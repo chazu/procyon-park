@@ -10,6 +10,7 @@ import (
 )
 
 func TestStatusCmd_Text(t *testing.T) {
+	resetFlags(t)
 	sock := startMockDaemon(t, map[string]methodHandler{
 		"system.status": func(params json.RawMessage) (json.RawMessage, *ipc.Error) {
 			return json.RawMessage(`{"status":"running","pid":1234}`), nil
@@ -36,6 +37,7 @@ func TestStatusCmd_Text(t *testing.T) {
 }
 
 func TestStatusCmd_JSON(t *testing.T) {
+	resetFlags(t)
 	sock := startMockDaemon(t, map[string]methodHandler{
 		"system.status": func(params json.RawMessage) (json.RawMessage, *ipc.Error) {
 			return json.RawMessage(`{"status":"running"}`), nil
@@ -66,6 +68,7 @@ func TestStatusCmd_JSON(t *testing.T) {
 }
 
 func TestStatusCmd_NoAgents(t *testing.T) {
+	resetFlags(t)
 	sock := startMockDaemon(t, map[string]methodHandler{
 		"system.status": func(params json.RawMessage) (json.RawMessage, *ipc.Error) {
 			return json.RawMessage(`{"status":"running"}`), nil
