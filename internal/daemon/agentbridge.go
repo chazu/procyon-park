@@ -24,6 +24,8 @@ func RegisterAgentHandlers(srv *IPCServer, store *tuplestore.TupleStore) {
 	srv.Handle("agent.list", handleAgentList(store))
 	srv.Handle("agent.respawn", handleAgentRespawn(store))
 	srv.Handle("agent.prune", handleAgentPrune(store))
+	srv.Handle("agent.show", handleAgentShow(store))
+	srv.Handle("agent.stuck", handleAgentStuck(store))
 }
 
 // spawnParams are the JSON-RPC parameters for agent.spawn.
@@ -228,5 +230,125 @@ func handleAgentPrune(store *tuplestore.TupleStore) Handler {
 		}
 
 		return result, nil
+	}
+}
+
+// showParams are the JSON-RPC parameters for agent.show.
+type showParams struct {
+	AgentName string `json:"agent_name"`
+	RepoName  string `json:"repo_name"`
+}
+
+// showResult combines registration data with liveness info.
+type showResult struct {
+	Name          string `json:"name"`
+	Role          string `json:"role"`
+	Status        string `json:"status"`
+	ActualStatus  string `json:"actual_status"`
+	SessionExists bool   `json:"session_exists"`
+	TmuxSession   string `json:"tmux_session"`
+	Worktree      string `json:"worktree"`
+	Branch        string `json:"branch"`
+	Task          string `json:"task"`
+	EpicID        string `json:"epic_id,omitempty"`
+}
+
+// handleAgentShow returns a Handler that retrieves detailed agent information.
+func handleAgentShow(store *tuplestore.TupleStore) Handler {
+	return func(params json.RawMessage) (interface{}, error) {
+		var p showParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "invalid params: " + err.Error()}
+		}
+
+		if p.AgentName == "" || p.RepoName == "" {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "agent_name and repo_name are required"}
+		}
+
+		// Look up the agent registration tuple.
+		cat := "agent"
+		tuples, err := store.FindAll(&cat, &p.RepoName, &p.AgentName, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("agent.show: %w", err)
+		}
+		if len(tuples) == 0 {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: fmt.Sprintf("agent %q not found in repo %q", p.AgentName, p.RepoName)}
+		}
+
+		payload, _ := tuples[0]["payload"].(string)
+		var info struct {
+			Role        string `json:"role"`
+			Status      string `json:"status"`
+			TmuxSession string `json:"tmuxSession"`
+			Worktree    string `json:"worktree"`
+			Branch      string `json:"branch"`
+			Task        string `json:"task"`
+			EpicID      string `json:"epicId"`
+		}
+		json.Unmarshal([]byte(payload), &info)
+
+		// Get liveness info.
+		actualStatus, err := dismiss.GetActualStatus(store, p.AgentName, p.RepoName)
+		if err != nil {
+			return nil, fmt.Errorf("agent.show: %w", err)
+		}
+
+		return &showResult{
+			Name:          p.AgentName,
+			Role:          info.Role,
+			Status:        info.Status,
+			ActualStatus:  actualStatus.ActualStatus,
+			SessionExists: actualStatus.SessionExists,
+			TmuxSession:   info.TmuxSession,
+			Worktree:      info.Worktree,
+			Branch:        info.Branch,
+			Task:          info.Task,
+			EpicID:        info.EpicID,
+		}, nil
+	}
+}
+
+// stuckParams are the JSON-RPC parameters for agent.stuck.
+type stuckParams struct {
+	AgentName string `json:"agent_name"`
+	RepoName  string `json:"repo_name"`
+}
+
+// handleAgentStuck returns a Handler that marks an agent as stuck.
+func handleAgentStuck(store *tuplestore.TupleStore) Handler {
+	return func(params json.RawMessage) (interface{}, error) {
+		var p stuckParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "invalid params: " + err.Error()}
+		}
+
+		if p.AgentName == "" || p.RepoName == "" {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "agent_name and repo_name are required"}
+		}
+
+		// Look up the agent tuple to get existing payload.
+		cat := "agent"
+		tuples, err := store.FindAll(&cat, &p.RepoName, &p.AgentName, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("agent.stuck: %w", err)
+		}
+		if len(tuples) == 0 {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: fmt.Sprintf("agent %q not found in repo %q", p.AgentName, p.RepoName)}
+		}
+
+		// Parse existing payload and update status.
+		payload, _ := tuples[0]["payload"].(string)
+		var payloadMap map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &payloadMap); err != nil {
+			payloadMap = make(map[string]interface{})
+		}
+		payloadMap["status"] = "stuck"
+		updatedPayload, _ := json.Marshal(payloadMap)
+
+		// Remove old tuple and write updated one.
+		store.FindAndDelete(&cat, &p.RepoName, &p.AgentName, nil, nil)
+		store.Insert(cat, p.RepoName, p.AgentName, "", string(updatedPayload), "", nil, nil, nil)
+
+		return map[string]string{"status": "stuck"}, nil
 	}
 }
