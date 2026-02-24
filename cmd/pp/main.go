@@ -26,6 +26,8 @@ func run(args []string) int {
 		switch args[0] {
 		case "daemon":
 			return handleDaemon(args[1:])
+		case "agent":
+			return handleAgent(args[1:])
 		case "--version", "-version", "version":
 			fmt.Println("pp (procyon-park) v0.1.0")
 			return 0
@@ -93,6 +95,7 @@ func printUsage() {
 
 Commands:
   daemon    Manage the background daemon
+  agent     Manage agents (spawn, dismiss, status, list, prune)
   help      Show this help message
   version   Print version and exit
 
@@ -107,5 +110,12 @@ Daemon subcommands:
   pp daemon run      Start the daemon in the foreground
   pp daemon stop     Stop the running daemon
   pp daemon status   Check if the daemon is running
+
+Agent subcommands:
+  pp agent spawn     Spawn a new agent
+  pp agent dismiss   Dismiss (tear down) an agent
+  pp agent status    Check agent status with liveness detection
+  pp agent list      List agents for a repo
+  pp agent prune     Clean up dead agents and orphaned resources
 `)
 }

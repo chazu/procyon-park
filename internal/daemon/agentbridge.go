@@ -21,6 +21,7 @@ func RegisterAgentHandlers(srv *IPCServer, store *tuplestore.TupleStore) {
 	srv.Handle("agent.spawn", handleAgentSpawn(store))
 	srv.Handle("agent.dismiss", handleAgentDismiss(store))
 	srv.Handle("agent.status", handleAgentStatus(store))
+	srv.Handle("agent.list", handleAgentList(store))
 	srv.Handle("agent.respawn", handleAgentRespawn(store))
 	srv.Handle("agent.prune", handleAgentPrune(store))
 }
@@ -154,6 +155,44 @@ func handleAgentRespawn(store *tuplestore.TupleStore) Handler {
 		}
 
 		return result, nil
+	}
+}
+
+// listParams are the JSON-RPC parameters for agent.list.
+type listParams struct {
+	RepoName string `json:"repo_name"`
+}
+
+// handleAgentList returns a Handler that lists all registered agents for a repo.
+func handleAgentList(store *tuplestore.TupleStore) Handler {
+	return func(params json.RawMessage) (interface{}, error) {
+		var p listParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "invalid params: " + err.Error()}
+		}
+
+		if p.RepoName == "" {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "repo_name is required"}
+		}
+
+		cat := "agent"
+		tuples, err := store.FindAll(&cat, &p.RepoName, nil, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("agent.list: %w", err)
+		}
+
+		type agentEntry struct {
+			Name    string `json:"name"`
+			Payload string `json:"payload"`
+		}
+		agents := make([]agentEntry, 0, len(tuples))
+		for _, t := range tuples {
+			name, _ := t["identity"].(string)
+			payload, _ := t["payload"].(string)
+			agents = append(agents, agentEntry{Name: name, Payload: payload})
+		}
+
+		return agents, nil
 	}
 }
 
