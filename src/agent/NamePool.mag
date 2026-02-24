@@ -1,0 +1,129 @@
+"""
+Cub name pool backed by the BBS tuplespace.
+
+The pool contains 50 cutesy names stored as tuples with category `#cubName`.
+Names are allocated atomically via `in:` (destructive read) and released via
+`out:` (write back). When the pool is exhausted, a numeric fallback `cub-N`
+is generated.
+
+Name tuples use scope = repoName, identity = the name itself, and lifecycle
+= `#session` so they can be consumed atomically by `in:`.
+
+```example
+"Seed the pool for a repo"
+NamePool seed: 'my-repo' in: space.
+
+"Allocate a name"
+name := NamePool nextName: 'my-repo' in: space.
+name   "=> 'Sprocket' (first available)"
+
+"Release it back"
+NamePool release: name for: 'my-repo' in: space.
+```
+"""
+namespace: ProcyonPark::Agent
+
+NamePool subclass: Object
+
+  -- Name list
+
+  """
+  Return the array of 50 standard cub names.
+  """
+  class method: names [
+      ^#('Sprocket' 'Gizmo' 'Nibbles' 'Fizz' 'Bumble'
+         'Twitch' 'Pip' 'Jinx' 'Spark' 'Rascal'
+         'Widget' 'Cog' 'Whimsy' 'Flicker' 'Doodle'
+         'Tinker' 'Pebble' 'Ziggy' 'Noodle' 'Scuttle'
+         'Quirk' 'Giggles' 'Wren' 'Skitter' 'Blip'
+         'Moxie' 'Pickle' 'Zephyr' 'Crumble' 'Fern'
+         'Wisp' 'Bramble' 'Cricket' 'Marble' 'Rustle'
+         'Tadpole' 'Acorn' 'Biscuit' 'Clover' 'Dewdrop'
+         'Echo' 'Fable' 'Glimmer' 'Hazel' 'Ivy'
+         'Juniper' 'Kudzu' 'Lark' 'Moss' 'Nettle')
+  ]
+
+  -- Seeding
+
+  """
+  Seed the name pool for the given repo in the tuplespace.
+  Only adds names that are not already present (idempotent).
+  Returns the number of names seeded.
+  """
+  class method: seed: repoName in: space [
+      | names seeded |
+      names := self names.
+      seeded := 0.
+      names do: [:n |
+          "Check via pattern scan (SQL-level match avoids string identity issues)"
+          (space scan: (Pattern category: #cubName scope: repoName identity: n)) size = 0
+              ifTrue: [
+                  space out: (Tuple category: #cubName scope: repoName
+                                   identity: n
+                                   payload: (Dictionary new)).
+                  seeded := seeded + 1.
+              ].
+      ].
+      ^seeded
+  ]
+
+  -- Allocation
+
+  """
+  Allocate the next available name for the given repo.
+  Uses atomic `in:` to consume a name tuple. If the pool is
+  exhausted, falls back to a numeric name (cub-1, cub-2, ...).
+  """
+  class method: nextName: repoName in: space [
+      | result |
+      result := space in: (Pattern category: #cubName scope: repoName) timeout: 100.
+      (result isKindOf: Failure) ifTrue: [
+          ^self fallbackName: repoName in: space
+      ].
+      ^result identity
+  ]
+
+  """
+  Generate a numeric fallback name (cub-1, cub-2, ...).
+  Finds the next unused number by scanning existing agent registrations.
+  """
+  class method: fallbackName: repoName in: space [
+      | agents n candidate found |
+      agents := space scan: (Pattern category: #agent scope: repoName).
+      n := 1.
+      found := false.
+      [found not] whileTrue: [
+          candidate := 'cub-', n printString.
+          (agents detect: [:a | a identity = candidate] ifNone: [nil])
+              ifNil: [found := true]
+              ifNotNil: [n := n + 1].
+      ].
+      ^candidate
+  ]
+
+  -- Release
+
+  """
+  Return a name to the pool for the given repo.
+  Only returns standard pool names; numeric fallback names are discarded.
+  """
+  class method: release: aName for: repoName in: space [
+      | existing |
+      (self names includes: aName) ifFalse: [^self].
+      "Idempotent: check it's not already in the pool"
+      existing := space scan: (Pattern category: #cubName scope: repoName identity: aName).
+      existing size > 0 ifTrue: [^self].
+      space out: (Tuple category: #cubName scope: repoName
+                       identity: aName
+                       payload: (Dictionary new)).
+      ^self
+  ]
+
+  -- Query
+
+  """
+  Return the number of available names for the given repo.
+  """
+  class method: available: repoName in: space [
+      ^(space scan: (Pattern category: #cubName scope: repoName)) size
+  ]

@@ -1,0 +1,96 @@
+"""
+Agent registry backed by the BBS tuplespace.
+
+The registry stores agent records as tuples with category `#agent`,
+scope = repoName, identity = agentName, and payload containing the
+agent's metadata (role, status, tmuxSession, worktree, branch, task,
+epicId, createdAt).
+
+```example
+"Register an agent"
+agent := Agent name: 'Bramble' role: 'cub'.
+AgentRegistry register: agent for: 'my-repo' in: space.
+
+"Look up by name"
+found := AgentRegistry get: 'Bramble' for: 'my-repo' in: space.
+found name   "=> 'Bramble'"
+
+"List all agents"
+all := AgentRegistry list: 'my-repo' in: space.
+all size     "=> 1"
+```
+"""
+namespace: ProcyonPark::Agent
+
+AgentRegistry subclass: Object
+
+  -- Registration
+
+  """
+  Register an agent in the tuplespace for the given repo.
+  Writes an agent tuple with the agent's payload.
+  If an agent with the same name already exists, it is replaced.
+  """
+  class method: register: anAgent for: repoName in: space [
+      | payload tuple |
+      "Remove existing registration if any"
+      self unregister: anAgent name for: repoName in: space.
+      payload := anAgent toPayload.
+      tuple := Tuple category: #agent scope: repoName
+                    identity: anAgent name
+                    payload: payload.
+      ^space out: tuple
+  ]
+
+  -- Unregistration
+
+  """
+  Remove an agent from the registry by name.
+  Returns self. No-op if the agent is not registered.
+  """
+  class method: unregister: aName for: repoName in: space [
+      | existing |
+      existing := space scan: (Pattern category: #agent scope: repoName identity: aName).
+      existing do: [:t |
+          space in: (Pattern category: #agent scope: repoName identity: aName) timeout: 100.
+      ].
+      ^self
+  ]
+
+  -- Lookup
+
+  """
+  Get a single agent by name. Returns an Agent or nil if not found.
+  Uses non-blocking scan to avoid timeout overhead.
+  """
+  class method: get: aName for: repoName in: space [
+      | results |
+      results := space scan: (Pattern category: #agent scope: repoName identity: aName).
+      results size = 0 ifTrue: [^nil].
+      ^Agent fromTuple: results first
+  ]
+
+  """
+  List all agents registered for the given repo.
+  Returns an Array of Agent objects.
+  """
+  class method: list: repoName in: space [
+      | tuples |
+      tuples := space scan: (Pattern category: #agent scope: repoName).
+      ^tuples collect: [:t | Agent fromTuple: t]
+  ]
+
+  -- Status update
+
+  """
+  Update the status of a named agent. Replaces the agent tuple
+  with an updated payload. Returns the Agent or nil if not found.
+  """
+  class method: updateStatus: aStatus for: aName in: repoName space: space [
+      | agent |
+      agent := self get: aName for: repoName in: space.
+      agent ifNil: [^nil].
+      agent status: aStatus.
+      self register: agent for: repoName in: space.
+      ^agent
+  ]

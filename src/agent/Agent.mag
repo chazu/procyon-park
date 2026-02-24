@@ -1,0 +1,140 @@
+"""
+An agent in the imp-castle system.
+
+Agents are autonomous contributors that work on tasks within a repository.
+Each agent has a unique name, a role, and is associated with a tmux session,
+git worktree, and branch. Agent state is stored in the tuplespace as tuples
+with category `#agent`.
+
+```example
+"Create an agent"
+a := Agent name: 'Bramble' role: 'cub'.
+a tmuxSession: 'pp-Bramble'.
+a worktree: '/path/to/worktree'.
+a branch: 'agent/Bramble/task-123'.
+a task: 'task-123'.
+a status   "=> #active"
+```
+
+```example
+"Reconstruct from a tuplespace row"
+agent := Agent fromPayload: payloadDict name: 'Bramble'.
+agent status   "=> #active"
+```
+"""
+namespace: ProcyonPark::Agent
+
+Agent subclass: Object
+  instanceVars: name role tmuxSession worktree branch task epicId createdAt status
+
+  -- Factory
+
+  """
+  Create a new agent with the given name and role.
+  Status defaults to #active.
+  """
+  class method: name: aName role: aRole [
+      ^self new
+          name: aName;
+          role: aRole;
+          status: #active
+  ]
+
+  """
+  Reconstruct an Agent from a payload Dictionary and name.
+  Used when reading agent tuples from the tuplespace.
+  """
+  class method: fromPayload: aDict name: aName [
+      ^self new
+          name: aName;
+          role: (aDict at: 'role' ifAbsent: ['cub']);
+          tmuxSession: (aDict at: 'tmuxSession' ifAbsent: [nil]);
+          worktree: (aDict at: 'worktree' ifAbsent: [nil]);
+          branch: (aDict at: 'branch' ifAbsent: [nil]);
+          task: (aDict at: 'task' ifAbsent: [nil]);
+          epicId: (aDict at: 'epicId' ifAbsent: [nil]);
+          createdAt: (aDict at: 'createdAt' ifAbsent: [nil]);
+          status: (aDict at: 'status' ifAbsent: [#active])
+  ]
+
+  """
+  Reconstruct an Agent from a Tuple retrieved from the tuplespace.
+  Handles JSON-encoded payload by decoding it to a Dictionary first.
+  """
+  class method: fromTuple: aTuple [
+      | payload |
+      payload := aTuple payload.
+      (payload isKindOf: Dictionary) ifFalse: [payload := Json decode: payload].
+      ^self fromPayload: payload name: aTuple identity
+  ]
+
+  -- Serialization
+
+  """
+  Convert agent fields to a Dictionary suitable for tuplespace storage.
+  """
+  method: toPayload [
+      | d |
+      d := Dictionary new.
+      d at: 'role' put: role.
+      d at: 'status' put: status.
+      tmuxSession ifNotNil: [:v | d at: 'tmuxSession' put: v].
+      worktree ifNotNil: [:v | d at: 'worktree' put: v].
+      branch ifNotNil: [:v | d at: 'branch' put: v].
+      task ifNotNil: [:v | d at: 'task' put: v].
+      epicId ifNotNil: [:v | d at: 'epicId' put: v].
+      createdAt ifNotNil: [:v | d at: 'createdAt' put: v].
+      ^d
+  ]
+
+  -- Status queries
+
+  """Answer true if this agent is active."""
+  method: isActive [
+      ^status = #active
+  ]
+
+  """Answer true if this agent has been stopped."""
+  method: isStopped [
+      ^status = #stopped
+  ]
+
+  """Answer true if this agent is dead."""
+  method: isDead [
+      ^status = #dead
+  ]
+
+  -- Printing
+
+  method: printString [
+      ^'Agent(', name, ' ', role, ' ', status printString, ')'
+  ]
+
+  -- Accessors
+
+  method: name [ ^name ]
+  method: name: aName [ name := aName ]
+
+  method: role [ ^role ]
+  method: role: aRole [ role := aRole ]
+
+  method: tmuxSession [ ^tmuxSession ]
+  method: tmuxSession: aSession [ tmuxSession := aSession ]
+
+  method: worktree [ ^worktree ]
+  method: worktree: aPath [ worktree := aPath ]
+
+  method: branch [ ^branch ]
+  method: branch: aBranch [ branch := aBranch ]
+
+  method: task [ ^task ]
+  method: task: aTask [ task := aTask ]
+
+  method: epicId [ ^epicId ]
+  method: epicId: anId [ epicId := anId ]
+
+  method: createdAt [ ^createdAt ]
+  method: createdAt: aTime [ createdAt := aTime ]
+
+  method: status [ ^status ]
+  method: status: aStatus [ status := aStatus ]
