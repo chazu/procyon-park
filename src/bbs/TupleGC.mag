@@ -1,0 +1,227 @@
+"""
+Periodic garbage collection for the BBS tuplespace.
+
+TupleGC runs a background process that periodically cleans up stale tuples,
+promotes conventions that reach quorum, and logs warnings about systemic
+issues. Each collection phase is a separate method for clarity and testability.
+
+```example
+"Start GC on a tuplespace with the default 60-second interval"
+gc := TupleGC on: space interval: 60.
+gc start.
+
+"Later, stop the GC"
+gc stop.
+```
+
+```example
+"Run individual collection phases manually (useful for testing)"
+gc := TupleGC on: space interval: 60.
+gc collectExpiredEphemeral.
+gc cleanupStaleClaims.
+gc promoteConventions.
+gc detectSystemicObstacles.
+gc detectUnclaimedNeeds.
+```
+"""
+namespace: ProcyonPark::Bbs
+
+TupleGC subclass: Object
+  instanceVars: space store interval running
+
+  -- Factory
+
+  """
+  Create a TupleGC for the given TupleSpace with a collection interval
+  in seconds. Does not start automatically — call start.
+  """
+  class method: on: aTupleSpace interval: anInterval [
+      ^self new
+          space: aTupleSpace;
+          store: aTupleSpace store;
+          interval: anInterval;
+          running: false
+  ]
+
+  """
+  Create a TupleGC with the default 60-second interval.
+  """
+  class method: on: aTupleSpace [
+      ^self on: aTupleSpace interval: 60
+  ]
+
+  -- Lifecycle
+
+  """
+  Start the GC background process. Forks a process that runs collection
+  cycles at the configured interval. No-op if already running.
+  """
+  method: start [
+      running ifTrue: [^self].
+      running := true.
+      [self runLoop] fork
+  ]
+
+  """
+  Stop the GC background process. The current cycle (if any) will complete
+  before the process exits.
+  """
+  method: stop [
+      running := false
+  ]
+
+  """
+  Answer whether the GC is currently running.
+  """
+  method: isRunning [
+      ^running
+  ]
+
+  -- Main loop (private)
+
+  """
+  The GC run loop. Executes collection phases, then sleeps for the interval.
+  Exits when running is set to false.
+  """
+  method: runLoop [
+      [running] whileTrue: [
+          self runCycle.
+          Process sleep: (interval * 1000)
+      ]
+  ]
+
+  """
+  Execute one full GC cycle: all collection phases in sequence.
+  """
+  method: runCycle [
+      self collectExpiredEphemeral.
+      self cleanupStaleClaims.
+      self promoteConventions.
+      self detectSystemicObstacles.
+      self detectUnclaimedNeeds
+  ]
+
+  -- Collection phases
+
+  """
+  Delete ephemeral tuples that have exceeded their TTL.
+  Hook point: archival to DuckDB would go here before deletion.
+  """
+  method: collectExpiredEphemeral [
+      | count |
+      "TODO: Archive to DuckDB before deleting (deferred)"
+      count := store deleteExpiredEphemeral.
+      count > 0 ifTrue: [
+          Transcript show: 'TupleGC: collected ', count printString, ' expired ephemeral tuples'; cr
+      ]
+  ]
+
+  """
+  Clean up stale claim tuples. A claim is stale if:
+  - It is older than 1 hour AND a task_done event exists for the same task, OR
+  - It is older than 2 hours unconditionally.
+  """
+  method: cleanupStaleClaims [
+      | staleClaims1h staleClaims2h cleaned |
+      cleaned := 0.
+
+      "Claims >1h with a completed task_done event"
+      staleClaims1h := store findStaleClaims: 3600.
+      staleClaims1h do: [:row |
+          | tuple taskIdent |
+          tuple := Tuple fromRow: row.
+          taskIdent := tuple identity.
+          (store hasEventForTask: taskIdent) ifTrue: [
+              store delete: tuple id.
+              cleaned := cleaned + 1
+          ]
+      ].
+
+      "Claims >2h unconditionally"
+      staleClaims2h := store findStaleClaims: 7200.
+      staleClaims2h do: [:row |
+          | tuple |
+          tuple := Tuple fromRow: row.
+          store delete: tuple id.
+          cleaned := cleaned + 1
+      ].
+
+      cleaned > 0 ifTrue: [
+          Transcript show: 'TupleGC: cleaned ', cleaned printString, ' stale claims'; cr
+      ]
+  ]
+
+  """
+  When 2+ agents propose the same convention, promote it to furniture.
+  Deletes the proposals and writes a furniture convention tuple.
+  """
+  method: promoteConventions [
+      | duplicates |
+      duplicates := store findDuplicateConventionProposals.
+      duplicates do: [:entry |
+          | ident agentCount proposalPattern convTuple |
+          ident := entry at: 'identity'.
+          agentCount := entry at: 'agent_count'.
+
+          "Delete all proposals for this identity"
+          proposalPattern := Dictionary new.
+          proposalPattern at: 'category' put: 'conventionProposal'.
+          proposalPattern at: 'identity' put: ident.
+          store deleteByPattern: proposalPattern.
+
+          "Write the promoted convention as furniture"
+          convTuple := Tuple category: #convention scope: '' identity: ident
+                           payload: (Dictionary new
+                               at: #promoted put: true;
+                               at: #agentCount put: agentCount;
+                               yourself).
+          convTuple lifecycle: #furniture.
+          space out: convTuple.
+
+          Transcript show: 'TupleGC: promoted convention "', ident, '" (', agentCount printString, ' agents)'; cr
+      ]
+  ]
+
+  """
+  Log a warning when 2 or more obstacles share the same scope,
+  indicating a systemic issue.
+  """
+  method: detectSystemicObstacles [
+      | groups |
+      groups := store groupByScope: 'obstacle'.
+      groups keysAndValuesDo: [:scope :count |
+          count >= 2 ifTrue: [
+              Transcript show: 'TupleGC WARNING: ', count printString,
+                  ' obstacles in scope "', scope, '" — possible systemic issue'; cr
+          ]
+      ]
+  ]
+
+  """
+  Log a warning for need tuples that have been unclaimed for more than
+  10 minutes (600 seconds).
+  """
+  method: detectUnclaimedNeeds [
+      | unclaimed |
+      unclaimed := store findUnclaimedNeeds: 600.
+      unclaimed do: [:row |
+          | tuple |
+          tuple := Tuple fromRow: row.
+          Transcript show: 'TupleGC WARNING: unclaimed need "', tuple identity,
+              '" in scope "', tuple scope, '" for >10 minutes'; cr
+      ]
+  ]
+
+  -- Accessors
+
+  method: space [ ^space ]
+  method: space: aSpace [ space := aSpace ]
+
+  method: store [ ^store ]
+  method: store: aStore [ store := aStore ]
+
+  method: interval [ ^interval ]
+  method: interval: anInterval [ interval := anInterval ]
+
+  method: running [ ^running ]
+  method: running: aBoolean [ running := aBoolean ]

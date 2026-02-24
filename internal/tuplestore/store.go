@@ -328,6 +328,194 @@ func (s *TupleStore) Count(category, scope, identity, instance, payloadSearch *s
 }
 
 // ---------------------------------------------------------------------------
+// GC Operations
+// ---------------------------------------------------------------------------
+
+// FindExpiredEphemeral returns all ephemeral tuples whose TTL has elapsed.
+// A tuple is expired when created_at + ttl_seconds < now.
+func (s *TupleStore) FindExpiredEphemeral() ([]map[string]interface{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cols := `tuples.id, tuples.category, tuples.scope, tuples.identity, tuples.instance,
+		tuples.payload, tuples.lifecycle, tuples.task_id, tuples.agent_id,
+		tuples.created_at, tuples.updated_at, tuples.ttl_seconds`
+	query := "SELECT " + cols + ` FROM tuples
+		WHERE lifecycle = 'ephemeral'
+		AND ttl_seconds IS NOT NULL
+		AND datetime(created_at, '+' || ttl_seconds || ' seconds') <= datetime('now')
+		ORDER BY tuples.id`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("tuplestore: findExpiredEphemeral: %w", err)
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		row, err := scanTupleRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, row)
+	}
+	return results, nil
+}
+
+// DeleteExpiredEphemeral deletes all expired ephemeral tuples and returns the count deleted.
+func (s *TupleStore) DeleteExpiredEphemeral() (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query := `DELETE FROM tuples
+		WHERE lifecycle = 'ephemeral'
+		AND ttl_seconds IS NOT NULL
+		AND datetime(created_at, '+' || ttl_seconds || ' seconds') <= datetime('now')`
+	result, err := s.db.Exec(query)
+	if err != nil {
+		return 0, fmt.Errorf("tuplestore: deleteExpiredEphemeral: %w", err)
+	}
+	return result.RowsAffected()
+}
+
+// FindStaleClaims returns claim tuples older than the given age in seconds.
+func (s *TupleStore) FindStaleClaims(maxAgeSeconds int) ([]map[string]interface{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cols := `tuples.id, tuples.category, tuples.scope, tuples.identity, tuples.instance,
+		tuples.payload, tuples.lifecycle, tuples.task_id, tuples.agent_id,
+		tuples.created_at, tuples.updated_at, tuples.ttl_seconds`
+	query := "SELECT " + cols + ` FROM tuples
+		WHERE category = 'claim'
+		AND datetime(created_at, '+' || ? || ' seconds') <= datetime('now')
+		ORDER BY tuples.id`
+
+	rows, err := s.db.Query(query, maxAgeSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("tuplestore: findStaleClaims: %w", err)
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		row, err := scanTupleRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, row)
+	}
+	return results, nil
+}
+
+// HasEventForTask checks whether a task_done event exists for the given task identity.
+func (s *TupleStore) HasEventForTask(taskIdentity string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query := `SELECT COUNT(*) FROM tuples
+		WHERE category = 'event' AND identity = 'task_done'
+		AND payload LIKE ?`
+	// Use LIKE for a simple substring match on the task identity in the JSON payload
+	pattern := fmt.Sprintf("%%%s%%", taskIdentity)
+	var count int64
+	if err := s.db.QueryRow(query, pattern).Scan(&count); err != nil {
+		return false, fmt.Errorf("tuplestore: hasEventForTask: %w", err)
+	}
+	return count > 0, nil
+}
+
+// GroupByScope returns a map of scope -> count for tuples matching the given category.
+// Useful for detecting systemic obstacles or unclaimed needs.
+func (s *TupleStore) GroupByScope(category string) (map[string]int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query := `SELECT scope, COUNT(*) FROM tuples WHERE category = ? GROUP BY scope`
+	rows, err := s.db.Query(query, category)
+	if err != nil {
+		return nil, fmt.Errorf("tuplestore: groupByScope: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]int64)
+	for rows.Next() {
+		var scope string
+		var count int64
+		if err := rows.Scan(&scope, &count); err != nil {
+			return nil, fmt.Errorf("tuplestore: groupByScope scan: %w", err)
+		}
+		result[scope] = count
+	}
+	return result, nil
+}
+
+// FindUnclaimedNeeds returns need tuples older than the given age in seconds.
+func (s *TupleStore) FindUnclaimedNeeds(maxAgeSeconds int) ([]map[string]interface{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cols := `tuples.id, tuples.category, tuples.scope, tuples.identity, tuples.instance,
+		tuples.payload, tuples.lifecycle, tuples.task_id, tuples.agent_id,
+		tuples.created_at, tuples.updated_at, tuples.ttl_seconds`
+	query := "SELECT " + cols + ` FROM tuples
+		WHERE category = 'need'
+		AND datetime(created_at, '+' || ? || ' seconds') <= datetime('now')
+		ORDER BY tuples.id`
+
+	rows, err := s.db.Query(query, maxAgeSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("tuplestore: findUnclaimedNeeds: %w", err)
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		row, err := scanTupleRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, row)
+	}
+	return results, nil
+}
+
+// FindDuplicateConventionProposals returns convention proposals that have been proposed
+// by 2 or more distinct agents. Returns rows grouped by identity with count.
+func (s *TupleStore) FindDuplicateConventionProposals() ([]map[string]interface{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query := `SELECT identity, COUNT(DISTINCT agent_id) as agent_count
+		FROM tuples
+		WHERE category = 'conventionProposal'
+		AND agent_id IS NOT NULL
+		GROUP BY identity
+		HAVING COUNT(DISTINCT agent_id) >= 2`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("tuplestore: findDuplicateConventionProposals: %w", err)
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		var identity string
+		var count int64
+		if err := rows.Scan(&identity, &count); err != nil {
+			return nil, fmt.Errorf("tuplestore: findDuplicateConventionProposals scan: %w", err)
+		}
+		results = append(results, map[string]interface{}{
+			"identity":    identity,
+			"agent_count": count,
+		})
+	}
+	return results, nil
+}
+
+// ---------------------------------------------------------------------------
 // Query Building
 // ---------------------------------------------------------------------------
 

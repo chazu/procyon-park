@@ -366,4 +366,170 @@ func registerInstanceMethods(vmInst *vm.VM, storeClass *vm.Class) {
 		}
 		return vm.FromSmallInt(count)
 	})
+
+	// ---------------------------------------------------------------------------
+	// GC Primitives
+	// ---------------------------------------------------------------------------
+
+	// findExpiredEphemeral — Find all ephemeral tuples past their TTL.
+	// Returns an Array of Dictionaries.
+	storeClass.AddMethod0(vmInst.Selectors, "findExpiredEphemeral", func(vmPtr interface{}, recv vm.Value) vm.Value {
+		v := vmPtr.(*vm.VM)
+		s := getStore(v, recv)
+		if s == nil {
+			return failureResult(v, "Not a TupleStore")
+		}
+
+		rows, err := s.FindExpiredEphemeral()
+		if err != nil {
+			return failureResult(v, "TupleStore findExpiredEphemeral: "+err.Error())
+		}
+
+		elems := make([]vm.Value, len(rows))
+		for i, row := range rows {
+			elems[i] = tupleRowToDict(v, row)
+		}
+		return v.NewArrayWithElements(elems)
+	})
+
+	// deleteExpiredEphemeral — Delete all expired ephemeral tuples.
+	// Returns the count of deleted tuples.
+	storeClass.AddMethod0(vmInst.Selectors, "deleteExpiredEphemeral", func(vmPtr interface{}, recv vm.Value) vm.Value {
+		v := vmPtr.(*vm.VM)
+		s := getStore(v, recv)
+		if s == nil {
+			return failureResult(v, "Not a TupleStore")
+		}
+
+		count, err := s.DeleteExpiredEphemeral()
+		if err != nil {
+			return failureResult(v, "TupleStore deleteExpiredEphemeral: "+err.Error())
+		}
+		return vm.FromSmallInt(count)
+	})
+
+	// findStaleClaims: maxAgeSeconds — Find claim tuples older than the given seconds.
+	// Returns an Array of Dictionaries.
+	storeClass.AddMethod1(vmInst.Selectors, "findStaleClaims:", func(vmPtr interface{}, recv vm.Value, ageVal vm.Value) vm.Value {
+		v := vmPtr.(*vm.VM)
+		s := getStore(v, recv)
+		if s == nil {
+			return failureResult(v, "Not a TupleStore")
+		}
+
+		if !ageVal.IsSmallInt() {
+			return failureResult(v, "TupleStore findStaleClaims: requires an integer (seconds)")
+		}
+		age := int(ageVal.SmallInt())
+
+		rows, err := s.FindStaleClaims(age)
+		if err != nil {
+			return failureResult(v, "TupleStore findStaleClaims: "+err.Error())
+		}
+
+		elems := make([]vm.Value, len(rows))
+		for i, row := range rows {
+			elems[i] = tupleRowToDict(v, row)
+		}
+		return v.NewArrayWithElements(elems)
+	})
+
+	// hasEventForTask: taskIdentity — Check if a task_done event exists for the task.
+	// Returns true or false.
+	storeClass.AddMethod1(vmInst.Selectors, "hasEventForTask:", func(vmPtr interface{}, recv vm.Value, taskVal vm.Value) vm.Value {
+		v := vmPtr.(*vm.VM)
+		s := getStore(v, recv)
+		if s == nil {
+			return failureResult(v, "Not a TupleStore")
+		}
+
+		taskID := toString(v, taskVal)
+		has, err := s.HasEventForTask(taskID)
+		if err != nil {
+			return failureResult(v, "TupleStore hasEventForTask: "+err.Error())
+		}
+		if has {
+			return vm.True
+		}
+		return vm.False
+	})
+
+	// groupByScope: category — Group tuples by scope for the given category.
+	// Returns a Dictionary of scope -> count.
+	storeClass.AddMethod1(vmInst.Selectors, "groupByScope:", func(vmPtr interface{}, recv vm.Value, catVal vm.Value) vm.Value {
+		v := vmPtr.(*vm.VM)
+		s := getStore(v, recv)
+		if s == nil {
+			return failureResult(v, "Not a TupleStore")
+		}
+
+		cat := toString(v, catVal)
+		groups, err := s.GroupByScope(cat)
+		if err != nil {
+			return failureResult(v, "TupleStore groupByScope: "+err.Error())
+		}
+
+		dict := v.NewDictionary()
+		for scope, count := range groups {
+			key := v.Registry().NewStringValue(scope)
+			val := vm.FromSmallInt(count)
+			v.DictionaryAtPut(dict, key, val)
+		}
+		return dict
+	})
+
+	// findUnclaimedNeeds: maxAgeSeconds — Find need tuples older than the given seconds.
+	// Returns an Array of Dictionaries.
+	storeClass.AddMethod1(vmInst.Selectors, "findUnclaimedNeeds:", func(vmPtr interface{}, recv vm.Value, ageVal vm.Value) vm.Value {
+		v := vmPtr.(*vm.VM)
+		s := getStore(v, recv)
+		if s == nil {
+			return failureResult(v, "Not a TupleStore")
+		}
+
+		if !ageVal.IsSmallInt() {
+			return failureResult(v, "TupleStore findUnclaimedNeeds: requires an integer (seconds)")
+		}
+		age := int(ageVal.SmallInt())
+
+		rows, err := s.FindUnclaimedNeeds(age)
+		if err != nil {
+			return failureResult(v, "TupleStore findUnclaimedNeeds: "+err.Error())
+		}
+
+		elems := make([]vm.Value, len(rows))
+		for i, row := range rows {
+			elems[i] = tupleRowToDict(v, row)
+		}
+		return v.NewArrayWithElements(elems)
+	})
+
+	// findDuplicateConventionProposals — Find convention proposals with 2+ distinct agents.
+	// Returns an Array of Dictionaries with keys 'identity' and 'agent_count'.
+	storeClass.AddMethod0(vmInst.Selectors, "findDuplicateConventionProposals", func(vmPtr interface{}, recv vm.Value) vm.Value {
+		v := vmPtr.(*vm.VM)
+		s := getStore(v, recv)
+		if s == nil {
+			return failureResult(v, "Not a TupleStore")
+		}
+
+		proposals, err := s.FindDuplicateConventionProposals()
+		if err != nil {
+			return failureResult(v, "TupleStore findDuplicateConventionProposals: "+err.Error())
+		}
+
+		elems := make([]vm.Value, len(proposals))
+		for i, p := range proposals {
+			dict := v.NewDictionary()
+			key := v.Registry().NewStringValue("identity")
+			val := v.Registry().NewStringValue(p["identity"].(string))
+			v.DictionaryAtPut(dict, key, val)
+
+			countKey := v.Registry().NewStringValue("agent_count")
+			countVal := vm.FromSmallInt(p["agent_count"].(int64))
+			v.DictionaryAtPut(dict, countKey, countVal)
+			elems[i] = dict
+		}
+		return v.NewArrayWithElements(elems)
+	})
 }

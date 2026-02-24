@@ -267,6 +267,186 @@ func TestWildcardPattern(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// GC Method Tests
+// ---------------------------------------------------------------------------
+
+func TestDeleteExpiredEphemeral(t *testing.T) {
+	s := mustNewMemoryStore(t)
+
+	// Insert an ephemeral tuple with 0-second TTL (already expired)
+	ttl0 := 0
+	s.Insert("notification", "agent1", "msg-1", "local",
+		`{"type":"info"}`, "ephemeral", nil, nil, &ttl0)
+
+	// Insert a session tuple (should not be affected)
+	s.Insert("claim", "repo", "task-1", "local", `{}`, "session", nil, nil, nil)
+
+	// Insert an ephemeral tuple with a very large TTL (should not be expired)
+	ttl := 999999
+	s.Insert("notification", "agent2", "msg-2", "local",
+		`{"type":"info"}`, "ephemeral", nil, nil, &ttl)
+
+	count, err := s.DeleteExpiredEphemeral()
+	if err != nil {
+		t.Fatalf("DeleteExpiredEphemeral: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 deleted, got %d", count)
+	}
+
+	// Verify: 2 tuples remain (session + non-expired ephemeral)
+	all, _ := s.FindAll(nil, nil, nil, nil, nil)
+	if len(all) != 2 {
+		t.Fatalf("expected 2 remaining, got %d", len(all))
+	}
+}
+
+func TestFindExpiredEphemeral(t *testing.T) {
+	s := mustNewMemoryStore(t)
+
+	ttl0 := 0
+	s.Insert("notification", "agent1", "msg-1", "local",
+		`{"type":"info"}`, "ephemeral", nil, nil, &ttl0)
+
+	rows, err := s.FindExpiredEphemeral()
+	if err != nil {
+		t.Fatalf("FindExpiredEphemeral: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 expired, got %d", len(rows))
+	}
+	if rows[0]["identity"] != "msg-1" {
+		t.Errorf("identity = %v, want msg-1", rows[0]["identity"])
+	}
+}
+
+func TestFindStaleClaims(t *testing.T) {
+	s := mustNewMemoryStore(t)
+
+	// Insert a claim (just created, so 0 seconds old)
+	s.Insert("claim", "repo", "task-1", "local",
+		`{"agent":"Rustle","status":"in_progress"}`, "session", nil, nil, nil)
+
+	// With 0 second max age, the claim should be "stale"
+	rows, err := s.FindStaleClaims(0)
+	if err != nil {
+		t.Fatalf("FindStaleClaims: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 stale claim, got %d", len(rows))
+	}
+
+	// With 999999 second max age, nothing is stale
+	rows2, err := s.FindStaleClaims(999999)
+	if err != nil {
+		t.Fatalf("FindStaleClaims large age: %v", err)
+	}
+	if len(rows2) != 0 {
+		t.Fatalf("expected 0 stale claims, got %d", len(rows2))
+	}
+}
+
+func TestHasEventForTask(t *testing.T) {
+	s := mustNewMemoryStore(t)
+
+	// No events yet
+	has, err := s.HasEventForTask("task-123")
+	if err != nil {
+		t.Fatalf("HasEventForTask: %v", err)
+	}
+	if has {
+		t.Fatal("expected false, no events inserted")
+	}
+
+	// Insert a task_done event with task in payload
+	s.Insert("event", "repo", "task_done", "local",
+		`{"task":"task-123","agent":"Rustle"}`, "session", nil, nil, nil)
+
+	has2, err := s.HasEventForTask("task-123")
+	if err != nil {
+		t.Fatalf("HasEventForTask: %v", err)
+	}
+	if !has2 {
+		t.Fatal("expected true after inserting task_done event")
+	}
+}
+
+func TestGroupByScope(t *testing.T) {
+	s := mustNewMemoryStore(t)
+
+	s.Insert("obstacle", "repo-a", "build-fail", "local", `{}`, "session", nil, nil, nil)
+	s.Insert("obstacle", "repo-a", "test-fail", "local", `{}`, "session", nil, nil, nil)
+	s.Insert("obstacle", "repo-b", "lint-fail", "local", `{}`, "session", nil, nil, nil)
+
+	groups, err := s.GroupByScope("obstacle")
+	if err != nil {
+		t.Fatalf("GroupByScope: %v", err)
+	}
+	if groups["repo-a"] != 2 {
+		t.Errorf("repo-a count = %d, want 2", groups["repo-a"])
+	}
+	if groups["repo-b"] != 1 {
+		t.Errorf("repo-b count = %d, want 1", groups["repo-b"])
+	}
+}
+
+func TestFindUnclaimedNeeds(t *testing.T) {
+	s := mustNewMemoryStore(t)
+
+	s.Insert("need", "repo", "help-with-tests", "local",
+		`{"detail":"need help"}`, "session", nil, nil, nil)
+
+	// With 0 second threshold, the need is unclaimed
+	rows, err := s.FindUnclaimedNeeds(0)
+	if err != nil {
+		t.Fatalf("FindUnclaimedNeeds: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 unclaimed need, got %d", len(rows))
+	}
+
+	// With very large threshold, nothing is old enough
+	rows2, err := s.FindUnclaimedNeeds(999999)
+	if err != nil {
+		t.Fatalf("FindUnclaimedNeeds large age: %v", err)
+	}
+	if len(rows2) != 0 {
+		t.Fatalf("expected 0 unclaimed needs, got %d", len(rows2))
+	}
+}
+
+func TestFindDuplicateConventionProposals(t *testing.T) {
+	s := mustNewMemoryStore(t)
+
+	agent1 := "Rustle"
+	agent2 := "Bramble"
+
+	// Two proposals for same convention from different agents
+	s.Insert("conventionProposal", "repo", "use-snake-case", "local",
+		`{"detail":"snake case for variables"}`, "session", nil, &agent1, nil)
+	s.Insert("conventionProposal", "repo", "use-snake-case", "local",
+		`{"detail":"snake_case is better"}`, "session", nil, &agent2, nil)
+
+	// One proposal from a single agent (should not appear)
+	s.Insert("conventionProposal", "repo", "use-tabs", "local",
+		`{"detail":"tabs are better"}`, "session", nil, &agent1, nil)
+
+	results, err := s.FindDuplicateConventionProposals()
+	if err != nil {
+		t.Fatalf("FindDuplicateConventionProposals: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 duplicate, got %d", len(results))
+	}
+	if results[0]["identity"] != "use-snake-case" {
+		t.Errorf("identity = %v, want use-snake-case", results[0]["identity"])
+	}
+	if results[0]["agent_count"] != int64(2) {
+		t.Errorf("agent_count = %v, want 2", results[0]["agent_count"])
+	}
+}
+
 func TestMigrationIdempotent(t *testing.T) {
 	s := mustNewMemoryStore(t)
 
