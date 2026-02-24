@@ -1,0 +1,266 @@
+"""
+A Linda-style tuplespace for the BBS coordination layer.
+
+TupleSpace provides the four classic Linda operations: `out:` (write),
+`in:` (destructive blocking read), `rd:` (non-destructive blocking read),
+and `scan:` (non-blocking match-all). Blocking operations use Maggie
+channels with configurable timeouts.
+
+Furniture tuples (lifecycle = #furniture) are protected from consumption
+via `in:` — they can only be read non-destructively.
+
+```example
+"Open a tuplespace backed by an in-memory store"
+space := TupleSpace open: ':memory:'.
+
+"Write a tuple"
+id := space out: (Tuple category: #fact scope: 'my-repo'
+                        identity: 'lang' payload: (Dictionary new at: #content put: 'Go'; yourself)).
+
+"Non-blocking scan"
+facts := space scan: (Pattern category: #fact scope: 'my-repo').
+
+"Blocking read with timeout"
+claim := space in: (Pattern category: #claim) timeout: 3000.
+```
+"""
+namespace: ProcyonPark::Bbs
+
+TupleSpace subclass: Object
+  instanceVars: store waiters mutex
+
+  -- Factory
+
+  """
+  Open a tuplespace backed by a TupleStore at the given path.
+  Use ':memory:' for an in-memory store.
+  """
+  class method: open: dbPath [
+      | s |
+      dbPath = ':memory:'
+          ifTrue: [s := TupleStore openMemory]
+          ifFalse: [s := TupleStore open: dbPath].
+      ^self new
+          store: s;
+          waiters: (Array new: 0);
+          mutex: Mutex new
+  ]
+
+  -- OUT: write a tuple into the space
+
+  """
+  Insert a tuple into the tuplespace. Wakes any matching waiters.
+  Returns the tuple's row ID.
+  """
+  method: out: aTuple [
+      | id insertDict |
+      insertDict := self tupleToInsertDict: aTuple.
+      mutex critical: [
+          id := store insert: insertDict.
+          aTuple id: id.
+          self wakeWaitersFor: aTuple.
+      ].
+      ^id
+  ]
+
+  -- IN: destructive blocking read
+
+  """
+  Destructive blocking read with a default 5-second (5000ms) timeout.
+  Finds and removes the oldest matching tuple. Blocks if no match exists.
+  Furniture tuples cannot be consumed — returns a Failure.
+  """
+  method: in: aPattern [
+      ^self in: aPattern timeout: 5000
+  ]
+
+  """
+  Destructive blocking read with explicit timeout (in milliseconds).
+  """
+  method: in: aPattern timeout: aTimeout [
+      | result patternDict tuple |
+      patternDict := self patternToDict: aPattern.
+      mutex critical: [
+          result := store findOne: patternDict.
+          result ifNotNil: [
+              tuple := Tuple fromRow: result.
+              tuple isFurniture ifTrue: [
+                  ^Failure with: 'Cannot consume furniture tuple via in()'
+              ].
+              store delete: tuple id.
+              ^tuple
+          ].
+      ].
+      ^self waitFor: aPattern destructive: true timeout: aTimeout
+  ]
+
+  -- RD: non-destructive blocking read
+
+  """
+  Non-destructive blocking read with a default 5-second (5000ms) timeout.
+  Finds the oldest matching tuple without removing it.
+  """
+  method: rd: aPattern [
+      ^self rd: aPattern timeout: 5000
+  ]
+
+  """
+  Non-destructive blocking read with explicit timeout (in milliseconds).
+  """
+  method: rd: aPattern timeout: aTimeout [
+      | result patternDict tuple |
+      patternDict := self patternToDict: aPattern.
+      mutex critical: [
+          result := store findOne: patternDict.
+          result ifNotNil: [
+              ^Tuple fromRow: result
+          ].
+      ].
+      ^self waitFor: aPattern destructive: false timeout: aTimeout
+  ]
+
+  -- SCAN: non-blocking match-all
+
+  """
+  Return all tuples matching the pattern. Non-blocking.
+  Returns an Array of Tuple objects.
+  """
+  method: scan: aPattern [
+      | patternDict rows |
+      patternDict := self patternToDict: aPattern.
+      rows := store findAll: patternDict.
+      ^rows collect: [:row | Tuple fromRow: row]
+  ]
+
+  -- Blocking support (private)
+
+  """
+  Register a waiter and block until a matching tuple arrives or timeout.
+  Returns the matched Tuple or a Failure on timeout.
+  """
+  method: waitFor: aPattern destructive: aBoolean timeout: aTimeout [
+      | waiter timeoutCh result |
+      waiter := Waiter pattern: aPattern destructive: aBoolean.
+      mutex critical: [
+          waiters := waiters copyWith: waiter.
+      ].
+
+      timeoutCh := Channel new.
+      [Process sleep: aTimeout. timeoutCh send: #timeout] fork.
+
+      result := Channel select: {
+          waiter channel onReceive: [:tuple | tuple].
+          timeoutCh onReceive: [:_ |
+              mutex critical: [
+                  waiters := waiters reject: [:w | w == waiter].
+              ].
+              Failure with: 'Timeout waiting for tuple match'
+          ]
+      }.
+      ^result
+  ]
+
+  """
+  Wake any waiters whose pattern matches the newly inserted tuple.
+  For destructive waiters, furniture tuples are skipped.
+  Only the first matching waiter is woken (FIFO).
+  """
+  method: wakeWaitersFor: aTuple [
+      waiters copy do: [:w |
+          (w pattern matches: aTuple) ifTrue: [
+              (w isDestructive and: [aTuple isFurniture])
+                  ifFalse: [
+                      w isDestructive ifTrue: [store delete: aTuple id].
+                      w resume: aTuple.
+                      waiters := waiters reject: [:each | each == w].
+                      ^self
+                  ]
+          ]
+      ]
+  ]
+
+  -- IN with CancellationContext
+
+  """
+  Destructive blocking read with a CancellationContext for structured
+  cancellation instead of a timeout.
+  """
+  method: in: aPattern withContext: ctx [
+      | result patternDict tuple waiter |
+      patternDict := self patternToDict: aPattern.
+      mutex critical: [
+          result := store findOne: patternDict.
+          result ifNotNil: [
+              tuple := Tuple fromRow: result.
+              tuple isFurniture ifTrue: [
+                  ^Failure with: 'Cannot consume furniture tuple via in()'
+              ].
+              store delete: tuple id.
+              ^tuple
+          ].
+      ].
+
+      waiter := Waiter pattern: aPattern destructive: true.
+      mutex critical: [
+          waiters := waiters copyWith: waiter.
+      ].
+
+      ^Channel select: {
+          waiter channel onReceive: [:t | t].
+          ctx doneChannel onReceive: [:_ |
+              mutex critical: [
+                  waiters := waiters reject: [:w | w == waiter].
+              ].
+              Failure with: 'Cancelled'
+          ]
+      }
+  ]
+
+  -- Dictionary conversion (private)
+
+  """
+  Convert a Tuple to the Dictionary format expected by TupleStore insert:.
+  """
+  method: tupleToInsertDict: aTuple [
+      | d payload |
+      d := Dictionary new.
+      d at: 'category' put: aTuple category.
+      d at: 'scope' put: (aTuple scope ifNil: ['']).
+      d at: 'identity' put: (aTuple identity ifNil: ['']).
+      d at: 'instance' put: (aTuple instance ifNil: ['local']).
+      "Payload is a Dictionary in Maggie; serialize to JSON for the Go store"
+      payload := aTuple payload.
+      payload ifNil: [payload := '{}'].
+      (payload isKindOf: Dictionary) ifTrue: [payload := Json encode: payload].
+      d at: 'payload' put: payload.
+      d at: 'lifecycle' put: (aTuple lifecycle ifNil: ['session']).
+      aTuple taskId ifNotNil: [:v | d at: 'taskId' put: v].
+      aTuple agentId ifNotNil: [:v | d at: 'agentId' put: v].
+      aTuple ttlSeconds ifNotNil: [:v | d at: 'ttl' put: v].
+      ^d
+  ]
+
+  """
+  Convert a Pattern to the Dictionary format expected by TupleStore queries.
+  """
+  method: patternToDict: aPattern [
+      | d |
+      d := Dictionary new.
+      aPattern category ifNotNil: [:v | d at: 'category' put: v].
+      aPattern scope ifNotNil: [:v | d at: 'scope' put: v].
+      aPattern identity ifNotNil: [:v | d at: 'identity' put: v].
+      aPattern instance ifNotNil: [:v | d at: 'instance' put: v].
+      aPattern payloadSearch ifNotNil: [:v | d at: 'payloadSearch' put: v].
+      ^d
+  ]
+
+  -- Accessors
+
+  method: store [ ^store ]
+  method: store: aStore [ store := aStore ]
+
+  method: waiters [ ^waiters ]
+  method: waiters: anArray [ waiters := anArray ]
+
+  method: mutex [ ^mutex ]
+  method: mutex: aMutex [ mutex := aMutex ]

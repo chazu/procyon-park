@@ -1,0 +1,51 @@
+"""
+A blocked caller waiting for a tuple match in the TupleSpace.
+
+When `in:` or `rd:` finds no immediate match, a Waiter is registered on
+the space. When `out:` writes a tuple that matches, the waiter's channel
+receives the tuple, unblocking the caller.
+
+```example
+"Create a destructive waiter for claim tuples"
+w := Waiter pattern: (Pattern category: #claim scope: 'my-repo') destructive: true.
+w isDestructive   "=> true"
+w channel          "=> an unbuffered Channel"
+```
+"""
+namespace: ProcyonPark::Bbs
+
+Waiter subclass: Object
+  instanceVars: pattern destructive channel
+
+  -- Factory
+
+  """
+  Create a waiter with the given pattern and destructive flag.
+  An unbuffered channel is created for the caller to block on.
+  """
+  class method: pattern: aPattern destructive: aBoolean [
+      ^self new
+          pattern: aPattern;
+          destructive: aBoolean;
+          channel: Channel new
+  ]
+
+  -- Resumption
+
+  """
+  Resume the blocked caller by sending the matched tuple on the channel.
+  """
+  method: resume: aTuple [
+      channel send: aTuple
+  ]
+
+  -- Accessors
+
+  method: pattern [ ^pattern ]
+  method: pattern: aPattern [ pattern := aPattern ]
+
+  method: isDestructive [ ^destructive ]
+  method: destructive: aBoolean [ destructive := aBoolean ]
+
+  method: channel [ ^channel ]
+  method: channel: aChannel [ channel := aChannel ]
