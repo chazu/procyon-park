@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // protectedBranches is the set of branch names that must never be committed to
@@ -217,6 +218,26 @@ func ListOrphanedWorktrees(ctx context.Context, baseDir string) ([]string, error
 		}
 	}
 	return orphaned, nil
+}
+
+// BranchAge returns the age of a branch based on its most recent commit date.
+// If the branch doesn't exist, it returns 0 and an error.
+func BranchAge(ctx context.Context, repoPath, branchName string) (time.Duration, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"log", "-1", "--format=%ci", "refs/heads/"+branchName)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("git log branch %s: %w", branchName, err)
+	}
+	dateStr := strings.TrimSpace(string(out))
+	if dateStr == "" {
+		return 0, fmt.Errorf("branch %s has no commits", branchName)
+	}
+	commitTime, err := time.Parse("2006-01-02 15:04:05 -0700", dateStr)
+	if err != nil {
+		return 0, fmt.Errorf("parse commit date %q: %w", dateStr, err)
+	}
+	return time.Since(commitTime), nil
 }
 
 // resolveMainRepo reads the .git file in a worktree directory and returns the
