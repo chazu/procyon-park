@@ -224,7 +224,7 @@ Define Go packages in `maggie.toml` and let gowrap generate bindings automatical
 
 **imp-castle usage**: SQLite at `~/.imp-castle/bbs/tuplespace.db` (WAL mode) for the Linda-style tuplespace.
 
-**Recommended Go library**: `github.com/mattn/go-sqlite3` (CGo, most mature) or `modernc.org/sqlite` (pure Go, no CGo — better for cross-compilation).
+**Recommended Go library**: `modernc.org/sqlite` (pure Go, no CGo — better for cross-compilation).
 
 **Maggie interop design**:
 
@@ -373,6 +373,8 @@ conn close.
 
 **Alternative**: If the daemon uses HTTP, use Maggie's existing `HttpServer`/`HttpClient` primitives over a Unix socket transport. This simplifies the API to standard HTTP request/response.
 
+WE HAVE CHOSEN TO USE HTTP RATHER THAN UNIX SOCKETS
+
 ### 4.5 File I/O
 
 **Purpose**: Configuration files, state persistence (JSON, TOML), log files, PID files.
@@ -508,6 +510,8 @@ Use both interop mechanisms strategically:
 | **TOML** | gowrap | Simple parse/generate API |
 | **CUE** | gowrap | Parse/validate/extract API |
 | **JSON** | Hand-written or gowrap | May already be partially available via Dictionary#asJson |
+
+LETS DEFINITELY IMPLEMENT ROBUST JSON SUPPORT IN MAGGIE IF IT ISNT THERE ALREADY
 
 ### 6.2 Namespace Convention
 

@@ -600,7 +600,7 @@ case <-ctx.Done():
 
 1. **Should the daemon also expose a TCP port?** For remote hub connections (multi-machine imp-castle), TCP is needed. But this is Phase 4+ territory. Start Unix-only.
 
-2. **Should the CLI be a compiled Go binary or a Maggie script?** A Go binary is faster to start and can handle the Unix socket connection. A Maggie script would need `mag` to boot a VM just to send an IPC request. **Recommendation:** Go binary for the CLI, Maggie for the daemon.
+2. **Should the CLI be a compiled Go binary or a Maggie script?** A Go binary is faster to start and can handle the Unix socket connection. A Maggie script would need `mag` to boot a VM just to send an IPC request. **Recommendation:** Go binary for the CLI, Maggie for the daemon. Decision: ONE BINARY ONLY - MAGGIE VM WITH CUSTOM ENTRYPOINT
 
 3. **Image format versioning.** Maggie's image format is at version 4. Procyon-park will extend the VM with new primitives (tuplespace, agent management). Will the image format need new versions? Likely yes. Plan for `ImageVersion = 5` with procyon-park extensions.
 

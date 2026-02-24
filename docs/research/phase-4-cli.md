@@ -23,7 +23,7 @@ Three options for the CLI:
 2. **Maggie script** — The CLI is a Maggie program. Each invocation boots a Maggie VM, parses args, connects to daemon.
 3. **Single binary with everything** — One Go binary contains both CLI and daemon, selected by subcommand (`procyon-park daemon run` vs `procyon-park agent spawn`).
 
-### Decision: Option 3 — Single Go binary, thin CLI layer
+### Decision: Option 3 — Single Go binary, thin CLI layer, full Maggie image
 
 **Rationale:**
 
