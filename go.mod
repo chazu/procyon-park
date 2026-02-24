@@ -3,14 +3,15 @@ module github.com/chazu/procyon-park
 go 1.25.7
 
 require (
+	cuelang.org/go v0.15.4
 	github.com/chazu/maggie v0.0.0
 	github.com/mattn/go-isatty v0.0.20
+	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.46.1
 )
 
 require (
 	cuelabs.dev/go/oci/ociregistry v0.0.0-20250722084951-074d06050084 // indirect
-	cuelang.org/go v0.15.4 // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/apache/arrow-go/v18 v18.1.0 // indirect
 	github.com/bufbuild/protocompile v0.7.1 // indirect
@@ -36,7 +37,6 @@ require (
 	github.com/protocolbuffers/txtpbfmt v0.0.0-20251016062345-16587c79cd91 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
