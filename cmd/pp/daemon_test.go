@@ -143,7 +143,7 @@ func TestHandleDaemon_InvalidArgs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRunVersion(t *testing.T) {
-	for _, arg := range []string{"version", "--version", "-version"} {
+	for _, arg := range []string{"version", "--version"} {
 		t.Run(arg, func(t *testing.T) {
 			code := run([]string{arg})
 			if code != 0 {
@@ -154,7 +154,7 @@ func TestRunVersion(t *testing.T) {
 }
 
 func TestRunHelp(t *testing.T) {
-	for _, arg := range []string{"help", "--help", "-help"} {
+	for _, arg := range []string{"help", "--help"} {
 		t.Run(arg, func(t *testing.T) {
 			code := run([]string{arg})
 			if code != 0 {
