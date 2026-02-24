@@ -1,0 +1,180 @@
+"""
+A Linda-style tuple for the BBS tuplespace.
+
+Tuples are the fundamental unit of coordination in the tuplespace. Each
+tuple carries a category, scope, identity, payload (as a Dictionary),
+and lifecycle metadata. Tuples are mutable during construction (builder
+pattern via cascaded sends) but should be treated as handed off once
+written to the space via `TupleSpace out:`.
+
+The `in:` and `rd:` operations return fresh Tuple instances constructed
+from store query results via `fromRow:`.
+
+```example
+"Create a fact tuple"
+t := Tuple category: #fact scope: 'my-repo'
+         identity: 'language' payload: (Dictionary new at: #content put: 'Go'; yourself).
+t isFurniture    "=> false (lifecycle defaults to #session)"
+```
+
+```example
+"Convenience factory for claims"
+c := Tuple claim: 'task-123' agent: 'Bramble' status: 'in_progress'.
+c category       "=> #claim"
+c scope          "=> 'task-123'"
+```
+"""
+namespace: ProcyonPark::Bbs
+
+Tuple subclass: Object
+  instanceVars: id category scope identity instance payload lifecycle taskId agentId createdAt updatedAt ttlSeconds
+
+  -- Factory class methods
+
+  """
+  Create a tuple with the four core addressing fields and a payload.
+  Instance defaults to 'local', lifecycle defaults to #session.
+  """
+  class method: category: cat scope: sc identity: ident payload: pl [
+      ^self new
+          category: cat;
+          scope: sc;
+          identity: ident;
+          payload: pl;
+          instance: 'local';
+          lifecycle: #session
+  ]
+
+  """
+  Create a fact tuple. Facts default to #furniture lifecycle.
+  """
+  class method: fact: ident identity: content [
+      | t |
+      t := self category: #fact scope: ident identity: content
+               payload: (Dictionary new at: #content put: content; yourself).
+      t lifecycle: #furniture.
+      ^t
+  ]
+
+  """
+  Create a claim tuple for an agent claiming work.
+  """
+  class method: claim: ident agent: agent status: status [
+      ^self category: #claim scope: ident identity: ident
+            payload: (Dictionary new
+                at: #agent put: agent;
+                at: #status put: status;
+                yourself)
+  ]
+
+  """
+  Create an event tuple with the given identity and payload.
+  """
+  class method: event: ident payload: pl [
+      ^self category: #event scope: '' identity: ident payload: pl
+  ]
+
+  """
+  Construct a Tuple from a Dictionary returned by a Store query.
+  Maps string keys from the database row to instance variables.
+  """
+  class method: fromRow: aDict [
+      | t |
+      t := self new.
+      t id: (aDict at: 'id' ifAbsent: [nil]).
+      t category: (aDict at: 'category' ifAbsent: [nil]).
+      t scope: (aDict at: 'scope' ifAbsent: ['']).
+      t identity: (aDict at: 'identity' ifAbsent: ['']).
+      t instance: (aDict at: 'instance' ifAbsent: ['local']).
+      t lifecycle: (aDict at: 'lifecycle' ifAbsent: [#session]).
+      t taskId: (aDict at: 'task_id' ifAbsent: [nil]).
+      t agentId: (aDict at: 'agent_id' ifAbsent: [nil]).
+      t createdAt: (aDict at: 'created_at' ifAbsent: [nil]).
+      t updatedAt: (aDict at: 'updated_at' ifAbsent: [nil]).
+      t ttlSeconds: (aDict at: 'ttl_seconds' ifAbsent: [nil]).
+      "Payload comes as a Dictionary from the Go interop layer"
+      t payload: (aDict at: 'payload' ifAbsent: [Dictionary new]).
+      ^t
+  ]
+
+  -- Lifecycle queries
+
+  """
+  Answer true if this is a furniture tuple (permanent, not consumable).
+  """
+  method: isFurniture [
+      ^lifecycle = #furniture
+  ]
+
+  """
+  Answer true if this is a session tuple (lives for the daemon session).
+  """
+  method: isSession [
+      ^lifecycle = #session
+  ]
+
+  """
+  Answer true if this is an ephemeral tuple (short-lived with TTL).
+  """
+  method: isEphemeral [
+      ^lifecycle = #ephemeral
+  ]
+
+  """
+  Assert that this tuple can be consumed via `in:`. Furniture tuples
+  cannot be consumed. Returns a Failure if the tuple is furniture,
+  otherwise returns self.
+  """
+  method: assertConsumable [
+      self isFurniture ifTrue: [
+          ^Failure with: 'Furniture tuples cannot be consumed via in()'
+      ].
+      ^self
+  ]
+
+  -- Accessors
+
+  method: id [ ^id ]
+  method: id: anId [ id := anId ]
+
+  method: category [ ^category ]
+  method: category: aCat [ category := aCat ]
+
+  method: scope [ ^scope ]
+  method: scope: aScope [ scope := aScope ]
+
+  method: identity [ ^identity ]
+  method: identity: anIdent [ identity := anIdent ]
+
+  method: instance [ ^instance ]
+  method: instance: anInst [ instance := anInst ]
+
+  method: payload [ ^payload ]
+  method: payload: aPayload [ payload := aPayload ]
+
+  method: lifecycle [ ^lifecycle ]
+  method: lifecycle: aLifecycle [ lifecycle := aLifecycle ]
+
+  method: taskId [ ^taskId ]
+  method: taskId: aTaskId [ taskId := aTaskId ]
+
+  method: agentId [ ^agentId ]
+  method: agentId: anAgentId [ agentId := anAgentId ]
+
+  method: createdAt [ ^createdAt ]
+  method: createdAt: aTime [ createdAt := aTime ]
+
+  method: updatedAt [ ^updatedAt ]
+  method: updatedAt: aTime [ updatedAt := aTime ]
+
+  method: ttlSeconds [ ^ttlSeconds ]
+  method: ttlSeconds: aTtl [ ttlSeconds := aTtl ]
+
+  -- Printing
+
+  """
+  Return a human-readable representation of the tuple.
+  """
+  method: printString [
+      ^'Tuple(', category printString, ' ', scope printString, ' ', identity printString, ')'
+  ]

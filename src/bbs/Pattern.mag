@@ -1,0 +1,154 @@
+"""
+A matching pattern for querying the BBS tuplespace.
+
+Patterns use nil fields as wildcards. Non-nil fields require exact
+equality. The `payloadSearch` field triggers FTS5 full-text search
+on the payload column when queried via the Store.
+
+In-memory matching (used for waiter wake-up in TupleSpace) ignores
+`payloadSearch` since FTS requires the database. All other fields
+are checked with exact equality, with nil meaning "match anything".
+
+```example
+"Match all fact tuples in a scope"
+p := Pattern category: #fact scope: 'my-repo'.
+p matches: (Tuple category: #fact scope: 'my-repo' identity: 'lang' payload: Dictionary new)
+    "=> true"
+```
+
+```example
+"Wildcard pattern matches everything"
+Pattern any matches: anyTuple   "=> true"
+```
+"""
+namespace: ProcyonPark::Bbs
+
+Pattern subclass: Object
+  instanceVars: category scope identity instance payloadSearch
+
+  -- Factory class methods
+
+  """
+  Create a fully wildcard pattern that matches any tuple.
+  """
+  class method: any [
+      ^self new
+  ]
+
+  """
+  Match tuples with a specific category and scope.
+  """
+  class method: category: cat scope: sc [
+      ^self new category: cat; scope: sc
+  ]
+
+  """
+  Match tuples with a specific category, scope, and identity.
+  """
+  class method: category: cat scope: sc identity: ident [
+      ^self new category: cat; scope: sc; identity: ident
+  ]
+
+  """
+  Create a pattern with an FTS5 payload search query.
+  """
+  class method: withPayloadSearch: query [
+      ^self new payloadSearch: query
+  ]
+
+  -- Matching
+
+  """
+  Test whether this pattern matches a given tuple in memory.
+  Nil fields act as wildcards. The payloadSearch field is not
+  evaluated in memory (it requires FTS5 in the database).
+  """
+  method: matches: aTuple [
+      category ifNotNil: [category = aTuple category ifFalse: [^false]].
+      scope ifNotNil: [scope = aTuple scope ifFalse: [^false]].
+      identity ifNotNil: [identity = aTuple identity ifFalse: [^false]].
+      instance ifNotNil: [instance = aTuple instance ifFalse: [^false]].
+      ^true
+  ]
+
+  -- SQL generation
+
+  """
+  Build a WHERE clause and parameter array for Store queries.
+  Returns a Dictionary with keys #sql (String) and #params (Array).
+  Nil fields are omitted. Non-nil fields become 'column = ?' bindings.
+  PayloadSearch joins against the FTS5 virtual table.
+  """
+  method: toSQLWhere [
+      | clauses params |
+      clauses := Array new: 0.
+      params := Array new: 0.
+
+      category ifNotNil: [
+          clauses := clauses copyWith: 'category = ?'.
+          params := params copyWith: category
+      ].
+      scope ifNotNil: [
+          clauses := clauses copyWith: 'scope = ?'.
+          params := params copyWith: scope
+      ].
+      identity ifNotNil: [
+          clauses := clauses copyWith: 'identity = ?'.
+          params := params copyWith: identity
+      ].
+      instance ifNotNil: [
+          clauses := clauses copyWith: 'instance = ?'.
+          params := params copyWith: instance
+      ].
+      payloadSearch ifNotNil: [
+          clauses := clauses copyWith: 'id IN (SELECT rowid FROM tuples_fts WHERE tuples_fts MATCH ?)'.
+          params := params copyWith: payloadSearch
+      ].
+
+      clauses isEmpty ifTrue: [
+          ^Dictionary new
+              at: #sql put: '1=1';
+              at: #params put: #();
+              yourself
+      ].
+
+      ^Dictionary new
+          at: #sql put: (clauses inject: '' into: [:acc :clause |
+              acc isEmpty
+                  ifTrue: [clause]
+                  ifFalse: [acc, ' AND ', clause]
+          ]);
+          at: #params put: params;
+          yourself
+  ]
+
+  -- Accessors
+
+  method: category [ ^category ]
+  method: category: aCat [ category := aCat ]
+
+  method: scope [ ^scope ]
+  method: scope: aScope [ scope := aScope ]
+
+  method: identity [ ^identity ]
+  method: identity: anIdent [ identity := anIdent ]
+
+  method: instance [ ^instance ]
+  method: instance: anInst [ instance := anInst ]
+
+  method: payloadSearch [ ^payloadSearch ]
+  method: payloadSearch: aQuery [ payloadSearch := aQuery ]
+
+  -- Printing
+
+  """
+  Return a human-readable representation of the pattern.
+  Nil fields are shown as '*' (wildcard).
+  """
+  method: printString [
+      | catStr scopeStr identStr |
+      catStr := category ifNil: ['*'] ifNotNil: [category printString].
+      scopeStr := scope ifNil: ['*'] ifNotNil: [scope printString].
+      identStr := identity ifNil: ['*'] ifNotNil: [identity printString].
+      ^'Pattern(', catStr, ' ', scopeStr, ' ', identStr, ')'
+  ]

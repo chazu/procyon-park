@@ -1,0 +1,91 @@
+"""
+Standard category vocabulary for the BBS tuplespace.
+
+Each category has a default lifecycle that determines how long its
+tuples persist. The standard categories map to the Go implementation's
+seed data:
+
+| Category             | Lifecycle  | Purpose                          |
+|----------------------|------------|----------------------------------|
+| fact                 | furniture  | Established knowledge            |
+| convention           | furniture  | Agreed-upon patterns/rules       |
+| claim                | session    | Agent claiming ownership of work |
+| available            | session    | Work available for claiming      |
+| obstacle             | session    | Something blocking progress      |
+| need                 | session    | Something an agent requires      |
+| artifact             | session    | Output produced by an agent      |
+| event                | session    | Significant occurrence           |
+| notification         | ephemeral  | Directed message to an agent     |
+| conventionProposal   | session    | Proposed convention (pre-quorum) |
+
+```example
+TupleCategory fact              "=> #fact"
+TupleCategory defaultLifecycleFor: #fact    "=> #furniture"
+TupleCategory defaultLifecycleFor: #claim   "=> #session"
+```
+"""
+namespace: ProcyonPark::Bbs
+
+TupleCategory subclass: Object
+
+  -- Standard category accessors
+
+  """Return the #fact category symbol."""
+  class method: fact [ ^#fact ]
+
+  """Return the #convention category symbol."""
+  class method: convention [ ^#convention ]
+
+  """Return the #claim category symbol."""
+  class method: claim [ ^#claim ]
+
+  """Return the #available category symbol."""
+  class method: available [ ^#available ]
+
+  """Return the #obstacle category symbol."""
+  class method: obstacle [ ^#obstacle ]
+
+  """Return the #need category symbol."""
+  class method: need [ ^#need ]
+
+  """Return the #artifact category symbol."""
+  class method: artifact [ ^#artifact ]
+
+  """Return the #event category symbol."""
+  class method: event [ ^#event ]
+
+  """Return the #notification category symbol."""
+  class method: notification [ ^#notification ]
+
+  """Return the #conventionProposal category symbol."""
+  class method: conventionProposal [ ^#conventionProposal ]
+
+  -- Lifecycle mapping
+
+  """
+  Return the default lifecycle for a given category symbol.
+  Facts and conventions are furniture (permanent). Notifications
+  are ephemeral. Everything else is session-scoped.
+  """
+  class method: defaultLifecycleFor: aCategorySymbol [
+      aCategorySymbol = #fact ifTrue: [^#furniture].
+      aCategorySymbol = #convention ifTrue: [^#furniture].
+      aCategorySymbol = #notification ifTrue: [^#ephemeral].
+      ^#session
+  ]
+
+  -- Enumeration
+
+  """
+  Return an array of all standard category symbols.
+  """
+  class method: all [
+      ^#(fact convention claim available obstacle need artifact event notification conventionProposal)
+  ]
+
+  """
+  Answer whether the given symbol is a recognized category.
+  """
+  class method: isValid: aCategorySymbol [
+      ^self all includes: aCategorySymbol
+  ]
