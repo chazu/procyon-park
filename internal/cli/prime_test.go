@@ -63,6 +63,53 @@ func TestPrimeCmd_DefaultRole(t *testing.T) {
 	}
 }
 
+func TestPrimeCmd_SendsAllEnvVars(t *testing.T) {
+	var received map[string]string
+	sock := startMockDaemon(t, map[string]methodHandler{
+		"system.prime": func(params json.RawMessage) (json.RawMessage, *ipc.Error) {
+			received = make(map[string]string)
+			json.Unmarshal(params, &received)
+			return json.RawMessage(`"ok"`), nil
+		},
+	})
+
+	os.Setenv("PP_AGENT_ROLE", "king")
+	os.Setenv("PP_AGENT_NAME", "Marble")
+	os.Setenv("PP_REPO", "myrepo")
+	os.Setenv("PP_TASK", "task-42")
+	os.Setenv("PP_BRANCH", "agent/Marble/task-42")
+	os.Setenv("PP_WORKTREE", "/tmp/wt/Marble")
+	defer func() {
+		os.Unsetenv("PP_AGENT_ROLE")
+		os.Unsetenv("PP_AGENT_NAME")
+		os.Unsetenv("PP_REPO")
+		os.Unsetenv("PP_TASK")
+		os.Unsetenv("PP_BRANCH")
+		os.Unsetenv("PP_WORKTREE")
+	}()
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetArgs([]string{"prime", "--socket", sock, "--output", "text"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	checks := map[string]string{
+		"role":       "king",
+		"agent_name": "Marble",
+		"repo":       "myrepo",
+		"task_id":    "task-42",
+		"branch":     "agent/Marble/task-42",
+		"worktree":   "/tmp/wt/Marble",
+	}
+	for key, want := range checks {
+		if got := received[key]; got != want {
+			t.Errorf("param %q: got %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestPrimeCmd_JSON(t *testing.T) {
 	sock := startMockDaemon(t, map[string]methodHandler{
 		"system.prime": func(params json.RawMessage) (json.RawMessage, *ipc.Error) {

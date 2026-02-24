@@ -10,14 +10,22 @@ import (
 )
 
 // primeCmd outputs role-specific instructions for the calling agent.
-// It reads PP_AGENT_ROLE from the environment to determine which
-// instruction set to output.
+// It reads PP_* environment variables and sends them to the daemon's
+// system.prime handler to generate role-specific instructions.
 var primeCmd = &cobra.Command{
 	Use:   "prime",
 	Short: "Output role-specific agent instructions",
-	Long: `Outputs priming instructions for the current agent based on the
-PP_AGENT_ROLE environment variable. Agents call this at startup to
-receive their role-specific instructions and orientation context.`,
+	Long: `Outputs priming instructions for the current agent based on PP_*
+environment variables. Agents call this at startup to receive their
+role-specific instructions and orientation context.
+
+Environment variables read:
+  PP_AGENT_ROLE  Agent role (default: cub)
+  PP_AGENT_NAME  Agent name
+  PP_REPO        Repository name
+  PP_TASK        Current task ID
+  PP_BRANCH      Git branch name
+  PP_WORKTREE    Worktree path`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		role := os.Getenv("PP_AGENT_ROLE")
@@ -29,7 +37,14 @@ receive their role-specific instructions and orientation context.`,
 			return NewExitErr(ExitConnection, fmt.Errorf("daemon not reachable: %w", err))
 		}
 
-		params := map[string]string{"role": role}
+		params := map[string]string{
+			"role":       role,
+			"agent_name": os.Getenv("PP_AGENT_NAME"),
+			"repo":       os.Getenv("PP_REPO"),
+			"task_id":    os.Getenv("PP_TASK"),
+			"branch":     os.Getenv("PP_BRANCH"),
+			"worktree":   os.Getenv("PP_WORKTREE"),
+		}
 		result, err := ipc.Call(SocketPath(), "system.prime", params)
 		if err != nil {
 			return fmt.Errorf("prime failed: %w", err)

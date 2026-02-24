@@ -86,6 +86,7 @@ func (d *DaemonServer) Run(ctx context.Context) error {
 		RegisterAgentHandlers(d.ipcServer, d.store)
 		RegisterRepoHandlers(d.ipcServer, d.store)
 		RegisterConfigHandlers(d.ipcServer, d.store)
+		RegisterPrimeHandlers(d.ipcServer, d.store)
 		if err := d.ipcServer.Start(); err != nil {
 			d.worker.Stop()
 			if d.pidFile != nil {
