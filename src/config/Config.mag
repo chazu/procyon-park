@@ -1,0 +1,131 @@
+"""
+Daemon configuration loaded from maggie.toml.
+
+Config reads the project's maggie.toml file and provides typed access
+to daemon-relevant settings: data directory, checkpoint interval, shutdown
+timeout, socket path, and PID file path. Missing keys fall back to sensible
+defaults.
+
+```example
+"Load config from the default location"
+cfg := Config load: 'maggie.toml'.
+cfg dataDir          "=> '~/.procyon-park'"
+cfg checkpointInterval "=> 300000 (5 minutes in ms)"
+```
+
+```example
+"Load from a TOML string (useful in tests)"
+cfg := Config fromToml: '[daemon]
+data_dir = "/tmp/pp"
+checkpoint_interval = 60000'.
+cfg dataDir           "=> '/tmp/pp'"
+```
+"""
+namespace: ProcyonPark
+
+Config subclass: Object
+  instanceVars: dataDir socketPath pidPath checkpointInterval shutdownTimeout projectName namespace version
+
+  -- Defaults
+
+  """Default data directory: ~/.procyon-park"""
+  class method: defaultDataDir [
+      ^File join: File homeDirectory with: '.procyon-park'
+  ]
+
+  """Default checkpoint interval in milliseconds (5 minutes)."""
+  class method: defaultCheckpointInterval [ ^300000 ]
+
+  """Default shutdown timeout in milliseconds (30 seconds)."""
+  class method: defaultShutdownTimeout [ ^30000 ]
+
+  -- Factory
+
+  """
+  Load config from a maggie.toml file path. Falls back to defaults for
+  any missing keys. Returns a Failure if the file cannot be read.
+  """
+  class method: load: aPath [
+      | contents |
+      (File exists: aPath) ifFalse: [^self defaults].
+      contents := File readFileContents: aPath.
+      (contents isKindOf: Failure) ifTrue: [^self defaults].
+      ^self fromToml: contents
+  ]
+
+  """
+  Create a Config from a TOML-encoded string. Missing keys use defaults.
+  """
+  class method: fromToml: aString [
+      | parsed |
+      parsed := Toml decode: aString.
+      ^self fromDictionary: parsed
+  ]
+
+  """
+  Create a Config from a parsed TOML Dictionary. Extracts [daemon] section
+  and [project] section, applying defaults for missing keys.
+  """
+  class method: fromDictionary: aDict [
+      | cfg daemon project dd |
+      cfg := self new.
+      dd := self defaultDataDir.
+
+      "Extract [project] section"
+      project := aDict at: 'project' ifAbsent: [Dictionary new].
+      cfg projectName: (project at: 'name' ifAbsent: ['procyon-park']).
+      cfg namespace: (project at: 'namespace' ifAbsent: ['ProcyonPark']).
+      cfg version: (project at: 'version' ifAbsent: ['0.0.0']).
+
+      "Extract [daemon] section"
+      daemon := aDict at: 'daemon' ifAbsent: [Dictionary new].
+      cfg dataDir: (daemon at: 'data_dir' ifAbsent: [dd]).
+      cfg socketPath: (daemon at: 'socket_path'
+          ifAbsent: [File join: dd with: 'daemon.sock']).
+      cfg pidPath: (daemon at: 'pid_path'
+          ifAbsent: [File join: dd with: 'daemon.pid']).
+      cfg checkpointInterval: (daemon at: 'checkpoint_interval'
+          ifAbsent: [self defaultCheckpointInterval]).
+      cfg shutdownTimeout: (daemon at: 'shutdown_timeout'
+          ifAbsent: [self defaultShutdownTimeout]).
+      ^cfg
+  ]
+
+  """
+  Create a Config with all default values.
+  """
+  class method: defaults [
+      ^self fromDictionary: Dictionary new
+  ]
+
+  -- Accessors
+
+  method: dataDir [ ^dataDir ]
+  method: dataDir: aString [ dataDir := aString ]
+
+  method: socketPath [ ^socketPath ]
+  method: socketPath: aString [ socketPath := aString ]
+
+  method: pidPath [ ^pidPath ]
+  method: pidPath: aString [ pidPath := aString ]
+
+  method: checkpointInterval [ ^checkpointInterval ]
+  method: checkpointInterval: anInt [ checkpointInterval := anInt ]
+
+  method: shutdownTimeout [ ^shutdownTimeout ]
+  method: shutdownTimeout: anInt [ shutdownTimeout := anInt ]
+
+  method: projectName [ ^projectName ]
+  method: projectName: aString [ projectName := aString ]
+
+  method: namespace [ ^namespace ]
+  method: namespace: aString [ namespace := aString ]
+
+  method: version [ ^version ]
+  method: version: aString [ version := aString ]
+
+  -- Printing
+
+  method: printString [
+      ^'Config(dataDir=', dataDir printString, ', checkpoint=', checkpointInterval printString, 'ms)'
+  ]

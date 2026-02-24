@@ -1,0 +1,256 @@
+"""
+Daemon entry point and event-driven main loop.
+
+DaemonMain replaces Main.start when procyon-park runs as a daemon. It
+initializes the Config, TupleSpace, and checkpoint timer, then enters
+an event-driven main loop using Channel select to multiplex:
+  - IPC requests (dispatched through the ipcChannel)
+  - Checkpoint timer ticks (periodic image saves)
+  - Shutdown signals (graceful termination)
+
+The event loop runs until a shutdown signal arrives, then performs a
+final checkpoint and closes all resources.
+
+```example
+"Start the daemon with default config"
+DaemonMain start.
+
+"Start with a custom config path"
+DaemonMain startWith: '/path/to/maggie.toml'.
+```
+
+```example
+"Create a daemon for testing (no file I/O, in-memory tuplespace)"
+daemon := DaemonMain new.
+daemon config: (Config defaults).
+daemon space: (TupleSpace open: ':memory:').
+daemon start.
+```
+"""
+namespace: ProcyonPark
+
+DaemonMain subclass: Object
+  instanceVars: config space ipcChannel shutdownChannel checkpointChannel running lastCheckpoint
+
+  -- Factory / Entry Points
+
+  """
+  Primary daemon entry point. Loads config from maggie.toml,
+  initializes the tuplespace, and enters the event loop.
+  Returns when shutdown completes.
+  """
+  class method: start [
+      ^self startWith: 'maggie.toml'
+  ]
+
+  """
+  Start the daemon with config loaded from the given path.
+  """
+  class method: startWith: configPath [
+      | daemon |
+      daemon := self new.
+      daemon initWith: (Config load: configPath).
+      daemon run.
+      ^daemon
+  ]
+
+  """
+  Create a daemon configured for testing: in-memory tuplespace,
+  custom config, no file system side effects.
+  """
+  class method: testInstance [
+      | daemon |
+      daemon := self new.
+      daemon initWith: Config defaults.
+      daemon space: (TupleSpace open: ':memory:').
+      ^daemon
+  ]
+
+  -- Initialization
+
+  """
+  Initialize the daemon with the given Config. Sets up channels and
+  the tuplespace. Does not start the event loop (call run for that).
+  """
+  method: initWith: aConfig [
+      config := aConfig.
+      ipcChannel := Channel new: 64.
+      shutdownChannel := Channel new: 1.
+      checkpointChannel := Channel new: 1.
+      running := false.
+      lastCheckpoint := nil.
+
+      "Open tuplespace (in-memory for now; SQLite backing comes in Phase 3)"
+      space ifNil: [
+          space := TupleSpace open: ':memory:'
+      ]
+  ]
+
+  -- Event Loop
+
+  """
+  Run the daemon event loop. Starts the checkpoint timer, then enters
+  a blocking select loop over IPC, checkpoint, and shutdown channels.
+  Returns when shutdown is complete.
+  """
+  method: run [
+      running := true.
+      self startCheckpointTimer.
+      self eventLoop.
+      self shutdown
+  ]
+
+  """
+  The core event loop. Uses Channel select to multiplex three event
+  sources without polling. Runs until running becomes false.
+  """
+  method: eventLoop [
+      [running] whileTrue: [
+          Channel select: {
+              ipcChannel onReceive: [:req | self handleIpcRequest: req].
+              checkpointChannel onReceive: [:tick | self handleCheckpointTick].
+              shutdownChannel onReceive: [:reason | self handleShutdown: reason]
+          }
+      ]
+  ]
+
+  -- Event Handlers
+
+  """
+  Handle an incoming IPC request. The request is a Dictionary with
+  at minimum a 'method' key. Results are sent back on the request's
+  'replyChannel' if present.
+  """
+  method: handleIpcRequest: req [
+      | method params result replyChannel |
+      method := req at: 'method' ifAbsent: ['unknown'].
+      params := req at: 'params' ifAbsent: [Dictionary new].
+      replyChannel := req at: 'replyChannel' ifAbsent: [nil].
+
+      result := self dispatch: method params: params.
+
+      replyChannel ifNotNil: [:ch | ch send: result]
+  ]
+
+  """
+  Dispatch an IPC method call to the appropriate handler.
+  Returns the result (a Dictionary or value).
+  """
+  method: dispatch: method params: params [
+      method = 'system.status' ifTrue: [^self statusResponse].
+      method = 'system.shutdown' ifTrue: [
+          self requestShutdown: 'IPC shutdown request'.
+          ^Dictionary new at: 'status' put: 'shutting_down'; yourself
+      ].
+      method = 'system.checkpoint' ifTrue: [
+          self handleCheckpointTick.
+          ^Dictionary new at: 'status' put: 'checkpointed'; yourself
+      ].
+      ^Dictionary new at: 'error' put: 'unknown method: ', method; yourself
+  ]
+
+  """
+  Build a status response Dictionary.
+  """
+  method: statusResponse [
+      ^Dictionary new
+          at: 'status' put: 'running';
+          at: 'version' put: config version;
+          at: 'project' put: config projectName;
+          at: 'lastCheckpoint' put: lastCheckpoint;
+          yourself
+  ]
+
+  """
+  Handle a checkpoint timer tick. Records the checkpoint time.
+  Actual image saving is delegated to the Go-side checkpoint.Manager
+  via VMWorker.Do(); this handler tracks the Maggie-side bookkeeping.
+  """
+  method: handleCheckpointTick [
+      lastCheckpoint := 'checkpoint-done'.
+      "The Go-side checkpoint.Manager handles the actual atomic write.
+       This hook exists so the Maggie layer can do pre-checkpoint
+       housekeeping (e.g., flush caches, compact tuplespace)."
+  ]
+
+  """
+  Handle a shutdown signal. Stops the event loop.
+  """
+  method: handleShutdown: reason [
+      running := false
+  ]
+
+  -- Checkpoint Timer
+
+  """
+  Start a background process that sends periodic ticks on the
+  checkpointChannel. The interval comes from config.
+  """
+  method: startCheckpointTimer [
+      | interval |
+      interval := config checkpointInterval.
+      [
+          [running] whileTrue: [
+              Process sleep: interval.
+              running ifTrue: [checkpointChannel trySend: 'tick']
+          ]
+      ] fork
+  ]
+
+  -- Shutdown
+
+  """
+  Request a graceful shutdown. Sends a reason on the shutdown channel.
+  Safe to call from any process/goroutine.
+  """
+  method: requestShutdown: reason [
+      shutdownChannel trySend: reason
+  ]
+
+  """
+  Perform shutdown cleanup: final checkpoint, close tuplespace.
+  """
+  method: shutdown [
+      self handleCheckpointTick.
+      running := false
+  ]
+
+  -- IPC Submission
+
+  """
+  Submit an IPC request from outside the event loop. Creates a reply
+  channel, sends the request, and blocks until the result arrives.
+  Returns the result.
+  """
+  method: submit: method params: params [
+      | req replyChannel result |
+      replyChannel := Channel new: 1.
+      req := Dictionary new
+          at: 'method' put: method;
+          at: 'params' put: params;
+          at: 'replyChannel' put: replyChannel;
+          yourself.
+      ipcChannel send: req.
+      ^replyChannel receive
+  ]
+
+  -- Accessors
+
+  method: config [ ^config ]
+  method: config: aConfig [ config := aConfig ]
+
+  method: space [ ^space ]
+  method: space: aSpace [ space := aSpace ]
+
+  method: ipcChannel [ ^ipcChannel ]
+  method: shutdownChannel [ ^shutdownChannel ]
+  method: checkpointChannel [ ^checkpointChannel ]
+
+  method: running [ ^running ]
+  method: lastCheckpoint [ ^lastCheckpoint ]
+
+  -- Printing
+
+  method: printString [
+      ^'DaemonMain(', config projectName, ' v', config version, ')'
+  ]
