@@ -1,0 +1,12 @@
+[project]
+name = "procyon-park"
+namespace = "ProcyonPark"
+version = "0.1.0"
+
+[source]
+dirs = ["src", "lib"]
+entry = "Main.start"
+
+[image]
+output = "procyon-park.image"
+include-source = true
