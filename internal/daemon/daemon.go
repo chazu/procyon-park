@@ -82,6 +82,7 @@ func (d *DaemonServer) Run(ctx context.Context) error {
 	socketPath := d.resolveSocketPath()
 	if socketPath != "" {
 		d.ipcServer = NewIPCServer(socketPath, d.shutdownCh)
+		RegisterBBSHandlers(d.ipcServer, d.store)
 		if err := d.ipcServer.Start(); err != nil {
 			d.worker.Stop()
 			if d.pidFile != nil {

@@ -259,10 +259,14 @@ func (s *IPCServer) processRequest(data []byte) JSONRPCResponse {
 
 	result, err := handler(req.Params)
 	if err != nil {
+		code := ErrCodeInternal
+		if re, ok := err.(*rpcError); ok {
+			code = re.Code
+		}
 		return JSONRPCResponse{
 			JSONRPC: "2.0",
 			Error: &JSONRPCError{
-				Code:    ErrCodeInternal,
+				Code:    code,
 				Message: err.Error(),
 			},
 			ID: req.ID,
