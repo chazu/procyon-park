@@ -161,6 +161,21 @@ func CommitAll(ctx context.Context, worktreePath, message string) error {
 	return nil
 }
 
+// DeleteBranch deletes a local branch. It refuses to delete protected branches.
+// Equivalent to: git -C repoPath branch -D branchName.
+func DeleteBranch(ctx context.Context, repoPath, branchName string) error {
+	if IsProtectedBranch(branchName) {
+		return fmt.Errorf("refusing to delete protected branch %q", branchName)
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"branch", "-D", branchName)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git branch -D %s: %s: %w", branchName, bytes.TrimSpace(out), err)
+	}
+	return nil
+}
+
 // IsProtectedBranch returns true if branch is a protected branch name.
 // The check is case-insensitive.
 func IsProtectedBranch(branch string) bool {
