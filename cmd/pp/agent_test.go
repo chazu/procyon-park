@@ -279,8 +279,10 @@ func TestRunAgentDispatch(t *testing.T) {
 }
 
 func TestRunAgentListDispatch(t *testing.T) {
-	// 'pp agent list' with no daemon should return 1
-	code := run([]string{"agent", "list", "--data-dir", t.TempDir(), "--repo-name", "test"})
+	// 'pp agent list' with no daemon should return 1.
+	// Use --socket pointing to a non-existent path so the IPC call fails fast.
+	socketPath := t.TempDir() + "/no-daemon.sock"
+	code := run([]string{"agent", "list", "--socket", socketPath, "--repo-name", "test"})
 	if code != 1 {
 		t.Fatalf("expected exit code 1 (no daemon running), got %d", code)
 	}

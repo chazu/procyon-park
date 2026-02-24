@@ -20,7 +20,7 @@ var AgentCmd = &cobra.Command{
 	Short: "Manage agents (spawn, dismiss, status, list, prune, respawn, show, attach, logs, stuck)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.Help()
-		return NewExitErr(ExitUsage, fmt.Errorf("missing agent subcommand"))
+		return NewExitErr(ExitError, fmt.Errorf("missing agent subcommand"))
 	},
 }
 
@@ -605,6 +605,7 @@ func init() {
 		agentLogsCmd,
 		agentStuckCmd,
 	)
+	rootCmd.AddCommand(AgentCmd)
 }
 
 // mustGetString returns a flag value, panicking on error (safe because

@@ -345,9 +345,16 @@ func handleAgentStuck(store *tuplestore.TupleStore) Handler {
 		payloadMap["status"] = "stuck"
 		updatedPayload, _ := json.Marshal(payloadMap)
 
+		// Preserve lifecycle and instance from original tuple.
+		origInstance, _ := tuples[0]["instance"].(string)
+		origLifecycle, _ := tuples[0]["lifecycle"].(string)
+		if origLifecycle == "" {
+			origLifecycle = "session"
+		}
+
 		// Remove old tuple and write updated one.
 		store.FindAndDelete(&cat, &p.RepoName, &p.AgentName, nil, nil)
-		store.Insert(cat, p.RepoName, p.AgentName, "", string(updatedPayload), "", nil, nil, nil)
+		store.Insert(cat, p.RepoName, p.AgentName, origInstance, string(updatedPayload), origLifecycle, nil, nil, nil)
 
 		return map[string]string{"status": "stuck"}, nil
 	}

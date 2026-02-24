@@ -1,7 +1,4 @@
+// cobra_agent.go — Agent commands are self-registered by internal/cli/cmd_agent.go.
+// This file is kept for documentation purposes. The import of internal/cli
+// in cobra_compat.go triggers the registration.
 package main
-
-import "github.com/chazu/procyon-park/internal/cli"
-
-func init() {
-	cli.AddCommand(cli.AgentCmd)
-}

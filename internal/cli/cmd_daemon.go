@@ -22,7 +22,7 @@ var DaemonCmd = &cobra.Command{
 	Short: "Manage the background daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.Help()
-		return NewExitErr(ExitUsage, fmt.Errorf("missing daemon subcommand"))
+		return NewExitErr(ExitError, fmt.Errorf("missing daemon subcommand"))
 	},
 }
 
@@ -163,6 +163,7 @@ func init() {
 	pf.StringVar(&flagDataDir, "data-dir", "", "data directory (default: ~/.procyon-park)")
 
 	DaemonCmd.AddCommand(daemonRunCmd, daemonStopCmd, daemonStatusCmd, daemonRestartCmd)
+	rootCmd.AddCommand(DaemonCmd)
 }
 
 // resolveDataDir returns the data directory from the --data-dir flag or the default.
