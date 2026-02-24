@@ -1,7 +1,6 @@
 package workflow
 
 import (
-	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -26,29 +25,9 @@ func makeInstance(id, repo, name string, status InstanceStatus) *Instance {
 		WorkflowName: name,
 		Status:       status,
 		CurrentStep:  0,
-		Context:      json.RawMessage(`{"key":"value"}`),
-		Params:       json.RawMessage(`{"p1":"v1"}`),
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-}
-
-func TestGenerateID(t *testing.T) {
-	id, err := GenerateID()
-	if err != nil {
-		t.Fatalf("GenerateID: %v", err)
-	}
-	if !strings.HasPrefix(id, "wf-") {
-		t.Errorf("expected prefix wf-, got %s", id)
-	}
-	if len(id) != 19 { // "wf-" + 16 hex chars
-		t.Errorf("expected length 19, got %d: %s", len(id), id)
-	}
-
-	// Uniqueness.
-	id2, _ := GenerateID()
-	if id == id2 {
-		t.Error("two generated IDs should differ")
+		Context:      WorkflowContext{ActiveRepo: repo},
+		Params:       map[string]string{"p1": "v1"},
+		StartedAt:    now,
 	}
 }
 
@@ -76,14 +55,13 @@ func TestCRUD(t *testing.T) {
 	if got.Status != StatusPending {
 		t.Errorf("status = %s, want pending", got.Status)
 	}
-	if string(got.Context) != `{"key":"value"}` {
-		t.Errorf("context = %s", got.Context)
+	if got.Context.ActiveRepo != "myrepo" {
+		t.Errorf("context.ActiveRepo = %s, want myrepo", got.Context.ActiveRepo)
 	}
 
 	// Update.
 	inst.Status = StatusRunning
 	inst.CurrentStep = 2
-	inst.UpdatedAt = time.Now().UTC().Truncate(time.Second)
 	if err := s.UpdateInstance(inst); err != nil {
 		t.Fatalf("UpdateInstance: %v", err)
 	}
@@ -163,8 +141,7 @@ func TestStatusIndexQueries(t *testing.T) {
 		{"wf-005", "repo-b", StatusCompleted},
 	} {
 		inst := makeInstance(tc.id, tc.repo, "wf", tc.status)
-		inst.CreatedAt = inst.CreatedAt.Add(time.Duration(i) * time.Second)
-		inst.UpdatedAt = inst.CreatedAt
+		inst.StartedAt = inst.StartedAt.Add(time.Duration(i) * time.Second)
 		if err := s.CreateInstance(inst); err != nil {
 			t.Fatalf("create %s: %v", tc.id, err)
 		}
@@ -208,7 +185,6 @@ func TestStatusIndexQueries(t *testing.T) {
 
 	// Status index is updated on UpdateInstance.
 	inst := makeInstance("wf-002", "repo-a", "wf", StatusCompleted)
-	inst.UpdatedAt = time.Now().UTC().Truncate(time.Second)
 	if err := s.UpdateInstance(inst); err != nil {
 		t.Fatalf("UpdateInstance: %v", err)
 	}
@@ -306,7 +282,6 @@ func TestConcurrentUpdates(t *testing.T) {
 			defer wg.Done()
 			upd := makeInstance("wf-conc", "myrepo", "deploy", StatusRunning)
 			upd.CurrentStep = step
-			upd.UpdatedAt = time.Now().UTC().Truncate(time.Second)
 			if err := s.UpdateInstance(upd); err != nil {
 				errs <- err
 			}

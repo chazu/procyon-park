@@ -1,11 +1,7 @@
-// Package workflow provides SQLite-backed persistence for workflow instances
-// and gate state, enabling crash recovery for the workflow engine.
 package workflow
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -13,31 +9,6 @@ import (
 
 	_ "modernc.org/sqlite"
 )
-
-// InstanceStatus represents the lifecycle state of a workflow instance.
-type InstanceStatus string
-
-const (
-	StatusPending   InstanceStatus = "pending"
-	StatusRunning   InstanceStatus = "running"
-	StatusCompleted InstanceStatus = "completed"
-	StatusFailed    InstanceStatus = "failed"
-	StatusCancelled InstanceStatus = "cancelled"
-)
-
-// Instance holds the serializable state of a running workflow.
-type Instance struct {
-	ID           string          `json:"id"`
-	RepoName     string          `json:"repo_name"`
-	WorkflowName string          `json:"workflow_name"`
-	Status       InstanceStatus  `json:"status"`
-	CurrentStep  int             `json:"current_step"`
-	Context      json.RawMessage `json:"context,omitempty"`
-	Params       json.RawMessage `json:"params,omitempty"`
-	Error        string          `json:"error,omitempty"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
-}
 
 // GateState persists the state of an in-progress gate step for crash recovery.
 type GateState struct {
@@ -137,15 +108,6 @@ CREATE TABLE IF NOT EXISTS workflow_gate_state (
 );
 `
 
-// GenerateID creates a new workflow instance ID of the form "wf-<random hex>".
-func GenerateID() (string, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("workflow/state: generate id: %w", err)
-	}
-	return "wf-" + hex.EncodeToString(b), nil
-}
-
 // CreateInstance inserts a new workflow instance. The instance ID and repo_name
 // are used as the composite primary key.
 func (s *Store) CreateInstance(inst *Instance) error {
@@ -166,7 +128,7 @@ func (s *Store) CreateInstance(inst *Instance) error {
 	_, err = tx.Exec(
 		`INSERT INTO workflow_instances (repo_name, instance_id, data, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?)`,
-		inst.RepoName, inst.ID, string(data), inst.CreatedAt.UTC(), inst.UpdatedAt.UTC(),
+		inst.RepoName, inst.ID, string(data), inst.StartedAt.UTC(), time.Now().UTC(),
 	)
 	if err != nil {
 		return fmt.Errorf("workflow/state: insert instance: %w", err)
@@ -203,7 +165,7 @@ func (s *Store) UpdateInstance(inst *Instance) error {
 
 	result, err := tx.Exec(
 		`UPDATE workflow_instances SET data = ?, updated_at = ? WHERE repo_name = ? AND instance_id = ?`,
-		string(data), inst.UpdatedAt.UTC(), inst.RepoName, inst.ID,
+		string(data), time.Now().UTC(), inst.RepoName, inst.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("workflow/state: update instance: %w", err)
