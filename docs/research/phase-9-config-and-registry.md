@@ -128,8 +128,8 @@ hub_discovery = false
 
 Environment override convention:
 ```
-PROCYON_FEATURES_BBS_ENABLED=true
-PROCYON_FEATURES_WORKFLOWS_ENABLED=false
+PP_FEATURES_BBS_ENABLED=true
+PP_FEATURES_WORKFLOWS_ENABLED=false
 ```
 
 ```go
@@ -153,7 +153,7 @@ imp-castle is a local tool, not a SaaS product. Feature flags here gate incomple
 #### 2.4 Recommendations
 
 - **Flat booleans in config** — no nesting, no typed variants, no percentage rollouts.
-- **Environment override via simple naming convention:** `PROCYON_` prefix + TOML path with `_` separators, uppercased.
+- **Environment override via simple naming convention:** `PP_` prefix + TOML path with `_` separators, uppercased. This is consistent with Phase 4's choice of `pp` as the binary name and `PP_` as the agent env var prefix.
 - **Compile-time defaults in Go code** — the `defaultConfig()` function is the source of truth for what's on by default.
 - **No feature flag registry or metadata** — just read the config. The code that checks a flag knows what it means.
 
@@ -353,13 +353,13 @@ func initWorkTracker(repoPath string) worktracker.WorkTracker {
 
 **File:** `internal/cli/init.go`
 
-The `pp init` command:
+The `pp init` command (imp-castle equivalent: `pp init`):
 1. Creates directory structure at `~/.imp-castle/`.
 2. Creates CUE workflow module infrastructure.
 3. Generates Ed25519 node identity (for future hub).
 4. Prints next steps.
 
-Repo onboarding is `pp repo add <path>`, which:
+Repo onboarding is `pp repo add <path>` (imp-castle equivalent: `pp repo add`), which:
 1. Resolves the path to the main git repo.
 2. Detects beads presence.
 3. Detects main branch.
@@ -396,12 +396,12 @@ Actions:
 5. Create `<repo>/.procyon-park/` directory if it doesn't exist.
 6. Optionally initialize beads if not present.
 
-#### 5.3 `cub doctor` (Validation)
+#### 5.3 `pp doctor` (Validation)
 
 A diagnostic command that checks system health:
 
 ```
-cub doctor
+pp doctor
 ```
 
 Checks:
@@ -422,7 +422,7 @@ Output format: green checkmarks / red X marks with actionable messages.
 #### 5.4 Recommendations
 
 - **Idempotent setup** — users should be able to run `pp init` at any time without fear.
-- **`cub doctor` is essential** — multi-agent systems have many moving parts. A single diagnostic command saves hours of debugging.
+- **`pp doctor` is essential** — multi-agent systems have many moving parts. A single diagnostic command saves hours of debugging.
 - **No interactive prompts in `pp init`** — just do the right thing with defaults. Interactive setup wizards are a bad UX for CLI tools.
 - **Minimal prerequisites:** Git, tmux, a shell. Everything else is optional.
 
@@ -523,7 +523,7 @@ auto_discover = false  # mDNS/DNS-SD discovery
 | Config precedence | env > repo > global > default | Standard 12-factor; env always wins |
 | Hub protocol | gRPC or HTTP/JSON (TBD) | Defer decision until hub is actually needed |
 | Config reloading | None (read at startup) | Agents are short-lived; daemon can SIGHUP |
-| Validation | `cub doctor` command | Better UX than scattered error messages |
+| Validation | `pp doctor` command | Better UX than scattered error messages |
 
 ---
 
@@ -535,9 +535,9 @@ auto_discover = false  # mDNS/DNS-SD discovery
 | Config fields | 1 (agent_command) | Full config struct |
 | Feature flags | None | Config booleans with env override |
 | Work tracker interface | 3 methods | 8+ methods (expanded for king/workflows) |
-| Setup validation | None | `cub doctor` command |
+| Setup validation | None | `pp doctor` command |
 | Hub support | Identity only | Identity + config surface (gated) |
-| Env override | None | `PROCYON_*` convention |
+| Env override | None | `PP_*` convention |
 
 ---
 

@@ -268,8 +268,10 @@ Analytics results are written as furniture tuples, not session tuples. This mean
 ### 8.4 Synthesis is Best-Effort
 LLM failures don't block archival. The system works without synthesis (just loses the knowledge extraction benefit).
 
-### 8.5 DuckDB as Ephemeral Query Engine
-DuckDB is used purely as a computation engine — opened in-memory, query runs, connection closes. No persistent DuckDB state. All durable state lives in SQLite (hot) or Parquet files (warm).
+### 8.5 DuckDB as Ephemeral Query Engine (Analytics)
+In the analytics subsystem, DuckDB is used purely as a computation engine — opened in-memory, query runs, connection closes. No persistent DuckDB state for analytics. All durable state lives in SQLite (hot) or Parquet files (warm).
+
+**Note:** The telemetry subsystem (Phase 8) uses DuckDB differently — as an in-memory buffer that accumulates OTEL signal data and flushes to Parquet every 5 minutes. Data lives in DuckDB between flushes. This is a distinct usage pattern from analytics: telemetry uses DuckDB as a write buffer, analytics uses it as a read-only query engine.
 
 ### 8.6 Self-Improving Conventions
 The convention lifecycle: agents propose -> GC promotes at quorum -> feedback loop prunes if ineffective -> synthesis extracts from successful sessions. This creates a self-improving system where conventions that work survive and those that don't are automatically removed.
