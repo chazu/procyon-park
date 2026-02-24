@@ -49,7 +49,7 @@ include-source = true
 output = "wrap"
 
 [[go-wrap.packages]]
-import = "github.com/mattn/go-sqlite3"
+import = "modernc.org/sqlite"
 include = ["Open"]
 
 [[go-wrap.packages]]
@@ -60,9 +60,7 @@ include = ["NewConnector", "NewAppender"]
 import = "github.com/BurntSushi/toml"
 include = ["Decode", "DecodeFile"]
 
-[[go-wrap.packages]]
-import = "cuelang.org/go/cue"
-include = ["Context", "Value"]
+# Note: CUE is NOT a gowrap candidate. See §4.7 for details on hand-written primitives.
 ```
 
 ## 2. Build System: Single Binary Packaging
@@ -111,7 +109,7 @@ The `mag build` command:
 ### 2.3 Recommended Build Pipeline for Procyon-Park
 
 ```makefile
-all: procyon-park
+all: pp
 
 wrap:
     mag wrap  # Generates Go wrappers from maggie.toml
@@ -119,14 +117,14 @@ wrap:
 image: wrap
     mag $(SRC_DIRS) --save-image procyon-park.image
 
-procyon-park: image
-    mag build -o procyon-park
+pp: image
+    mag build -o pp
 
 test:
     mag test src/
 
 clean:
-    rm -rf wrap/ procyon-park.image procyon-park
+    rm -rf wrap/ procyon-park.image pp
 ```
 
 ## 3. Go Interop Primitives
@@ -224,7 +222,7 @@ Define Go packages in `maggie.toml` and let gowrap generate bindings automatical
 
 **imp-castle usage**: SQLite at `~/.imp-castle/bbs/tuplespace.db` (WAL mode) for the Linda-style tuplespace.
 
-**Recommended Go library**: `modernc.org/sqlite` (pure Go, no CGo — better for cross-compilation).
+**Recommended Go library**: `modernc.org/sqlite` (pure Go, no CGo). This is what the reference implementation already uses (Phase 1), eliminates CGo complexity for SQLite, and simplifies the build. DuckDB still needs CGo regardless.
 
 **Maggie interop design**:
 
@@ -463,7 +461,17 @@ steps do: [:step |
 result := Cue evaluate: 'x: 1 + 2, y: x * 3'.
 ```
 
-**Implementation approach**: gowrap for `cuelang.org/go/cue`. CUE values map naturally to Maggie Dictionaries and Arrays. The main challenge is CUE's type system (constraints, unification) — for procyon-park's use case (workflow validation), a simple parse-validate-extract API is sufficient.
+**Implementation approach**: Hand-written Go primitives (NOT gowrap). Phase 6 reveals that the actual CUE requirements far exceed a simple parse-validate-extract API:
+
+- Module-aware loading with `cue.mod/` directory traversal
+- Two-phase compilation (parse with stubs, resolve with concrete params)
+- `_input` / `_ctx` hidden field injection
+- Re-compilation at each step with updated context
+- CUE unification for the Evaluate step's output validation
+- Schema embedding via `//go:embed`
+- Aspect expansion as a post-load transformation
+
+gowrap generates bindings for simple API surfaces, but CUE's usage in the workflow engine requires deep integration with CUE's compiler, module system, and unification engine. The Maggie-side workflow loader should call Go functions for CUE compilation, unification, and value extraction. The Go side handles module resolution, context injection, and re-compilation. This is the same approach used for process exec — "tight VM integration" demands hand-written primitives.
 
 ## 5. Existing Maggie Primitives Inventory
 
@@ -508,7 +516,7 @@ Use both interop mechanisms strategically:
 | **Unix sockets** | gowrap or HTTP-over-Unix | Reuse existing HTTP primitives if possible |
 | **File I/O** | Already exists | No work needed |
 | **TOML** | gowrap | Simple parse/generate API |
-| **CUE** | gowrap | Parse/validate/extract API |
+| **CUE** | Hand-written primitive | Deep integration with CUE compiler, module system, and unification engine (see §4.7) |
 | **JSON** | Hand-written or gowrap | May already be partially available via Dictionary#asJson |
 
 LETS DEFINITELY IMPLEMENT ROBUST JSON SUPPORT IN MAGGIE IF IT ISNT THERE ALREADY
@@ -523,16 +531,15 @@ ProcyonPark::Db::DuckDB      -- DuckDB analytics
 ProcyonPark::Sys::Exec       -- Process execution
 ProcyonPark::Sys::Socket     -- Unix socket IPC
 ProcyonPark::Config::Toml    -- TOML parsing
-ProcyonPark::Config::Cue     -- CUE evaluation
+ProcyonPark::Config::Cue     -- CUE evaluation (hand-written, not gowrap)
 ```
 
-Or, if using gowrap's default naming:
+Or, if using gowrap's default naming (for gowrap-compatible packages only):
 
 ```
-Go::Sqlite3                   -- from github.com/mattn/go-sqlite3
+Go::Sqlite                    -- from modernc.org/sqlite
 Go::Duckdb                    -- from github.com/marcboeker/go-duckdb
 Go::Toml                      -- from github.com/BurntSushi/toml
-Go::Cue                       -- from cuelang.org/go/cue
 ```
 
 ### 6.3 Error Handling Convention
@@ -556,10 +563,10 @@ This maps to the Go pattern of `(value, error)` returns. gowrap auto-detects err
 ### 7.1 Required Dependencies
 
 ```
-github.com/mattn/go-sqlite3       -- SQLite (CGo) or modernc.org/sqlite (pure Go)
+modernc.org/sqlite                -- SQLite (pure Go, no CGo)
 github.com/marcboeker/go-duckdb   -- DuckDB analytics
 github.com/BurntSushi/toml        -- TOML parsing
-cuelang.org/go                    -- CUE evaluation
+cuelang.org/go                    -- CUE evaluation (hand-written primitives, not gowrap)
 ```
 
 ### 7.2 Dependencies from imp-castle (for reference)
@@ -575,12 +582,12 @@ imp-castle's go.mod uses:
 
 ### 7.3 CGo Consideration
 
-Both `go-sqlite3` and `go-duckdb` require CGo. This means:
+`go-duckdb` requires CGo. `modernc.org/sqlite` is pure Go and does not require CGo. This means CGo is only needed for DuckDB (analytics tier, deferrable). The core system (BBS tuplespace, config, work tracking) can be built without CGo.
+
+For DuckDB's CGo requirement:
 - Cross-compilation is harder (need C toolchain for target platform)
 - Build times are longer
 - Binary is slightly larger
-
-**Alternative for SQLite**: `modernc.org/sqlite` is a pure-Go SQLite implementation (transpiled from C). Slightly slower but eliminates CGo dependency. Worth considering if cross-compilation or build simplicity is a priority.
 
 ## 8. Key Risks and Open Questions
 
@@ -588,9 +595,9 @@ Both `go-sqlite3` and `go-duckdb` require CGo. This means:
 
 The gowrap system exists and works for basic wrapping, but its handling of complex APIs (CUE's type system, DuckDB's appender API) may need manual adjustment. Plan for a prototype phase to validate gowrap output for each library.
 
-### 8.2 SQLite vs Pure Go
+### 8.2 SQLite Library Choice
 
-Decision needed: CGo SQLite (`go-sqlite3`) vs pure Go (`modernc.org/sqlite`). The former is more battle-tested and faster; the latter simplifies the build. Since procyon-park targets a single platform initially (Darwin/arm64), CGo is acceptable.
+**Decided:** Use `modernc.org/sqlite` (pure Go). This is what the reference implementation already uses, eliminates CGo complexity for SQLite (DuckDB still needs CGo), and simplifies cross-compilation if ever needed.
 
 ### 8.3 Process Exec Security
 
@@ -622,7 +629,7 @@ Embedding all wrapped Go packages will increase the binary size. Current Maggie 
 3. **Process exec primitives** — hand-written (needs VM integration)
 4. **Unix socket primitives** — via gowrap or reuse HTTP primitives
 5. **TOML parsing** — via gowrap
-6. **CUE evaluation** — via gowrap
+6. **CUE evaluation** — hand-written primitives (deep integration with CUE compiler, module system, unification)
 
 ### Recommended Implementation Order
 1. Process exec (critical for git/tmux — blocks agent lifecycle)

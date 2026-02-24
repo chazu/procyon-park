@@ -65,6 +65,8 @@ Two hidden CUE fields are available in workflow definitions:
 
 `_ctx` references in step configs are resolved at execution time via `ResolveStepConfig()`, which re-parses the CUE config with current context values injected.
 
+**Note:** The `_ctx` mechanism is internal to the workflow engine — it's a compile-time concern for CUE config resolution. Step results are also written to the tuplespace for observability and coordination. This means external consumers (the king, analytics, other agents) can observe step progress via tuplespace tuples, while the CUE engine uses `_ctx` for its own config resolution.
+
 ---
 
 ## 2. State Machine Executor (Maggie Context)
@@ -75,7 +77,7 @@ The `Executor` struct (`executor.go`) is the central runtime component:
 
 ```go
 type Executor struct {
-    store              store.Store           // Persistent KV store (Badger)
+    store              store.Store           // Persistent KV store (SQLite)
     handlers           map[string]StepHandler // Step type -> handler registry
     telemetry          *telemetry.TelemetryStore
     nodeID             string
@@ -160,16 +162,18 @@ Handlers receive the full instance (for context access and mutation), the step i
 
 ### 3.2 Wait (`steps/wait.go`)
 
-**Purpose**: Polls for output messages from the most recently spawned agent.
+**Purpose**: Polls the tuplespace for completion events from the most recently spawned agent.
 
 **Config** (`WaitConfig`):
 - `timeout` — max wait time (default: "10m")
 
 **Execution**:
 1. Resolves agent name from most recent spawn step's output (walks step results backward)
-2. Polls message store every 5s for messages of type `output` addressed to `daemon` from the agent
-3. On message found: sets `instance.Context.PreviousOutput` to message data, returns output
+2. Polls the tuplespace every 5s for `event` tuples with identity `task_done` matching the agent (using a Pattern with category `#event`, identity `task_done`, and payload matching the agent name)
+3. On matching tuple found: sets `instance.Context.PreviousOutput` to tuple payload data, returns output
 4. On timeout: returns error
+
+**Procyon-park note:** This replaces the original imp-castle design which polled a message store for `output` type messages. The BBS tuplespace already has the `task_done` event type used by agents in the completion protocol, so the Wait step simply reads these existing events.
 
 ### 3.3 Evaluate (`steps/evaluate.go`)
 
@@ -204,17 +208,17 @@ Handlers receive the full instance (for context access and mutation), the step i
 Two variants:
 
 **Human Gate** (`gateType: "human"`):
-- Sends approval prompt messages to specified approvers
-- Polls for `workflow_approve` or `workflow_reject` command messages
+- Writes a `gate_request` tuple to the tuplespace for each specified approver (category: `event`, identity: `gate_request`, payload includes workflow ID, step index, approver name)
+- Polls the tuplespace for `gate_response` tuples (approve/reject) matching the workflow instance ID
 - Default timeout: 30m
-- Uses persistent `gateState` for crash recovery (tracks `startedAt`, whether prompt was sent)
+- Uses persistent gate state (in SQLite) for crash recovery (tracks `startedAt`, whether request tuples were written)
 - On approve: returns `{gate: "approved", approvedBy: "..."}`
 - On reject: returns error with reason
-- CLI commands: `cub workflow approve <id>`, `cub workflow reject <id> --reason "..."`
+- CLI commands: `pp workflow approve <id>` and `pp workflow reject <id> --reason "..."` write `gate_response` tuples to the tuplespace
 
 **Timer Gate** (`gateType: "timer"`):
 - Pauses for specified duration (e.g., "5m", "1h")
-- Uses persistent `gateState` for crash recovery (calculates remaining time from original start)
+- Uses persistent gate state (in SQLite) for crash recovery (calculates remaining time from original start)
 - Returns `{gate: "timer_elapsed", duration: "..."}` on completion
 
 ---
@@ -302,32 +306,32 @@ type Instance struct {
 
 ### Persistence
 
-Instances are stored in a Badger KV store with:
-- **Primary bucket** (`workflow`): `repoName/instanceID` → JSON-serialized Instance
-- **Index bucket** (`workflow-idx`): `status/repoName/status/instanceID` → empty value
+Instances are stored in SQLite with:
+- **`workflow_instances` table**: keyed by `(repo_name, instance_id)`, stores JSON-serialized Instance data
+- **`workflow_instances_idx` table**: status index keyed by `(status, repo_name, instance_id)` for filtered queries
 
-Status index is maintained on every `UpdateInstance()` call — old index entry deleted, new one written in a transaction.
+Status index is maintained on every `UpdateInstance()` call — old index entry deleted, new one inserted in a transaction. SQLite transactions ensure atomicity of the index update.
 
 ### CLI Management
 
-- `cub workflow list [--repo] [--status]` — list instances
-- `cub workflow status <id> [--repo]` — show instance details
-- `cub workflow cancel <id>` — cancel running instance (dismisses active agent)
-- `cub workflow definitions` — list available workflow definitions
+- `pp workflow list [--repo] [--status]` — list instances
+- `pp workflow show <id> [--repo]` — show instance details
+- `pp workflow cancel <id>` — cancel running instance (dismisses active agent)
+- `pp workflow list` — list available workflow definitions
 
 ---
 
 ## 6. Approval Gates
 
-Human gates implement a message-based approval flow:
+Human gates implement a tuplespace-based approval flow:
 
-1. **Prompt**: System sends chat messages to each approver with approve/reject instructions
-2. **Poll**: Gate handler polls for command messages to daemon with matching `WorkflowID`
-3. **Approve**: `cub workflow approve <id>` sends a `workflow_approve` command message
-4. **Reject**: `cub workflow reject <id> --reason "..."` sends a `workflow_reject` command message
+1. **Request**: System writes `gate_request` tuples to the tuplespace for each approver (with workflow instance ID and step index in payload)
+2. **Poll**: Gate handler polls the tuplespace for `gate_response` tuples matching the workflow instance ID
+3. **Approve**: `pp workflow approve <id>` writes a `gate_response` tuple with `{action: "approve", ...}`
+4. **Reject**: `pp workflow reject <id> --reason "..."` writes a `gate_response` tuple with `{action: "reject", reason: "..."}`
 5. **Timeout**: Default 30m, configurable per-gate
 
-Gate state is persisted separately (in `gate-state` bucket) for crash recovery — if the daemon restarts mid-gate, it resumes from where it left off without re-sending prompts.
+Gate state is persisted in a `workflow_gate_state` SQLite table for crash recovery — if the daemon restarts mid-gate, it resumes from where it left off without re-writing request tuples.
 
 ---
 
@@ -436,7 +440,7 @@ A hybrid approach might work best:
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    CLI Layer                          │
-│  cub workflow run/list/status/cancel/approve/reject   │
+│  pp workflow run/list/show/cancel/approve/reject       │
 └────────────────────────┬────────────────────────────┘
                          │ (via daemon RPC)
 ┌────────────────────────▼────────────────────────────┐
@@ -466,8 +470,8 @@ A hybrid approach might work best:
                          │
 ┌────────────────────────▼────────────────────────────┐
 │            State / Persistence                       │
-│  - Badger KV: workflow + workflow-idx buckets         │
-│  - Gate state: separate bucket for crash recovery    │
+│  - SQLite: workflow_instances + index tables          │
+│  - Gate state: workflow_gate_state table              │
 │  - Instance lifecycle: pending→running→completed     │
 │  - Status index for filtered queries                 │
 └─────────────────────────────────────────────────────┘
