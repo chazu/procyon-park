@@ -6,8 +6,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/chazu/maggie/vm"
 	"github.com/chazu/procyon-park/internal/tuplestore"
@@ -34,11 +36,12 @@ type Config struct {
 // TupleStore, and manages the daemon lifecycle (PID file, signals,
 // graceful shutdown).
 type DaemonServer struct {
-	config  Config
-	vmInst  *vm.VM
-	worker  *VMWorker
-	store   *tuplestore.TupleStore
-	pidFile *PIDFile
+	config    Config
+	vmInst    *vm.VM
+	worker    *VMWorker
+	store     *tuplestore.TupleStore
+	pidFile   *PIDFile
+	ipcServer *IPCServer
 
 	// shutdownOnce ensures Shutdown runs exactly once.
 	shutdownOnce sync.Once
@@ -75,7 +78,21 @@ func (d *DaemonServer) Run(ctx context.Context) error {
 	// Start the VMWorker
 	d.worker = NewVMWorker(d.vmInst)
 
-	log.Printf("daemon started, PID %d", os.Getpid())
+	// Start the IPC server if a socket path is configured.
+	socketPath := d.resolveSocketPath()
+	if socketPath != "" {
+		d.ipcServer = NewIPCServer(socketPath, d.shutdownCh)
+		if err := d.ipcServer.Start(); err != nil {
+			d.worker.Stop()
+			if d.pidFile != nil {
+				d.pidFile.Release()
+			}
+			return fmt.Errorf("daemon: %w", err)
+		}
+		log.Printf("daemon started, PID %d, socket %s", os.Getpid(), socketPath)
+	} else {
+		log.Printf("daemon started, PID %d", os.Getpid())
+	}
 
 	// Install signal handlers
 	sigCh := make(chan os.Signal, 2)
@@ -103,6 +120,11 @@ func (d *DaemonServer) Run(ctx context.Context) error {
 func (d *DaemonServer) Shutdown() {
 	d.shutdownOnce.Do(func() {
 		close(d.shutdownCh)
+
+		// Stop accepting new connections and drain in-flight requests.
+		if d.ipcServer != nil {
+			d.ipcServer.Stop(time.Duration(d.config.ShutdownTimeout) * time.Second)
+		}
 
 		if d.worker != nil {
 			d.worker.Stop()
@@ -134,7 +156,25 @@ func (d *DaemonServer) Store() *tuplestore.TupleStore {
 	return d.store
 }
 
+// IPCServer returns the IPC server, or nil if no socket path was configured.
+func (d *DaemonServer) IPCServer() *IPCServer {
+	return d.ipcServer
+}
+
 // ShutdownCh returns a channel that is closed when shutdown begins.
 func (d *DaemonServer) ShutdownCh() <-chan struct{} {
 	return d.shutdownCh
+}
+
+// resolveSocketPath returns the Unix socket path to use.
+// It uses Config.SocketPath if set, otherwise derives it from DataDir.
+// Returns empty string if neither is configured.
+func (d *DaemonServer) resolveSocketPath() string {
+	if d.config.SocketPath != "" {
+		return d.config.SocketPath
+	}
+	if d.config.DataDir != "" {
+		return filepath.Join(d.config.DataDir, "daemon.sock")
+	}
+	return ""
 }
