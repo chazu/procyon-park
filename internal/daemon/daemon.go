@@ -13,6 +13,7 @@ import (
 
 	"github.com/chazu/maggie/vm"
 	"github.com/chazu/procyon-park/internal/tuplestore"
+	"github.com/chazu/procyon-park/internal/workflow"
 )
 
 // Config holds daemon configuration values.
@@ -40,6 +41,8 @@ type DaemonServer struct {
 	vmInst    *vm.VM
 	worker    *VMWorker
 	store     *tuplestore.TupleStore
+	wfStore   *workflow.Store
+	executor  *workflow.Executor
 	pidFile   *PIDFile
 	ipcServer *IPCServer
 
@@ -78,6 +81,15 @@ func (d *DaemonServer) Run(ctx context.Context) error {
 	// Start the VMWorker
 	d.worker = NewVMWorker(d.vmInst)
 
+	// Initialize workflow engine.
+	if err := d.initWorkflowEngine(); err != nil {
+		d.worker.Stop()
+		if d.pidFile != nil {
+			d.pidFile.Release()
+		}
+		return fmt.Errorf("daemon: %w", err)
+	}
+
 	// Start the IPC server if a socket path is configured.
 	socketPath := d.resolveSocketPath()
 	if socketPath != "" {
@@ -87,6 +99,7 @@ func (d *DaemonServer) Run(ctx context.Context) error {
 		RegisterRepoHandlers(d.ipcServer, d.store)
 		RegisterConfigHandlers(d.ipcServer, d.store)
 		RegisterPrimeHandlers(d.ipcServer, d.store)
+		RegisterWorkflowHandlers(d.ipcServer, d.executor, d.store)
 		if err := d.ipcServer.Start(); err != nil {
 			d.worker.Stop()
 			if d.pidFile != nil {
@@ -135,6 +148,12 @@ func (d *DaemonServer) Shutdown() {
 			d.worker.Stop()
 		}
 
+		if d.wfStore != nil {
+			if err := d.wfStore.Close(); err != nil {
+				log.Printf("warning: workflow store close: %v", err)
+			}
+		}
+
 		if d.store != nil {
 			if err := d.store.Close(); err != nil {
 				log.Printf("warning: store close: %v", err)
@@ -169,6 +188,37 @@ func (d *DaemonServer) IPCServer() *IPCServer {
 // ShutdownCh returns a channel that is closed when shutdown begins.
 func (d *DaemonServer) ShutdownCh() <-chan struct{} {
 	return d.shutdownCh
+}
+
+// Executor returns the workflow Executor, or nil if not initialized.
+func (d *DaemonServer) Executor() *workflow.Executor {
+	return d.executor
+}
+
+// initWorkflowEngine creates the workflow Store and Executor.
+// Step handlers start as an empty registry; they are wired by the
+// integration layer that connects spawn/dismiss/tuplestore callbacks.
+func (d *DaemonServer) initWorkflowEngine() error {
+	dbPath := filepath.Join(d.config.DataDir, "workflows.db")
+	wfStore, err := workflow.NewStore(dbPath)
+	if err != nil {
+		return fmt.Errorf("workflow store: %w", err)
+	}
+	d.wfStore = wfStore
+
+	// Step handlers start empty; callers can populate via SetStepHandlers
+	// before or after Run. The executor still handles list/show/cancel/defs.
+	registry := make(map[string]workflow.StepHandler)
+	d.executor = workflow.NewExecutor(wfStore, registry, d.config.DataDir)
+
+	return nil
+}
+
+// SetStepHandlers replaces the executor's step handler registry.
+// Must be called before running any workflows. Typically called after
+// New() but before Run() by the integration layer.
+func (d *DaemonServer) SetStepHandlers(registry map[string]workflow.StepHandler) {
+	d.executor = workflow.NewExecutor(d.wfStore, registry, d.config.DataDir)
 }
 
 // resolveSocketPath returns the Unix socket path to use.
