@@ -483,6 +483,112 @@ func TestBBSBridgeRoundTrip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// tuple.pulse tests
+// ---------------------------------------------------------------------------
+
+func TestTuplePulseBasic(t *testing.T) {
+	sockPath := shortSockPath(t)
+	shutdownCh := make(chan struct{})
+
+	store := mustNewStore(t)
+	srv := NewIPCServer(sockPath, shutdownCh)
+	RegisterBBSHandlers(srv, store)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Stop(time.Second)
+
+	// Insert some notification tuples for agent "Widget".
+	store.Insert("notification", "Widget", "task-assigned", "local",
+		`{"task":"task-1"}`, "session", nil, nil, nil)
+	store.Insert("notification", "Widget", "priority-change", "local",
+		`{"task":"task-2"}`, "session", nil, nil, nil)
+	// Insert one for a different agent — should not be returned.
+	store.Insert("notification", "Sprocket", "task-assigned", "local",
+		`{"task":"task-3"}`, "session", nil, nil, nil)
+
+	resp := rpcCall(t, sockPath, `{"jsonrpc":"2.0","method":"tuple.pulse","params":{"agent_id":"Widget"},"id":60}`)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	rows, ok := resp.Result.([]interface{})
+	if !ok {
+		t.Fatalf("expected array result, got %T", resp.Result)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 notifications, got %d", len(rows))
+	}
+
+	// Pulse again — should be empty (notifications were drained).
+	resp = rpcCall(t, sockPath, `{"jsonrpc":"2.0","method":"tuple.pulse","params":{"agent_id":"Widget"},"id":61}`)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	rows = resp.Result.([]interface{})
+	if len(rows) != 0 {
+		t.Fatalf("expected 0 notifications after drain, got %d", len(rows))
+	}
+
+	// Sprocket's notification should still exist.
+	resp = rpcCall(t, sockPath, `{"jsonrpc":"2.0","method":"tuple.pulse","params":{"agent_id":"Sprocket"},"id":62}`)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	rows = resp.Result.([]interface{})
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 notification for Sprocket, got %d", len(rows))
+	}
+}
+
+func TestTuplePulseNoNotifications(t *testing.T) {
+	sockPath := shortSockPath(t)
+	shutdownCh := make(chan struct{})
+
+	store := mustNewStore(t)
+	srv := NewIPCServer(sockPath, shutdownCh)
+	RegisterBBSHandlers(srv, store)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Stop(time.Second)
+
+	resp := rpcCall(t, sockPath, `{"jsonrpc":"2.0","method":"tuple.pulse","params":{"agent_id":"Widget"},"id":63}`)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	rows, ok := resp.Result.([]interface{})
+	if !ok {
+		t.Fatalf("expected array result, got %T", resp.Result)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected empty array, got %d", len(rows))
+	}
+}
+
+func TestTuplePulseMissingAgentID(t *testing.T) {
+	sockPath := shortSockPath(t)
+	shutdownCh := make(chan struct{})
+
+	store := mustNewStore(t)
+	srv := NewIPCServer(sockPath, shutdownCh)
+	RegisterBBSHandlers(srv, store)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Stop(time.Second)
+
+	resp := rpcCall(t, sockPath, `{"jsonrpc":"2.0","method":"tuple.pulse","params":{},"id":64}`)
+	if resp.Error == nil {
+		t.Fatal("expected error for missing agent_id")
+	}
+	if resp.Error.Code != ErrCodeInvalidParams {
+		t.Fatalf("expected code %d, got %d", ErrCodeInvalidParams, resp.Error.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Error code routing tests
 // ---------------------------------------------------------------------------
 

@@ -20,6 +20,7 @@ func RegisterBBSHandlers(srv *IPCServer, store *tuplestore.TupleStore) {
 	srv.Handle("tuple.read", handleTupleRead(store))
 	srv.Handle("tuple.take", handleTupleTake(store))
 	srv.Handle("tuple.scan", handleTupleScan(store))
+	srv.Handle("tuple.pulse", handleTuplePulse(store))
 }
 
 // --- param structs --------------------------------------------------------
@@ -121,6 +122,41 @@ func handleTupleScan(store *tuplestore.TupleStore) Handler {
 		if err != nil {
 			return nil, fmt.Errorf("tuple.scan: %w", err)
 		}
+		if rows == nil {
+			rows = []map[string]interface{}{}
+		}
+		return rows, nil
+	}
+}
+
+// handleTuplePulse drains notification tuples for a specific agent and returns them.
+// Params: {"agent_id": "name"}. Returns an array of notification tuples (removed).
+func handleTuplePulse(store *tuplestore.TupleStore) Handler {
+	return func(params json.RawMessage) (interface{}, error) {
+		var p struct {
+			AgentID string `json:"agent_id"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "invalid params: " + err.Error()}
+		}
+		if p.AgentID == "" {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "agent_id is required"}
+		}
+
+		cat := "notification"
+		rows, err := store.FindAll(&cat, &p.AgentID, nil, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("tuple.pulse: scan: %w", err)
+		}
+
+		// Remove the notifications we found.
+		if len(rows) > 0 {
+			_, err := store.DeleteByPattern(&cat, &p.AgentID, nil, nil)
+			if err != nil {
+				return nil, fmt.Errorf("tuple.pulse: delete: %w", err)
+			}
+		}
+
 		if rows == nil {
 			rows = []map[string]interface{}{}
 		}
