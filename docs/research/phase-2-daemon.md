@@ -167,7 +167,7 @@ JSON-RPC for the CLI-facing command channel (simple, debuggable). A separate Con
 4. JSON-RPC is trivially implementable in Maggie itself. A Maggie class can parse JSON-RPC requests and dispatch to methods. This means the daemon's command handling can eventually be written in Maggie, not Go.
 5. If gRPC/Connect is needed later (e.g., for remote hub connections), it can be added as a second listener without replacing the JSON-RPC interface.
 
-**Socket path:** `~/.procyon-park/daemon.sock` (configurable via `PROCYON_PARK_SOCK` env var or config file).
+**Socket path:** `~/.procyon-park/daemon.sock` (configurable via `PP_DAEMON_SOCKET` env var or config file).
 
 ---
 

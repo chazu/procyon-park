@@ -658,7 +658,7 @@ TupleGC >> promoteConventions [
   "Group convention-proposal tuples by content.
    When 2+ independent agents propose the same thing, promote to furniture."
   | proposals groups |
-  proposals := space scan: (Pattern category: #claim identity: 'convention-proposal').
+  proposals := space scan: (Pattern category: #conventionProposal).
   groups := proposals groupBy: [:p | p payload at: #content].
   groups keysAndValuesDo: [:content :props |
     | agents |

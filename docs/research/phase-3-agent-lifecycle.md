@@ -162,8 +162,8 @@ Variables are set at session creation time via tmux `-e` flags, not inherited fr
 
 ### Session Naming Convention
 
-- Agents: `cub-{repoName}-{agentName}`
-- King: `cub-king`
+- Agents: `pp-{repoName}-{agentName}`
+- King: `pp-king`
 
 ---
 
@@ -371,8 +371,8 @@ Dead agent branches are preserved for `DefaultBranchMinAge` (24 hours) to allow 
 
 | Pattern | Example |
 |---------|---------|
-| tmux session (agent) | `cub-procyon-park-Marble` |
-| tmux session (king) | `cub-king` |
+| tmux session (agent) | `pp-procyon-park-Marble` |
+| tmux session (king) | `pp-king` |
 | worktree path | `~/.imp-castle/worktrees/procyon-park/Marble/` |
 | branch name | `agent/Marble/procyon-park-709` |
 | feature branch | `feature/epic-42` |
@@ -403,8 +403,23 @@ For Procyon Park (Maggie), the agent lifecycle system provides these key pattern
 
 - **Agent identity** is a struct with name, role, status, and resource references (session, worktree, branch)
 - **Spawn** is a multi-step orchestration: name allocation → branch creation → worktree creation → session creation → command launch → registration
-- **Dismiss** reverses spawn but merges work first: session kill → merge → name release → worktree removal → branch deletion → mailbox deletion → unregistration
+- **Dismiss** reverses spawn but merges work first: session kill → merge → name release → worktree removal → branch deletion → unregistration
 - **Respawn** preserves work (commit + push), cleans resources (except branch), then spawns fresh from the preserved branch
 - **Liveness** is detected by checking if the execution environment (tmux session) still exists
 - **Concurrency** is handled by file locking on all shared state
-- **Communication** between agents uses a mailbox system with file-backed JSON messages
+- **Communication** between agents uses the BBS tuplespace (not a mailbox system — the mail system is removed in favor of tuples, per Phase 4)
+
+### Daemon-Mediated Operations
+
+**All agent lifecycle operations go through the daemon via IPC.** The CLI never calls tmux/git directly — it always talks to the daemon. The Go code documented in this phase becomes the daemon-side implementation behind the IPC interface, not a standalone module.
+
+The daemon dispatches to:
+- **Go code** for system operations (tmux session create/kill, git worktree/branch operations)
+- **Maggie tuplespace** for state management (agent registration, name allocation, status tracking)
+
+This means:
+- Agent state lives in the tuplespace, not JSON files
+- Name allocation uses tuplespace tuples, not file-based JSON with flock()
+- The agent registry moves from JSON files to the tuplespace
+- Go handles system operations (tmux, git) via hand-written primitives
+- Maggie handles orchestration logic (the multi-step spawn/dismiss sequences)
