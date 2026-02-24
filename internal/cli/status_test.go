@@ -19,18 +19,9 @@ func TestStatusCmd_Text(t *testing.T) {
 		},
 	})
 
-	oldSocket := flagSocket
-	flagSocket = sock
-	oldOutput := flagOutput
-	flagOutput = "text"
-	defer func() {
-		flagSocket = oldSocket
-		flagOutput = oldOutput
-	}()
-
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
-	rootCmd.SetArgs([]string{"status"})
+	rootCmd.SetArgs([]string{"status", "--socket", sock, "--output", "text"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -54,18 +45,9 @@ func TestStatusCmd_JSON(t *testing.T) {
 		},
 	})
 
-	oldSocket := flagSocket
-	flagSocket = sock
-	oldOutput := flagOutput
-	flagOutput = "json"
-	defer func() {
-		flagSocket = oldSocket
-		flagOutput = oldOutput
-	}()
-
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
-	rootCmd.SetArgs([]string{"status"})
+	rootCmd.SetArgs([]string{"status", "--socket", sock, "--output", "json"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,18 +75,9 @@ func TestStatusCmd_NoAgents(t *testing.T) {
 		},
 	})
 
-	oldSocket := flagSocket
-	flagSocket = sock
-	oldOutput := flagOutput
-	flagOutput = "text"
-	defer func() {
-		flagSocket = oldSocket
-		flagOutput = oldOutput
-	}()
-
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
-	rootCmd.SetArgs([]string{"status"})
+	rootCmd.SetArgs([]string{"status", "--socket", sock, "--output", "text"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

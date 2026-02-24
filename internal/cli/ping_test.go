@@ -16,18 +16,9 @@ func TestPingCmd_Text(t *testing.T) {
 		},
 	})
 
-	oldSocket := flagSocket
-	flagSocket = sock
-	oldOutput := flagOutput
-	flagOutput = "text"
-	defer func() {
-		flagSocket = oldSocket
-		flagOutput = oldOutput
-	}()
-
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
-	rootCmd.SetArgs([]string{"ping"})
+	rootCmd.SetArgs([]string{"ping", "--socket", sock, "--output", "text"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -45,18 +36,9 @@ func TestPingCmd_JSON(t *testing.T) {
 		},
 	})
 
-	oldSocket := flagSocket
-	flagSocket = sock
-	oldOutput := flagOutput
-	flagOutput = "json"
-	defer func() {
-		flagSocket = oldSocket
-		flagOutput = oldOutput
-	}()
-
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
-	rootCmd.SetArgs([]string{"ping"})
+	rootCmd.SetArgs([]string{"ping", "--socket", sock, "--output", "json"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -72,14 +54,10 @@ func TestPingCmd_JSON(t *testing.T) {
 }
 
 func TestPingCmd_DaemonDown(t *testing.T) {
-	oldSocket := flagSocket
-	flagSocket = "/tmp/nonexistent-ping-test.sock"
-	defer func() { flagSocket = oldSocket }()
-
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(new(bytes.Buffer))
-	rootCmd.SetArgs([]string{"ping"})
+	rootCmd.SetArgs([]string{"ping", "--socket", "/tmp/nonexistent-ping-test.sock"})
 	err := rootCmd.Execute()
 	if err == nil {
 		t.Fatal("expected error when daemon is down")
