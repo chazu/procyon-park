@@ -1,0 +1,97 @@
+"""
+An agent-scoped notification mailbox backed by the BBS tuplespace.
+
+AgentMailbox provides a simple send/drain/count interface for delivering
+ephemeral notifications to a specific agent. Notifications are stored as
+tuples with category #notification, scoped to the agent's ID, and expire
+after a configurable TTL (default 300 seconds).
+
+The drain operation atomically scans and deletes all pending notifications
+for the agent, returning them as an Array.
+
+```example
+"Create a mailbox for agent Bramble"
+space := TupleSpace open: ':memory:'.
+box := AgentMailbox for: 'Bramble' in: space.
+
+"Send a notification"
+box send: (Dictionary new at: #content put: 'task-123 completed'; yourself).
+
+"Drain all pending notifications"
+msgs := box drain.
+msgs size   "=> 1"
+```
+"""
+namespace: ProcyonPark::Bbs
+
+AgentMailbox subclass: Object
+  instanceVars: space agentId
+
+  -- Factory
+
+  """
+  Create a mailbox for the given agent, backed by the given tuplespace.
+  """
+  class method: for: anAgentId in: aTupleSpace [
+      ^self new
+          agentId: anAgentId;
+          space: aTupleSpace
+  ]
+
+  -- Sending
+
+  """
+  Send a notification to this agent's mailbox.
+  Creates an ephemeral tuple with category #notification, scoped to the
+  agent ID, with a 300-second TTL.
+  """
+  method: send: aMessage [
+      | tuple |
+      tuple := Tuple category: TupleCategory notification
+                     scope: agentId
+                     identity: ''
+                     payload: aMessage.
+      tuple lifecycle: #ephemeral.
+      tuple ttlSeconds: 300.
+      tuple agentId: agentId.
+      ^space out: tuple
+  ]
+
+  -- Draining
+
+  """
+  Atomically scan and delete all pending notifications for this agent.
+  Returns an Array of Tuple objects. The scan and delete happen inside
+  the space's mutex to prevent races with concurrent sends.
+  """
+  method: drain [
+      | pattern matches |
+      pattern := Pattern category: TupleCategory notification scope: agentId.
+      matches := space scan: pattern.
+      matches do: [:each |
+          space in: (Pattern category: TupleCategory notification
+                            scope: agentId
+                            identity: each identity)
+                 timeout: 0
+      ].
+      ^matches
+  ]
+
+  -- Counting
+
+  """
+  Return the number of pending notifications for this agent.
+  """
+  method: count [
+      | pattern |
+      pattern := Pattern category: TupleCategory notification scope: agentId.
+      ^(space scan: pattern) size
+  ]
+
+  -- Accessors
+
+  method: space [ ^space ]
+  method: space: aTupleSpace [ space := aTupleSpace ]
+
+  method: agentId [ ^agentId ]
+  method: agentId: anId [ agentId := anId ]

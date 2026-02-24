@@ -1,0 +1,151 @@
+"""
+Automatic cross-reference notification generator for the BBS tuplespace.
+
+CrossPollinator watches tuples written to the space and scans their payloads
+for references to other scopes (agent names, repo names, task IDs). When a
+reference is detected, it generates a notification tuple in the referenced
+scope's mailbox so agents are informed of activity that mentions them.
+
+Rate limiting prevents notification spam: at most 1 notification per
+(source-agent, target-scope) pair every 5 minutes (300 seconds).
+
+CrossPollinator is designed to be hooked into TupleSpace out: as a
+post-insert callback.
+
+```example
+space := TupleSpace open: ':memory:'.
+pollinator := CrossPollinator on: space.
+
+"After writing a tuple that references 'Bramble' in its payload,
+ CrossPollinator generates a notification in Bramble's mailbox."
+space out: (Tuple category: #event scope: 'my-repo'
+               identity: 'task_done'
+               payload: (Dictionary new at: #agent put: 'Bramble'; yourself)).
+pollinator checkCrossReferences: (space scan: (Pattern category: #event)) first.
+```
+"""
+namespace: ProcyonPark::Bbs
+
+CrossPollinator subclass: Object
+  instanceVars: space rateLimiter
+
+  -- Factory
+
+  """
+  Create a CrossPollinator attached to the given tuplespace.
+  Initializes an empty rate limiter dictionary.
+  """
+  class method: on: aTupleSpace [
+      ^self new
+          space: aTupleSpace;
+          rateLimiter: Dictionary new
+  ]
+
+  -- Cross-reference checking
+
+  """
+  Scan a tuple's payload for scope references and generate notifications
+  for each referenced scope (if not rate-limited).
+  Skips notification tuples to avoid feedback loops.
+  """
+  method: checkCrossReferences: aTuple [
+      | refs sourceAgent |
+      aTuple category = TupleCategory notification ifTrue: [^self].
+      refs := self extractScopeReferences: aTuple payload.
+      sourceAgent := aTuple agentId ifNil: [aTuple scope].
+      refs do: [:targetScope |
+          targetScope = aTuple scope ifFalse: [
+              (self isRateLimited: sourceAgent target: targetScope)
+                  ifFalse: [
+                      self notifyScope: targetScope about: aTuple from: sourceAgent.
+                      self recordSend: sourceAgent target: targetScope.
+                  ]
+          ]
+      ]
+  ]
+
+  -- Scope reference extraction
+
+  """
+  Parse a payload Dictionary for values that look like scope references.
+  Returns an Array of unique scope strings found in the payload values.
+  A scope reference is any string value associated with keys commonly
+  used for agent/scope identification: agent, agentId, scope, target,
+  assignee, blockedBy, dependsOn.
+  """
+  method: extractScopeReferences: aPayload [
+      | refs scopeKeys |
+      refs := Array new: 0.
+      (aPayload isNil or: [(aPayload isKindOf: Dictionary) not])
+          ifTrue: [^refs].
+      scopeKeys := #(agent agentId scope target assignee blockedBy dependsOn).
+      aPayload keysAndValuesDo: [:key :value |
+          (value isKindOf: String) ifTrue: [
+              (scopeKeys includes: key asSymbol) ifTrue: [
+                  value isEmpty ifFalse: [
+                      (refs includes: value) ifFalse: [
+                          refs := refs copyWith: value
+                      ]
+                  ]
+              ]
+          ]
+      ].
+      ^refs
+  ]
+
+  -- Rate limiting (private)
+
+  """
+  Check if a notification from sourceAgent to targetScope is rate-limited.
+  Rate limit window is 300 seconds (5 minutes).
+  """
+  method: isRateLimited: sourceAgent target: targetScope [
+      | key lastSent now |
+      key := sourceAgent, '->', targetScope.
+      lastSent := rateLimiter at: key ifAbsent: [^false].
+      now := Time now.
+      ^(now - lastSent) < 300
+  ]
+
+  """
+  Record that a notification was sent from sourceAgent to targetScope.
+  """
+  method: recordSend: sourceAgent target: targetScope [
+      | key |
+      key := sourceAgent, '->', targetScope.
+      rateLimiter at: key put: Time now
+  ]
+
+  -- Notification generation (private)
+
+  """
+  Generate a notification tuple in the target scope's mailbox.
+  The notification payload includes the source tuple's category,
+  identity, and the source agent for context.
+  """
+  method: notifyScope: targetScope about: aTuple from: sourceAgent [
+      | notification payload |
+      payload := Dictionary new
+          at: #source put: sourceAgent;
+          at: #category put: aTuple category;
+          at: #identity put: aTuple identity;
+          at: #scope put: aTuple scope;
+          at: #content put: ('Cross-reference from ', sourceAgent);
+          yourself.
+      notification := Tuple category: TupleCategory notification
+                            scope: targetScope
+                            identity: ''
+                            payload: payload.
+      notification lifecycle: #ephemeral.
+      notification ttlSeconds: 300.
+      notification agentId: targetScope.
+      space out: notification
+  ]
+
+  -- Accessors
+
+  method: space [ ^space ]
+  method: space: aTupleSpace [ space := aTupleSpace ]
+
+  method: rateLimiter [ ^rateLimiter ]
+  method: rateLimiter: aDict [ rateLimiter := aDict ]
