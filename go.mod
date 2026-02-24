@@ -2,7 +2,10 @@ module github.com/chazu/procyon-park
 
 go 1.25.7
 
-require github.com/chazu/maggie v0.0.0
+require (
+	github.com/chazu/maggie v0.0.0
+	modernc.org/sqlite v1.46.1
+)
 
 require (
 	cuelabs.dev/go/oci/ociregistry v0.0.0-20250722084951-074d06050084 // indirect
@@ -50,7 +53,6 @@ require (
 	modernc.org/libc v1.67.6 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.46.1 // indirect
 )
 
 replace github.com/chazu/maggie => ../maggie
