@@ -5,6 +5,7 @@ go 1.25.7
 require (
 	cuelang.org/go v0.15.4
 	github.com/chazu/maggie v0.0.0
+	github.com/marcboeker/go-duckdb v1.8.5
 	github.com/mattn/go-isatty v0.0.20
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.46.1
@@ -27,7 +28,6 @@ require (
 	github.com/jhump/protoreflect v1.15.4 // indirect
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
-	github.com/marcboeker/go-duckdb v1.8.5 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
