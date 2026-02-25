@@ -209,14 +209,9 @@ func handleGCStatus(store *tuplestore.TupleStore, dataDir string) Handler {
 	return func(params json.RawMessage) (interface{}, error) {
 		// Run a dry-read of the store to count tuples by lifecycle and category.
 		// This gives a snapshot of what GC would operate on.
-		allCat := ""
-		tuples, err := store.FindAll(&allCat, nil, nil, nil, nil)
+		tuples, err := store.FindAll(nil, nil, nil, nil, nil)
 		if err != nil {
-			// If empty category doesn't work, try without filter.
-			tuples, err = store.FindAll(nil, nil, nil, nil, nil)
-			if err != nil {
-				return nil, fmt.Errorf("gc.status: %w", err)
-			}
+			return nil, fmt.Errorf("gc.status: %w", err)
 		}
 
 		ephemeral, session, furniture := 0, 0, 0
@@ -310,13 +305,9 @@ func handleSynthesisRun(store *tuplestore.TupleStore) Handler {
 		}
 
 		// Find all tuples for this task.
-		cat := ""
-		tuples, err := store.FindAll(&cat, nil, nil, nil, nil)
+		tuples, err := store.FindAll(nil, nil, nil, nil, nil)
 		if err != nil {
-			tuples, err = store.FindAll(nil, nil, nil, nil, nil)
-			if err != nil {
-				return nil, fmt.Errorf("synthesis.run: find tuples: %w", err)
-			}
+			return nil, fmt.Errorf("synthesis.run: find tuples: %w", err)
 		}
 
 		// Filter by task_id.
