@@ -24,13 +24,14 @@ type FlushConfig struct {
 // This is crash-safe — a crash between export and purge produces duplicates
 // rather than data loss.
 type Flusher struct {
-	pipeline *Pipeline
-	cfg      FlushConfig
+	pipeline  *Pipeline
+	cfg       FlushConfig
 
-	mu      sync.Mutex
-	once    sync.Once
-	stopCh  chan struct{}
-	doneCh  chan struct{}
+	mu        sync.Mutex
+	once      sync.Once
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+	lastFlush time.Time // last successful flush time (protected by mu)
 }
 
 // NewFlusher creates a Flusher that will export from pipeline to Parquet files.
@@ -92,6 +93,14 @@ func (f *Flusher) finalFlush() {
 	f.Flush()
 }
 
+// LastFlushTime returns the time of the last successful flush.
+// Returns zero time if no flush has occurred.
+func (f *Flusher) LastFlushTime() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastFlush
+}
+
 // Flush exports each signal table to Parquet and purges the exported rows.
 // It is safe to call concurrently (serialised via mutex).
 func (f *Flusher) Flush() error {
@@ -110,6 +119,9 @@ func (f *Flusher) Flush() error {
 		if err := f.flushTable(tbl.table, tbl.stem, partition); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if firstErr == nil {
+		f.lastFlush = now
 	}
 	return firstErr
 }
