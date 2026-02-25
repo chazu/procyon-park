@@ -22,12 +22,75 @@ func init() {
 		},
 	}
 
+	repoCmd.AddCommand(repoAddCmd())
 	repoCmd.AddCommand(repoRegisterCmd())
 	repoCmd.AddCommand(repoUnregisterCmd())
 	repoCmd.AddCommand(repoListCmd())
 	repoCmd.AddCommand(repoStatusCmd())
 
 	AddCommand(repoCmd)
+}
+
+// repoAddCmd returns the 'pp repo add' command. It registers a repository,
+// creates <repo>/.procyon-park/ if needed, and prints the result.
+func repoAddCmd() *cobra.Command {
+	var name string
+	cmd := &cobra.Command{
+		Use:   "add <path>",
+		Short: "Add a repository for tracking",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := EnsureDaemon(); err != nil {
+				return NewExitErr(ExitConnection, err)
+			}
+
+			repoPath, err := filepath.Abs(args[0])
+			if err != nil {
+				return NewExitErr(ExitError, fmt.Errorf("resolve path: %w", err))
+			}
+
+			// Validate that the path is a git repository.
+			gitDir := filepath.Join(repoPath, ".git")
+			if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
+				return NewExitErr(ExitError, fmt.Errorf("%s is not a git repository", repoPath))
+			}
+
+			if name == "" {
+				name = filepath.Base(repoPath)
+			}
+
+			params := map[string]string{
+				"name": name,
+				"path": repoPath,
+			}
+
+			result, err := ipc.Call(SocketPath(), "repo.register", params)
+			if err != nil {
+				return NewExitErr(ExitError, fmt.Errorf("repo.register: %w", err))
+			}
+
+			// Create <repo>/.procyon-park/ for per-repo config and state.
+			repoPPDir := filepath.Join(repoPath, ".procyon-park")
+			if err := os.MkdirAll(repoPPDir, 0755); err != nil {
+				// Non-fatal: warn but don't fail.
+				fmt.Fprintf(os.Stderr, "warning: could not create %s: %v\n", repoPPDir, err)
+			}
+
+			f, fErr := output.ResolveFormat(flagOutput, os.Stdout)
+			if fErr != nil {
+				return NewExitErr(ExitUsage, fErr)
+			}
+
+			if f == output.FormatJSON || f == output.FormatJSONPretty {
+				fmt.Fprintln(os.Stdout, string(result))
+			} else if !flagQuiet {
+				fmt.Fprintf(os.Stdout, "added repository %q at %s\n", name, repoPath)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", "name for the repository (default: directory name)")
+	return cmd
 }
 
 // repoRegisterCmd returns the 'pp repo register' command.

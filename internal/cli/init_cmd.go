@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/chazu/procyon-park/internal/identity"
+	"github.com/chazu/procyon-park/internal/tuplestore"
 	"github.com/spf13/cobra"
 )
 
@@ -44,7 +46,39 @@ var initCmd = &cobra.Command{
 			fmt.Fprintf(w, "Already exists: %s\n", configPath)
 		}
 
+		// Generate node identity (Ed25519 keypair + UUID v5 node ID).
+		identityDir := filepath.Join(dataDir, "identity")
+		info, identityCreated, err := identity.Generate(identityDir)
+		if err != nil {
+			return fmt.Errorf("generate identity: %w", err)
+		}
+		if identityCreated {
+			fmt.Fprintf(w, "Generated node identity: %s\n", info.NodeID)
+		} else {
+			fmt.Fprintf(w, "Node identity exists: %s\n", info.NodeID)
+		}
+
+		// Initialize BBS tuplespace storage.
+		bbsPath := filepath.Join(dataDir, "bbs.db")
+		if _, err := os.Stat(bbsPath); os.IsNotExist(err) {
+			store, err := tuplestore.NewStore(bbsPath)
+			if err != nil {
+				return fmt.Errorf("init tuplespace: %w", err)
+			}
+			store.Close()
+			fmt.Fprintf(w, "Created BBS tuplespace: %s\n", bbsPath)
+		} else {
+			fmt.Fprintf(w, "Already exists: %s\n", bbsPath)
+		}
+
+		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "Initialization complete.")
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "Next steps:")
+		fmt.Fprintln(w, "  pp repo add <path>    Register a repository")
+		fmt.Fprintln(w, "  pp config list        View configuration")
+		fmt.Fprintln(w, "  pp doctor             Verify setup")
+
 		return nil
 	},
 }
@@ -56,11 +90,19 @@ func init() {
 const defaultConfig = `# Procyon Park configuration
 # See: pp help config
 
-# [daemon]
-# socket = "~/.procyon-park/daemon.sock"
-
 # [agent]
-# default_role = "cub"
+# command = "claude"        # agent command to run
+# max_concurrent = 4        # max parallel agents
+
+# [daemon]
+# poll_interval = "5s"      # work-checking interval
+
+# [telemetry]
+# enabled = false            # enable OTEL telemetry
+
+# [features]
+# bbs_enabled = true         # enable BBS tuplespace
+# workflows_enabled = true   # enable workflow engine
 `
 
 // ensureDir creates a directory if it doesn't exist. Returns true if created.
