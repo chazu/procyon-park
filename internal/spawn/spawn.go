@@ -29,6 +29,10 @@ import (
 	"github.com/chazu/procyon-park/internal/tuplestore"
 )
 
+// DefaultAgentCmd is a sentinel value that, when set as AgentCmd, causes Spawn
+// to construct a default command: cd <worktree> && claude --dangerously-skip-permissions
+const DefaultAgentCmd = "__default__"
+
 // validRoles is the set of recognized agent roles.
 var validRoles = map[string]bool{
 	"cub":  true,
@@ -173,8 +177,12 @@ func Spawn(ctx context.Context, p Params, store *tuplestore.TupleStore) (*Result
 	})
 
 	// Step 7: Launch agent command (if provided).
-	if p.AgentCmd != "" {
-		err = tmux.SendKeys(sessionName, p.AgentCmd)
+	agentCmd := p.AgentCmd
+	if agentCmd == DefaultAgentCmd {
+		agentCmd = fmt.Sprintf("cd %s && claude --dangerously-skip-permissions", worktreePath)
+	}
+	if agentCmd != "" {
+		err = tmux.SendKeys(sessionName, agentCmd)
 		if err != nil {
 			return nil, fmt.Errorf("spawn: launch agent command: %w", err)
 		}

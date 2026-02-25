@@ -55,6 +55,11 @@ func handleAgentSpawn(store *tuplestore.TupleStore) Handler {
 			promptWait = time.Duration(p.PromptWaitMs) * time.Millisecond
 		}
 
+		agentCmd := p.AgentCmd
+		if agentCmd == "" {
+			agentCmd = spawn.DefaultAgentCmd
+		}
+
 		result, err := spawn.Spawn(context.Background(), spawn.Params{
 			Role:         p.Role,
 			TaskID:       p.TaskID,
@@ -63,7 +68,7 @@ func handleAgentSpawn(store *tuplestore.TupleStore) Handler {
 			RepoRoot:     p.RepoRoot,
 			WorktreeBase: p.WorktreeBase,
 			EpicID:       p.EpicID,
-			AgentCmd:     p.AgentCmd,
+			AgentCmd:     agentCmd,
 			PrimeText:    p.PrimeText,
 			PromptWait:   promptWait,
 		}, store)
@@ -144,12 +149,17 @@ func handleAgentRespawn(store *tuplestore.TupleStore) Handler {
 			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "invalid params: " + err.Error()}
 		}
 
+		agentCmd := p.AgentCmd
+		if agentCmd == "" {
+			agentCmd = spawn.DefaultAgentCmd
+		}
+
 		result, err := respawn.Respawn(context.Background(), respawn.Params{
 			AgentName:    p.AgentName,
 			RepoName:     p.RepoName,
 			RepoRoot:     p.RepoRoot,
 			WorktreeBase: p.WorktreeBase,
-			AgentCmd:     p.AgentCmd,
+			AgentCmd:     agentCmd,
 			PrimeText:    p.PrimeText,
 		}, store)
 		if err != nil {
