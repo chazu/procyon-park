@@ -1,26 +1,24 @@
 // repobridge.go registers JSON-RPC handlers for repository management.
 // Provides repo.register, repo.unregister, repo.list, repo.status.
 //
-// Repositories are stored as tuples in the TupleStore with category "repo"
-// and lifecycle "furniture" so they survive session cleanup.
+// Repositories are stored in a JSON-based registry at ~/.procyon-park/repos.json.
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
-	"github.com/chazu/procyon-park/internal/tuplestore"
+	"github.com/chazu/procyon-park/internal/registry"
 )
 
 // RegisterRepoHandlers wires the repo.* JSON-RPC methods.
 // Must be called before the IPCServer is started.
-func RegisterRepoHandlers(srv *IPCServer, store *tuplestore.TupleStore) {
-	srv.Handle("repo.register", handleRepoRegister(store))
-	srv.Handle("repo.unregister", handleRepoUnregister(store))
-	srv.Handle("repo.list", handleRepoList(store))
-	srv.Handle("repo.status", handleRepoStatus(store))
+func RegisterRepoHandlers(srv *IPCServer, reg *registry.Registry) {
+	srv.Handle("repo.register", handleRepoRegister(reg))
+	srv.Handle("repo.unregister", handleRepoUnregister(reg))
+	srv.Handle("repo.list", handleRepoList(reg))
+	srv.Handle("repo.status", handleRepoStatus(reg))
 }
 
 // repoRegisterParams are the JSON-RPC parameters for repo.register.
@@ -29,46 +27,24 @@ type repoRegisterParams struct {
 	Path string `json:"path"`
 }
 
-// handleRepoRegister stores a repo tuple.
-func handleRepoRegister(store *tuplestore.TupleStore) Handler {
+// handleRepoRegister adds a repo to the registry.
+func handleRepoRegister(reg *registry.Registry) Handler {
 	return func(params json.RawMessage) (interface{}, error) {
 		var p repoRegisterParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "invalid params: " + err.Error()}
 		}
-		if p.Name == "" {
-			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "name is required"}
-		}
 		if p.Path == "" {
 			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "path is required"}
 		}
 
-		absPath, err := filepath.Abs(p.Path)
+		ctx := context.Background()
+		repo, err := reg.Add(ctx, p.Name, p.Path)
 		if err != nil {
-			return nil, fmt.Errorf("resolve path: %w", err)
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: err.Error()}
 		}
 
-		// Check if already registered.
-		cat := "repo"
-		existing, err := store.FindAll(&cat, nil, &p.Name, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("repo.register: check existing: %w", err)
-		}
-		if len(existing) > 0 {
-			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: fmt.Sprintf("repository %q is already registered", p.Name)}
-		}
-
-		payload := fmt.Sprintf(`{"path":%q}`, absPath)
-		id, err := store.Insert("repo", "", p.Name, "local", payload, "furniture", nil, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("repo.register: %w", err)
-		}
-
-		return map[string]interface{}{
-			"id":   id,
-			"name": p.Name,
-			"path": absPath,
-		}, nil
+		return repo, nil
 	}
 }
 
@@ -77,8 +53,8 @@ type repoUnregisterParams struct {
 	Name string `json:"name"`
 }
 
-// handleRepoUnregister removes a repo tuple.
-func handleRepoUnregister(store *tuplestore.TupleStore) Handler {
+// handleRepoUnregister removes a repo from the registry.
+func handleRepoUnregister(reg *registry.Registry) Handler {
 	return func(params json.RawMessage) (interface{}, error) {
 		var p repoUnregisterParams
 		if err := json.Unmarshal(params, &p); err != nil {
@@ -88,13 +64,8 @@ func handleRepoUnregister(store *tuplestore.TupleStore) Handler {
 			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: "name is required"}
 		}
 
-		cat := "repo"
-		row, err := store.FindAndDelete(&cat, nil, &p.Name, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("repo.unregister: %w", err)
-		}
-		if row == nil {
-			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: fmt.Sprintf("repository %q not found", p.Name)}
+		if err := reg.Remove(p.Name); err != nil {
+			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: err.Error()}
 		}
 
 		return map[string]string{"status": "unregistered", "name": p.Name}, nil
@@ -102,25 +73,15 @@ func handleRepoUnregister(store *tuplestore.TupleStore) Handler {
 }
 
 // handleRepoList returns all registered repositories.
-func handleRepoList(store *tuplestore.TupleStore) Handler {
+func handleRepoList(reg *registry.Registry) Handler {
 	return func(params json.RawMessage) (interface{}, error) {
-		cat := "repo"
-		rows, err := store.FindAll(&cat, nil, nil, nil, nil)
+		repos, err := reg.List()
 		if err != nil {
 			return nil, fmt.Errorf("repo.list: %w", err)
 		}
-
-		type repoEntry struct {
-			Name string `json:"name"`
-			Path string `json:"path"`
+		if repos == nil {
+			repos = []registry.Repo{}
 		}
-		repos := make([]repoEntry, 0, len(rows))
-		for _, row := range rows {
-			name, _ := row["identity"].(string)
-			path := extractRepoPath(row)
-			repos = append(repos, repoEntry{Name: name, Path: path})
-		}
-
 		return repos, nil
 	}
 }
@@ -130,8 +91,18 @@ type repoStatusParams struct {
 	Name string `json:"name"`
 }
 
-// handleRepoStatus returns status for one or all repos.
-func handleRepoStatus(store *tuplestore.TupleStore) Handler {
+// repoStatusEntry is the JSON response for repo.status.
+type repoStatusEntry struct {
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	MainBranch string `json:"main_branch"`
+	HasBeads   bool   `json:"has_beads"`
+	Status     string `json:"status"`
+	Warning    string `json:"warning,omitempty"`
+}
+
+// handleRepoStatus returns status for one or all repos with staleness checks.
+func handleRepoStatus(reg *registry.Registry) Handler {
 	return func(params json.RawMessage) (interface{}, error) {
 		var p repoStatusParams
 		if len(params) > 0 && string(params) != "null" {
@@ -140,68 +111,62 @@ func handleRepoStatus(store *tuplestore.TupleStore) Handler {
 			}
 		}
 
-		cat := "repo"
-		var namePtr *string
+		ctx := context.Background()
+
 		if p.Name != "" {
-			namePtr = &p.Name
+			repo, err := reg.Get(p.Name)
+			if err != nil {
+				return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: err.Error()}
+			}
+			warnings, _ := reg.CheckStaleness(ctx)
+			warning := ""
+			for _, w := range warnings {
+				if w.Name == repo.Name {
+					warning = w.Warning
+					break
+				}
+			}
+			status := "ok"
+			if warning != "" {
+				status = "stale"
+			}
+			return []repoStatusEntry{{
+				Name:       repo.Name,
+				Path:       repo.Path,
+				MainBranch: repo.MainBranch,
+				HasBeads:   repo.HasBeads,
+				Status:     status,
+				Warning:    warning,
+			}}, nil
 		}
-		rows, err := store.FindAll(&cat, nil, namePtr, nil, nil)
+
+		repos, err := reg.List()
 		if err != nil {
 			return nil, fmt.Errorf("repo.status: %w", err)
 		}
 
-		if p.Name != "" && len(rows) == 0 {
-			return nil, &rpcError{Code: ErrCodeInvalidParams, Msg: fmt.Sprintf("repository %q not found", p.Name)}
+		warnings, _ := reg.CheckStaleness(ctx)
+		warningMap := map[string]string{}
+		for _, w := range warnings {
+			warningMap[w.Name] = w.Warning
 		}
 
-		type repoStatus struct {
-			Name   string `json:"name"`
-			Path   string `json:"path"`
-			Status string `json:"status"`
+		entries := make([]repoStatusEntry, 0, len(repos))
+		for _, repo := range repos {
+			w := warningMap[repo.Name]
+			status := "ok"
+			if w != "" {
+				status = "stale"
+			}
+			entries = append(entries, repoStatusEntry{
+				Name:       repo.Name,
+				Path:       repo.Path,
+				MainBranch: repo.MainBranch,
+				HasBeads:   repo.HasBeads,
+				Status:     status,
+				Warning:    w,
+			})
 		}
-		statuses := make([]repoStatus, 0, len(rows))
-		for _, row := range rows {
-			name, _ := row["identity"].(string)
-			path := extractRepoPath(row)
-			status := checkRepoStatus(path)
-			statuses = append(statuses, repoStatus{Name: name, Path: path, Status: status})
-		}
-
-		return statuses, nil
+		return entries, nil
 	}
-}
-
-// extractRepoPath gets the path from a repo tuple's payload.
-func extractRepoPath(row map[string]interface{}) string {
-	payloadStr, _ := row["payload"].(string)
-	if payloadStr == "" {
-		return ""
-	}
-	var payload struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
-		return ""
-	}
-	return payload.Path
-}
-
-// checkRepoStatus returns a simple status string for a repo path.
-func checkRepoStatus(path string) string {
-	if path == "" {
-		return "unknown"
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return "missing"
-	}
-	if !info.IsDir() {
-		return "invalid"
-	}
-	// Check for .git directory.
-	gitPath := filepath.Join(path, ".git")
-	if _, err := os.Stat(gitPath); err != nil {
-		return "not-git"
-	}
-	return "ok"
 }
