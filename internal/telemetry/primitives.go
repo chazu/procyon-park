@@ -386,7 +386,7 @@ func registerTelemInstanceMethods(vmInst *vm.VM, telemClass *vm.Class) {
 		}()
 
 		// Execute the block. Maggie blocks respond to "value" (0-arg).
-		result := v.Send(blockVal, "value", []vm.Value{})
+		result := v.Send(blockVal, "value", nil)
 
 		// If the block returned a Failure, mark the span as error.
 		failureClass := v.FailureClass
