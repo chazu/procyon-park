@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/chazu/maggie/vm"
+	"github.com/chazu/procyon-park/internal/registry"
 	"github.com/chazu/procyon-park/internal/tuplestore"
 	"github.com/chazu/procyon-park/internal/workflow"
 )
@@ -96,7 +97,16 @@ func (d *DaemonServer) Run(ctx context.Context) error {
 		d.ipcServer = NewIPCServer(socketPath, d.shutdownCh)
 		RegisterBBSHandlers(d.ipcServer, d.store)
 		RegisterAgentHandlers(d.ipcServer, d.store)
-		RegisterRepoHandlers(d.ipcServer, d.store)
+		regPath := filepath.Join(d.config.DataDir, "repos.json")
+		reg, err := registry.New(regPath)
+		if err != nil {
+			d.worker.Stop()
+			if d.pidFile != nil {
+				d.pidFile.Release()
+			}
+			return fmt.Errorf("daemon: init registry: %w", err)
+		}
+		RegisterRepoHandlers(d.ipcServer, reg)
 		RegisterConfigHandlers(d.ipcServer, d.store)
 		RegisterPrimeHandlers(d.ipcServer, d.store)
 		RegisterWorkflowHandlers(d.ipcServer, d.executor, d.store)

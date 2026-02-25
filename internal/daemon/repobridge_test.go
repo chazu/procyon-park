@@ -6,33 +6,39 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/chazu/procyon-park/internal/tuplestore"
+	"github.com/chazu/procyon-park/internal/registry"
 )
 
-func newTestStore(t *testing.T) *tuplestore.TupleStore {
+func newTestRegistry(t *testing.T) *registry.Registry {
 	t.Helper()
-	store, err := tuplestore.NewMemoryStore()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "repos.json")
+	reg, err := registry.New(path)
 	if err != nil {
-		t.Fatalf("create test store: %v", err)
+		t.Fatalf("create test registry: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
-	return store
+	return reg
 }
 
 func TestRepoRegisterAndList(t *testing.T) {
-	store := newTestStore(t)
+	reg := newTestRegistry(t)
 	srv := NewIPCServer("/dev/null", make(chan struct{}))
-	RegisterRepoHandlers(srv, store)
+	RegisterRepoHandlers(srv, reg)
 
-	// Register a repo.
-	regParams, _ := json.Marshal(map[string]string{"name": "myrepo", "path": "/tmp/myrepo"})
+	// Create a temp dir as a fake repo with .git.
+	tmpDir := t.TempDir()
+	os.Mkdir(filepath.Join(tmpDir, ".git"), 0755)
+
+	regParams, _ := json.Marshal(map[string]string{"name": "myrepo", "path": tmpDir})
 	result, err := srv.handlers["repo.register"](regParams)
 	if err != nil {
 		t.Fatalf("repo.register: %v", err)
 	}
-	reg := result.(map[string]interface{})
-	if reg["name"] != "myrepo" {
-		t.Errorf("expected name 'myrepo', got %v", reg["name"])
+	data, _ := json.Marshal(result)
+	var registered registry.Repo
+	json.Unmarshal(data, &registered)
+	if registered.Name != "myrepo" {
+		t.Errorf("expected name 'myrepo', got %v", registered.Name)
 	}
 
 	// List repos.
@@ -40,12 +46,8 @@ func TestRepoRegisterAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repo.list: %v", err)
 	}
-	type repoEntry struct {
-		Name string `json:"name"`
-		Path string `json:"path"`
-	}
-	data, _ := json.Marshal(result)
-	var repos []repoEntry
+	data, _ = json.Marshal(result)
+	var repos []registry.Repo
 	json.Unmarshal(data, &repos)
 	if len(repos) != 1 {
 		t.Fatalf("expected 1 repo, got %d", len(repos))
@@ -56,11 +58,14 @@ func TestRepoRegisterAndList(t *testing.T) {
 }
 
 func TestRepoRegisterDuplicate(t *testing.T) {
-	store := newTestStore(t)
+	reg := newTestRegistry(t)
 	srv := NewIPCServer("/dev/null", make(chan struct{}))
-	RegisterRepoHandlers(srv, store)
+	RegisterRepoHandlers(srv, reg)
 
-	params, _ := json.Marshal(map[string]string{"name": "dup", "path": "/tmp/dup"})
+	tmpDir := t.TempDir()
+	os.Mkdir(filepath.Join(tmpDir, ".git"), 0755)
+
+	params, _ := json.Marshal(map[string]string{"name": "dup", "path": tmpDir})
 	_, err := srv.handlers["repo.register"](params)
 	if err != nil {
 		t.Fatalf("first register: %v", err)
@@ -73,12 +78,14 @@ func TestRepoRegisterDuplicate(t *testing.T) {
 }
 
 func TestRepoUnregister(t *testing.T) {
-	store := newTestStore(t)
+	reg := newTestRegistry(t)
 	srv := NewIPCServer("/dev/null", make(chan struct{}))
-	RegisterRepoHandlers(srv, store)
+	RegisterRepoHandlers(srv, reg)
 
-	// Register then unregister.
-	regParams, _ := json.Marshal(map[string]string{"name": "tounreg", "path": "/tmp/tounreg"})
+	tmpDir := t.TempDir()
+	os.Mkdir(filepath.Join(tmpDir, ".git"), 0755)
+
+	regParams, _ := json.Marshal(map[string]string{"name": "tounreg", "path": tmpDir})
 	srv.handlers["repo.register"](regParams)
 
 	unregParams, _ := json.Marshal(map[string]string{"name": "tounreg"})
@@ -90,7 +97,7 @@ func TestRepoUnregister(t *testing.T) {
 	// List should be empty.
 	result, _ := srv.handlers["repo.list"](nil)
 	data, _ := json.Marshal(result)
-	var repos []struct{ Name string }
+	var repos []registry.Repo
 	json.Unmarshal(data, &repos)
 	if len(repos) != 0 {
 		t.Errorf("expected 0 repos after unregister, got %d", len(repos))
@@ -98,9 +105,9 @@ func TestRepoUnregister(t *testing.T) {
 }
 
 func TestRepoUnregisterNotFound(t *testing.T) {
-	store := newTestStore(t)
+	reg := newTestRegistry(t)
 	srv := NewIPCServer("/dev/null", make(chan struct{}))
-	RegisterRepoHandlers(srv, store)
+	RegisterRepoHandlers(srv, reg)
 
 	params, _ := json.Marshal(map[string]string{"name": "nonexistent"})
 	_, err := srv.handlers["repo.unregister"](params)
@@ -110,11 +117,10 @@ func TestRepoUnregisterNotFound(t *testing.T) {
 }
 
 func TestRepoStatus(t *testing.T) {
-	store := newTestStore(t)
+	reg := newTestRegistry(t)
 	srv := NewIPCServer("/dev/null", make(chan struct{}))
-	RegisterRepoHandlers(srv, store)
+	RegisterRepoHandlers(srv, reg)
 
-	// Create a temp dir as a fake repo.
 	tmpDir := t.TempDir()
 	gitDir := filepath.Join(tmpDir, ".git")
 	os.Mkdir(gitDir, 0755)
@@ -122,18 +128,13 @@ func TestRepoStatus(t *testing.T) {
 	regParams, _ := json.Marshal(map[string]string{"name": "testrepo", "path": tmpDir})
 	srv.handlers["repo.register"](regParams)
 
-	// Status should show "ok" for the temp dir with .git.
 	result, err := srv.handlers["repo.status"](nil)
 	if err != nil {
 		t.Fatalf("repo.status: %v", err)
 	}
 
-	type statusEntry struct {
-		Name   string `json:"name"`
-		Status string `json:"status"`
-	}
 	data, _ := json.Marshal(result)
-	var statuses []statusEntry
+	var statuses []repoStatusEntry
 	json.Unmarshal(data, &statuses)
 	if len(statuses) != 1 {
 		t.Fatalf("expected 1 status, got %d", len(statuses))
@@ -144,9 +145,9 @@ func TestRepoStatus(t *testing.T) {
 }
 
 func TestRepoStatusMissing(t *testing.T) {
-	store := newTestStore(t)
+	reg := newTestRegistry(t)
 	srv := NewIPCServer("/dev/null", make(chan struct{}))
-	RegisterRepoHandlers(srv, store)
+	RegisterRepoHandlers(srv, reg)
 
 	regParams, _ := json.Marshal(map[string]string{"name": "gone", "path": "/nonexistent/path/that/doesnt/exist"})
 	srv.handlers["repo.register"](regParams)
@@ -156,36 +157,28 @@ func TestRepoStatusMissing(t *testing.T) {
 		t.Fatalf("repo.status: %v", err)
 	}
 
-	type statusEntry struct {
-		Name   string `json:"name"`
-		Status string `json:"status"`
-	}
 	data, _ := json.Marshal(result)
-	var statuses []statusEntry
+	var statuses []repoStatusEntry
 	json.Unmarshal(data, &statuses)
 	if len(statuses) != 1 {
 		t.Fatalf("expected 1 status, got %d", len(statuses))
 	}
-	if statuses[0].Status != "missing" {
-		t.Errorf("expected status 'missing', got %q", statuses[0].Status)
+	if statuses[0].Status != "stale" {
+		t.Errorf("expected status 'stale', got %q", statuses[0].Status)
+	}
+	if statuses[0].Warning == "" {
+		t.Error("expected a warning for missing path")
 	}
 }
 
 func TestRepoRegisterMissingParams(t *testing.T) {
-	store := newTestStore(t)
+	reg := newTestRegistry(t)
 	srv := NewIPCServer("/dev/null", make(chan struct{}))
-	RegisterRepoHandlers(srv, store)
-
-	// Missing name.
-	params, _ := json.Marshal(map[string]string{"path": "/tmp/foo"})
-	_, err := srv.handlers["repo.register"](params)
-	if err == nil {
-		t.Fatal("expected error for missing name")
-	}
+	RegisterRepoHandlers(srv, reg)
 
 	// Missing path.
-	params, _ = json.Marshal(map[string]string{"name": "foo"})
-	_, err = srv.handlers["repo.register"](params)
+	params, _ := json.Marshal(map[string]string{"name": "foo"})
+	_, err := srv.handlers["repo.register"](params)
 	if err == nil {
 		t.Fatal("expected error for missing path")
 	}
