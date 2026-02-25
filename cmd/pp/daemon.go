@@ -12,6 +12,7 @@ import (
 	"github.com/chazu/procyon-park/internal/daemon"
 	"github.com/chazu/procyon-park/internal/telemetry"
 	"github.com/chazu/procyon-park/internal/tuplestore"
+	"github.com/chazu/procyon-park/internal/worktracker"
 )
 
 // defaultDataDir returns ~/.procyon-park.
@@ -49,6 +50,7 @@ func runDaemonRun(dataDir string) error {
 
 	vmInst := vm.NewVM()
 	telemetry.Register(vmInst)
+	worktracker.Register(vmInst)
 
 	cfg := daemon.Config{
 		DataDir: dataDir,
