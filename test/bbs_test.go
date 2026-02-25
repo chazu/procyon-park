@@ -248,7 +248,7 @@ func compileSourceFile(t *testing.T, vmInst *vm.VM, source string) {
 
 	var imports []string
 	for _, imp := range sf.Imports {
-		imports = append(imports, cub.Path)
+		imports = append(imports, imp.Path)
 	}
 
 	// Pass 1: Register class skeletons
