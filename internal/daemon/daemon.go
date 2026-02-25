@@ -100,6 +100,7 @@ func (d *DaemonServer) Run(ctx context.Context) error {
 		RegisterConfigHandlers(d.ipcServer, d.store)
 		RegisterPrimeHandlers(d.ipcServer, d.store)
 		RegisterWorkflowHandlers(d.ipcServer, d.executor, d.store)
+		RegisterAnalyticsHandlers(d.ipcServer, d.store, d.config.DataDir)
 		if err := d.ipcServer.Start(); err != nil {
 			d.worker.Stop()
 			if d.pidFile != nil {
