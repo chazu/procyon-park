@@ -515,6 +515,37 @@ func (s *TupleStore) FindDuplicateConventionProposals() ([]map[string]interface{
 	return results, nil
 }
 
+// Upsert inserts or replaces a tuple matching (category, scope, identity, instance).
+// It atomically deletes any existing match and inserts the new tuple.
+// Returns the new row ID.
+func (s *TupleStore) Upsert(category, scope, identity, instance, payload, lifecycle string,
+	taskID, agentID *string, ttl *int) (int64, error) {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Delete existing match (if any).
+	where, args := buildWhere(&category, &scope, &identity, &instance, nil)
+	if _, err := s.db.Exec("DELETE FROM tuples WHERE "+where, args...); err != nil {
+		return 0, fmt.Errorf("tuplestore: upsert delete: %w", err)
+	}
+
+	// Insert the new tuple.
+	stmt, err := s.prepare("insert", `INSERT INTO tuples
+		(category, scope, identity, instance, payload, lifecycle, task_id, agent_id, ttl_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return 0, err
+	}
+
+	result, err := stmt.Exec(category, scope, identity, instance, payload, lifecycle,
+		taskID, agentID, ttl)
+	if err != nil {
+		return 0, fmt.Errorf("tuplestore: upsert insert: %w", err)
+	}
+	return result.LastInsertId()
+}
+
 // ---------------------------------------------------------------------------
 // Query Building
 // ---------------------------------------------------------------------------
