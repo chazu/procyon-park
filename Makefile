@@ -1,4 +1,4 @@
-.PHONY: all image pp test clean
+.PHONY: all image pp install test clean
 
 # Build the pp binary
 all: pp
@@ -11,6 +11,11 @@ image:
 pp: image
 	cp procyon-park.image cmd/pp/
 	go build -o pp ./cmd/pp/
+
+# Codesign and install to ~/go/bin
+install: pp
+	codesign -s - pp
+	cp pp ~/go/bin/pp
 
 # Run tests
 test:
