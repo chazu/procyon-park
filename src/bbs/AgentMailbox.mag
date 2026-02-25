@@ -22,7 +22,7 @@ msgs := box drain.
 msgs size   "=> 1"
 ```
 """
-namespace: ProcyonPark::Bbs
+namespace: 'ProcyonPark::Bbs'
 
 AgentMailbox subclass: Object
   instanceVars: space agentId

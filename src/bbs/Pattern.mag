@@ -21,7 +21,7 @@ p matches: (Tuple category: #fact scope: 'my-repo' identity: 'lang' payload: Dic
 Pattern any matches: anyTuple   "=> true"
 ```
 """
-namespace: ProcyonPark::Bbs
+namespace: 'ProcyonPark::Bbs'
 
 Pattern subclass: Object
   instanceVars: category scope identity instance payloadSearch

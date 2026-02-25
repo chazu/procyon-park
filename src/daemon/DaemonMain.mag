@@ -27,7 +27,7 @@ daemon space: (TupleSpace open: ':memory:').
 daemon start.
 ```
 """
-namespace: ProcyonPark
+namespace: 'ProcyonPark'
 
 DaemonMain subclass: Object
   instanceVars: config space ipcChannel shutdownChannel checkpointChannel running lastCheckpoint

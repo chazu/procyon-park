@@ -1,16 +1,18 @@
-"ProcyonPark entry point.
- Loaded by the pp binary on startup."
+"""
+ProcyonPark entry point.
 
-namespace: ProcyonPark
+Loaded by the pp binary on startup.
+"""
+namespace: 'ProcyonPark'
 
-class Main
+Main subclass: Object
 
-class methods
+  """Entry point for procyon-park daemon and CLI."""
+  class method: start [
+      ^'ProcyonPark v0.1.0'
+  ]
 
-start
-    "Entry point for procyon-park daemon and CLI."
-    ^'ProcyonPark v0.1.0'
-
-version
-    "Return the current version string."
-    ^'0.1.0'
+  """Return the current version string."""
+  class method: version [
+      ^'0.1.0'
+  ]

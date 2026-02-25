@@ -22,7 +22,7 @@ agent := Agent fromPayload: payloadDict name: 'Bramble'.
 agent status   "=> #active"
 ```
 """
-namespace: ProcyonPark::Agent
+namespace: 'ProcyonPark::Agent'
 
 Agent subclass: Object
   instanceVars: name role tmuxSession worktree branch task epicId createdAt status

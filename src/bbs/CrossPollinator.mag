@@ -24,7 +24,7 @@ space out: (Tuple category: #event scope: 'my-repo'
 pollinator checkCrossReferences: (space scan: (Pattern category: #event)) first.
 ```
 """
-namespace: ProcyonPark::Bbs
+namespace: 'ProcyonPark::Bbs'
 
 CrossPollinator subclass: Object
   instanceVars: space rateLimiter

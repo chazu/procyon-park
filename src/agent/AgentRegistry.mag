@@ -20,7 +20,7 @@ all := AgentRegistry list: 'my-repo' in: space.
 all size     "=> 1"
 ```
 """
-namespace: ProcyonPark::Agent
+namespace: 'ProcyonPark::Agent'
 
 AgentRegistry subclass: Object
 

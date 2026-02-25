@@ -21,7 +21,7 @@ checkpoint_interval = 60000'.
 cfg dataDir           "=> '/tmp/pp'"
 ```
 """
-namespace: ProcyonPark
+namespace: 'ProcyonPark'
 
 Config subclass: Object
   instanceVars: dataDir socketPath pidPath checkpointInterval shutdownTimeout projectName namespace version

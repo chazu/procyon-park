@@ -24,7 +24,7 @@ c category       "=> #claim"
 c scope          "=> 'task-123'"
 ```
 """
-namespace: ProcyonPark::Bbs
+namespace: 'ProcyonPark::Bbs'
 
 Tuple subclass: Object
   instanceVars: id category scope identity instance payload lifecycle taskId agentId createdAt updatedAt ttlSeconds

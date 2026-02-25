@@ -21,7 +21,7 @@ name   "=> 'Sprocket' (first available)"
 NamePool release: name for: 'my-repo' in: space.
 ```
 """
-namespace: ProcyonPark::Agent
+namespace: 'ProcyonPark::Agent'
 
 NamePool subclass: Object
 

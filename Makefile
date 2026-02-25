@@ -5,7 +5,7 @@ all: pp
 
 # Compile Maggie sources into an image
 image:
-	mag src/... lib/... --save-image procyon-park.image
+	mag --save-image procyon-park.image src/... lib/...
 
 # Copy image and build the Go binary
 pp: image

@@ -24,7 +24,7 @@ facts := space scan: (Pattern category: #fact scope: 'my-repo').
 claim := space in: (Pattern category: #claim) timeout: 3000.
 ```
 """
-namespace: ProcyonPark::Bbs
+namespace: 'ProcyonPark::Bbs'
 
 TupleSpace subclass: Object
   instanceVars: store waiters mutex

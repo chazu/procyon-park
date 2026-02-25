@@ -12,7 +12,7 @@ w isDestructive   "=> true"
 w channel          "=> an unbuffered Channel"
 ```
 """
-namespace: ProcyonPark::Bbs
+namespace: 'ProcyonPark::Bbs'
 
 Waiter subclass: Object
   instanceVars: pattern destructive channel

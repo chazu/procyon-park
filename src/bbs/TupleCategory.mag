@@ -24,7 +24,7 @@ TupleCategory defaultLifecycleFor: #fact    "=> #furniture"
 TupleCategory defaultLifecycleFor: #claim   "=> #session"
 ```
 """
-namespace: ProcyonPark::Bbs
+namespace: 'ProcyonPark::Bbs'
 
 TupleCategory subclass: Object
 

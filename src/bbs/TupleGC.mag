@@ -24,7 +24,7 @@ gc detectSystemicObstacles.
 gc detectUnclaimedNeeds.
 ```
 """
-namespace: ProcyonPark::Bbs
+namespace: 'ProcyonPark::Bbs'
 
 TupleGC subclass: Object
   instanceVars: space store interval running
