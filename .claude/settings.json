@@ -1,0 +1,9 @@
+{
+  "lsp": {
+    "maggie": {
+      "command": "mag",
+      "args": ["lsp"],
+      "filePatterns": ["*.mag"]
+    }
+  }
+}

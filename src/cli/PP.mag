@@ -1,0 +1,377 @@
+"The pp CLI — a thin HTTP client for agent-system communication.
+ Reads PP_URL, PP_SCOPE, PP_TASK from environment."
+
+PP subclass: Object
+  instanceVars: baseUrl client scope taskId
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: initialize [
+    baseUrl := System env: 'PP_URL'.
+    (baseUrl isNil or: [baseUrl isEmpty]) ifTrue: [baseUrl := 'http://localhost:7777'].
+    scope := System env: 'PP_SCOPE'.
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default'].
+    taskId := System env: 'PP_TASK'.
+    taskId isNil ifTrue: [taskId := ''].
+    client := HttpClient new
+  ]
+
+  method: runWith: args [
+    "Dispatch to the appropriate command based on args."
+    | cmd |
+    args isEmpty ifTrue: [
+      self printUsage.
+      ^self
+    ].
+
+    cmd := args at: 0.
+
+    cmd = 'observe' ifTrue: [^self cmdObserve: args].
+    cmd = 'decide'  ifTrue: [^self cmdDecide: args].
+    cmd = 'event'   ifTrue: [^self cmdEvent: args].
+    cmd = 'plan'    ifTrue: [^self cmdPlan: args].
+    cmd = 'read'    ifTrue: [^self cmdRead: args].
+    cmd = 'notify'  ifTrue: [^self cmdNotify: args].
+    cmd = 'dismiss' ifTrue: [^self cmdDismiss: args].
+    cmd = 'status'  ifTrue: [^self cmdStatus: args].
+    cmd = 'prime'   ifTrue: [^self cmdPrime: args].
+    cmd = 'help'    ifTrue: [^self printUsage].
+
+    ('Unknown command: ', cmd) println.
+    self printUsage
+  ]
+
+  "--- Commands ---"
+
+  method: cmdObserve: args [
+    "pp observe <identity> <detail> [--tags tag1,tag2]"
+    | identity detail tags body |
+    args size < 3 ifTrue: [
+      'Usage: pp observe <identity> <detail> [--tags tag1,tag2]' println.
+      ^self
+    ].
+
+    identity := args at: 1.
+    detail := args at: 2.
+    tags := self flagValue: '--tags' in: args.
+
+    body := Dictionary new.
+    body at: 'scope' put: scope.
+    body at: 'identity' put: identity.
+    body at: 'detail' put: detail.
+    taskId isEmpty ifFalse: [body at: 'task' put: taskId].
+    tags notNil ifTrue: [body at: 'tags' put: (tags split: ',')].
+
+    self post: '/api/observe' body: body
+  ]
+
+  method: cmdDecide: args [
+    "pp decide <identity> <detail> [--rationale ...]"
+    | body rationale |
+    args size < 3 ifTrue: [
+      'Usage: pp decide <identity> <detail> [--rationale ...]' println.
+      ^self
+    ].
+
+    body := Dictionary new.
+    body at: 'scope' put: scope.
+    body at: 'identity' put: (args at: 1).
+    body at: 'detail' put: (args at: 2).
+    taskId isEmpty ifFalse: [body at: 'task' put: taskId].
+    rationale := self flagValue: '--rationale' in: args.
+    rationale notNil ifTrue: [body at: 'rationale' put: rationale].
+
+    self post: '/api/decide' body: body
+  ]
+
+  method: cmdEvent: args [
+    "pp event <identity> [--type T] [--summary S]"
+    | body summary eventType |
+    args size < 2 ifTrue: [
+      'Usage: pp event <identity> [--type T] [--summary S]' println.
+      ^self
+    ].
+
+    body := Dictionary new.
+    body at: 'scope' put: scope.
+    body at: 'identity' put: (args at: 1).
+    eventType := self flagValue: '--type' in: args.
+    body at: 'type' put: (eventType isNil ifTrue: ['generic'] ifFalse: [eventType]).
+    summary := self flagValue: '--summary' in: args.
+    summary notNil ifTrue: [body at: 'summary' put: summary].
+
+    self post: '/api/event' body: body
+  ]
+
+  method: cmdPlan: args [
+    "pp plan <file.json>"
+    | filePath contents body |
+    args size < 2 ifTrue: [
+      'Usage: pp plan <file.json>' println.
+      ^self
+    ].
+
+    filePath := args at: 1.
+    (File exists: filePath) ifFalse: [
+      ('File not found: ', filePath) println.
+      ^self
+    ].
+
+    contents := File readFileContents: filePath.
+    body := Json decode: contents.
+    body at: 'scope' put: scope.
+    taskId isEmpty ifFalse: [body at: 'task' put: taskId].
+
+    self post: '/api/plan' body: body
+  ]
+
+  method: cmdRead: args [
+    "pp read <category> [scope] [identity]"
+    | category rdScope rdIdentity body |
+    args size < 2 ifTrue: [
+      'Usage: pp read <category> [scope] [identity]' println.
+      ^self
+    ].
+
+    category := args at: 1.
+    rdScope := args size > 2 ifTrue: [args at: 2] ifFalse: [scope].
+    rdIdentity := args size > 3 ifTrue: [args at: 3] ifFalse: [nil].
+
+    rdIdentity notNil ifTrue: [
+      "Read a specific tuple"
+      body := Dictionary new.
+      body at: 'category' put: category.
+      body at: 'scope' put: rdScope.
+      body at: 'identity' put: rdIdentity.
+      self post: '/api/rdp' body: body
+    ] ifFalse: [
+      "Scan all in category+scope"
+      body := Dictionary new.
+      body at: 'category' put: category.
+      body at: 'scope' put: rdScope.
+      self post: '/api/scan' body: body
+    ]
+  ]
+
+  method: cmdNotify: args [
+    "pp notify <message> [--severity info|warn|urgent]"
+    | body severity |
+    args size < 2 ifTrue: [
+      'Usage: pp notify <message> [--severity info|warn|urgent]' println.
+      ^self
+    ].
+
+    body := Dictionary new.
+    body at: 'message' put: (args at: 1).
+    body at: 'scope' put: scope.
+    severity := self flagValue: '--severity' in: args.
+    body at: 'severity' put: (severity isNil ifTrue: ['info'] ifFalse: [severity]).
+
+    self post: '/api/notify' body: body
+  ]
+
+  method: cmdDismiss: args [
+    "pp dismiss"
+    | body |
+    taskId isEmpty ifTrue: [
+      'No task ID set (PP_TASK env var). Cannot dismiss.' println.
+      ^self
+    ].
+
+    body := Dictionary new.
+    body at: 'task_id' put: taskId.
+    body at: 'scope' put: scope.
+
+    self post: '/api/dismiss' body: body
+  ]
+
+  method: cmdStatus: args [
+    "pp status — show health + current task context"
+    | response health |
+    [
+      response := client get: baseUrl, '/api/health'.
+      health := Json decode: response.
+      'Procyon Park Status:' println.
+      ('  Tuples:  ', (health at: 'tuples' ifAbsent: ['?']) printString) println.
+      ('  Uptime:  ', (health at: 'uptime' ifAbsent: ['?']) printString, 's') println.
+
+      taskId isEmpty ifFalse: [
+        ('  Task:    ', taskId) println.
+        ('  Scope:   ', scope) println
+      ]
+    ] on: Exception do: [:e |
+      ('Error connecting to Procyon Park at ', baseUrl, ': ', e messageText) println
+    ]
+  ]
+
+  method: cmdPrime: args [
+    "pp prime [--role <role>] — output priming context for an agent."
+    | roleName conventions facts signals notifications out |
+
+    roleName := self flagValue: '--role' in: args.
+    roleName isNil ifTrue: [roleName := 'agent'].
+
+    out := '# Procyon Park Agent Context
+
+You are connected to the Procyon Park orchestration system.
+Communicate with it using the `pp` command-line tool.
+
+## Available Commands
+
+  pp observe <identity> <detail> [--tags t1,t2]     Report an observation
+  pp decide <identity> <detail> [--rationale ..]     Record a decision
+  pp event <identity> [--type T] [--summary S]       Emit an event
+  pp plan <file.json>                                Submit a structured plan
+  pp read <category> [scope] [identity]              Read tuples
+  pp notify <message> [--severity info|warn|urgent]  Notify the user
+  pp dismiss                                         Signal task completion
+  pp status                                          Show system status
+
+## Rules
+
+- All coordination flows through `pp`. Do not coordinate with other agents directly.
+- Report anything unexpected with `pp observe`.
+- When done, run `pp dismiss`.
+
+## Environment
+
+  PP_URL   = ', baseUrl, '
+  PP_SCOPE = ', scope, '
+'.
+
+    taskId isEmpty ifFalse: [
+      out := out, '  PP_TASK  = ', taskId, '
+'
+    ].
+
+    "Conventions"
+    conventions := self safeScan: 'convention' scope: nil.
+    conventions isEmpty ifFalse: [
+      out := out, '
+## Conventions
+
+'.
+      conventions do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- **', (t at: 'identity' ifAbsent: ['?']), '**: ', (payload at: 'detail' ifAbsent: ['']), '
+'
+      ]
+    ].
+
+    "Facts in scope"
+    facts := self safeScan: 'fact' scope: scope.
+    facts isEmpty ifFalse: [
+      out := out, '
+## Known Facts (scope: ', scope, ')
+
+'.
+      facts do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- **', (t at: 'identity' ifAbsent: ['?']), '**: ', (payload at: 'detail' ifAbsent: ['']), '
+'
+      ]
+    ].
+
+    "Signals in scope"
+    signals := self safeScan: 'signal' scope: scope.
+    signals isEmpty ifFalse: [
+      out := out, '
+## Signals (scope: ', scope, ')
+
+'.
+      signals do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- **', (t at: 'identity' ifAbsent: ['?']), '**: ', (Json encode: payload), '
+'
+      ]
+    ].
+
+    "Pending notifications"
+    notifications := self safeGetNotifications.
+    notifications isEmpty ifFalse: [
+      out := out, '
+## Pending Notifications
+
+'.
+      notifications do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- [', (payload at: 'severity' ifAbsent: ['info']), '] ', (payload at: 'message' ifAbsent: ['']), '
+'
+      ]
+    ].
+
+    out println
+  ]
+
+  "--- Helpers ---"
+
+  method: post: path body: dict [
+    "POST JSON to the API and print the response."
+    | url jsonBody response result |
+    url := baseUrl, path.
+    jsonBody := Json encode: dict.
+
+    [
+      response := client post: url body: jsonBody contentType: 'application/json'.
+      result := Json decode: response.
+      (Json encodePretty: result) println
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
+  ]
+
+  method: safeScan: category scope: aScope [
+    "Scan the server for tuples, returning an Array. Returns empty array on error."
+    | body response result |
+    body := Dictionary new.
+    body at: 'category' put: category.
+    aScope notNil ifTrue: [body at: 'scope' put: aScope].
+    [
+      response := client post: baseUrl, '/api/scan' body: (Json encode: body) contentType: 'application/json'.
+      response isNil ifTrue: [^#()].
+      result := Json decode: response.
+      ^result at: 'tuples' ifAbsent: [#()]
+    ] on: Exception do: [:e | ^#()]
+  ]
+
+  method: safeGetNotifications [
+    "Fetch notifications from the server. Returns empty array on error."
+    ^self safeScan: 'notification' scope: nil
+  ]
+
+  method: flagValue: flag in: args [
+    "Extract the value after a --flag in args. Returns nil if not found."
+    | idx |
+    idx := args indexOf: flag.
+    (idx >= 0 and: [idx < (args size - 1)])
+      ifTrue: [^args at: idx + 1]
+      ifFalse: [^nil]
+  ]
+
+  method: printUsage [
+    'Procyon Park CLI' println.
+    '' println.
+    'Usage: pp <command> [args...]' println.
+    '' println.
+    'Commands:' println.
+    '  observe  <identity> <detail> [--tags t1,t2]     Report an observation' println.
+    '  decide   <identity> <detail> [--rationale ...]   Record a decision' println.
+    '  event    <identity> [--type T] [--summary S]     Emit an event' println.
+    '  plan     <file.json>                             Submit a structured plan' println.
+    '  read     <category> [scope] [identity]           Read tuples' println.
+    '  notify   <message> [--severity info|warn|urgent] Notify the user' println.
+    '  dismiss                                          Signal task completion' println.
+    '  status                                           Show system status' println.
+    '  help                                             Show this help' println.
+    '' println.
+    'Environment:' println.
+    ('  PP_URL   = ', baseUrl) println.
+    ('  PP_SCOPE = ', scope) println.
+    ('  PP_TASK  = ', taskId) println
+  ]

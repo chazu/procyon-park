@@ -1,0 +1,29 @@
+"Valid tuple categories for the Procyon Park tuplespace."
+
+Categories subclass: Object
+
+  classMethod: valid [
+    ^#('fact' 'convention' 'observation' 'decision' 'signal'
+       'task' 'template' 'workflow' 'token' 'rule' 'ingestion'
+       'event' 'obstacle' 'session' 'artifact' 'link' 'notification')
+  ]
+
+  classMethod: isValid: aString [
+    ^self valid includes: aString
+  ]
+
+  classMethod: validate: aString [
+    "Raise an error if category is not valid."
+    (self isValid: aString) ifFalse: [
+      Error signal: 'Invalid category: ', aString
+    ]
+  ]
+
+  classMethod: pinned [
+    "Categories that are always persistent (never consumed by in:)."
+    ^#('fact' 'convention' 'template' 'rule' 'ingestion' 'artifact' 'link' 'decision')
+  ]
+
+  classMethod: isPinned: aString [
+    ^self pinned includes: aString
+  ]

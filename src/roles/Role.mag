@@ -1,0 +1,116 @@
+"Base role definition for Procyon Park agents.
+ Each role defines a system prompt, context constraints, and pp commands."
+
+Role subclass: Object
+  instanceVars: name description systemPromptTemplate contextConstraints ppCommands
+
+  method: name [ ^name ]
+  method: description [ ^description ]
+  method: systemPromptTemplate [ ^systemPromptTemplate ]
+  method: contextConstraints [ ^contextConstraints ]
+  method: ppCommands [ ^ppCommands ]
+
+  method: name: n [ name := n ]
+  method: description: d [ description := d ]
+  method: systemPromptTemplate: t [ systemPromptTemplate := t ]
+  method: contextConstraints: c [ contextConstraints := c ]
+  method: ppCommands: p [ ppCommands := p ]
+
+  method: primeFor: taskDescription context: contextTuples [
+    "Assemble the full system prompt for this role, given a task and context."
+    | prompt |
+    prompt := self systemPromptHeader.
+    prompt := prompt, '
+
+## Your Task
+', taskDescription, '
+
+## Context from the Knowledge Base
+'.
+    contextTuples do: [:t |
+      | cat ident payload |
+      cat := t at: 'category' ifAbsent: ['?'].
+      ident := t at: 'identity' ifAbsent: ['?'].
+      payload := t at: 'payload' ifAbsent: [Dictionary new].
+      prompt := prompt, '
+### [', cat, '] ', ident, '
+', (payload at: 'detail' ifAbsent: [Json encode: payload]), '
+'
+    ].
+
+    prompt := prompt, '
+
+## Communication
+You communicate with the Procyon Park coordination system using the `pp` command-line tool.
+The server URL and your task context are pre-configured in your environment.
+
+Available commands:
+'.
+    ppCommands do: [:cmd |
+      prompt := prompt, '  ', cmd, '
+'
+    ].
+
+    prompt := prompt, '
+
+## Rules
+- Do NOT attempt to coordinate with other agents directly.
+- All coordination flows through the tuplespace via `pp`.
+- Report observations about anything unexpected you discover.
+- When you are done, signal completion as described below.
+
+', self completionInstructions.
+
+    ^prompt
+  ]
+
+  method: systemPromptHeader [
+    ^'You are a ', name, ' agent working within the Procyon Park orchestration system.
+
+', description
+  ]
+
+  method: completionInstructions [
+    "Subclasses override this for role-specific completion behavior."
+    ^'When your work is complete, run: pp dismiss'
+  ]
+
+  method: assembleContext: bbs scope: scope taskId: taskId [
+    "Assemble context tuples from the BBS based on this role''s constraints."
+    | hard soft budget result conventions remaining |
+    hard := contextConstraints at: 'hard' ifAbsent: [#()].
+    soft := contextConstraints at: 'soft' ifAbsent: [#()].
+    budget := contextConstraints at: 'budget' ifAbsent: [50].
+    result := Array new: 0.
+
+    "Always include conventions"
+    conventions := bbs scanAll: 'convention'.
+    result := result, conventions.
+
+    "Hard constraints — must include"
+    hard do: [:spec |
+      | cat tuples |
+      cat := spec at: 'category'.
+      tuples := bbs scan: cat scope: scope.
+      result := result, tuples
+    ].
+
+    "Soft constraints — fill remaining budget"
+    remaining := budget - result size.
+    remaining > 0 ifTrue: [
+      soft do: [:spec |
+        remaining > 0 ifTrue: [
+          | cat tuples |
+          cat := spec at: 'category'.
+          tuples := bbs scan: cat scope: scope.
+          tuples size > remaining ifTrue: [
+            tuples := tuples copyFrom: 0 to: remaining - 1
+          ].
+          result := result, tuples.
+          remaining := budget - result size
+        ]
+      ]
+    ].
+
+    ^result
+  ]

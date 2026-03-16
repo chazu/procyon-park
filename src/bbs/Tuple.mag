@@ -1,0 +1,102 @@
+"A tuple in the Procyon Park tuplespace.
+ Tuples are the fundamental unit of coordination — they carry category,
+ scope, identity, and a payload Dictionary. Modality controls consumption
+ semantics: linear (consumed once), persistent (never consumed), or
+ affine (consumed once or expires)."
+
+Tuple subclass: Object
+  instanceVars: id category scope identity payload pinned modality createdAt ttl
+
+  "--- Accessors ---"
+
+  method: id [ ^id ]
+  method: id: anInteger [ id := anInteger ]
+  method: category [ ^category ]
+  method: scope [ ^scope ]
+  method: identity [ ^identity ]
+  method: payload [ ^payload ]
+  method: pinned [ ^pinned ]
+  method: modality [ ^modality ]
+  method: createdAt [ ^createdAt ]
+  method: ttl [ ^ttl ]
+
+  "--- Initialization ---"
+
+  method: initialize [
+    pinned := false.
+    modality := #linear.
+    createdAt := DateTime now.
+    ttl := 0.
+    payload := Dictionary new
+  ]
+
+  method: category: cat scope: sc identity: ident payload: pl [
+    Categories validate: cat.
+    category := cat.
+    scope := sc.
+    identity := ident.
+    payload := pl.
+    (Categories isPinned: cat) ifTrue: [
+      pinned := true.
+      modality := #persistent
+    ]
+  ]
+
+  method: makePinned [
+    pinned := true.
+    modality := #persistent
+  ]
+
+  method: makeAffine: ttlSeconds [
+    modality := #affine.
+    ttl := ttlSeconds
+  ]
+
+  "--- Queries ---"
+
+  method: isPinned [ ^pinned ]
+  method: isLinear [ ^modality = #linear ]
+  method: isPersistent [ ^modality = #persistent ]
+  method: isAffine [ ^modality = #affine ]
+
+  method: isExpired [
+    "Returns true if this is an affine tuple that has passed its TTL."
+    self isAffine ifFalse: [ ^false ].
+    ttl = 0 ifTrue: [ ^false ].
+    ^(DateTime now epochSeconds - createdAt epochSeconds) > ttl
+  ]
+
+  "--- Serialization ---"
+
+  method: asDictionary [
+    "Serialize to a Dictionary suitable for JSON encoding."
+    | d |
+    d := Dictionary new.
+    d at: 'id' put: id.
+    d at: 'category' put: category.
+    d at: 'scope' put: scope.
+    d at: 'identity' put: identity.
+    d at: 'payload' put: payload.
+    d at: 'pinned' put: pinned.
+    d at: 'modality' put: modality printString.
+    d at: 'created_at' put: createdAt printString.
+    d at: 'ttl' put: ttl.
+    ^d
+  ]
+
+  classMethod: fromDictionary: d [
+    "Deserialize from a Dictionary (e.g., from JSON)."
+    | t |
+    t := self new initialize.
+    t id: (d at: 'id' ifAbsent: [nil]).
+    t category: (d at: 'category') scope: (d at: 'scope') identity: (d at: 'identity') payload: (d at: 'payload' ifAbsent: [Dictionary new]).
+    (d at: 'pinned' ifAbsent: [false]) ifTrue: [t makePinned].
+    (d at: 'ttl' ifAbsent: [0]) > 0 ifTrue: [t makeAffine: (d at: 'ttl')].
+    ^t
+  ]
+
+  "--- Printing ---"
+
+  method: printString [
+    ^'Tuple(', category, ':', scope, ':', identity, ')'
+  ]

@@ -1,0 +1,124 @@
+"The dispatcher — runs the tick loop that advances workflows,
+ evaluates rules, dispatches tasks, and performs housekeeping."
+
+Dispatcher subclass: Object
+  instanceVars: bbs workflowEngine ruleEngine taskDispatcher running tick
+
+  classMethod: on: aBBS harnessFactory: factory [
+    ^super new initBBS: aBBS harnessFactory: factory
+  ]
+
+  classMethod: on: aBBS harnessFactory: factory maxSlots: max [
+    ^super new initBBS: aBBS harnessFactory: factory maxSlots: max
+  ]
+
+  method: initBBS: aBBS harnessFactory: factory [
+    self initBBS: aBBS harnessFactory: factory maxSlots: 4
+  ]
+
+  method: initBBS: aBBS harnessFactory: factory maxSlots: max [
+    bbs := aBBS.
+    workflowEngine := WorkflowEngine on: aBBS.
+    ruleEngine := RuleEngine on: aBBS.
+    taskDispatcher := TaskDispatcher on: aBBS maxSlots: max harnessFactory: factory.
+    running := false.
+    tick := 0
+  ]
+
+  method: workflowEngine [ ^workflowEngine ]
+  method: ruleEngine [ ^ruleEngine ]
+  method: taskDispatcher [ ^taskDispatcher ]
+
+  "--- Lifecycle ---"
+
+  method: start [
+    "Start the dispatcher tick loop in a forked process."
+    running := true.
+    'Dispatcher started.' println.
+    [self runLoop] fork
+  ]
+
+  method: stop [
+    running := false.
+    'Dispatcher stopped.' println
+  ]
+
+  method: isRunning [ ^running ]
+
+  "--- Tick Loop ---"
+
+  method: runLoop [
+    [running] whileTrue: [
+      [self onTick] on: Exception do: [:e |
+        ('Dispatcher tick error: ', e messageText) println
+      ].
+      Process sleep: 10
+    ]
+  ]
+
+  method: onTick [
+    tick := tick + 1.
+
+    "Every tick (10s): core operations"
+    taskDispatcher checkCompleted.
+    workflowEngine advance.
+    ruleEngine evaluate.
+    taskDispatcher dispatch.
+
+    "Every 6th tick (~60s): reconciliation"
+    (tick \\ 6) = 0 ifTrue: [
+      self reconcile
+    ].
+
+    "Every 30th tick (~5min): housekeeping"
+    (tick \\ 30) = 0 ifTrue: [
+      self housekeep
+    ]
+  ]
+
+  "--- Reconciliation ---"
+
+  method: reconcile [
+    "Periodic reconciliation tasks."
+    "MVP: no-op. Future: reconcile rules from CUE files, slot state."
+  ]
+
+  "--- Housekeeping ---"
+
+  method: housekeep [
+    "Periodic housekeeping: expire affine tuples, clean up completed workflows."
+    self expireAffineTuples.
+    self cleanCompletedWorkflows
+  ]
+
+  method: expireAffineTuples [
+    "Scan for expired affine tuples. The TupleSpace handles TTL natively,
+     but we check for any that slipped through."
+    "MVP: TupleSpace's outAffine:ttl: handles this natively."
+  ]
+
+  method: cleanCompletedWorkflows [
+    "Clean up workflows that have been completed for a while."
+    | workflows now |
+    workflows := bbs scanAll: 'workflow'.
+    now := DateTime now epochSeconds.
+
+    workflows do: [:wf |
+      | payload completedAt |
+      payload := wf at: 'payload'.
+      (payload at: 'status' ifAbsent: ['']) = 'completed' ifTrue: [
+        completedAt := payload at: 'completed_at' ifAbsent: [now].
+        "Clean up after 1 hour"
+        (now - completedAt) > 3600 ifTrue: [
+          bbs inp: 'workflow' scope: (wf at: 'scope') identity: (wf at: 'identity')
+        ]
+      ]
+    ]
+  ]
+
+  "--- Direct Operations ---"
+
+  method: instantiateWorkflow: templateId scope: scope params: params [
+    "Convenience: directly instantiate a workflow."
+    ^workflowEngine instantiate: templateId scope: scope params: params
+  ]

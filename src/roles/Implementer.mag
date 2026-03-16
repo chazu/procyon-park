@@ -1,0 +1,39 @@
+"Implementer role — writes code for a single scoped subtask."
+
+Implementer subclass: Role
+
+  classMethod: new [
+    | r hard soft constraints h |
+    r := super new.
+    r name: 'implementer'.
+    r description: 'You are an implementer. Your job is to write code for a specific subtask as described in your task description. Stay tightly scoped — implement only what is asked for. Report anything surprising you discover as observations.'.
+    r ppCommands: #(
+      'pp observe <identity> <detail>   — report something unexpected you found'
+      'pp read <category> [scope] [id]  — read from the knowledge base'
+      'pp dismiss                       — signal that implementation is complete'
+    ).
+
+    hard := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'decision'.
+    hard := hard copyWith: h.
+
+    soft := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'convention'.
+    soft := soft copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'fact'.
+    soft := soft copyWith: h.
+
+    constraints := Dictionary new.
+    constraints at: 'hard' put: hard.
+    constraints at: 'soft' put: soft.
+    constraints at: 'budget' put: 40.
+    r contextConstraints: constraints.
+    ^r
+  ]
+
+  method: completionInstructions [
+    ^'When your implementation is complete:
+1. Ensure all code changes are saved
+2. Run: pp observe implementation-complete "Implemented <brief summary of what you did>"
+3. Run: pp dismiss'
+  ]

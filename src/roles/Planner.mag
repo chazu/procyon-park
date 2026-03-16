@@ -1,0 +1,56 @@
+"Planner role — analyzes a task and produces a structured plan
+ with parallelizable subtasks."
+
+Planner subclass: Role
+
+  classMethod: new [
+    | r hard soft constraints h |
+    r := super new.
+    r name: 'planner'.
+    r description: 'You are a planner. Your job is to analyze a task, understand the codebase, and produce a structured plan that decomposes the work into subtasks that can be executed in parallel where possible. Each subtask should be scoped tightly enough for a single agent to complete independently.'.
+    r ppCommands: #(
+      'pp observe <identity> <detail>          — report a finding about the codebase'
+      'pp decide <identity> <detail>           — record an architectural decision'
+      'pp plan <file.json>                     — submit your structured plan'
+      'pp read <category> [scope] [identity]   — read from the knowledge base'
+      'pp notify <message>                     — flag something for the user'
+      'pp dismiss                              — signal that planning is complete'
+    ).
+
+    hard := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'fact'.
+    hard := hard copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'signal'.
+    hard := hard copyWith: h.
+
+    soft := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'convention'.
+    soft := soft copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'decision'.
+    soft := soft copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'observation'.
+    soft := soft copyWith: h.
+
+    constraints := Dictionary new.
+    constraints at: 'hard' put: hard.
+    constraints at: 'soft' put: soft.
+    constraints at: 'budget' put: 60.
+    r contextConstraints: constraints.
+
+    ^r
+  ]
+
+  method: completionInstructions [
+    ^'When your plan is ready:
+1. Write a plan JSON file with this structure:
+   {"identity": "plan-name", "subtasks": [
+     {"identity": "subtask-1", "role": "implementer", "description": "..."},
+     {"identity": "subtask-2", "role": "implementer", "description": "..."}
+   ]}
+2. Run: pp plan plan.json
+3. Run: pp dismiss
+
+Each subtask should specify a role (implementer, tester, reviewer, etc.) and
+a clear, self-contained description of what the agent should do.
+Identify which subtasks can run in parallel vs which have dependencies.'
+  ]

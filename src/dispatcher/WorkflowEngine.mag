@@ -1,0 +1,237 @@
+"Workflow engine — Petri net execution over the tuplespace.
+ Instantiates workflows from templates and advances token positions."
+
+WorkflowEngine subclass: Object
+  instanceVars: bbs cueCtx
+
+  classMethod: on: aBBS [
+    ^super new initBBS: aBBS
+  ]
+
+  method: initBBS: aBBS [
+    bbs := aBBS.
+    cueCtx := CueContext new
+  ]
+
+  "--- Workflow Instantiation ---"
+
+  method: instantiate: templateIdentity scope: scope params: params [
+    "Create a workflow instance from a template.
+     1. Read template from BBS
+     2. Write workflow tuple with status running
+     3. Write initial tokens at start places
+     Returns the workflow instance ID."
+
+    | template instanceId workflowPayload templatePayload startPlaces |
+
+    "Read the template"
+    template := bbs rdp: 'template' scope: 'system' identity: templateIdentity.
+    template isNil ifTrue: [Error signal: 'Template not found: ', templateIdentity].
+
+    "Generate instance ID"
+    instanceId := templateIdentity, '-', DateTime now epochSeconds printString.
+
+    "Write workflow instance tuple"
+    workflowPayload := Dictionary new.
+    workflowPayload at: 'template' put: templateIdentity.
+    workflowPayload at: 'status' put: 'running'.
+    workflowPayload at: 'params' put: params.
+    workflowPayload at: 'scope' put: scope.
+    workflowPayload at: 'started_at' put: DateTime now epochSeconds.
+
+    bbs out: 'workflow' scope: scope identity: instanceId payload: workflowPayload.
+
+    "Write initial tokens at start places"
+    templatePayload := template at: 'payload'.
+    startPlaces := templatePayload at: 'start_places'.
+
+    startPlaces do: [:place |
+      | tokenPayload |
+      tokenPayload := Dictionary new.
+      tokenPayload at: 'workflow_instance' put: instanceId.
+      tokenPayload at: 'place' put: place.
+      tokenPayload at: 'status' put: 'positive'.
+      tokenPayload at: 'transition_id' put: ''.
+      tokenPayload at: 'modality' put: 'linear'.
+      bbs out: 'token' scope: scope identity: instanceId, ':token:', place payload: tokenPayload
+    ].
+
+    ('Workflow instantiated: ', instanceId) println.
+    ^instanceId
+  ]
+
+  "--- Workflow Advancement ---"
+
+  method: advance [
+    "The core Petri net step. Scan tokens, find enabled transitions, fire them."
+
+    | workflows |
+    workflows := bbs scanAll: 'workflow'.
+
+    workflows do: [:wf |
+      | wfPayload status |
+      wfPayload := wf at: 'payload'.
+      status := wfPayload at: 'status'.
+      status = 'running' ifTrue: [
+        self advanceInstance: wf
+      ]
+    ]
+  ]
+
+  method: advanceInstance: wf [
+    "Advance a single workflow instance."
+    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal |
+
+    instanceId := wf at: 'identity'.
+    scope := wf at: 'scope'.
+    wfPayload := wf at: 'payload'.
+    templateId := wfPayload at: 'template'.
+
+    "Read the template for transition definitions"
+    template := bbs rdp: 'template' scope: 'system' identity: templateId.
+    template isNil ifTrue: [^self]. "Template missing — skip"
+
+    templatePayload := template at: 'payload'.
+    transitions := templatePayload at: 'transitions'.
+
+    "Scan all tokens for this instance"
+    allTokens := bbs scanAll: 'token'.
+    instanceTokens := allTokens select: [:t |
+      (t at: 'payload') at: 'workflow_instance' ifAbsent: [''] = instanceId
+        and: [(t at: 'payload') at: 'status' ifAbsent: [''] = 'positive']
+    ].
+
+    "Collect current token places"
+    tokenPlaces := instanceTokens collect: [:t | (t at: 'payload') at: 'place'].
+
+    "Check for completion: all tokens in terminal places"
+    terminalPlaces := templatePayload at: 'terminal_places'.
+    allTerminal := tokenPlaces size > 0 and: [
+      tokenPlaces detect: [:p | (terminalPlaces includes: p) not] ifNone: [nil].
+      (tokenPlaces reject: [:p | terminalPlaces includes: p]) isEmpty
+    ].
+
+    allTerminal ifTrue: [
+      self completeWorkflow: wf.
+      ^self
+    ].
+
+    "Check each transition for enabled-ness"
+    transitions do: [:tr |
+      self tryFireTransition: tr instance: instanceId scope: scope params: (wfPayload at: 'params' ifAbsent: [Dictionary new]) tokenPlaces: tokenPlaces
+    ]
+  ]
+
+  method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces [
+    "Try to fire a single transition. Checks input places, preconditions, then fires."
+
+    | inPlaces outPlaces preconditions role taskPayload |
+    inPlaces := transition at: 'in'.
+    outPlaces := transition at: 'out'.
+
+    "Check all input places have tokens"
+    (inPlaces detect: [:p | (tokenPlaces includes: p) not] ifNone: [nil]) notNil ifTrue: [^self].
+
+    "Check preconditions (if any)"
+    preconditions := transition at: 'preconditions' ifAbsent: [#()].
+    preconditions do: [:pre |
+      (self checkPrecondition: pre scope: scope params: params) ifFalse: [^self]
+    ].
+
+    "Fire! Consume input tokens, produce output tokens"
+    ('  Firing transition: ', (transition at: 'id')) println.
+
+    "Consume input tokens"
+    inPlaces do: [:place |
+      bbs inp: 'token' scope: scope identity: instanceId, ':token:', place
+    ].
+
+    "Produce output tokens"
+    outPlaces do: [:place |
+      | tokenPayload |
+      tokenPayload := Dictionary new.
+      tokenPayload at: 'workflow_instance' put: instanceId.
+      tokenPayload at: 'place' put: place.
+      tokenPayload at: 'status' put: 'positive'.
+      tokenPayload at: 'transition_id' put: (transition at: 'id').
+      tokenPayload at: 'modality' put: 'linear'.
+      bbs out: 'token' scope: scope identity: instanceId, ':token:', place payload: tokenPayload
+    ].
+
+    "If transition has a role, write a task tuple"
+    role := transition at: 'role' ifAbsent: [nil].
+    role notNil ifTrue: [
+      taskPayload := Dictionary new.
+      taskPayload at: 'role' put: role.
+      taskPayload at: 'status' put: 'pending'.
+      taskPayload at: 'description' put: (transition at: 'description' ifAbsent: ['']).
+      taskPayload at: 'workflow_instance' put: instanceId.
+      taskPayload at: 'transition_id' put: (transition at: 'id').
+      bbs out: 'task' scope: scope identity: instanceId, ':task:', (transition at: 'id') payload: taskPayload
+    ]
+  ]
+
+  "--- Precondition Checking ---"
+
+  method: checkPrecondition: pre scope: scope params: params [
+    "Check a single precondition: existence + optional CUE constraint."
+    | category preScope preIdentity tuple constraint |
+
+    category := pre at: 'category'.
+    preScope := self resolveParams: (pre at: 'scope' ifAbsent: [scope]) with: params.
+    preIdentity := self resolveParams: (pre at: 'identity') with: params.
+
+    "Existence check"
+    tuple := bbs rdp: category scope: preScope identity: preIdentity.
+    tuple isNil ifTrue: [^false].
+
+    "CUE constraint check (if specified)"
+    constraint := pre at: 'constraint' ifAbsent: [nil].
+    constraint isNil ifTrue: [^true].
+
+    ^self evaluateConstraint: constraint against: (tuple at: 'payload')
+  ]
+
+  method: evaluateConstraint: constraintSrc against: payload [
+    "Evaluate a CUE constraint string against a payload Dictionary."
+    | constraintVal payloadJson payloadVal unified |
+    constraintVal := (cueCtx compileString: constraintSrc) value.
+    payloadJson := Json encode: payload.
+    payloadVal := (cueCtx compileString: payloadJson) value.
+    unified := payloadVal unify: constraintVal.
+    ^unified error isNil
+  ]
+
+  method: resolveParams: template with: params [
+    "Simple {{param}} interpolation."
+    | result |
+    result := template.
+    params keysAndValuesDo: [:k :v |
+      result := result replaceAll: '{{', k, '}}' with: v printString
+    ].
+    ^result
+  ]
+
+  "--- Workflow Completion ---"
+
+  method: completeWorkflow: wf [
+    "Mark a workflow as complete, emit events, notify user."
+    | instanceId scope payload |
+    instanceId := wf at: 'identity'.
+    scope := wf at: 'scope'.
+
+    ('Workflow complete: ', instanceId) println.
+
+    "Consume the workflow tuple and rewrite with completed status"
+    bbs inp: 'workflow' scope: scope identity: instanceId.
+    payload := wf at: 'payload'.
+    payload at: 'status' put: 'completed'.
+    payload at: 'completed_at' put: DateTime now epochSeconds.
+    bbs out: 'workflow' scope: scope identity: instanceId payload: payload.
+
+    "Emit completion event"
+    bbs emitEvent: scope identity: 'workflow-complete:', instanceId type: 'workflow-complete' summary: 'Workflow completed: ', instanceId.
+
+    "Notify user"
+    bbs notify: 'Workflow completed: ', instanceId scope: scope severity: 'info'
+  ]

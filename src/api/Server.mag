@@ -1,0 +1,344 @@
+"HTTP API server for Procyon Park.
+ Exposes the BBS tuplespace over HTTP as JSON endpoints."
+
+ApiServer subclass: Object
+  instanceVars: httpServer bbs port
+
+  classMethod: on: portNumber bbs: aBBS [
+    ^super new initPort: portNumber bbs: aBBS
+  ]
+
+  method: initPort: portNumber bbs: aBBS [
+    port := portNumber.
+    bbs := aBBS.
+    httpServer := HttpServer new: port.
+    self registerRoutes
+  ]
+
+  method: bbs [ ^bbs ]
+
+  method: start [
+    ('Procyon Park API starting on port ', port printString) println.
+    httpServer start
+  ]
+
+  method: stop [
+    httpServer stop
+  ]
+
+  "--- Route Registration ---"
+
+  method: registerRoutes [
+    "Health"
+    httpServer route: '/api/health' method: 'GET' handler: [:req | self handleHealth: req].
+
+    "Core tuplespace operations"
+    httpServer route: '/api/out' method: 'POST' handler: [:req | self handleOut: req].
+    httpServer route: '/api/inp' method: 'POST' handler: [:req | self handleInp: req].
+    httpServer route: '/api/rdp' method: 'POST' handler: [:req | self handleRdp: req].
+    httpServer route: '/api/scan' method: 'POST' handler: [:req | self handleScan: req].
+
+    "Convenience endpoints"
+    httpServer route: '/api/observe' method: 'POST' handler: [:req | self handleObserve: req].
+    httpServer route: '/api/decide' method: 'POST' handler: [:req | self handleDecide: req].
+    httpServer route: '/api/event' method: 'POST' handler: [:req | self handleEvent: req].
+    httpServer route: '/api/notify' method: 'POST' handler: [:req | self handleNotify: req].
+    httpServer route: '/api/dismiss' method: 'POST' handler: [:req | self handleDismiss: req].
+    httpServer route: '/api/notifications' method: 'GET' handler: [:req | self handleNotifications: req].
+    httpServer route: '/api/plan' method: 'POST' handler: [:req | self handlePlan: req]
+  ]
+
+  "--- Helpers ---"
+
+  method: jsonResponse: statusCode body: dict [
+    | resp |
+    resp := HttpResponse new: statusCode body: (Json encode: dict).
+    resp contentType: 'application/json'.
+    ^resp
+  ]
+
+  method: okResponse: dict [
+    ^self jsonResponse: 200 body: dict
+  ]
+
+  method: errorResponse: statusCode message: msg [
+    | d |
+    d := Dictionary new.
+    d at: 'error' put: msg.
+    ^self jsonResponse: statusCode body: d
+  ]
+
+  method: parseBody: req [
+    "Parse JSON request body into a Dictionary. Returns nil on parse failure."
+    | result |
+    result := nil.
+    [result := Json decode: req body] on: Exception do: [:e | result := nil].
+    ^result
+  ]
+
+  method: requireFields: fields in: dict [
+    "Check that all required fields are present. Returns error message or nil."
+    fields do: [:f |
+      (dict includesKey: f) ifFalse: [
+        ^'Missing required field: ', f
+      ]
+    ].
+    ^nil
+  ]
+
+  method: makeResult: key value: val [
+    | d |
+    d := Dictionary new.
+    d at: key put: val.
+    ^d
+  ]
+
+  method: okStatus [
+    | d |
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    ^d
+  ]
+
+  method: okWithId: anId [
+    | d |
+    d := Dictionary new.
+    d at: 'id' put: anId.
+    d at: 'status' put: 'ok'.
+    ^d
+  ]
+
+  "--- Health ---"
+
+  method: handleHealth: req [
+    | d |
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'tuples' put: bbs size.
+    d at: 'uptime' put: bbs uptime.
+    ^self okResponse: d
+  ]
+
+  "--- Core Operations ---"
+
+  method: handleOut: req [
+    | body err id category payload pinned ttl |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('category' 'scope' 'identity') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    category := body at: 'category'.
+    (Categories isValid: category) ifFalse: [
+      ^self errorResponse: 400 message: 'Invalid category: ', category
+    ].
+
+    payload := body at: 'payload' ifAbsent: [Dictionary new].
+    pinned := body at: 'pinned' ifAbsent: [false].
+    ttl := body at: 'ttl' ifAbsent: [0].
+
+    pinned ifTrue: [
+      id := bbs outPinned: category scope: (body at: 'scope') identity: (body at: 'identity') payload: payload
+    ] ifFalse: [
+      ttl > 0
+        ifTrue: [
+          id := bbs outAffine: category scope: (body at: 'scope') identity: (body at: 'identity') payload: payload ttl: ttl
+        ]
+        ifFalse: [
+          id := bbs out: category scope: (body at: 'scope') identity: (body at: 'identity') payload: payload
+        ]
+    ].
+
+    ^self okResponse: (self okWithId: id)
+  ]
+
+  method: handleInp: req [
+    | body err tuple d |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('category' 'scope' 'identity') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    tuple := bbs inp: (body at: 'category') scope: (body at: 'scope') identity: (body at: 'identity').
+    d := Dictionary new.
+    d at: 'tuple' put: tuple.
+    ^self okResponse: d
+  ]
+
+  method: handleRdp: req [
+    | body err tuple d |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('category' 'scope' 'identity') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    tuple := bbs rdp: (body at: 'category') scope: (body at: 'scope') identity: (body at: 'identity').
+    d := Dictionary new.
+    d at: 'tuple' put: tuple.
+    ^self okResponse: d
+  ]
+
+  method: handleScan: req [
+    | body err tuples d |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('category') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    (body includesKey: 'scope')
+      ifTrue: [tuples := bbs scan: (body at: 'category') scope: (body at: 'scope')]
+      ifFalse: [tuples := bbs scanAll: (body at: 'category')].
+
+    d := Dictionary new.
+    d at: 'tuples' put: tuples.
+    d at: 'count' put: tuples size.
+    ^self okResponse: d
+  ]
+
+  "--- Convenience Endpoints ---"
+
+  method: handleObserve: req [
+    | body err id |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('scope' 'identity' 'detail') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    id := bbs observe: (body at: 'scope')
+               identity: (body at: 'identity')
+               detail: (body at: 'detail')
+               tags: (body at: 'tags' ifAbsent: [#()])
+               task: (body at: 'task' ifAbsent: ['']).
+
+    ^self okResponse: (self okWithId: id)
+  ]
+
+  method: handleDecide: req [
+    | body err id |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('scope' 'identity' 'detail') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    id := bbs decide: (body at: 'scope')
+               identity: (body at: 'identity')
+               detail: (body at: 'detail')
+               rationale: (body at: 'rationale' ifAbsent: [''])
+               task: (body at: 'task' ifAbsent: ['']).
+
+    ^self okResponse: (self okWithId: id)
+  ]
+
+  method: handleEvent: req [
+    | body err id |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('scope' 'identity') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    id := bbs emitEvent: (body at: 'scope')
+                identity: (body at: 'identity')
+                type: (body at: 'type' ifAbsent: ['generic'])
+                summary: (body at: 'summary' ifAbsent: ['']).
+
+    ^self okResponse: (self okWithId: id)
+  ]
+
+  method: handleNotify: req [
+    | body err id |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('message') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    id := bbs notify: (body at: 'message')
+               scope: (body at: 'scope' ifAbsent: ['system'])
+               severity: (body at: 'severity' ifAbsent: ['info']).
+
+    ^self okResponse: (self okWithId: id)
+  ]
+
+  method: handleDismiss: req [
+    | body err d |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('task_id' 'scope') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    "Emit a task-complete event"
+    bbs emitEvent: (body at: 'scope')
+        identity: 'task-complete:', (body at: 'task_id')
+        type: 'task-complete'
+        summary: 'Agent dismissed'.
+
+    "Notify the user"
+    bbs notify: 'Agent completed task: ', (body at: 'task_id')
+        scope: (body at: 'scope')
+        severity: 'info'.
+
+    d := Dictionary new.
+    d at: 'status' put: 'dismissed'.
+    ^self okResponse: d
+  ]
+
+  method: handleNotifications: req [
+    | since notifications filtered d |
+    since := req queryParam: 'since'.
+    since isNil ifTrue: [since := 0] ifFalse: [since := since asInteger].
+
+    notifications := bbs scanAll: 'notification'.
+    filtered := notifications select: [:n |
+      (n at: 'created_at' ifAbsent: [0]) >= since
+    ].
+
+    d := Dictionary new.
+    d at: 'notifications' put: filtered.
+    d at: 'count' put: filtered size.
+    ^self okResponse: d
+  ]
+
+  method: handlePlan: req [
+    | body err scope identity subtasks planPayload d |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('scope' 'identity' 'subtasks') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    scope := body at: 'scope'.
+    identity := body at: 'identity'.
+    subtasks := body at: 'subtasks'.
+
+    "Record the plan as a decision"
+    planPayload := Dictionary new.
+    planPayload at: 'detail' put: 'Plan: ', identity.
+    planPayload at: 'subtasks' put: subtasks.
+    planPayload at: 'task' put: (body at: 'task' ifAbsent: ['']).
+    bbs outPinned: 'decision' scope: scope identity: 'plan:', identity payload: planPayload.
+
+    "Create a task tuple for each subtask"
+    subtasks do: [:st |
+      | taskPayload |
+      taskPayload := Dictionary new.
+      taskPayload at: 'role' put: (st at: 'role' ifAbsent: ['implementer']).
+      taskPayload at: 'status' put: 'pending'.
+      taskPayload at: 'description' put: (st at: 'description' ifAbsent: ['']).
+      taskPayload at: 'plan' put: identity.
+      bbs out: 'task' scope: scope identity: (st at: 'identity') payload: taskPayload
+    ].
+
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'plan_id' put: identity.
+    d at: 'tasks_created' put: subtasks size.
+    ^self okResponse: d
+  ]

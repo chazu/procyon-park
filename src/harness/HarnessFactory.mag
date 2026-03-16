@@ -1,0 +1,31 @@
+"Factory for creating harness instances based on role names."
+
+HarnessFactory subclass: Object
+  instanceVars: roles
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: initialize [
+    roles := Dictionary new.
+    roles at: 'scout' put: Scout new.
+    roles at: 'planner' put: Planner new.
+    roles at: 'implementer' put: Implementer new.
+    roles at: 'reviewer' put: Reviewer new.
+    roles at: 'tester' put: Tester new.
+    roles at: 'fixer' put: Fixer new
+  ]
+
+  method: roleFor: roleName [
+    ^roles at: roleName ifAbsent: [
+      Error signal: 'Unknown role: ', roleName
+    ]
+  ]
+
+  method: createFor: roleName task: taskId scope: scope bbs: bbs [
+    "Create a ClaudeHarness instance for the given role and task."
+    | role |
+    role := self roleFor: roleName.
+    ^ClaudeHarness new initRole: role task: taskId scope: scope bbs: bbs
+  ]

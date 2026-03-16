@@ -1,0 +1,100 @@
+"Task dispatcher — matches pending tasks to available agent slots
+ and spawns harness processes."
+
+TaskDispatcher subclass: Object
+  instanceVars: bbs maxSlots activeSlots harnessFactory mutex
+
+  classMethod: on: aBBS maxSlots: max harnessFactory: factory [
+    ^super new initBBS: aBBS maxSlots: max harnessFactory: factory
+  ]
+
+  method: initBBS: aBBS maxSlots: max harnessFactory: factory [
+    bbs := aBBS.
+    maxSlots := max.
+    activeSlots := Dictionary new.
+    harnessFactory := factory.
+    mutex := Mutex new
+  ]
+
+  method: activeCount [
+    ^activeSlots size
+  ]
+
+  method: availableSlots [
+    ^maxSlots - self activeCount
+  ]
+
+  method: dispatch [
+    "Scan for pending tasks and dispatch them to available slots."
+    | pendingTasks count |
+    self availableSlots <= 0 ifTrue: [^self].
+
+    pendingTasks := bbs scanAll: 'task'.
+    pendingTasks := pendingTasks select: [:t |
+      (t at: 'payload') at: 'status' ifAbsent: [''] = 'pending'
+    ].
+
+    pendingTasks isEmpty ifTrue: [^self].
+
+    "Sort by creation time (oldest first)"
+    pendingTasks := pendingTasks sorted: [:a :b |
+      (a at: 'created_at' ifAbsent: [0]) < (b at: 'created_at' ifAbsent: [0])
+    ].
+
+    "Dispatch as many as we have slots for"
+    count := pendingTasks size min: self availableSlots.
+
+    1 to: count do: [:i |
+      | task |
+      task := pendingTasks at: i - 1.
+      self dispatchTask: task
+    ]
+  ]
+
+  method: dispatchTask: task [
+    "Claim a task and spawn a harness process for it."
+    | taskId scope payload role harness |
+    taskId := task at: 'identity'.
+    scope := task at: 'scope'.
+    payload := task at: 'payload'.
+    role := payload at: 'role'.
+
+    "Claim: consume and rewrite with status dispatched"
+    bbs inp: 'task' scope: scope identity: taskId.
+    payload at: 'status' put: 'dispatched'.
+    payload at: 'dispatched_at' put: DateTime now epochSeconds.
+    bbs out: 'task' scope: scope identity: taskId payload: payload.
+
+    ('Dispatching task: ', taskId, ' (role: ', role, ')') println.
+
+    "Spawn harness in a forked process"
+    harness := harnessFactory createFor: role task: taskId scope: scope bbs: bbs.
+
+    [
+      [harness run] on: Exception do: [:e |
+        ('Task failed: ', taskId, ' - ', e messageText) println.
+        bbs emitEvent: scope
+            identity: 'task-failed:', taskId
+            type: 'task-failed'
+            summary: e messageText
+      ].
+      "Clean up slot"
+      mutex critical: [activeSlots removeKey: taskId ifAbsent: [nil]]
+    ] fork.
+
+    mutex critical: [activeSlots at: taskId put: harness]
+  ]
+
+  method: checkCompleted [
+    "Check for task-complete events and free slots."
+    | events |
+    events := bbs scanAll: 'event'.
+    events do: [:evt |
+      | evtIdentity taskId |
+      evtIdentity := evt at: 'identity'.
+      (evtIdentity startsWith: 'task-complete:') ifTrue: [
+        taskId := evtIdentity copyFrom: 'task-complete:' size.
+        mutex critical: [activeSlots removeKey: taskId ifAbsent: [nil]]
+      ]
+    ]
+  ]

@@ -1,0 +1,219 @@
+"The BBS (Bulletin Board System) — a tuplespace wrapper providing typed
+ operations for the Procyon Park coordination fabric.
+
+ Uses a dual storage strategy:
+   - TupleSpace for CUE-based blocking operations (in:, rd:)
+   - An Array-based index for non-blocking scan operations
+ This avoids the drain-and-restore antipattern which deadlocks on
+ persistent tuples."
+
+BBS subclass: Object
+  instanceVars: space nextId mutex cueCtx startedAt index
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: initialize [
+    space := TupleSpace new.
+    nextId := 0.
+    mutex := Mutex new.
+    cueCtx := CueContext new.
+    startedAt := DateTime now.
+    index := Array new: 0
+  ]
+
+  method: startedAt [ ^startedAt ]
+
+  "--- ID Generation ---"
+
+  method: assignId [
+    | id |
+    mutex critical: [
+      nextId := nextId + 1.
+      id := nextId
+    ].
+    ^id
+  ]
+
+  "--- Template Construction ---"
+
+  method: templateFor: category scope: scope identity: identity [
+    | cue ctx |
+    cue := '{category: "', category, '", scope: "', scope, '", identity: "', identity, '"}'.
+    ctx := CueContext new.
+    ^(ctx compileString: cue) value
+  ]
+
+  "--- Core Write Operations ---"
+
+  method: buildTuple: category scope: scope identity: identity payload: payload [
+    | d |
+    d := Dictionary new.
+    d at: 'id' put: self assignId.
+    d at: 'category' put: category.
+    d at: 'scope' put: scope.
+    d at: 'identity' put: identity.
+    d at: 'payload' put: payload.
+    d at: 'created_at' put: DateTime now epochSeconds.
+    ^d
+  ]
+
+  method: out: category scope: scope identity: identity payload: payload [
+    | d |
+    Categories validate: category.
+    d := self buildTuple: category scope: scope identity: identity payload: payload.
+    d at: 'pinned' put: false.
+    d at: 'modality' put: 'linear'.
+    space out: d.
+    mutex critical: [index := index copyWith: d].
+    ^d at: 'id'
+  ]
+
+  method: outPinned: category scope: scope identity: identity payload: payload [
+    | d |
+    Categories validate: category.
+    d := self buildTuple: category scope: scope identity: identity payload: payload.
+    d at: 'pinned' put: true.
+    d at: 'modality' put: 'persistent'.
+    space outPersistent: d.
+    mutex critical: [index := index copyWith: d].
+    ^d at: 'id'
+  ]
+
+  method: outAffine: category scope: scope identity: identity payload: payload ttl: ttlSeconds [
+    | d |
+    Categories validate: category.
+    d := self buildTuple: category scope: scope identity: identity payload: payload.
+    d at: 'pinned' put: false.
+    d at: 'modality' put: 'affine'.
+    d at: 'ttl' put: ttlSeconds.
+    space outAffine: d ttl: ttlSeconds.
+    mutex critical: [index := index copyWith: d].
+    ^d at: 'id'
+  ]
+
+  "--- Core Read/Consume Operations ---"
+
+  method: inp: category scope: scope identity: identity [
+    "Non-blocking consume. Returns the matched Dictionary or nil.
+     Also removes from the index."
+    | tmpl result |
+    tmpl := self templateFor: category scope: scope identity: identity.
+    result := space tryIn: tmpl.
+    result notNil ifTrue: [self removeFromIndex: result].
+    ^result
+  ]
+
+  method: in: category scope: scope identity: identity [
+    "Blocking consume. Suspends until a match is found."
+    | tmpl result |
+    tmpl := self templateFor: category scope: scope identity: identity.
+    result := space in: tmpl.
+    result notNil ifTrue: [self removeFromIndex: result].
+    ^result
+  ]
+
+  method: rdp: category scope: scope identity: identity [
+    "Non-blocking read (no consume). Returns the matched Dictionary or nil."
+    | tmpl |
+    tmpl := self templateFor: category scope: scope identity: identity.
+    ^space tryRead: tmpl
+  ]
+
+  method: rd: category scope: scope identity: identity [
+    "Blocking read (no consume)."
+    | tmpl |
+    tmpl := self templateFor: category scope: scope identity: identity.
+    ^space read: tmpl
+  ]
+
+  "--- Scan Operations (index-based, no drain-and-restore) ---"
+
+  method: scan: category scope: scope [
+    "Return all tuples matching category + scope."
+    ^mutex critical: [
+      index select: [:t |
+        (t at: 'category') = category and: [(t at: 'scope') = scope]
+      ]
+    ]
+  ]
+
+  method: scanAll: category [
+    "Return all tuples in a category (any scope)."
+    ^mutex critical: [
+      index select: [:t | (t at: 'category') = category]
+    ]
+  ]
+
+  "--- Index Management ---"
+
+  method: removeFromIndex: tuple [
+    | tupleId |
+    tupleId := tuple at: 'id'.
+    mutex critical: [
+      index := index reject: [:t | (t at: 'id') = tupleId]
+    ]
+  ]
+
+  "--- Signal Operations ---"
+
+  method: upsertSignal: scope identity: identity payload: payload [
+    self inp: 'signal' scope: scope identity: identity.
+    ^self outPinned: 'signal' scope: scope identity: identity payload: payload
+  ]
+
+  "--- Convenience Operations ---"
+
+  method: observe: scope identity: identity detail: detail [
+    ^self observe: scope identity: identity detail: detail tags: #() task: ''
+  ]
+
+  method: observe: scope identity: identity detail: detail tags: tags task: taskId [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'detail' put: detail.
+    payload at: 'tags' put: tags.
+    taskId isEmpty ifFalse: [payload at: 'task' put: taskId].
+    ^self out: 'observation' scope: scope identity: identity payload: payload
+  ]
+
+  method: decide: scope identity: identity detail: detail rationale: rationale task: taskId [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'detail' put: detail.
+    rationale isEmpty ifFalse: [payload at: 'rationale' put: rationale].
+    taskId isEmpty ifFalse: [payload at: 'task' put: taskId].
+    ^self outPinned: 'decision' scope: scope identity: identity payload: payload
+  ]
+
+  method: emitEvent: scope identity: identity type: type summary: summary [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'type' put: type.
+    summary isEmpty ifFalse: [payload at: 'summary' put: summary].
+    ^self out: 'event' scope: scope identity: identity payload: payload
+  ]
+
+  method: notify: message scope: scope severity: severity [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'message' put: message.
+    payload at: 'severity' put: severity.
+    payload at: 'read' put: false.
+    ^self out: 'notification' scope: scope identity: 'notify-', DateTime now epochSeconds printString payload: payload
+  ]
+
+  "--- Stats ---"
+
+  method: size [
+    ^mutex critical: [index size]
+  ]
+
+  method: uptime [
+    ^DateTime now epochSeconds - startedAt epochSeconds
+  ]
+
+  method: printString [
+    ^'BBS(', self size printString, ' tuples)'
+  ]

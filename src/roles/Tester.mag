@@ -1,0 +1,39 @@
+"Tester role — writes and runs tests based on the plan spec."
+
+Tester subclass: Role
+
+  classMethod: new [
+    | r hard soft constraints h |
+    r := super new.
+    r name: 'tester'.
+    r description: 'You are a tester. Your job is to write and run tests for a feature based on its specification. Test from the spec, not the implementation — you are verifying that the code does what it should, not how it does it. Report any test failures as observations.'.
+    r ppCommands: #(
+      'pp observe <identity> <detail>           — report a test failure or issue'
+      'pp read <category> [scope] [identity]    — read from the knowledge base'
+      'pp dismiss                               — signal that testing is complete'
+    ).
+
+    hard := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'decision'.
+    hard := hard copyWith: h.
+
+    soft := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'convention'.
+    soft := soft copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'fact'.
+    soft := soft copyWith: h.
+
+    constraints := Dictionary new.
+    constraints at: 'hard' put: hard.
+    constraints at: 'soft' put: soft.
+    constraints at: 'budget' put: 30.
+    r contextConstraints: constraints.
+    ^r
+  ]
+
+  method: completionInstructions [
+    ^'When testing is complete:
+1. For each test failure, run: pp observe test-failure-N "<test name>: <failure description>"
+2. If all tests pass: pp observe test-results "All tests passing"
+3. Run: pp dismiss'
+  ]

@@ -1,0 +1,170 @@
+"Reactive rule engine — evaluates standing rules against the tuplespace.
+ MVP: simple iteration, no indexing. Rules are pinned tuples in the BBS."
+
+RuleEngine subclass: Object
+  instanceVars: bbs cueCtx lastFired
+
+  classMethod: on: aBBS [
+    ^super new initBBS: aBBS
+  ]
+
+  method: initBBS: aBBS [
+    bbs := aBBS.
+    cueCtx := CueContext new.
+    lastFired := Dictionary new
+  ]
+
+  method: evaluate [
+    "Scan all active rules and try to fire each one."
+    | rules |
+    rules := bbs scanAll: 'rule'.
+
+    rules do: [:rule |
+      | payload status |
+      payload := rule at: 'payload'.
+      status := payload at: 'status' ifAbsent: ['active'].
+      status = 'active' ifTrue: [
+        self tryFire: rule
+      ]
+    ]
+  ]
+
+  method: tryFire: rule [
+    "Try to fire a single rule. Check cooldown, match consumes and requires, then fire."
+    | ruleIdentity payload cooldown lastTime now consumes consumeMatches allMatched requires selected scopeMatch scopes |
+    ruleIdentity := rule at: 'identity'.
+    payload := rule at: 'payload'.
+
+    "Check cooldown"
+    cooldown := payload at: 'cooldown_seconds' ifAbsent: [0].
+    now := DateTime now epochSeconds.
+    lastTime := lastFired at: ruleIdentity ifAbsent: [0].
+    (now - lastTime) < cooldown ifTrue: [^self].
+
+    "Match consumes patterns"
+    consumes := payload at: 'consumes'.
+    consumeMatches := Array new: 0.
+    allMatched := true.
+
+    consumes do: [:pattern |
+      | matches |
+      matches := self findMatching: pattern.
+      matches isEmpty ifTrue: [allMatched := false].
+      consumeMatches := consumeMatches copyWith: matches
+    ].
+
+    allMatched ifFalse: [^self].
+
+    "Match requires patterns"
+    requires := payload at: 'requires' ifAbsent: [#()].
+    requires do: [:pattern |
+      | matches |
+      matches := self findMatching: pattern.
+      matches isEmpty ifTrue: [allMatched := false]
+    ].
+
+    allMatched ifFalse: [^self].
+
+    "Select one tuple per consume pattern (oldest first)"
+    selected := consumeMatches collect: [:matches | matches first].
+
+    "Scope match check"
+    scopeMatch := payload at: 'scope_match' ifAbsent: ['same'].
+    scopeMatch = 'same' ifTrue: [
+      scopes := (selected collect: [:t | t at: 'scope']) asSet.
+      scopes size > 1 ifTrue: [^self]
+    ].
+
+    "Fire!"
+    self fire: rule matches: selected.
+    lastFired at: ruleIdentity put: now
+  ]
+
+  method: findMatching: pattern [
+    "Find tuples matching a rule pattern (category + identity/identity_match)."
+    | category candidates identity identityMatch constraint |
+    category := pattern at: 'category'.
+    candidates := bbs scanAll: category.
+
+    "Filter by identity or identity_match"
+    identity := pattern at: 'identity' ifAbsent: [nil].
+    identityMatch := pattern at: 'identity_match' ifAbsent: [nil].
+
+    identity notNil ifTrue: [
+      candidates := candidates select: [:t | (t at: 'identity') = identity]
+    ].
+
+    identityMatch notNil ifTrue: [
+      candidates := candidates select: [:t |
+        self matchGlob: identityMatch against: (t at: 'identity')
+      ]
+    ].
+
+    "Filter by CUE constraint if specified"
+    constraint := pattern at: 'constraint' ifAbsent: [nil].
+    constraint notNil ifTrue: [
+      candidates := candidates select: [:t |
+        self evaluateConstraint: constraint against: (t at: 'payload')
+      ]
+    ].
+
+    ^candidates
+  ]
+
+  method: matchGlob: pattern against: value [
+    "Simple trailing-wildcard glob match. Supports 'foo:*' patterns."
+    (pattern endsWith: '*') ifTrue: [
+      | prefix |
+      prefix := pattern copyFrom: 0 to: pattern size - 2.
+      ^value startsWith: prefix
+    ].
+    ^pattern = value
+  ]
+
+  method: evaluateConstraint: constraintSrc against: payload [
+    "Evaluate a CUE constraint string against a payload."
+    | constraintVal payloadJson payloadVal unified |
+    [
+      constraintVal := (cueCtx compileString: constraintSrc) value.
+      payloadJson := Json encode: payload.
+      payloadVal := (cueCtx compileString: payloadJson) value.
+      unified := payloadVal unify: constraintVal.
+      ^unified error isNil
+    ] on: Exception do: [:e | ^false]
+  ]
+
+  method: fire: rule matches: consumed [
+    "Fire a rule: consume matched tuples, produce outputs."
+    | ruleIdentity payload scope produces |
+    ruleIdentity := rule at: 'identity'.
+    payload := rule at: 'payload'.
+    scope := consumed first at: 'scope'.
+
+    ('Rule fired: ', ruleIdentity) println.
+
+    "Consume matched tuples"
+    consumed do: [:t |
+      bbs inp: (t at: 'category') scope: (t at: 'scope') identity: (t at: 'identity')
+    ].
+
+    "Produce output tuples"
+    produces := payload at: 'produces' ifAbsent: [#()].
+    produces do: [:prod |
+      | prodCategory prodIdentity prodPayload prodScope |
+      prodCategory := prod at: 'category'.
+      prodIdentity := self resolveTemplate: (prod at: 'identity_template') scope: scope.
+      prodScope := prod at: 'scope' ifAbsent: [scope].
+      prodPayload := prod at: 'payload' ifAbsent: [Dictionary new].
+
+      bbs out: prodCategory scope: prodScope identity: prodIdentity payload: prodPayload
+    ]
+  ]
+
+  method: resolveTemplate: template scope: scope [
+    "Resolve {{timestamp}} and {{scope}} in identity templates."
+    | result |
+    result := template.
+    result := result replaceAll: '{{timestamp}}' with: DateTime now epochSeconds printString.
+    result := result replaceAll: '{{scope}}' with: scope.
+    ^result
+  ]

@@ -1,0 +1,68 @@
+"Claude Code harness — spawns a Claude CLI process with the appropriate
+ system prompt, environment, and tools for a given role and task."
+
+ClaudeHarness subclass: Object
+  instanceVars: role taskId scope bbs process systemPrompt workDir
+
+  method: initRole: aRole task: aTaskId scope: aScope bbs: aBBS [
+    role := aRole.
+    taskId := aTaskId.
+    scope := aScope.
+    bbs := aBBS.
+    workDir := File workingDirectory
+  ]
+
+  method: workDir: aPath [
+    workDir := aPath
+  ]
+
+  method: role [ ^role ]
+  method: taskId [ ^taskId ]
+
+  method: run [
+    "Assemble the system prompt, spawn Claude, wait for completion."
+
+    "Assemble context from BBS"
+    | contextTuples taskTuple taskDescription env result |
+    contextTuples := role assembleContext: bbs scope: scope taskId: taskId.
+
+    "Read the task description"
+    taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
+    taskDescription := taskTuple notNil
+      ifTrue: [(taskTuple at: 'payload') at: 'description' ifAbsent: ['No description']]
+      ifFalse: ['Task: ', taskId].
+
+    "Build the system prompt"
+    systemPrompt := role primeFor: taskDescription context: contextTuples.
+
+    "Spawn Claude"
+    ('Starting Claude harness for ', role name, ' task: ', taskId) println.
+
+    env := Dictionary new.
+    env at: 'PP_URL' put: 'http://localhost:7777'.
+    env at: 'PP_SCOPE' put: scope.
+    env at: 'PP_TASK' put: taskId.
+
+    process := ExternalProcess command: 'claude'.
+    process args: #(
+      '--system-prompt' systemPrompt
+      '--allowedTools' 'Bash,Read,Write,Edit,Glob,Grep'
+      '-p' taskDescription
+    ).
+    process env: env.
+    process dir: workDir.
+
+    result := process run.
+
+    "Check result"
+    process isSuccess ifTrue: [
+      ('Harness completed: ', taskId) println
+    ] ifFalse: [
+      ('Harness failed: ', taskId, ' (exit ', process exitCode printString, ')') println.
+      ('stderr: ', process stderr) println
+    ]
+  ]
+
+  method: printString [
+    ^'ClaudeHarness(', role name, ':', taskId, ')'
+  ]

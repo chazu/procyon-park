@@ -1,0 +1,147 @@
+"Procyon Park — Agent Orchestration System
+ Binary: pp
+ Usage: pp <command> [args...]"
+
+Main subclass: Object
+
+  classMethod: start [
+    | args cmd |
+    args := System args.
+
+    args isEmpty ifTrue: [
+      self printUsage.
+      ^self
+    ].
+
+    cmd := args at: 0.
+
+    "Server"
+    cmd = 'serve'   ifTrue: [^self startServer: (args copyFrom: 1)].
+
+    "Agent communication (thin HTTP client commands)"
+    cmd = 'observe' ifTrue: [^PP new runWith: args].
+    cmd = 'decide'  ifTrue: [^PP new runWith: args].
+    cmd = 'event'   ifTrue: [^PP new runWith: args].
+    cmd = 'plan'    ifTrue: [^PP new runWith: args].
+    cmd = 'read'    ifTrue: [^PP new runWith: args].
+    cmd = 'notify'  ifTrue: [^PP new runWith: args].
+    cmd = 'dismiss' ifTrue: [^PP new runWith: args].
+    cmd = 'status'  ifTrue: [^PP new runWith: args].
+    cmd = 'prime'   ifTrue: [^PP new runWith: args].
+
+    "Help"
+    cmd = 'help'    ifTrue: [^self printUsage].
+    cmd = '--help'  ifTrue: [^self printUsage].
+    cmd = '-h'      ifTrue: [^self printUsage].
+
+    "Version"
+    cmd = 'version' ifTrue: [^self printVersion].
+    cmd = '--version' ifTrue: [^self printVersion].
+
+    ('Unknown command: ', cmd) println.
+    '' println.
+    self printUsage
+  ]
+
+  classMethod: printVersion [
+    'pp v0.1.0 (Procyon Park)' println
+  ]
+
+  classMethod: printUsage [
+    'pp — Procyon Park Agent Orchestration' println.
+    '' println.
+    'Usage: pp <command> [args...]' println.
+    '' println.
+    'Server:' println.
+    '  serve [--port 7777]                            Start the Procyon Park server' println.
+    '' println.
+    'Agent Commands (talk to a running server):' println.
+    '  observe  <identity> <detail> [--tags t1,t2]    Report an observation' println.
+    '  decide   <identity> <detail> [--rationale ..]  Record a decision' println.
+    '  event    <identity> [--type T] [--summary S]   Emit an event' println.
+    '  plan     <file.json>                           Submit a structured plan' println.
+    '  read     <category> [scope] [identity]         Read tuples' println.
+    '  notify   <message> [--severity info|warn|urgent] Notify the user' println.
+    '  dismiss                                        Signal task completion' println.
+    '  status                                         Show system status' println.
+    '  prime [--role <role>]                           Output agent priming context' println.
+    '' println.
+    'Other:' println.
+    '  help, --help, -h                               Show this help' println.
+    '  version, --version                             Show version' println.
+    '' println.
+    'Environment:' println.
+    '  PP_URL    Server URL for agent commands (default: http://localhost:7777)' println.
+    '  PP_SCOPE  Default scope for agent commands (default: default)' println.
+    '  PP_TASK   Current task ID (set by harness when spawning agents)' println.
+    '  PP_PORT   Server port for pp serve (default: 7777)' println
+  ]
+
+  "--- Server ---"
+
+  classMethod: startServer: args [
+    | bbs api dispatcher harnessFactory port portStr |
+
+    'Procyon Park v0.1.0' println.
+    '===================' println.
+
+    "Parse --port flag"
+    port := 7777.
+    portStr := self flagValue: '--port' in: args.
+    portStr notNil ifTrue: [port := portStr asInteger].
+
+    "Initialize BBS"
+    bbs := BBS new.
+    'BBS initialized.' println.
+
+    "Seed system conventions"
+    self seedConventions: bbs.
+
+    "Initialize harness factory"
+    harnessFactory := HarnessFactory new.
+
+    "Initialize dispatcher"
+    dispatcher := Dispatcher on: bbs harnessFactory: harnessFactory.
+
+    "Initialize HTTP API"
+    api := ApiServer on: port bbs: bbs.
+
+    "Start dispatcher (runs in background process)"
+    dispatcher start.
+
+    "Start API server (blocks)"
+    api start.
+
+    "Reaching here means server stopped"
+    dispatcher stop
+  ]
+
+  classMethod: flagValue: flag in: args [
+    | idx |
+    idx := args indexOf: flag.
+    (idx >= 0 and: [idx < (args size - 1)])
+      ifTrue: [^args at: idx + 1]
+      ifFalse: [^nil]
+  ]
+
+  classMethod: seedConventions: bbs [
+    | payload |
+
+    payload := Dictionary new.
+    payload at: 'detail' put: 'All agent communication goes through the pp CLI tool. Do not attempt direct coordination between agents.'.
+    bbs outPinned: 'convention' scope: 'system' identity: 'communication' payload: payload.
+
+    payload := Dictionary new.
+    payload at: 'detail' put: 'Report unexpected findings as observations using pp observe. These may be promoted to facts if corroborated by multiple agents.'.
+    bbs outPinned: 'convention' scope: 'system' identity: 'observations' payload: payload.
+
+    payload := Dictionary new.
+    payload at: 'detail' put: 'When your task is done, always run pp dismiss to signal completion. This allows the system to advance workflows and free resources.'.
+    bbs outPinned: 'convention' scope: 'system' identity: 'completion' payload: payload.
+
+    payload := Dictionary new.
+    payload at: 'detail' put: 'Stay tightly scoped to your assigned task. Do not modify code outside your task boundary unless absolutely necessary.'.
+    bbs outPinned: 'convention' scope: 'system' identity: 'scope' payload: payload.
+
+    'System conventions seeded.' println
+  ]

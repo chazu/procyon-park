@@ -1,0 +1,45 @@
+"Scout role — on-demand research agent.
+ Explores a topic, writes findings to a document, asks to be dismissed."
+
+Scout subclass: Role
+
+  classMethod: new [
+    | r hard soft constraints h1 s1 s2 |
+    r := super new.
+    r name: 'scout'.
+    r description: 'You are a research scout. Your job is to deeply explore a topic, gather information from the codebase and any available sources, and write a clear, comprehensive document summarizing your findings. Once your document is complete, dismiss yourself.'.
+    r ppCommands: #(
+      'pp observe <identity> <detail>  — report something interesting you found'
+      'pp notify <message>             — flag something for the user''s attention'
+      'pp dismiss                      — signal that your research is complete'
+    ).
+
+    hard := Array new: 0.
+    h1 := Dictionary new.
+    h1 at: 'category' put: 'fact'.
+    hard := hard copyWith: h1.
+
+    soft := Array new: 0.
+    s1 := Dictionary new.
+    s1 at: 'category' put: 'convention'.
+    s2 := Dictionary new.
+    s2 at: 'category' put: 'signal'.
+    soft := soft copyWith: s1.
+    soft := soft copyWith: s2.
+
+    constraints := Dictionary new.
+    constraints at: 'hard' put: hard.
+    constraints at: 'soft' put: soft.
+    constraints at: 'budget' put: 30.
+    r contextConstraints: constraints.
+
+    ^r
+  ]
+
+  method: completionInstructions [
+    ^'When your research is complete:
+1. Write your findings to a document file in the working directory
+2. Run: pp observe research-complete "Wrote findings to <filename>"
+3. Run: pp notify "Scout research complete: <brief summary>"
+4. Run: pp dismiss'
+  ]

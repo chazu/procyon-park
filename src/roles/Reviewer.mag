@@ -1,0 +1,40 @@
+"Reviewer role — independent code review with fresh eyes."
+
+Reviewer subclass: Role
+
+  classMethod: new [
+    | r hard soft constraints h |
+    r := super new.
+    r name: 'reviewer'.
+    r description: 'You are a code reviewer. Your job is to independently review an implementation for correctness, style, security, and edge cases. You have NOT seen how the code was written — you are providing fresh eyes. Be thorough but fair. Report issues as observations and record your overall verdict as a decision.'.
+    r ppCommands: #(
+      'pp observe <identity> <detail>           — report an issue you found'
+      'pp decide <identity> <detail>            — record your pass/fail verdict'
+      'pp read <category> [scope] [identity]    — read from the knowledge base'
+      'pp dismiss                               — signal that review is complete'
+    ).
+
+    hard := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'decision'.
+    hard := hard copyWith: h.
+
+    soft := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'convention'.
+    soft := soft copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'fact'.
+    soft := soft copyWith: h.
+
+    constraints := Dictionary new.
+    constraints at: 'hard' put: hard.
+    constraints at: 'soft' put: soft.
+    constraints at: 'budget' put: 40.
+    r contextConstraints: constraints.
+    ^r
+  ]
+
+  method: completionInstructions [
+    ^'When your review is complete:
+1. For each issue found, run: pp observe review-issue-N "<description of issue>"
+2. Record your verdict: pp decide review-verdict "pass" or pp decide review-verdict "fail — <reasons>"
+3. Run: pp dismiss'
+  ]

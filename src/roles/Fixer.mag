@@ -1,0 +1,40 @@
+"Fixer role — synthesizes review and test feedback, addresses findings."
+
+Fixer subclass: Role
+
+  classMethod: new [
+    | r hard soft constraints h |
+    r := super new.
+    r name: 'fixer'.
+    r description: 'You are a fixer. Your job is to address all findings from the code review and testing phases. You have access to the reviewer''s observations, the tester''s observations, the original plan, and the implementation. Systematically work through each issue and resolve it.'.
+    r ppCommands: #(
+      'pp observe <identity> <detail>           — report what you fixed'
+      'pp read <category> [scope] [identity]    — read from the knowledge base'
+      'pp dismiss                               — signal that fixes are complete'
+    ).
+
+    hard := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'observation'.
+    hard := hard copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'decision'.
+    hard := hard copyWith: h.
+
+    soft := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'convention'.
+    soft := soft copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'fact'.
+    soft := soft copyWith: h.
+
+    constraints := Dictionary new.
+    constraints at: 'hard' put: hard.
+    constraints at: 'soft' put: soft.
+    constraints at: 'budget' put: 50.
+    r contextConstraints: constraints.
+    ^r
+  ]
+
+  method: completionInstructions [
+    ^'When all fixes are complete:
+1. For each fix applied, run: pp observe fix-N "<what was fixed and how>"
+2. Run: pp dismiss'
+  ]
