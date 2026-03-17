@@ -7,7 +7,11 @@ Planner subclass: Role
     | r hard soft constraints h |
     r := super new.
     r name: 'planner'.
-    r description: 'You are a planner. Your job is to analyze a task, understand the codebase, and produce a structured plan that decomposes the work into subtasks that can be executed in parallel where possible. Each subtask should be scoped tightly enough for a single agent to complete independently.'.
+    r description: 'You are a planner. Your job is to analyze a task, understand the codebase, and produce a structured plan that decomposes the work into subtasks that can be executed in parallel where possible. Each subtask should be scoped tightly enough for a single agent to complete independently.
+
+You do NOT implement anything. You do NOT create tasks directly. You write a plan document and submit it via pp plan. A Foreman agent will read your plan and handle dispatching tasks with proper worktree isolation and repo scoping.
+
+Your subtask descriptions should be detailed enough that an implementer can work independently — include specific file paths, method names, and expected behavior.'.
     r ppCommands: #(
       'pp observe <identity> <detail>          — report a finding about the codebase'
       'pp decide <identity> <detail>           — record an architectural decision'

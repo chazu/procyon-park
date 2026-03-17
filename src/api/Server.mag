@@ -365,6 +365,9 @@ ApiServer subclass: Object
   ]
 
   method: handlePlan: req [
+    "Record a plan as a pinned decision. Does NOT create task tuples —
+     the Foreman reads the plan decision and dispatches tasks with proper
+     repo scoping and worktree isolation."
     | body err scope identity subtasks planPayload d |
     body := self parseBody: req.
     body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
@@ -376,28 +379,17 @@ ApiServer subclass: Object
     identity := body at: 'identity'.
     subtasks := body at: 'subtasks'.
 
-    "Record the plan as a decision"
+    "Record the plan as a decision — task creation is the Foreman's job"
     planPayload := Dictionary new.
     planPayload at: 'detail' put: 'Plan: ', identity.
     planPayload at: 'subtasks' put: subtasks.
     planPayload at: 'task' put: (body at: 'task' ifAbsent: ['']).
     bbs outPinned: 'decision' scope: scope identity: 'plan:', identity payload: planPayload.
 
-    "Create a task tuple for each subtask"
-    subtasks do: [:st |
-      | taskPayload |
-      taskPayload := Dictionary new.
-      taskPayload at: 'role' put: (st at: 'role' ifAbsent: ['implementer']).
-      taskPayload at: 'status' put: 'pending'.
-      taskPayload at: 'description' put: (st at: 'description' ifAbsent: ['']).
-      taskPayload at: 'plan' put: identity.
-      bbs out: 'task' scope: scope identity: (st at: 'identity') payload: taskPayload
-    ].
-
     d := Dictionary new.
     d at: 'status' put: 'ok'.
     d at: 'plan_id' put: identity.
-    d at: 'tasks_created' put: subtasks size.
+    d at: 'subtasks' put: subtasks size.
     ^self okResponse: d
   ]
 
