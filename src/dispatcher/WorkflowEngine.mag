@@ -80,7 +80,7 @@ WorkflowEngine subclass: Object
 
   method: advanceInstance: wf [
     "Advance a single workflow instance."
-    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal |
+    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params |
 
     instanceId := wf at: 'identity'.
     scope := wf at: 'scope'.
@@ -94,11 +94,16 @@ WorkflowEngine subclass: Object
     templatePayload := template at: 'payload'.
     transitions := templatePayload at: 'transitions'.
 
+    "Promote waiting tokens whose tasks have completed"
+    self promoteWaitingTokens: instanceId scope: scope.
+
     "Scan all tokens for this instance"
     allTokens := bbs scanAll: 'token'.
     instanceTokens := allTokens select: [:t |
-      (t at: 'payload') at: 'workflow_instance' ifAbsent: [''] = instanceId
-        and: [(t at: 'payload') at: 'status' ifAbsent: [''] = 'positive']
+      | wfInst tokStatus |
+      wfInst := (t at: 'payload') at: 'workflow_instance' ifAbsent: [''].
+      tokStatus := (t at: 'payload') at: 'status' ifAbsent: [''].
+      wfInst = instanceId and: [tokStatus = 'positive']
     ].
 
     "Collect current token places"
@@ -116,59 +121,113 @@ WorkflowEngine subclass: Object
       ^self
     ].
 
+    "Build params with instance available for interpolation"
+    params := wfPayload at: 'params' ifAbsent: [Dictionary new].
+    params at: 'instance' put: instanceId.
+
+    "Track consumed tokens within this tick to prevent double-firing"
+    consumedTokens := Array new: 0.
+
     "Check each transition for enabled-ness"
     transitions do: [:tr |
-      self tryFireTransition: tr instance: instanceId scope: scope params: (wfPayload at: 'params' ifAbsent: [Dictionary new]) tokenPlaces: tokenPlaces
+      consumedTokens := self tryFireTransition: tr instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens
     ]
   ]
 
-  method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces [
-    "Try to fire a single transition. Checks input places, preconditions, then fires."
+  "--- Token Promotion ---"
 
-    | inPlaces outPlaces preconditions role taskPayload |
+  method: promoteWaitingTokens: instanceId scope: scope [
+    "Find tokens with status=waiting and check if their spawning transition's
+     task has a task-complete event. If so, promote to positive."
+    | allTokens waitingTokens |
+    allTokens := bbs scanAll: 'token'.
+    waitingTokens := allTokens select: [:t |
+      | wfInst tokStatus |
+      wfInst := (t at: 'payload') at: 'workflow_instance' ifAbsent: [''].
+      tokStatus := (t at: 'payload') at: 'status' ifAbsent: [''].
+      wfInst = instanceId and: [tokStatus = 'waiting']
+    ].
+
+    waitingTokens do: [:tok |
+      | transId taskCompleteId evt tokIdentity newPayload |
+      transId := (tok at: 'payload') at: 'transition_id' ifAbsent: [''].
+      taskCompleteId := 'task-complete:', instanceId, ':task:', transId.
+      evt := bbs rdp: 'event' scope: scope identity: taskCompleteId.
+      evt notNil ifTrue: [
+        "Promote: consume waiting token, produce positive token"
+        tokIdentity := tok at: 'identity'.
+        bbs inp: 'token' scope: scope identity: tokIdentity.
+        newPayload := tok at: 'payload'.
+        newPayload at: 'status' put: 'positive'.
+        bbs out: 'token' scope: scope identity: tokIdentity payload: newPayload.
+        ('  Promoted waiting token: ', tokIdentity) println
+      ]
+    ]
+  ]
+
+  "--- Transition Firing ---"
+
+  method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens [
+    "Try to fire a single transition. Checks input places, preconditions, then fires.
+     Returns updated consumedTokens array."
+
+    | inPlaces outPlaces preconditions role taskPayload workdir resolvedDesc tokenStatus |
     inPlaces := transition at: 'in'.
     outPlaces := transition at: 'out'.
 
-    "Check all input places have tokens"
-    (inPlaces detect: [:p | (tokenPlaces includes: p) not] ifNone: [nil]) notNil ifTrue: [^self].
+    "Check all input places have tokens (excluding already-consumed ones this tick)"
+    (inPlaces detect: [:p |
+      (tokenPlaces includes: p) not or: [consumedTokens includes: p]
+    ] ifNone: [nil]) notNil ifTrue: [^consumedTokens].
 
     "Check preconditions (if any)"
     preconditions := transition at: 'preconditions' ifAbsent: [#()].
     preconditions do: [:pre |
-      (self checkPrecondition: pre scope: scope params: params) ifFalse: [^self]
+      (self checkPrecondition: pre scope: scope params: params) ifFalse: [^consumedTokens]
     ].
 
     "Fire! Consume input tokens, produce output tokens"
     ('  Firing transition: ', (transition at: 'id')) println.
 
-    "Consume input tokens"
+    "Consume input tokens and track them"
     inPlaces do: [:place |
-      bbs inp: 'token' scope: scope identity: instanceId, ':token:', place
+      bbs inp: 'token' scope: scope identity: instanceId, ':token:', place.
+      consumedTokens := consumedTokens copyWith: place
     ].
 
-    "Produce output tokens"
+    "If transition has a role, write a task tuple"
+    role := transition at: 'role' ifAbsent: [nil].
+
+    "Produce output tokens — if role-bearing, status is 'waiting' until task completes"
+    tokenStatus := role notNil ifTrue: ['waiting'] ifFalse: ['positive'].
     outPlaces do: [:place |
       | tokenPayload |
       tokenPayload := Dictionary new.
       tokenPayload at: 'workflow_instance' put: instanceId.
       tokenPayload at: 'place' put: place.
-      tokenPayload at: 'status' put: 'positive'.
+      tokenPayload at: 'status' put: tokenStatus.
       tokenPayload at: 'transition_id' put: (transition at: 'id').
       tokenPayload at: 'modality' put: 'linear'.
       bbs out: 'token' scope: scope identity: instanceId, ':token:', place payload: tokenPayload
     ].
 
-    "If transition has a role, write a task tuple"
-    role := transition at: 'role' ifAbsent: [nil].
     role notNil ifTrue: [
       taskPayload := Dictionary new.
       taskPayload at: 'role' put: role.
       taskPayload at: 'status' put: 'pending'.
-      taskPayload at: 'description' put: (transition at: 'description' ifAbsent: ['']).
+      resolvedDesc := self resolveParams: (transition at: 'description' ifAbsent: ['']) with: params.
+      taskPayload at: 'description' put: resolvedDesc.
       taskPayload at: 'workflow_instance' put: instanceId.
       taskPayload at: 'transition_id' put: (transition at: 'id').
+      "Pass through workdir if specified in transition"
+      workdir := transition at: 'workdir' ifAbsent: [nil].
+      workdir notNil ifTrue: [
+        taskPayload at: 'workdir' put: (self resolveParams: workdir with: params)
+      ].
       bbs out: 'task' scope: scope identity: instanceId, ':task:', (transition at: 'id') payload: taskPayload
-    ]
+    ].
+
+    ^consumedTokens
   ]
 
   "--- Precondition Checking ---"
@@ -207,7 +266,9 @@ WorkflowEngine subclass: Object
     | result |
     result := template.
     params keysAndValuesDo: [:k :v |
-      result := result replaceAll: '{{', k, '}}' with: v printString
+      | valStr |
+      valStr := (v isKindOf: String) ifTrue: [v] ifFalse: [v printString].
+      result := result replaceAll: '{{', k, '}}' with: valStr
     ].
     ^result
   ]

@@ -26,34 +26,35 @@ TaskDispatcher subclass: Object
 
   method: dispatch [
     "Scan for pending tasks and dispatch them to available slots."
-    | pendingTasks count |
+    | allTasks pendingTasks count |
     self availableSlots <= 0 ifTrue: [^self].
 
-    pendingTasks := bbs scanAll: 'task'.
-    pendingTasks := pendingTasks select: [:t |
-      (t at: 'payload') at: 'status' ifAbsent: [''] = 'pending'
+    allTasks := bbs scanAll: 'task'.
+
+    "Filter to pending"
+    pendingTasks := Array new: 0.
+    allTasks do: [:t |
+      | status |
+      status := (t at: 'payload') at: 'status' ifAbsent: [''].
+      status = 'pending' ifTrue: [
+        pendingTasks := pendingTasks copyWith: t
+      ]
     ].
 
-    pendingTasks isEmpty ifTrue: [^self].
-
-    "Sort by creation time (oldest first)"
-    pendingTasks := pendingTasks sorted: [:a :b |
-      (a at: 'created_at' ifAbsent: [0]) < (b at: 'created_at' ifAbsent: [0])
-    ].
+    pendingTasks size = 0 ifTrue: [^self].
 
     "Dispatch as many as we have slots for"
-    count := pendingTasks size min: self availableSlots.
+    count := pendingTasks size.
+    count > self availableSlots ifTrue: [count := self availableSlots].
 
-    1 to: count do: [:i |
-      | task |
-      task := pendingTasks at: i - 1.
-      self dispatchTask: task
+    0 to: count - 1 do: [:i |
+      self dispatchTask: (pendingTasks at: i)
     ]
   ]
 
   method: dispatchTask: task [
     "Claim a task and spawn a harness process for it."
-    | taskId scope payload role harness |
+    | taskId scope payload role harness workdir |
     taskId := task at: 'identity'.
     scope := task at: 'scope'.
     payload := task at: 'payload'.
@@ -69,6 +70,13 @@ TaskDispatcher subclass: Object
 
     "Spawn harness in a forked process"
     harness := harnessFactory createFor: role task: taskId scope: scope bbs: bbs.
+
+    "Set workdir if specified in task payload"
+    workdir := payload at: 'workdir' ifAbsent: [nil].
+    workdir notNil ifTrue: [
+      harness workDir: workdir.
+      ('  Using workdir: ', workdir) println
+    ].
 
     [
       [harness run] on: Exception do: [:e |

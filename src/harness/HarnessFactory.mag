@@ -14,7 +14,8 @@ HarnessFactory subclass: Object
     roles at: 'implementer' put: Implementer new.
     roles at: 'reviewer' put: Reviewer new.
     roles at: 'tester' put: Tester new.
-    roles at: 'fixer' put: Fixer new
+    roles at: 'fixer' put: Fixer new.
+    roles at: 'foreman' put: Foreman new
   ]
 
   method: roleFor: roleName [

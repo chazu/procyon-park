@@ -1,0 +1,290 @@
+"Repository registration — manages repos registered with Procyon Park.
+ Repos are stored as JSON config files at ~/.pp/repos/<name>.json.
+ Worktrees are managed at ~/.pp/worktrees/."
+
+Repo subclass: Object
+  instanceVars: ppDir reposDir worktreesDir
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: initialize [
+    | home |
+    home := System env: 'HOME'.
+    (home isNil or: [home isEmpty]) ifTrue: [
+      home := '/tmp'
+    ].
+    ppDir := home, '/.pp'.
+    reposDir := ppDir, '/repos'.
+    worktreesDir := ppDir, '/worktrees'
+  ]
+
+  method: ppDir [ ^ppDir ]
+  method: reposDir [ ^reposDir ]
+  method: worktreesDir [ ^worktreesDir ]
+
+  method: ensureDirs [
+    "Create ~/.pp/, ~/.pp/repos/, ~/.pp/worktrees/ if they don't exist."
+    self shellRun: 'mkdir -p "', reposDir, '" "', worktreesDir, '"'
+  ]
+
+  method: runWith: args [
+    "Dispatch repo subcommands."
+    | subcmd |
+    args size < 2 ifTrue: [
+      self printUsage.
+      ^self
+    ].
+
+    subcmd := args at: 1.
+
+    subcmd = 'add'    ifTrue: [^self cmdAdd: args].
+    subcmd = 'list'   ifTrue: [^self cmdList: args].
+    subcmd = 'ls'     ifTrue: [^self cmdList: args].
+    subcmd = 'remove' ifTrue: [^self cmdRemove: args].
+    subcmd = 'rm'     ifTrue: [^self cmdRemove: args].
+    subcmd = 'info'   ifTrue: [^self cmdInfo: args].
+    subcmd = 'help'   ifTrue: [^self printUsage].
+
+    ('Unknown repo command: ', subcmd) println.
+    self printUsage
+  ]
+
+  "--- Commands ---"
+
+  method: cmdAdd: args [
+    "pp repo add <path> [--name <name>]"
+    | rawPath absPath repoName configPath config flagName tmpFile |
+    args size < 3 ifTrue: [
+      'Usage: pp repo add <path> [--name <name>]' println.
+      ^self
+    ].
+
+    rawPath := args at: 2.
+    tmpFile := '/tmp/pp-repo-tmp-', DateTime now epochSeconds printString.
+
+    "Resolve to absolute path"
+    self shellRun: 'cd "', rawPath, '" 2>/dev/null && pwd > "', tmpFile, '"'.
+    (File exists: tmpFile) ifFalse: [
+      ('Error: path does not exist: ', rawPath) println.
+      ^self
+    ].
+    absPath := self readAndClean: tmpFile.
+    absPath isEmpty ifTrue: [
+      ('Error: path does not exist: ', rawPath) println.
+      ^self
+    ].
+
+    "Validate it is a git repo"
+    (File exists: absPath, '/.git') ifFalse: [
+      ('Error: not a git repository: ', absPath) println.
+      ^self
+    ].
+
+    "Determine repo name"
+    flagName := self flagValue: '--name' in: args.
+    flagName notNil
+      ifTrue: [repoName := flagName]
+      ifFalse: [
+        self shellRun: 'basename "', absPath, '" > "', tmpFile, '"'.
+        repoName := self readAndClean: tmpFile
+      ].
+
+    "Ensure directories exist"
+    self ensureDirs.
+
+    "Write config"
+    configPath := reposDir, '/', repoName, '.json'.
+
+    config := Dictionary new.
+    config at: 'name' put: repoName.
+    config at: 'path' put: absPath.
+    config at: 'registered_at' put: DateTime now epochSeconds.
+
+    self shellRun: 'cat > "', configPath, '" << ''PPEOF''
+', (Json encodePretty: config), '
+PPEOF'.
+
+    ('Registered repository: ', repoName) println.
+    ('  Path: ', absPath) println.
+    ('  Config: ', configPath) println
+  ]
+
+  method: cmdList: args [
+    "pp repo list"
+    | tmpFile fileList count |
+
+    self ensureDirs.
+    tmpFile := '/tmp/pp-repo-list-', DateTime now epochSeconds printString.
+
+    self shellRun: 'ls "', reposDir, '/" 2>/dev/null | grep ".json$" > "', tmpFile, '"'.
+
+    (File exists: tmpFile) ifFalse: [
+      'No repositories registered.' println.
+      'Use: pp repo add <path>' println.
+      ^self
+    ].
+
+    fileList := File readFileContents: tmpFile.
+    self shellRun: 'rm -f "', tmpFile, '"'.
+
+    count := 0.
+    (fileList split: '
+') do: [:fname |
+      | configPath contents config name path valid |
+      (fname size > 5 and: [(fname copyFrom: fname size - 5) = '.json']) ifTrue: [
+        configPath := reposDir, '/', fname.
+        [
+          contents := File readFileContents: configPath.
+          config := Json decode: contents.
+          name := config at: 'name' ifAbsent: ['?'].
+          path := config at: 'path' ifAbsent: ['?'].
+          valid := File exists: path.
+          count := count + 1.
+          (name, '  ', path, (valid ifTrue: [''] ifFalse: ['  [MISSING]'])) println
+        ] on: Exception do: [:e |
+          ('  Error reading ', fname, ': ', e messageText) println
+        ]
+      ]
+    ].
+
+    count = 0 ifTrue: [
+      'No repositories registered.' println.
+      'Use: pp repo add <path>' println
+    ]
+  ]
+
+  method: cmdRemove: args [
+    "pp repo remove <name>"
+    | repoName configPath |
+    args size < 3 ifTrue: [
+      'Usage: pp repo remove <name>' println.
+      ^self
+    ].
+
+    repoName := args at: 2.
+    configPath := reposDir, '/', repoName, '.json'.
+
+    (File exists: configPath) ifFalse: [
+      ('Error: no repository registered with name: ', repoName) println.
+      ^self
+    ].
+
+    self shellRun: 'rm "', configPath, '"'.
+    ('Removed repository: ', repoName) println
+  ]
+
+  method: cmdInfo: args [
+    "pp repo info <name>"
+    | repoName configPath contents config |
+    args size < 3 ifTrue: [
+      'Usage: pp repo info <name>' println.
+      ^self
+    ].
+
+    repoName := args at: 2.
+    configPath := reposDir, '/', repoName, '.json'.
+
+    (File exists: configPath) ifFalse: [
+      ('Error: no repository registered with name: ', repoName) println.
+      ^self
+    ].
+
+    contents := File readFileContents: configPath.
+    config := Json decode: contents.
+    (Json encodePretty: config) println
+  ]
+
+  "--- Validation ---"
+
+  method: validateAll [
+    "Validate all registered repos still exist. Print warnings for missing ones."
+    | tmpFile fileList |
+
+    (File exists: reposDir) ifFalse: [^self].
+
+    tmpFile := '/tmp/pp-repo-validate-', DateTime now epochSeconds printString.
+    self shellRun: 'ls "', reposDir, '/" 2>/dev/null | grep ".json$" > "', tmpFile, '"'.
+    (File exists: tmpFile) ifFalse: [^self].
+
+    fileList := File readFileContents: tmpFile.
+    self shellRun: 'rm -f "', tmpFile, '"'.
+
+    (fileList split: '
+') do: [:fname |
+      | configPath contents config name path |
+      (fname size > 5 and: [(fname copyFrom: fname size - 5) = '.json']) ifTrue: [
+        configPath := reposDir, '/', fname.
+        [
+          contents := File readFileContents: configPath.
+          config := Json decode: contents.
+          name := config at: 'name' ifAbsent: ['?'].
+          path := config at: 'path' ifAbsent: ['?'].
+          (File exists: path) ifFalse: [
+            ('WARNING: registered repo missing: ', name, ' (', path, ')') println
+          ]
+        ] on: Exception do: [:e | "skip bad configs" ]
+      ]
+    ]
+  ]
+
+  method: repoForName: aName [
+    "Look up a registered repo by name. Returns config Dictionary or nil."
+    | configPath contents |
+    configPath := reposDir, '/', aName, '.json'.
+    (File exists: configPath) ifFalse: [^nil].
+    contents := File readFileContents: configPath.
+    ^Json decode: contents
+  ]
+
+  "--- Helpers ---"
+
+  method: shellRun: cmd [
+    "Run a shell command (fire and forget, no output capture)."
+    | proc shellArgs |
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: cmd.
+    proc args: shellArgs.
+    proc run
+  ]
+
+  method: readAndClean: tmpFile [
+    "Read a temp file, delete it, return contents with trailing newline stripped."
+    | raw result |
+    (File exists: tmpFile) ifFalse: [^''].
+    raw := File readFileContents: tmpFile.
+    self shellRun: 'rm -f "', tmpFile, '"'.
+    "Strip trailing newlines"
+    result := raw.
+    [result size > 0 and: [(result copyFrom: result size - 1) = '
+']] whileTrue: [
+      result := result copyFrom: 0 to: result size - 1
+    ].
+    ^result
+  ]
+
+  method: flagValue: flag in: args [
+    | idx |
+    idx := args indexOf: flag.
+    (idx >= 0 and: [idx < (args size - 1)])
+      ifTrue: [^args at: idx + 1]
+      ifFalse: [^nil]
+  ]
+
+  method: printUsage [
+    'pp repo — Repository management' println.
+    '' println.
+    'Usage: pp repo <command> [args...]' println.
+    '' println.
+    'Commands:' println.
+    '  add    <path> [--name <name>]   Register a repository' println.
+    '  list                            List registered repositories' println.
+    '  remove <name>                   Unregister a repository' println.
+    '  info   <name>                   Show repository details' println.
+    '' println.
+    'Repositories are stored at ~/.pp/repos/' println.
+    'Worktrees are managed at ~/.pp/worktrees/' println
+  ]

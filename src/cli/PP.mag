@@ -28,16 +28,20 @@ PP subclass: Object
 
     cmd := args at: 0.
 
-    cmd = 'observe' ifTrue: [^self cmdObserve: args].
-    cmd = 'decide'  ifTrue: [^self cmdDecide: args].
-    cmd = 'event'   ifTrue: [^self cmdEvent: args].
-    cmd = 'plan'    ifTrue: [^self cmdPlan: args].
-    cmd = 'read'    ifTrue: [^self cmdRead: args].
-    cmd = 'notify'  ifTrue: [^self cmdNotify: args].
-    cmd = 'dismiss' ifTrue: [^self cmdDismiss: args].
-    cmd = 'status'  ifTrue: [^self cmdStatus: args].
-    cmd = 'prime'   ifTrue: [^self cmdPrime: args].
-    cmd = 'help'    ifTrue: [^self printUsage].
+    cmd = 'observe'  ifTrue: [^self cmdObserve: args].
+    cmd = 'decide'   ifTrue: [^self cmdDecide: args].
+    cmd = 'event'    ifTrue: [^self cmdEvent: args].
+    cmd = 'plan'     ifTrue: [^self cmdPlan: args].
+    cmd = 'read'     ifTrue: [^self cmdRead: args].
+    cmd = 'notify'   ifTrue: [^self cmdNotify: args].
+    cmd = 'dismiss'  ifTrue: [^self cmdDismiss: args].
+    cmd = 'status'   ifTrue: [^self cmdStatus: args].
+    cmd = 'prime'    ifTrue: [^self cmdPrime: args].
+    cmd = 'task'     ifTrue: [^self cmdTask: args].
+    cmd = 'workflow' ifTrue: [^self cmdWorkflow: args].
+    cmd = 'signal'   ifTrue: [^self cmdSignal: args].
+    cmd = 'repo'     ifTrue: [^Repo new runWith: args].
+    cmd = 'help'     ifTrue: [^self printUsage].
 
     ('Unknown command: ', cmd) println.
     self printUsage
@@ -240,6 +244,11 @@ Communicate with it using the `pp` command-line tool.
   pp notify <message> [--severity info|warn|urgent]  Notify the user
   pp dismiss                                         Signal task completion
   pp status                                          Show system status
+  pp task <id> --role <r> --description <d> [--workdir <p>]  Create a task
+  pp workflow <template> [--param key=val ...]        Start a workflow
+  pp signal <id> <key> <value>                       Upsert a signal
+
+Worktree base: ~/.pp/worktrees/
 
 ## Rules
 
@@ -319,6 +328,106 @@ Communicate with it using the `pp` command-line tool.
     ].
 
     out println
+  ]
+
+  "--- Task/Workflow/Signal Commands ---"
+
+  method: cmdTask: args [
+    "pp task <identity> --role <role> --description <desc> [--workdir <path>]"
+    | body identity role desc workdir |
+    args size < 2 ifTrue: [
+      'Usage: pp task <identity> --role <role> --description <desc> [--workdir <path>]' println.
+      ^self
+    ].
+
+    identity := args at: 1.
+    role := self flagValue: '--role' in: args.
+    desc := self flagValue: '--description' in: args.
+
+    role isNil ifTrue: [
+      'Error: --role is required' println.
+      ^self
+    ].
+
+    desc isNil ifTrue: [desc := ''].
+
+    body := Dictionary new.
+    body at: 'scope' put: scope.
+    body at: 'identity' put: identity.
+    body at: 'role' put: role.
+    body at: 'description' put: desc.
+
+    workdir := self flagValue: '--workdir' in: args.
+    workdir notNil ifTrue: [body at: 'workdir' put: workdir].
+
+    taskId isEmpty ifFalse: [
+      body at: 'workflow_instance' put: taskId
+    ].
+
+    self post: '/api/task/create' body: body
+  ]
+
+  method: cmdWorkflow: args [
+    "pp workflow <template> [--scope <scope>] [--param key=value ...]"
+    | body templateId wfScope params i arg eqIdx key val |
+    args size < 2 ifTrue: [
+      'Usage: pp workflow <template> [--scope <scope>] [--param key=value ...]' println.
+      ^self
+    ].
+
+    templateId := args at: 1.
+    wfScope := self flagValue: '--scope' in: args.
+    wfScope isNil ifTrue: [wfScope := scope].
+
+    "Parse --param key=value pairs"
+    params := Dictionary new.
+    i := 0.
+    [i < args size] whileTrue: [
+      arg := args at: i.
+      arg = '--param' ifTrue: [
+        i < (args size - 1) ifTrue: [
+          i := i + 1.
+          arg := args at: i.
+          eqIdx := arg indexOf: '='.
+          eqIdx >= 0 ifTrue: [
+            key := arg copyFrom: 0 to: eqIdx.
+            val := arg copyFrom: eqIdx + 1.
+            params at: key put: val
+          ]
+        ]
+      ].
+      i := i + 1
+    ].
+
+    body := Dictionary new.
+    body at: 'template' put: templateId.
+    body at: 'scope' put: wfScope.
+    body at: 'params' put: params.
+
+    self post: '/api/workflow/start' body: body
+  ]
+
+  method: cmdSignal: args [
+    "pp signal <identity> <key> <value>"
+    | body identity key value payload |
+    args size < 4 ifTrue: [
+      'Usage: pp signal <identity> <key> <value>' println.
+      ^self
+    ].
+
+    identity := args at: 1.
+    key := args at: 2.
+    value := args at: 3.
+
+    payload := Dictionary new.
+    payload at: key put: value.
+
+    body := Dictionary new.
+    body at: 'scope' put: scope.
+    body at: 'identity' put: identity.
+    body at: 'payload' put: payload.
+
+    self post: '/api/signal' body: body
   ]
 
   "--- Helpers ---"

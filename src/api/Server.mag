@@ -2,15 +2,20 @@
  Exposes the BBS tuplespace over HTTP as JSON endpoints."
 
 ApiServer subclass: Object
-  instanceVars: httpServer bbs port
+  instanceVars: httpServer bbs port dispatcher
 
   classMethod: on: portNumber bbs: aBBS [
-    ^super new initPort: portNumber bbs: aBBS
+    ^super new initPort: portNumber bbs: aBBS dispatcher: nil
   ]
 
-  method: initPort: portNumber bbs: aBBS [
+  classMethod: on: portNumber bbs: aBBS dispatcher: aDispatcher [
+    ^super new initPort: portNumber bbs: aBBS dispatcher: aDispatcher
+  ]
+
+  method: initPort: portNumber bbs: aBBS dispatcher: aDispatcher [
     port := portNumber.
     bbs := aBBS.
+    dispatcher := aDispatcher.
     httpServer := HttpServer new: port.
     self registerRoutes
   ]
@@ -46,7 +51,9 @@ ApiServer subclass: Object
     httpServer route: '/api/dismiss' method: 'POST' handler: [:req | self handleDismiss: req].
     httpServer route: '/api/notifications' method: 'GET' handler: [:req | self handleNotifications: req].
     httpServer route: '/api/plan' method: 'POST' handler: [:req | self handlePlan: req].
-    httpServer route: '/api/workflow/start' method: 'POST' handler: [:req | self handleWorkflowStart: req]
+    httpServer route: '/api/workflow/start' method: 'POST' handler: [:req | self handleWorkflowStart: req].
+    httpServer route: '/api/task/create' method: 'POST' handler: [:req | self handleTaskCreate: req].
+    httpServer route: '/api/signal' method: 'POST' handler: [:req | self handleSignal: req]
   ]
 
   "--- Helpers ---"
@@ -347,7 +354,7 @@ ApiServer subclass: Object
   "--- Workflow Start ---"
 
   method: handleWorkflowStart: req [
-    | body err templateId scope params template templatePayload transitions missing d instanceId |
+    | body err templateId scope params d instanceId |
     body := self parseBody: req.
     body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
 
@@ -358,26 +365,11 @@ ApiServer subclass: Object
     scope := body at: 'scope'.
     params := body at: 'params' ifAbsent: [Dictionary new].
 
-    "Read the template from the BBS"
-    template := bbs rdp: 'template' scope: 'system' identity: templateId.
-    template isNil ifTrue: [
-      ^self errorResponse: 404 message: 'Template not found: ', templateId
+    "Instantiate the workflow"
+    dispatcher isNil ifTrue: [
+      ^self errorResponse: 500 message: 'No dispatcher configured'
     ].
-
-    "Extract all {{...}} placeholders from transitions and validate params"
-    templatePayload := template at: 'payload'.
-    transitions := templatePayload at: 'transitions' ifAbsent: [#()].
-    missing := self extractMissingParams: transitions provided: params.
-
-    missing isEmpty ifFalse: [
-      d := Dictionary new.
-      d at: 'error' put: 'Missing required template params'.
-      d at: 'missing_params' put: missing.
-      ^self jsonResponse: 400 body: d
-    ].
-
-    "All params present — instantiate the workflow"
-    instanceId := (WorkflowEngine on: bbs) instantiate: templateId scope: scope params: params.
+    instanceId := dispatcher instantiateWorkflow: templateId scope: scope params: params.
 
     d := Dictionary new.
     d at: 'status' put: 'ok'.
@@ -385,56 +377,51 @@ ApiServer subclass: Object
     ^self okResponse: d
   ]
 
-  method: extractMissingParams: transitions provided: params [
-    "Scan all string values in transitions for {{key}} placeholders.
-     Return an Array of param names not present in the provided Dictionary."
-    | allKeys missing |
-    allKeys := Set new.
 
-    transitions do: [:tr |
-      self collectPlaceholders: tr into: allKeys
+  "--- Task/Signal Endpoints ---"
+
+  method: handleTaskCreate: req [
+    "POST /api/task/create — create a single task tuple."
+    | body err taskPayload scope identity id |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('scope' 'identity' 'role' 'description') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    scope := body at: 'scope'.
+    identity := body at: 'identity'.
+
+    taskPayload := Dictionary new.
+    taskPayload at: 'role' put: (body at: 'role').
+    taskPayload at: 'status' put: 'pending'.
+    taskPayload at: 'description' put: (body at: 'description').
+
+    (body includesKey: 'workdir') ifTrue: [
+      taskPayload at: 'workdir' put: (body at: 'workdir')
     ].
 
-    missing := Array new: 0.
-    allKeys do: [:key |
-      (params includesKey: key) ifFalse: [
-        missing := missing copyWith: key
-      ]
+    (body includesKey: 'workflow_instance') ifTrue: [
+      taskPayload at: 'workflow_instance' put: (body at: 'workflow_instance')
     ].
-    ^missing
+
+    id := bbs out: 'task' scope: scope identity: identity payload: taskPayload.
+    ^self okResponse: (self okWithId: id)
   ]
 
-  method: collectPlaceholders: obj into: aSet [
-    "Recursively walk a structure collecting {{key}} placeholder names."
-    obj isString ifTrue: [
-      self extractPlaceholdersFrom: obj into: aSet.
-      ^self
-    ].
-    (obj isKindOf: Dictionary) ifTrue: [
-      obj valuesDo: [:v | self collectPlaceholders: v into: aSet].
-      ^self
-    ].
-    (obj isKindOf: Array) ifTrue: [
-      obj do: [:elem | self collectPlaceholders: elem into: aSet].
-      ^self
-    ]
-  ]
+  method: handleSignal: req [
+    "POST /api/signal — upsert a signal tuple."
+    | body err scope identity payload id |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
 
-  method: extractPlaceholdersFrom: aString into: aSet [
-    "Extract {{key}} placeholders from a string, adding keys to aSet."
-    | str startIdx endIdx key |
-    str := aString.
-    [
-      startIdx := str indexOf: '{{'.
-      startIdx >= 0
-    ] whileTrue: [
-      endIdx := str indexOf: '}}' startingAt: startIdx + 2.
-      endIdx >= 0 ifTrue: [
-        key := str copyFrom: startIdx + 2 to: endIdx - 1.
-        key isEmpty ifFalse: [aSet add: key].
-        str := str copyFrom: endIdx + 2
-      ] ifFalse: [
-        str := ''
-      ]
-    ]
+    err := self requireFields: #('scope' 'identity' 'payload') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    scope := body at: 'scope'.
+    identity := body at: 'identity'.
+    payload := body at: 'payload'.
+
+    id := bbs upsertSignal: scope identity: identity payload: payload.
+    ^self okResponse: (self okWithId: id)
   ]

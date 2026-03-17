@@ -1,0 +1,91 @@
+"Foreman role — orchestrates dispatch, integration, and quality evaluation.
+ Dual-phase: T2 dispatches implementers into worktrees and integrates results,
+ T6 evaluates review+test results and writes a verdict signal."
+
+Foreman subclass: Role
+
+  classMethod: new [
+    | r hard soft constraints h |
+    r := super new.
+    r name: 'foreman'.
+    r description: 'You are a foreman — a long-running orchestrator agent. You have two modes:
+
+**Dispatch & Integrate** (when your task says "Dispatch implementers"):
+1. Read the plan from the knowledge base (pp read decision <scope> plan:<plan-name>)
+2. Create git worktrees at ~/.pp/worktrees/<instance>/<subtask-name> using:
+   git worktree add ~/.pp/worktrees/<instance>/<name> -b <branch-name>
+3. Dispatch implementer tasks into those worktrees using:
+   pp task <id> --role implementer --description "<desc>" --workdir ~/.pp/worktrees/<instance>/<name>
+4. Poll for task completions using pp read event
+5. Merge each completed worktree branch into the feature branch
+6. Clean up worktrees (git worktree remove ~/.pp/worktrees/<instance>/<name>)
+7. Run pp dismiss when all implementers are done and integrated
+
+**Evaluate** (when your task says "Evaluate review and test"):
+1. Read review and test results from the knowledge base
+2. Check the review_cycle signal to see which cycle we are on
+3. Decide: pass (all good), fix (issues found, cycle < 3), or exhausted (cycle >= 3)
+4. Increment the cycle counter: pp signal review_cycle:<instance> count <N+1>
+5. Write your verdict: pp signal verdict:<instance> decision <pass|fix|exhausted>
+6. Run pp dismiss'.
+
+    r ppCommands: #(
+      'pp task <id> --role <r> --description <d> [--workdir <path>]  — dispatch a task'
+      'pp read <category> [scope] [identity]   — read from the knowledge base'
+      'pp observe <identity> <detail>          — report a finding'
+      'pp decide <identity> <detail>           — record a decision'
+      'pp signal <id> <key> <value>            — upsert a signal'
+      'pp notify <message>                     — flag something for the user'
+      'pp dismiss                              — signal task completion'
+    ).
+
+    hard := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'decision'.
+    hard := hard copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'task'.
+    hard := hard copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'event'.
+    hard := hard copyWith: h.
+
+    soft := Array new: 0.
+    h := Dictionary new. h at: 'category' put: 'observation'.
+    soft := soft copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'convention'.
+    soft := soft copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'fact'.
+    soft := soft copyWith: h.
+
+    constraints := Dictionary new.
+    constraints at: 'hard' put: hard.
+    constraints at: 'soft' put: soft.
+    constraints at: 'budget' put: 80.
+    r contextConstraints: constraints.
+
+    ^r
+  ]
+
+  method: completionInstructions [
+    ^'Completion depends on your phase:
+
+**Dispatch & Integrate phase:**
+1. Create worktrees with: git worktree add ~/.pp/worktrees/<instance>/<name> -b <branch>
+2. Dispatch tasks: pp task <id> --role implementer --description "<desc>" --workdir ~/.pp/worktrees/<instance>/<name>
+3. Poll for completions: pp read event <scope> (look for task-complete events)
+4. Merge completed work: git merge <worktree-branch> (from the feature branch)
+5. Clean up: git worktree remove ~/.pp/worktrees/<instance>/<name>
+6. Run: pp notify "Foreman: all implementations integrated"
+7. Run: pp dismiss
+
+**Evaluate phase:**
+1. Read review_cycle signal: pp read signal <scope> review_cycle:<instance>
+   - If not found, this is cycle 1
+2. Read review/test observations and decisions
+3. Decide verdict:
+   - "pass" if review and tests are clean
+   - "fix" if issues found and cycle < 3
+   - "exhausted" if cycle >= 3 (accept as-is)
+4. Increment cycle: pp signal review_cycle:<instance> count <N+1>
+5. Write verdict: pp signal verdict:<instance> decision <verdict>
+6. Run: pp notify "Foreman: verdict is <verdict> (cycle <N>)"
+7. Run: pp dismiss'
+  ]

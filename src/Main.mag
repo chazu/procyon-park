@@ -19,15 +19,19 @@ Main subclass: Object
     cmd = 'serve'   ifTrue: [^self startServer: (args copyFrom: 1)].
 
     "Agent communication (thin HTTP client commands)"
-    cmd = 'observe' ifTrue: [^PP new runWith: args].
-    cmd = 'decide'  ifTrue: [^PP new runWith: args].
-    cmd = 'event'   ifTrue: [^PP new runWith: args].
-    cmd = 'plan'    ifTrue: [^PP new runWith: args].
-    cmd = 'read'    ifTrue: [^PP new runWith: args].
-    cmd = 'notify'  ifTrue: [^PP new runWith: args].
-    cmd = 'dismiss' ifTrue: [^PP new runWith: args].
-    cmd = 'status'  ifTrue: [^PP new runWith: args].
-    cmd = 'prime'   ifTrue: [^PP new runWith: args].
+    cmd = 'observe'  ifTrue: [^PP new runWith: args].
+    cmd = 'decide'   ifTrue: [^PP new runWith: args].
+    cmd = 'event'    ifTrue: [^PP new runWith: args].
+    cmd = 'plan'     ifTrue: [^PP new runWith: args].
+    cmd = 'read'     ifTrue: [^PP new runWith: args].
+    cmd = 'notify'   ifTrue: [^PP new runWith: args].
+    cmd = 'dismiss'  ifTrue: [^PP new runWith: args].
+    cmd = 'status'   ifTrue: [^PP new runWith: args].
+    cmd = 'prime'    ifTrue: [^PP new runWith: args].
+    cmd = 'task'     ifTrue: [^PP new runWith: args].
+    cmd = 'workflow' ifTrue: [^PP new runWith: args].
+    cmd = 'signal'   ifTrue: [^PP new runWith: args].
+    cmd = 'repo'     ifTrue: [^Repo new runWith: args].
 
     "Help"
     cmd = 'help'    ifTrue: [^self printUsage].
@@ -65,6 +69,10 @@ Main subclass: Object
     '  dismiss                                        Signal task completion' println.
     '  status                                         Show system status' println.
     '  prime [--role <role>]                           Output agent priming context' println.
+    '  task     <id> --role <r> --description <d>     Create a task' println.
+    '  workflow <template> [--param key=val ...]       Start a workflow' println.
+    '  signal   <id> <key> <value>                    Upsert a signal' println.
+    '  repo     add|list|remove|info                  Manage repositories' println.
     '' println.
     'Other:' println.
     '  help, --help, -h                               Show this help' println.
@@ -100,11 +108,17 @@ Main subclass: Object
     "Initialize harness factory"
     harnessFactory := HarnessFactory new.
 
-    "Initialize dispatcher"
-    dispatcher := Dispatcher on: bbs harnessFactory: harnessFactory.
+    "Initialize dispatcher (8 slots to accommodate foreman + parallel implementers)"
+    dispatcher := Dispatcher on: bbs harnessFactory: harnessFactory maxSlots: 8.
 
-    "Initialize HTTP API"
-    api := ApiServer on: port bbs: bbs.
+    "Initialize HTTP API (with dispatcher reference for workflow endpoints)"
+    api := ApiServer on: port bbs: bbs dispatcher: dispatcher.
+
+    "Validate registered repos"
+    Repo new validateAll.
+
+    "Seed workflow templates"
+    self seedTemplates: bbs.
 
     "Start dispatcher (runs in background process)"
     dispatcher start.
@@ -144,4 +158,175 @@ Main subclass: Object
     bbs outPinned: 'convention' scope: 'system' identity: 'scope' payload: payload.
 
     'System conventions seeded.' println
+  ]
+
+  classMethod: seedTemplates: bbs [
+    | payload transitions t1 t2 pre arr |
+
+    "--- Scout-Done Template ---"
+    transitions := Array new: 0.
+
+    "T1: scout transition"
+    t1 := Dictionary new.
+    t1 at: 'id' put: 'scout'.
+    t1 at: 'in' put: #('request').
+    t1 at: 'out' put: #('scouting').
+    t1 at: 'role' put: 'scout'.
+    t1 at: 'description' put: '{{description}}'.
+    transitions := transitions copyWith: t1.
+
+    "T2: complete transition (automatic, precondition: task-complete event)"
+    t2 := Dictionary new.
+    t2 at: 'id' put: 'complete'.
+    t2 at: 'in' put: #('scouting').
+    t2 at: 'out' put: #('done').
+    pre := Dictionary new.
+    pre at: 'category' put: 'event'.
+    pre at: 'identity' put: 'task-complete:{{instance}}:task:scout'.
+    arr := Array new: 0.
+    arr := arr copyWith: pre.
+    t2 at: 'preconditions' put: arr.
+    transitions := transitions copyWith: t2.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('request').
+    payload at: 'terminal_places' put: #('done').
+    payload at: 'description' put: 'Simple scout research workflow'.
+
+    bbs outPinned: 'template' scope: 'system' identity: 'scout-done' payload: payload.
+
+    "--- Full Pipeline Template ---"
+    self seedFullPipeline: bbs.
+
+    'Workflow templates seeded.' println
+  ]
+
+  classMethod: seedFullPipeline: bbs [
+    | payload transitions t |
+
+    transitions := Array new: 0.
+
+    "T1: plan"
+    t := Dictionary new.
+    t at: 'id' put: 'plan'.
+    t at: 'in' put: #('planning').
+    t at: 'out' put: #('plan_ready').
+    t at: 'role' put: 'planner'.
+    t at: 'description' put: 'Create implementation plan for: {{description}}'.
+    transitions := transitions copyWith: t.
+
+    "T2: dispatch_integrate — foreman"
+    t := Dictionary new.
+    t at: 'id' put: 'dispatch_integrate'.
+    t at: 'in' put: #('plan_ready').
+    t at: 'out' put: #('integrated').
+    t at: 'role' put: 'foreman'.
+    t at: 'description' put: 'Dispatch implementers and integrate results for: {{description}}'.
+    transitions := transitions copyWith: t.
+
+    "T3: fork — automatic"
+    t := Dictionary new.
+    t at: 'id' put: 'fork'.
+    t at: 'in' put: #('integrated').
+    t at: 'out' put: #('reviewing' 'testing').
+    t at: 'preconditions' put: (self taskCompletePrecondition: 'dispatch_integrate').
+    transitions := transitions copyWith: t.
+
+    "T4: review"
+    t := Dictionary new.
+    t at: 'id' put: 'review'.
+    t at: 'in' put: #('reviewing').
+    t at: 'out' put: #('review_done').
+    t at: 'role' put: 'reviewer'.
+    t at: 'description' put: 'Review implementation for: {{description}}'.
+    transitions := transitions copyWith: t.
+
+    "T5: test"
+    t := Dictionary new.
+    t at: 'id' put: 'test'.
+    t at: 'in' put: #('testing').
+    t at: 'out' put: #('test_done').
+    t at: 'role' put: 'tester'.
+    t at: 'description' put: 'Test implementation for: {{description}}'.
+    transitions := transitions copyWith: t.
+
+    "T6: evaluate — foreman"
+    t := Dictionary new.
+    t at: 'id' put: 'evaluate'.
+    t at: 'in' put: #('review_done' 'test_done').
+    t at: 'out' put: #('evaluating').
+    t at: 'role' put: 'foreman'.
+    t at: 'description' put: 'Evaluate review and test results for: {{description}}'.
+    transitions := transitions copyWith: t.
+
+    "T7a: pass"
+    t := Dictionary new.
+    t at: 'id' put: 'pass'.
+    t at: 'in' put: #('evaluating').
+    t at: 'out' put: #('done').
+    t at: 'preconditions' put: (self verdictPrecondition: 'pass').
+    transitions := transitions copyWith: t.
+
+    "T7b: fix_needed"
+    t := Dictionary new.
+    t at: 'id' put: 'fix_needed'.
+    t at: 'in' put: #('evaluating').
+    t at: 'out' put: #('fixing').
+    t at: 'preconditions' put: (self verdictPrecondition: 'fix').
+    transitions := transitions copyWith: t.
+
+    "T7c: exhausted"
+    t := Dictionary new.
+    t at: 'id' put: 'exhausted'.
+    t at: 'in' put: #('evaluating').
+    t at: 'out' put: #('done').
+    t at: 'preconditions' put: (self verdictPrecondition: 'exhausted').
+    transitions := transitions copyWith: t.
+
+    "T8: fix"
+    t := Dictionary new.
+    t at: 'id' put: 'fix'.
+    t at: 'in' put: #('fixing').
+    t at: 'out' put: #('fix_done').
+    t at: 'role' put: 'fixer'.
+    t at: 'description' put: 'Fix issues found in review/test for: {{description}}'.
+    transitions := transitions copyWith: t.
+
+    "T9: re_review"
+    t := Dictionary new.
+    t at: 'id' put: 're_review'.
+    t at: 'in' put: #('fix_done').
+    t at: 'out' put: #('reviewing' 'testing').
+    t at: 'preconditions' put: (self taskCompletePrecondition: 'fix').
+    transitions := transitions copyWith: t.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('planning').
+    payload at: 'terminal_places' put: #('done').
+    payload at: 'description' put: 'Full pipeline: plan, implement, review+test, fix cycle'.
+
+    bbs outPinned: 'template' scope: 'system' identity: 'full-pipeline' payload: payload
+  ]
+
+  classMethod: taskCompletePrecondition: transitionId [
+    | pre arr |
+    pre := Dictionary new.
+    pre at: 'category' put: 'event'.
+    pre at: 'identity' put: 'task-complete:{{instance}}:task:', transitionId.
+    arr := Array new: 0.
+    arr := arr copyWith: pre.
+    ^arr
+  ]
+
+  classMethod: verdictPrecondition: verdictValue [
+    | pre arr |
+    pre := Dictionary new.
+    pre at: 'category' put: 'signal'.
+    pre at: 'identity' put: 'verdict:{{instance}}'.
+    pre at: 'constraint' put: '{decision: "', verdictValue, '"}'.
+    arr := Array new: 0.
+    arr := arr copyWith: pre.
+    ^arr
   ]
