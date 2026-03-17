@@ -46,6 +46,7 @@ PP subclass: Object
     ].
     cmd = 'signal'   ifTrue: [^self cmdSignal: args].
     cmd = 'log'      ifTrue: [^self cmdLog: args].
+    cmd = 'dashboard' ifTrue: [^self cmdDashboard: args].
     cmd = 'repo'     ifTrue: [^Repo new runWith: args].
     cmd = 'help'     ifTrue: [^self printUsage].
 
@@ -646,6 +647,69 @@ Worktree base: ~/.pp/worktrees/
     ]
   ]
 
+  method: cmdDashboard: args [
+    | url response result workflows tasks tokens notifications wfPayload tPayload place nPayload esc |
+
+    [true] whileTrue: [
+      esc := String new: 1.
+      esc at: 0 put: (Character value: 27).
+      (esc, '[2J', esc, '[H') print.
+
+      [
+        response := client get: baseUrl, '/api/dashboard'.
+        (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
+          result := Json decode: response.
+          '=== Procyon Park Dashboard ===' println.
+          '' println.
+          workflows := result at: 'workflows' ifAbsent: [#()].
+          tokens := result at: 'tokens' ifAbsent: [#()].
+          '--- Active Workflows ---' println.
+          workflows isEmpty ifTrue: ['  (none)' println].
+          workflows do: [:wf |
+            wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
+            ('  ', (wf at: 'identity' ifAbsent: ['?']),
+             '  template=', (wfPayload at: 'template' ifAbsent: ['?']),
+             '  status=', (wfPayload at: 'status' ifAbsent: ['?'])) println.
+            tokens do: [:tk |
+              tPayload := tk at: 'payload' ifAbsent: [Dictionary new].
+              (tPayload at: 'workflow_instance' ifAbsent: ['']) = (wf at: 'identity' ifAbsent: ['']) ifTrue: [
+                place := tPayload at: 'place' ifAbsent: ['?'].
+                ('    token: ', place, '  (', (tPayload at: 'status' ifAbsent: ['?']), ')') println
+              ]
+            ]
+          ].
+          '' println.
+          tasks := result at: 'tasks' ifAbsent: [#()].
+          '--- Tasks ---' println.
+          tasks isEmpty ifTrue: ['  (none)' println].
+          tasks do: [:t |
+            tPayload := t at: 'payload' ifAbsent: [Dictionary new].
+            ('  ', (t at: 'identity' ifAbsent: ['?']),
+             '  role=', (tPayload at: 'role' ifAbsent: ['?']),
+             '  status=', (tPayload at: 'status' ifAbsent: ['?'])) println
+          ].
+          '' println.
+          notifications := result at: 'notifications' ifAbsent: [#()].
+          '--- Recent Notifications ---' println.
+          notifications isEmpty ifTrue: ['  (none)' println].
+          notifications do: [:n |
+            nPayload := n at: 'payload' ifAbsent: [Dictionary new].
+            ('  [', (nPayload at: 'severity' ifAbsent: ['info']), '] ',
+             (nPayload at: 'message' ifAbsent: [''])) println
+          ].
+          '' println.
+          '(refreshing every 3s — Ctrl+C to exit)' println
+        ] ifFalse: [
+          'Error: no response from server' println
+        ]
+      ] on: Exception do: [:e |
+        ('Error: ', e messageText) println
+      ].
+
+      Process sleep: 3000
+    ]
+  ]
+
   "--- Helpers ---"
 
   method: post: path body: dict [
@@ -718,6 +782,7 @@ Worktree base: ~/.pp/worktrees/
     '  dismiss                                          Signal task completion' println.
     '  status                                           Show system status' println.
     '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
+    '  dashboard                                        Live system overview' println.
     '  help                                             Show this help' println.
     '' println.
     'Environment:' println.
