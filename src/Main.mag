@@ -31,6 +31,7 @@ Main subclass: Object
     cmd = 'task'     ifTrue: [^PP new runWith: args].
     cmd = 'workflow' ifTrue: [^PP new runWith: args].
     cmd = 'signal'   ifTrue: [^PP new runWith: args].
+    cmd = 'log'      ifTrue: [^PP new runWith: args].
     cmd = 'repo'     ifTrue: [^Repo new runWith: args].
 
     "Help"
@@ -66,6 +67,8 @@ Main subclass: Object
     '  plan     <file.json>                           Submit a structured plan' println.
     '  read     <category> [scope] [identity]         Read tuples' println.
     '  notify   <message> [--severity info|warn|urgent] Notify the user' println.
+    '  log      [--since <seconds>]                   Tail the notification stream' println.
+    '  log      --no-follow                           Show recent and exit' println.
     '  dismiss                                        Signal task completion' println.
     '  status                                         Show system status' println.
     '  prime [--role <role>]                           Output agent priming context' println.
