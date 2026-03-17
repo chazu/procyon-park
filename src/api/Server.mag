@@ -54,7 +54,8 @@ ApiServer subclass: Object
     httpServer route: '/api/plan' method: 'POST' handler: [:req | self handlePlan: req].
     httpServer route: '/api/workflow/start' method: 'POST' handler: [:req | self handleWorkflowStart: req].
     httpServer route: '/api/task/create' method: 'POST' handler: [:req | self handleTaskCreate: req].
-    httpServer route: '/api/signal' method: 'POST' handler: [:req | self handleSignal: req]
+    httpServer route: '/api/signal' method: 'POST' handler: [:req | self handleSignal: req].
+    httpServer route: '/api/dashboard' method: 'GET' handler: [:req | self handleDashboard: req]
   ]
 
   "--- Helpers ---"
@@ -470,4 +471,24 @@ ApiServer subclass: Object
 
     id := bbs upsertSignal: scope identity: identity payload: payload.
     ^self okResponse: (self okWithId: id)
+  ]
+
+  "--- Dashboard ---"
+
+  method: handleDashboard: req [
+    "GET /api/dashboard — return workflows, tasks, tokens, and recent notifications."
+    | workflows tasks tokens notifications recent d |
+    workflows := bbs scanAll: 'workflow'.
+    tasks := bbs scanAll: 'task'.
+    tokens := bbs scanAll: 'token'.
+    notifications := bbs scanAll: 'notification'.
+    recent := notifications size > 5
+      ifTrue: [notifications copyFrom: (notifications size - 5)]
+      ifFalse: [notifications].
+    d := Dictionary new.
+    d at: 'workflows' put: workflows.
+    d at: 'tasks' put: tasks.
+    d at: 'tokens' put: tokens.
+    d at: 'notifications' put: recent.
+    ^self okResponse: d
   ]
