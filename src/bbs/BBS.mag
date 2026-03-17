@@ -159,8 +159,10 @@ BBS subclass: Object
   "--- Signal Operations ---"
 
   method: upsertSignal: scope identity: identity payload: payload [
+    "Remove any existing signal with this identity, then write a new one.
+     Uses linear (not pinned) tuples so inp: can consume them properly."
     self inp: 'signal' scope: scope identity: identity.
-    ^self outPinned: 'signal' scope: scope identity: identity payload: payload
+    ^self out: 'signal' scope: scope identity: identity payload: payload
   ]
 
   "--- Convenience Operations ---"
