@@ -45,7 +45,8 @@ ApiServer subclass: Object
     httpServer route: '/api/notify' method: 'POST' handler: [:req | self handleNotify: req].
     httpServer route: '/api/dismiss' method: 'POST' handler: [:req | self handleDismiss: req].
     httpServer route: '/api/notifications' method: 'GET' handler: [:req | self handleNotifications: req].
-    httpServer route: '/api/plan' method: 'POST' handler: [:req | self handlePlan: req]
+    httpServer route: '/api/plan' method: 'POST' handler: [:req | self handlePlan: req].
+    httpServer route: '/api/workflow/start' method: 'POST' handler: [:req | self handleWorkflowStart: req]
   ]
 
   "--- Helpers ---"
@@ -341,4 +342,99 @@ ApiServer subclass: Object
     d at: 'plan_id' put: identity.
     d at: 'tasks_created' put: subtasks size.
     ^self okResponse: d
+  ]
+
+  "--- Workflow Start ---"
+
+  method: handleWorkflowStart: req [
+    | body err templateId scope params template templatePayload transitions missing d instanceId |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    err := self requireFields: #('template' 'scope') in: body.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
+    templateId := body at: 'template'.
+    scope := body at: 'scope'.
+    params := body at: 'params' ifAbsent: [Dictionary new].
+
+    "Read the template from the BBS"
+    template := bbs rdp: 'template' scope: 'system' identity: templateId.
+    template isNil ifTrue: [
+      ^self errorResponse: 404 message: 'Template not found: ', templateId
+    ].
+
+    "Extract all {{...}} placeholders from transitions and validate params"
+    templatePayload := template at: 'payload'.
+    transitions := templatePayload at: 'transitions' ifAbsent: [#()].
+    missing := self extractMissingParams: transitions provided: params.
+
+    missing isEmpty ifFalse: [
+      d := Dictionary new.
+      d at: 'error' put: 'Missing required template params'.
+      d at: 'missing_params' put: missing.
+      ^self jsonResponse: 400 body: d
+    ].
+
+    "All params present — instantiate the workflow"
+    instanceId := (WorkflowEngine on: bbs) instantiate: templateId scope: scope params: params.
+
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'workflow_id' put: instanceId.
+    ^self okResponse: d
+  ]
+
+  method: extractMissingParams: transitions provided: params [
+    "Scan all string values in transitions for {{key}} placeholders.
+     Return an Array of param names not present in the provided Dictionary."
+    | allKeys missing |
+    allKeys := Set new.
+
+    transitions do: [:tr |
+      self collectPlaceholders: tr into: allKeys
+    ].
+
+    missing := Array new: 0.
+    allKeys do: [:key |
+      (params includesKey: key) ifFalse: [
+        missing := missing copyWith: key
+      ]
+    ].
+    ^missing
+  ]
+
+  method: collectPlaceholders: obj into: aSet [
+    "Recursively walk a structure collecting {{key}} placeholder names."
+    obj isString ifTrue: [
+      self extractPlaceholdersFrom: obj into: aSet.
+      ^self
+    ].
+    (obj isKindOf: Dictionary) ifTrue: [
+      obj valuesDo: [:v | self collectPlaceholders: v into: aSet].
+      ^self
+    ].
+    (obj isKindOf: Array) ifTrue: [
+      obj do: [:elem | self collectPlaceholders: elem into: aSet].
+      ^self
+    ]
+  ]
+
+  method: extractPlaceholdersFrom: aString into: aSet [
+    "Extract {{key}} placeholders from a string, adding keys to aSet."
+    | str startIdx endIdx key |
+    str := aString.
+    [
+      startIdx := str indexOf: '{{'.
+      startIdx >= 0
+    ] whileTrue: [
+      endIdx := str indexOf: '}}' startingAt: startIdx + 2.
+      endIdx >= 0 ifTrue: [
+        key := str copyFrom: startIdx + 2 to: endIdx - 1.
+        key isEmpty ifFalse: [aSet add: key].
+        str := str copyFrom: endIdx + 2
+      ] ifFalse: [
+        str := ''
+      ]
+    ]
   ]
