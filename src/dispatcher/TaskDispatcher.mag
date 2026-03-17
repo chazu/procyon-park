@@ -67,6 +67,7 @@ TaskDispatcher subclass: Object
     bbs out: 'task' scope: scope identity: taskId payload: payload.
 
     ('Dispatching task: ', taskId, ' (role: ', role, ')') println.
+    bbs notify: 'Task dispatched: ', taskId, ' (role: ', role, ')' scope: scope severity: 'info'.
 
     "Spawn harness in a forked process"
     harness := harnessFactory createFor: role task: taskId scope: scope bbs: bbs.
@@ -101,6 +102,7 @@ TaskDispatcher subclass: Object
     [
       [harness run] on: Exception do: [:e |
         ('Task failed: ', taskId, ' - ', e messageText) println.
+        bbs notify: 'Task failed: ', taskId, ' - ', e messageText scope: scope severity: 'warn'.
         bbs emitEvent: scope
             identity: 'task-failed:', taskId
             type: 'task-failed'

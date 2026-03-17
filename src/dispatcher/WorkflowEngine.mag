@@ -57,6 +57,7 @@ WorkflowEngine subclass: Object
     ].
 
     ('Workflow instantiated: ', instanceId) println.
+    bbs notify: 'Workflow started: ', instanceId scope: scope severity: 'info'.
     ^instanceId
   ]
 
@@ -160,7 +161,8 @@ WorkflowEngine subclass: Object
         newPayload := tok at: 'payload'.
         newPayload at: 'status' put: 'positive'.
         bbs out: 'token' scope: scope identity: tokIdentity payload: newPayload.
-        ('  Promoted waiting token: ', tokIdentity) println
+        ('  Promoted waiting token: ', tokIdentity) println.
+        bbs notify: 'Token promoted: ', tokIdentity scope: scope severity: 'info'
       ]
     ]
   ]
@@ -188,6 +190,7 @@ WorkflowEngine subclass: Object
 
     "Fire! Consume input tokens, produce output tokens"
     ('  Firing transition: ', (transition at: 'id')) println.
+    bbs notify: 'Transition fired: ', (transition at: 'id'), ' in ', instanceId scope: scope severity: 'info'.
 
     "Consume input tokens and track them"
     inPlaces do: [:place |
