@@ -316,12 +316,15 @@ ApiServer subclass: Object
   ]
 
   method: handleNotificationStream: req [
-    "GET /api/notifications/stream?since=<epoch> — long-polling notification stream.
-     Returns notifications since the given epoch. If none found, holds
-     the request for up to 10 seconds, polling every 500ms."
-    | since notifications filtered mapped d i n obj |
+    "GET /api/notifications/stream?since=<epoch>&wait=<0|1> — long-polling notification stream.
+     Returns notifications since the given epoch. If none found and wait!=0, holds
+     the request for up to 10 seconds, polling every 500ms.
+     Pass wait=0 to return immediately (used by --no-follow)."
+    | since wait notifications filtered mapped d i obj p |
     since := req queryParam: 'since'.
     since isNil ifTrue: [since := 0] ifFalse: [since := since asInteger].
+    wait := req queryParam: 'wait'.
+    wait isNil ifTrue: [wait := 1] ifFalse: [wait := wait asInteger].
 
     "Initial scan"
     notifications := bbs scanAll: 'notification'.
@@ -329,23 +332,26 @@ ApiServer subclass: Object
       (n at: 'created_at' ifAbsent: [0]) >= since
     ].
 
-    "Long-poll: if no notifications yet, wait up to 10 seconds"
-    i := 0.
-    [filtered isEmpty and: [i < 20]] whileTrue: [
-      Process sleep: 500.
-      i := i + 1.
-      notifications := bbs scanAll: 'notification'.
-      filtered := notifications select: [:n |
-        (n at: 'created_at' ifAbsent: [0]) >= since
+    "Long-poll: if no notifications yet and wait enabled, wait up to 10 seconds"
+    wait > 0 ifTrue: [
+      i := 0.
+      [filtered isEmpty and: [i < 20]] whileTrue: [
+        Process sleep: 500.
+        i := i + 1.
+        notifications := bbs scanAll: 'notification'.
+        filtered := notifications select: [:n |
+          (n at: 'created_at' ifAbsent: [0]) >= since
+        ]
       ]
     ].
 
-    "Map to response format with explicit fields"
+    "Map to response format — message and severity live inside payload"
     mapped := filtered collect: [:n |
+      p := n at: 'payload' ifAbsent: [Dictionary new].
       obj := Dictionary new.
       obj at: 'id' put: (n at: 'id' ifAbsent: ['']).
-      obj at: 'message' put: (n at: 'message' ifAbsent: ['']).
-      obj at: 'severity' put: (n at: 'severity' ifAbsent: ['info']).
+      obj at: 'message' put: (p at: 'message' ifAbsent: ['']).
+      obj at: 'severity' put: (p at: 'severity' ifAbsent: ['info']).
       obj at: 'scope' put: (n at: 'scope' ifAbsent: ['system']).
       obj at: 'created_at' put: (n at: 'created_at' ifAbsent: [0]).
       obj
@@ -354,6 +360,7 @@ ApiServer subclass: Object
     d := Dictionary new.
     d at: 'ok' put: true.
     d at: 'notifications' put: mapped.
+    d at: 'count' put: mapped size.
     ^self okResponse: d
   ]
 

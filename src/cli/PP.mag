@@ -253,6 +253,7 @@ Communicate with it using the `pp` command-line tool.
   pp task <id> --role <r> --description <d> [--workdir <p>]  Create a task
   pp workflow <template> [--param key=val ...]        Start a workflow
   pp signal <id> <key> <value>                       Upsert a signal
+  pp log [--follow] [--no-follow] [--since <secs>]   Tail notification stream
 
 Worktree base: ~/.pp/worktrees/
 
@@ -600,13 +601,14 @@ Worktree base: ~/.pp/worktrees/
   ]
 
   method: cmdLog: args [
-    "pp log [--no-follow] [--since <seconds>] — poll notifications stream"
-    | follow sinceOffset since sinceStr url response result notifications n payload createdAt severity message ts maxCreatedAt dt |
+    "pp log [--follow] [--no-follow] [--since <seconds>] — poll notifications stream"
+    | follow sinceOffset since sinceStr url response result notifications payload createdAt severity message ts maxCreatedAt dt waitParam |
     follow := true.
     sinceOffset := 0.
 
-    "Parse flags"
+    "Parse flags — follow is default; --no-follow disables, --follow is explicit"
     (args indexOf: '--no-follow') >= 0 ifTrue: [follow := false].
+    (args indexOf: '--follow') >= 0 ifTrue: [follow := true].
     sinceStr := self flagValue: '--since' in: args.
     sinceStr notNil ifTrue: [sinceOffset := sinceStr asInteger].
 
@@ -615,20 +617,22 @@ Worktree base: ~/.pp/worktrees/
 
     [true] whileTrue: [
       sinceStr := since printString.
-      url := '/api/notifications/stream?since=', sinceStr.
+      "Pass wait=0 when not following so server returns immediately"
+      waitParam := follow ifTrue: ['1'] ifFalse: ['0'].
+      url := '/api/notifications/stream?since=', sinceStr, '&wait=', waitParam.
       [
         response := client get: baseUrl, url.
         (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
           result := Json decode: response.
           notifications := result at: 'notifications' ifAbsent: [#()].
           maxCreatedAt := since.
-          notifications do: [:n |
-            payload := n.
+          notifications do: [:notif |
+            payload := notif.
             createdAt := payload at: 'created_at' ifAbsent: [0].
             severity := payload at: 'severity' ifAbsent: ['info'].
             message := payload at: 'message' ifAbsent: [''].
             dt := DateTime fromEpoch: createdAt.
-            ts := dt format: 'YYYY-MM-DD HH:mm:ss'.
+            ts := dt printString.
             (ts, ' [', severity, '] ', message) println.
             createdAt > maxCreatedAt ifTrue: [maxCreatedAt := createdAt]
           ].
@@ -713,7 +717,7 @@ Worktree base: ~/.pp/worktrees/
     '  notify   <message> [--severity info|warn|urgent] Notify the user' println.
     '  dismiss                                          Signal task completion' println.
     '  status                                           Show system status' println.
-    '  log      [--no-follow] [--since <seconds>]       Stream notifications' println.
+    '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
     '  help                                             Show this help' println.
     '' println.
     'Environment:' println.
