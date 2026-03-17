@@ -651,9 +651,8 @@ Worktree base: ~/.pp/worktrees/
     | url response result workflows tasks tokens notifications wfPayload tPayload place nPayload esc |
 
     [true] whileTrue: [
-      esc := String new: 1.
-      esc at: 0 put: (Character value: 27).
-      (esc, '[2J', esc, '[H') print.
+      "Clear screen: print ESC[2J ESC[H using raw byte for ESC (27)"
+      self shellClear.
 
       [
         response := client get: baseUrl, '/api/dashboard'.
@@ -708,6 +707,14 @@ Worktree base: ~/.pp/worktrees/
 
       Process sleep: 3000
     ]
+  ]
+
+  method: shellClear [
+    "Clear terminal using external clear command."
+    | proc shellArgs |
+    proc := ExternalProcess command: '/usr/bin/clear'.
+    proc args: (Array new: 0).
+    proc run
   ]
 
   "--- Helpers ---"

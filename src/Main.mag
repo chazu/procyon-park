@@ -68,15 +68,15 @@ Main subclass: Object
     '  plan     <file.json>                           Submit a structured plan' println.
     '  read     <category> [scope] [identity]         Read tuples' println.
     '  notify   <message> [--severity info|warn|urgent] Notify the user' println.
-    '  log      [--follow] [--since <seconds>]          Tail the notification stream' println.
-    '  log      --no-follow                           Show recent and exit' println.
     '  dismiss                                        Signal task completion' println.
     '  status                                         Show system status' println.
-    '  prime [--role <role>]                           Output agent priming context' println.
+    '  prime    [--role <role>]                        Output agent priming context' println.
     '  task     <id> --role <r> --description <d>     Create a task' println.
     '  workflow <template> [--param key=val ...]       Start a workflow' println.
     '  signal   <id> <key> <value>                    Upsert a signal' println.
     '  repo     add|list|remove|info                  Manage repositories' println.
+    '  log      [--since <secs>] [--no-follow]        Tail notification stream' println.
+    '  dashboard                                      Live system overview' println.
     '' println.
     'Other:' println.
     '  help, --help, -h                               Show this help' println.
