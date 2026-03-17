@@ -50,6 +50,7 @@ ApiServer subclass: Object
     httpServer route: '/api/notify' method: 'POST' handler: [:req | self handleNotify: req].
     httpServer route: '/api/dismiss' method: 'POST' handler: [:req | self handleDismiss: req].
     httpServer route: '/api/notifications' method: 'GET' handler: [:req | self handleNotifications: req].
+    httpServer route: '/api/notifications/stream' method: 'GET' handler: [:req | self handleNotificationStream: req].
     httpServer route: '/api/plan' method: 'POST' handler: [:req | self handlePlan: req].
     httpServer route: '/api/workflow/start' method: 'POST' handler: [:req | self handleWorkflowStart: req].
     httpServer route: '/api/task/create' method: 'POST' handler: [:req | self handleTaskCreate: req].
@@ -311,6 +312,48 @@ ApiServer subclass: Object
     d := Dictionary new.
     d at: 'notifications' put: filtered.
     d at: 'count' put: filtered size.
+    ^self okResponse: d
+  ]
+
+  method: handleNotificationStream: req [
+    "GET /api/notifications/stream?since=<epoch> — long-polling notification stream.
+     Returns notifications since the given epoch. If none found, holds
+     the request for up to 10 seconds, polling every 500ms."
+    | since notifications filtered mapped d i n obj |
+    since := req queryParam: 'since'.
+    since isNil ifTrue: [since := 0] ifFalse: [since := since asInteger].
+
+    "Initial scan"
+    notifications := bbs scanAll: 'notification'.
+    filtered := notifications select: [:n |
+      (n at: 'created_at' ifAbsent: [0]) >= since
+    ].
+
+    "Long-poll: if no notifications yet, wait up to 10 seconds"
+    i := 0.
+    [filtered isEmpty and: [i < 20]] whileTrue: [
+      Process sleep: 500.
+      i := i + 1.
+      notifications := bbs scanAll: 'notification'.
+      filtered := notifications select: [:n |
+        (n at: 'created_at' ifAbsent: [0]) >= since
+      ]
+    ].
+
+    "Map to response format with explicit fields"
+    mapped := filtered collect: [:n |
+      obj := Dictionary new.
+      obj at: 'id' put: (n at: 'id' ifAbsent: ['']).
+      obj at: 'message' put: (n at: 'message' ifAbsent: ['']).
+      obj at: 'severity' put: (n at: 'severity' ifAbsent: ['info']).
+      obj at: 'scope' put: (n at: 'scope' ifAbsent: ['system']).
+      obj at: 'created_at' put: (n at: 'created_at' ifAbsent: [0]).
+      obj
+    ].
+
+    d := Dictionary new.
+    d at: 'ok' put: true.
+    d at: 'notifications' put: mapped.
     ^self okResponse: d
   ]
 
