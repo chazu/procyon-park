@@ -32,6 +32,7 @@ Main subclass: Object
     cmd = 'workflow' ifTrue: [^PP new runWith: args].
     cmd = 'signal'   ifTrue: [^PP new runWith: args].
     cmd = 'log'      ifTrue: [^PP new runWith: args].
+    cmd = 'dashboard' ifTrue: [^PP new runWith: args].
     cmd = 'repo'     ifTrue: [^Repo new runWith: args].
 
     "Help"
