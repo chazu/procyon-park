@@ -710,10 +710,13 @@ Worktree base: ~/.pp/worktrees/
   ]
 
   method: shellClear [
-    "Clear terminal using external clear command."
+    "Clear terminal using ANSI escape sequence."
     | proc shellArgs |
-    proc := ExternalProcess command: '/usr/bin/clear'.
-    proc args: (Array new: 0).
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: 'printf "\033[2J\033[H" > /dev/tty'.
+    proc args: shellArgs.
     proc run
   ]
 
