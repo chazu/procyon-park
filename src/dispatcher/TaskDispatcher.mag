@@ -106,11 +106,95 @@ TaskDispatcher subclass: Object
             type: 'task-failed'
             summary: e messageText
       ].
+      "Post-hoc validation: check for out-of-scope changes"
+      workdir notNil ifTrue: [
+        self validateScope: workdir taskId: taskId scope: scope
+      ].
       "Clean up slot"
       mutex critical: [activeSlots removeKey: taskId ifAbsent: [nil]]
     ] fork.
 
     mutex critical: [activeSlots at: taskId put: harness]
+  ]
+
+  method: validateScope: expectedDir taskId: aTaskId scope: aScope [
+    "Post-hoc validation: check that the agent only modified files within expectedDir.
+     Uses git status in the workdir to find changes, then checks each path."
+    | proc shellArgs diffOutput lines violations |
+
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: 'cd "', expectedDir, '" && git diff --name-only HEAD 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null'.
+    proc args: shellArgs.
+    proc dir: expectedDir.
+    proc run.
+
+    proc isSuccess ifFalse: [^self]. "Not a git dir or no changes — skip"
+
+    diffOutput := proc stderr. "stderr is what we can read; try stdout via temp file"
+
+    "Use temp file to capture output since ExternalProcess may not expose stdout"
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: 'cd "', expectedDir, '" && (git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null) | while read f; do realpath "$f" 2>/dev/null; done > /tmp/pp-scope-check-', aTaskId.
+    proc args: shellArgs.
+    proc dir: expectedDir.
+    proc run.
+
+    (File exists: '/tmp/pp-scope-check-', aTaskId) ifFalse: [^self].
+
+    diffOutput := File readFileContents: '/tmp/pp-scope-check-', aTaskId.
+
+    "Clean up temp file"
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: 'rm -f /tmp/pp-scope-check-', aTaskId.
+    proc args: shellArgs.
+    proc run.
+
+    diffOutput isEmpty ifTrue: [^self].
+
+    "Check each absolute path starts with the expected directory"
+    violations := Array new: 0.
+    (diffOutput split: '
+') do: [:line |
+      line isEmpty ifFalse: [
+        (line startsWith: expectedDir) ifFalse: [
+          violations := violations copyWith: line
+        ]
+      ]
+    ].
+
+    violations size > 0 ifTrue: [
+      ('SCOPE VIOLATION in task ', aTaskId, ': ', violations size printString, ' file(s) outside ', expectedDir) println.
+      violations do: [:v | ('  - ', v) println].
+
+      "Revert out-of-scope changes"
+      violations do: [:v |
+        ('  Reverting: ', v) println.
+        proc := ExternalProcess command: '/bin/sh'.
+        shellArgs := Array new: 0.
+        shellArgs := shellArgs copyWith: '-c'.
+        shellArgs := shellArgs copyWith: 'cd "', expectedDir, '" && git checkout -- "', v, '" 2>/dev/null'.
+        proc args: shellArgs.
+        proc dir: expectedDir.
+        proc run
+      ].
+
+      "Emit a scope-violation event"
+      bbs emitEvent: aScope
+          identity: 'scope-violation:', aTaskId
+          type: 'scope-violation'
+          summary: violations size printString, ' file(s) modified outside workdir'.
+
+      "Notify"
+      bbs notify: 'Scope violation in task ', aTaskId, ': ', violations size printString, ' out-of-scope file(s) reverted'
+          scope: aScope
+          severity: 'warn'
+    ]
   ]
 
   method: checkCompleted [

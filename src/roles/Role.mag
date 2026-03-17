@@ -17,9 +17,38 @@ Role subclass: Object
   method: ppCommands: p [ ppCommands := p ]
 
   method: primeFor: taskDescription context: contextTuples [
+    "Backward compat: no workdir boundary."
+    ^self primeFor: taskDescription context: contextTuples workDir: nil repoName: nil
+  ]
+
+  method: primeFor: taskDescription context: contextTuples workDir: aWorkDir repoName: aRepoName [
     "Assemble the full system prompt for this role, given a task and context."
     | prompt |
     prompt := self systemPromptHeader.
+
+    "Repo and workspace boundary"
+    aRepoName notNil ifTrue: [
+      prompt := prompt, '
+
+## Repository
+You are working in repository: **', aRepoName, '**'
+    ].
+    aWorkDir notNil ifTrue: [
+      prompt := prompt, '
+Working directory: ', aWorkDir, '
+
+## CRITICAL: Workspace Boundary
+You MUST only create, modify, or delete files within your working directory:
+  ', aWorkDir, '
+Do NOT:
+- Modify files outside this directory
+- Use absolute paths to write elsewhere
+- Run git commit, git push, or git checkout in other repositories
+- cd to directories outside your workspace
+Any changes outside your working directory will be detected and reverted.
+'
+    ].
+
     prompt := prompt, '
 
 ## Your Task
@@ -57,6 +86,7 @@ Available commands:
 - Do NOT attempt to coordinate with other agents directly.
 - All coordination flows through the tuplespace via `pp`.
 - Report observations about anything unexpected you discover.
+- Do NOT modify files outside your working directory.
 - When you are done, signal completion as described below.
 
 ', self completionInstructions.

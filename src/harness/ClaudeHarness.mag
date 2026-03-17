@@ -36,8 +36,8 @@ ClaudeHarness subclass: Object
       ifTrue: [(taskTuple at: 'payload') at: 'description' ifAbsent: ['No description']]
       ifFalse: ['Task: ', taskId].
 
-    "Build the system prompt"
-    systemPrompt := role primeFor: taskDescription context: contextTuples.
+    "Build the system prompt (with workdir boundary if set)"
+    systemPrompt := role primeFor: taskDescription context: contextTuples workDir: workDir repoName: repoName.
 
     "Spawn Claude"
     ('Starting Claude harness for ', role name, ' task: ', taskId) println.
