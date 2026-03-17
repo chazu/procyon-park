@@ -192,6 +192,18 @@ PP subclass: Object
     | response health |
     [
       response := client get: baseUrl, '/api/health'.
+      response isNil ifTrue: [
+        ('Error: no response from server at ', baseUrl) println.
+        ^self
+      ].
+      (response isKindOf: String) ifFalse: [
+        ('Error: server returned non-String response') println.
+        ^self
+      ].
+      response isEmpty ifTrue: [
+        ('Error: empty response from server') println.
+        ^self
+      ].
       health := Json decode: response.
       'Procyon Park Status:' println.
       ('  Tuples:  ', (health at: 'tuples' ifAbsent: ['?']) printString) println.
@@ -319,6 +331,18 @@ Communicate with it using the `pp` command-line tool.
 
     [
       response := client post: url body: jsonBody contentType: 'application/json'.
+      response isNil ifTrue: [
+        ('Error: no response from server') println.
+        ^self
+      ].
+      (response isKindOf: String) ifFalse: [
+        ('Error: server returned non-String response') println.
+        ^self
+      ].
+      response isEmpty ifTrue: [
+        ('Error: empty response from server') println.
+        ^self
+      ].
       result := Json decode: response.
       (Json encodePretty: result) println
     ] on: Exception do: [:e |
