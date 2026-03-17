@@ -52,7 +52,7 @@ Dispatcher subclass: Object
       [self onTick] on: Exception do: [:e |
         ('Dispatcher tick error: ', e messageText) println
       ].
-      Process sleep: 10
+      Process sleep: 10000
     ]
   ]
 

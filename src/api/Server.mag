@@ -405,6 +405,10 @@ ApiServer subclass: Object
       taskPayload at: 'workflow_instance' put: (body at: 'workflow_instance')
     ].
 
+    (body includesKey: 'repo') ifTrue: [
+      taskPayload at: 'repo' put: (body at: 'repo')
+    ].
+
     id := bbs out: 'task' scope: scope identity: identity payload: taskPayload.
     ^self okResponse: (self okWithId: id)
   ]

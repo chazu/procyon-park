@@ -212,6 +212,7 @@ WorkflowEngine subclass: Object
     ].
 
     role notNil ifTrue: [
+      | repo |
       taskPayload := Dictionary new.
       taskPayload at: 'role' put: role.
       taskPayload at: 'status' put: 'pending'.
@@ -219,6 +220,9 @@ WorkflowEngine subclass: Object
       taskPayload at: 'description' put: resolvedDesc.
       taskPayload at: 'workflow_instance' put: instanceId.
       taskPayload at: 'transition_id' put: (transition at: 'id').
+      "Propagate repo from workflow params"
+      repo := params at: 'repo' ifAbsent: [nil].
+      repo notNil ifTrue: [taskPayload at: 'repo' put: repo].
       "Pass through workdir if specified in transition"
       workdir := transition at: 'workdir' ifAbsent: [nil].
       workdir notNil ifTrue: [

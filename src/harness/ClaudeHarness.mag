@@ -2,18 +2,23 @@
  system prompt, environment, and tools for a given role and task."
 
 ClaudeHarness subclass: Object
-  instanceVars: role taskId scope bbs process systemPrompt workDir
+  instanceVars: role taskId scope bbs process systemPrompt workDir repoName
 
   method: initRole: aRole task: aTaskId scope: aScope bbs: aBBS [
     role := aRole.
     taskId := aTaskId.
     scope := aScope.
     bbs := aBBS.
-    workDir := File workingDirectory
+    workDir := File workingDirectory.
+    repoName := ''
   ]
 
   method: workDir: aPath [
     workDir := aPath
+  ]
+
+  method: repoName: aName [
+    repoName := aName
   ]
 
   method: role [ ^role ]
@@ -22,8 +27,7 @@ ClaudeHarness subclass: Object
   method: run [
     "Assemble the system prompt, spawn Claude, wait for completion."
 
-    "Assemble context from BBS"
-    | contextTuples taskTuple taskDescription env result |
+    | contextTuples taskTuple taskDescription env args |
     contextTuples := role assembleContext: bbs scope: scope taskId: taskId.
 
     "Read the task description"
@@ -38,21 +42,29 @@ ClaudeHarness subclass: Object
     "Spawn Claude"
     ('Starting Claude harness for ', role name, ' task: ', taskId) println.
 
+    "Build args array (cannot use #() literal — it treats vars as symbols)"
+    args := Array new: 0.
+    args := args copyWith: '--system-prompt'.
+    args := args copyWith: systemPrompt.
+    args := args copyWith: '--allowedTools'.
+    args := args copyWith: 'Bash,Read,Write,Edit,Glob,Grep'.
+    args := args copyWith: '-p'.
+    args := args copyWith: taskDescription.
+
+    "Environment — agents know their URL, scope, task, and repo"
     env := Dictionary new.
     env at: 'PP_URL' put: 'http://localhost:7777'.
     env at: 'PP_SCOPE' put: scope.
     env at: 'PP_TASK' put: taskId.
+    env at: 'PP_REPO' put: repoName.
+    env at: 'PP_REPO_PATH' put: workDir.
 
     process := ExternalProcess command: 'claude'.
-    process args: #(
-      '--system-prompt' systemPrompt
-      '--allowedTools' 'Bash,Read,Write,Edit,Glob,Grep'
-      '-p' taskDescription
-    ).
+    process args: args.
     process env: env.
     process dir: workDir.
 
-    result := process run.
+    process run.
 
     "Check result"
     process isSuccess ifTrue: [

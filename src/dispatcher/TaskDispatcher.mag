@@ -54,7 +54,7 @@ TaskDispatcher subclass: Object
 
   method: dispatchTask: task [
     "Claim a task and spawn a harness process for it."
-    | taskId scope payload role harness workdir |
+    | taskId scope payload role harness workdir repoField repoConfig repoPath |
     taskId := task at: 'identity'.
     scope := task at: 'scope'.
     payload := task at: 'payload'.
@@ -71,8 +71,28 @@ TaskDispatcher subclass: Object
     "Spawn harness in a forked process"
     harness := harnessFactory createFor: role task: taskId scope: scope bbs: bbs.
 
-    "Set workdir if specified in task payload"
+    "Resolve repo — task payload or explicit workdir"
+    repoField := payload at: 'repo' ifAbsent: [nil].
     workdir := payload at: 'workdir' ifAbsent: [nil].
+
+    repoField notNil ifTrue: [
+      "Look up registered repo path"
+      repoConfig := Repo new repoForName: repoField.
+      repoConfig notNil ifTrue: [
+        repoPath := repoConfig at: 'path' ifAbsent: [nil].
+        repoPath notNil ifTrue: [
+          harness repoName: repoField.
+          "workdir overrides repo path (e.g. worktree within repo)"
+          workdir isNil ifTrue: [
+            harness workDir: repoPath.
+            ('  Repo: ', repoField, ' (', repoPath, ')') println
+          ]
+        ]
+      ] ifFalse: [
+        ('  WARNING: repo not registered: ', repoField) println
+      ]
+    ].
+
     workdir notNil ifTrue: [
       harness workDir: workdir.
       ('  Using workdir: ', workdir) println
