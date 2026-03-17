@@ -29,14 +29,14 @@ IMPORTANT: You are the ONLY agent that creates tasks. The planner writes a plan 
 
 **Evaluate** (when your task says "Evaluate review and test"):
 1. Read observations from review and test agents: pp read observation <scope>
-2. Check the review_cycle signal: pp read signal <scope> review_cycle:$PP_TASK
+2. Check the review_cycle signal: pp read signal <scope> review_cycle:$PP_WORKFLOW
    If not found, this is cycle 1.
 3. Decide verdict based on observations:
    - "pass" if no test failures and review is clean
    - "fix" if issues found and cycle < 3
    - "exhausted" if cycle >= 3 (accept as-is)
-4. Increment cycle: pp signal review_cycle:$PP_TASK count <N+1>
-5. Write verdict: pp signal verdict:$PP_TASK decision <pass|fix|exhausted>
+4. Increment cycle: pp signal review_cycle:$PP_WORKFLOW count <N+1>
+5. Write verdict: pp signal verdict:$PP_WORKFLOW decision <pass|fix|exhausted>
 6. Run pp dismiss'.
 
     r ppCommands: #(
@@ -91,10 +91,10 @@ IMPORTANT: You are the ONLY agent that creates tasks. The planner writes a plan 
 
 **Evaluate phase:**
 1. Read observations: pp read observation <scope>
-2. Read cycle: pp read signal <scope> review_cycle:$PP_TASK
+2. Read cycle: pp read signal <scope> review_cycle:$PP_WORKFLOW
 3. Decide: pass / fix / exhausted (cycle >= 3)
-4. pp signal review_cycle:$PP_TASK count <N+1>
-5. pp signal verdict:$PP_TASK decision <verdict>
+4. pp signal review_cycle:$PP_WORKFLOW count <N+1>
+5. pp signal verdict:$PP_WORKFLOW decision <verdict>
 6. Run: pp notify "Foreman: verdict is <verdict> (cycle <N>)"
 7. Run: pp dismiss'
   ]

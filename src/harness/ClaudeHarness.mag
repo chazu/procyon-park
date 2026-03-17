@@ -27,14 +27,18 @@ ClaudeHarness subclass: Object
   method: run [
     "Assemble the system prompt, spawn Claude, wait for completion."
 
-    | contextTuples taskTuple taskDescription env args |
+    | contextTuples taskTuple taskDescription taskPayload workflowInstance env args |
     contextTuples := role assembleContext: bbs scope: scope taskId: taskId.
 
-    "Read the task description"
+    "Read the task description and workflow instance"
     taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
     taskDescription := taskTuple notNil
       ifTrue: [(taskTuple at: 'payload') at: 'description' ifAbsent: ['No description']]
       ifFalse: ['Task: ', taskId].
+    taskPayload := taskTuple notNil
+      ifTrue: [taskTuple at: 'payload']
+      ifFalse: [Dictionary new].
+    workflowInstance := taskPayload at: 'workflow_instance' ifAbsent: [''].
 
     "Build the system prompt (with workdir boundary if set)"
     systemPrompt := role primeFor: taskDescription context: contextTuples workDir: workDir repoName: repoName.
@@ -51,13 +55,14 @@ ClaudeHarness subclass: Object
     args := args copyWith: '-p'.
     args := args copyWith: taskDescription.
 
-    "Environment — agents know their URL, scope, task, and repo"
+    "Environment — agents know their URL, scope, task, repo, and workflow"
     env := Dictionary new.
     env at: 'PP_URL' put: 'http://localhost:7777'.
     env at: 'PP_SCOPE' put: scope.
     env at: 'PP_TASK' put: taskId.
     env at: 'PP_REPO' put: repoName.
     env at: 'PP_REPO_PATH' put: workDir.
+    env at: 'PP_WORKFLOW' put: workflowInstance.
 
     process := ExternalProcess command: 'claude'.
     process args: args.
