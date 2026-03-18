@@ -353,7 +353,7 @@ PPEOF'.
 
   method: cmdCleanBranches: args [
     "pp repo clean-branches [--dry-run] [--all] [--repo <name>] — remove stale impl/feature branches."
-    | tmpFile dryRun deleteAll repoName repoConfig repoPath branchOutput branchLines mergedOutput mergedLines branch trimmed isCurrent isMerged deletedMerged deletedForce totalDeleted line |
+    | tmpFile dryRun deleteAll repoName repoConfig repoPath branchOutput branchLines mergedOutput mergedLines branch trimmed isCurrent isMerged deletedMerged deletedForce totalDeleted line mlStr lineStr |
 
     dryRun := (args indexOf: '--dry-run') >= 0.
     deleteAll := (args indexOf: '--all') >= 0.
@@ -398,7 +398,6 @@ PPEOF'.
     mergedOutput isEmpty ifFalse: [
       (mergedOutput split: '
 ') do: [:ml |
-        | mlStr |
         mlStr := '', ml.
         mlStr isEmpty ifFalse: [
           mergedLines := mergedLines copyWith: mlStr
@@ -408,7 +407,6 @@ PPEOF'.
 
     "Process each branch"
     branchLines do: [:line |
-      | lineStr |
       isCurrent := false.
       lineStr := '', line.
       lineStr isEmpty ifFalse: [
