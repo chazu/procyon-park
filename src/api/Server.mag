@@ -53,6 +53,7 @@ ApiServer subclass: Object
     httpServer route: '/api/notifications/stream' method: 'GET' handler: [:req | self handleNotificationStream: req].
     httpServer route: '/api/plan' method: 'POST' handler: [:req | self handlePlan: req].
     httpServer route: '/api/workflow/start' method: 'POST' handler: [:req | self handleWorkflowStart: req].
+    httpServer route: '/api/workflow/cancel' method: 'POST' handler: [:req | self handleWorkflowCancel: req].
     httpServer route: '/api/task/create' method: 'POST' handler: [:req | self handleTaskCreate: req].
     httpServer route: '/api/signal' method: 'POST' handler: [:req | self handleSignal: req].
     httpServer route: '/api/dashboard' method: 'GET' handler: [:req | self handleDashboard: req]
@@ -417,6 +418,64 @@ ApiServer subclass: Object
     d := Dictionary new.
     d at: 'status' put: 'ok'.
     d at: 'workflow_id' put: instanceId.
+    ^self okResponse: d
+  ]
+
+
+  "--- Workflow Cancel ---"
+
+  method: handleWorkflowCancel: req [
+    "POST /api/workflow/cancel — cancel a running workflow and its pending tasks."
+    | body wfId scope wf payload tasks cancelledCount taskPayload taskIdentity taskStatus d |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    wfId := body at: 'workflow_id' ifAbsent: [nil].
+    wfId isNil ifTrue: [^self errorResponse: 400 message: 'workflow_id required'].
+
+    scope := body at: 'scope' ifAbsent: ['default'].
+
+    "Check workflow exists"
+    wf := bbs rdp: 'workflow' scope: scope identity: wfId.
+    wf isNil ifTrue: [^self errorResponse: 404 message: 'workflow not found'].
+
+    "Check workflow is not already terminal"
+    payload := wf at: 'payload'.
+    taskStatus := payload at: 'status' ifAbsent: ['unknown'].
+    (taskStatus = 'completed' or: [taskStatus = 'cancelled']) ifTrue: [
+      ^self errorResponse: 409 message: 'workflow already ', taskStatus
+    ].
+
+    "Consume and rewrite workflow as cancelled"
+    bbs inp: 'workflow' scope: scope identity: wfId.
+    payload at: 'status' put: 'cancelled'.
+    payload at: 'cancelled_at' put: DateTime now epochSeconds.
+    bbs out: 'workflow' scope: scope identity: wfId payload: payload.
+
+    "Cancel pending/dispatched tasks"
+    cancelledCount := 0.
+    tasks := bbs scan: 'task' scope: scope.
+    tasks do: [:t |
+      taskPayload := t at: 'payload'.
+      taskIdentity := t at: 'identity'.
+      taskStatus := taskPayload at: 'status' ifAbsent: [''].
+      ((taskPayload at: 'workflow_instance' ifAbsent: ['']) = wfId
+        and: [taskStatus = 'pending' or: [taskStatus = 'dispatched']]) ifTrue: [
+        bbs inp: 'task' scope: scope identity: taskIdentity.
+        taskPayload at: 'status' put: 'cancelled'.
+        bbs out: 'task' scope: scope identity: taskIdentity payload: taskPayload.
+        cancelledCount := cancelledCount + 1
+      ]
+    ].
+
+    "Emit event and notify"
+    bbs emitEvent: scope identity: 'workflow-cancelled:', wfId type: 'workflow-cancelled' summary: 'Workflow ', wfId, ' cancelled'.
+    bbs notify: ('Workflow ', wfId, ' has been cancelled') scope: scope severity: 'info'.
+
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'workflow_id' put: wfId.
+    d at: 'tasks_cancelled' put: cancelledCount.
     ^self okResponse: d
   ]
 
