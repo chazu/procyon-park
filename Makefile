@@ -11,6 +11,7 @@ full:
 
 install: build
 	cp $(BIN) $(GOBIN)/$(BIN)
+	codesign -f -s - $(GOBIN)/$(BIN)
 
 run:
 	mag -m Main.start

@@ -291,7 +291,7 @@ ApiServer subclass: Object
         summary: 'Agent dismissed'.
 
     "Notify the user"
-    bbs notify: 'Agent completed task: ', (body at: 'task_id')
+    bbs notify: ('Agent completed task: ', (body at: 'task_id'))
         scope: (body at: 'scope')
         severity: 'info'.
 
