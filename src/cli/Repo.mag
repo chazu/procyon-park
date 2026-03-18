@@ -377,8 +377,8 @@ PPEOF'.
       repoPath := self readAndClean: tmpFile
     ].
 
-    "Get impl/* and feature/* branches"
-    self shellRun: 'git -C "', repoPath, '" branch --list "impl/*" "feature/*" > "', tmpFile, '" 2>/dev/null'.
+    "Get impl/* and feature/* branches — use sed to strip leading spaces/asterisks"
+    self shellRun: 'git -C "', repoPath, '" branch --list "impl/*" "feature/*" 2>/dev/null | sed "s/^[* ]*//" > "', tmpFile, '"'.
     branchOutput := self readAndClean: tmpFile.
     branchOutput isEmpty ifTrue: [
       'No impl/* or feature/* branches found.' println.
@@ -387,35 +387,38 @@ PPEOF'.
     branchLines := branchOutput split: '
 '.
 
-    "Get merged branches"
-    self shellRun: 'git -C "', repoPath, '" branch --merged main > "', tmpFile, '" 2>/dev/null'.
+    "Get current branch name"
+    self shellRun: 'git -C "', repoPath, '" rev-parse --abbrev-ref HEAD > "', tmpFile, '" 2>/dev/null'.
+    trimmed := self readAndClean: tmpFile.
+
+    "Get merged branches — use sed to strip leading spaces/asterisks"
+    self shellRun: 'git -C "', repoPath, '" branch --merged main 2>/dev/null | sed "s/^[* ]*//" > "', tmpFile, '"'.
     mergedOutput := self readAndClean: tmpFile.
     mergedLines := Array new: 0.
     mergedOutput isEmpty ifFalse: [
       (mergedOutput split: '
 ') do: [:ml |
-        trimmed := ml trim.
-        trimmed isEmpty ifFalse: [
-          (trimmed startsWith: '* ') ifTrue: [
-            trimmed := (trimmed copyFrom: 2) trim
-          ].
-          mergedLines := mergedLines copyWith: trimmed
+        | mlStr |
+        mlStr := '', ml.
+        mlStr isEmpty ifFalse: [
+          mergedLines := mergedLines copyWith: mlStr
         ]
       ]
     ].
 
     "Process each branch"
     branchLines do: [:line |
+      | lineStr |
       isCurrent := false.
-      trimmed := line trim.
-      trimmed isEmpty ifFalse: [
-        (trimmed startsWith: '* ') ifTrue: [
+      lineStr := '', line.
+      lineStr isEmpty ifFalse: [
+        (lineStr = trimmed) ifTrue: [
           isCurrent := true
         ].
         isCurrent ifTrue: [
-          ('Skipping current branch: ', trimmed) println
+          ('Skipping current branch: ', lineStr) println
         ] ifFalse: [
-          branch := trimmed.
+          branch := lineStr.
           isMerged := (mergedLines indexOf: branch) >= 0.
           isMerged ifTrue: [
             dryRun ifTrue: [
