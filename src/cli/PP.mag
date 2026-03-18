@@ -39,10 +39,12 @@ PP subclass: Object
     cmd = 'prime'    ifTrue: [^self cmdPrime: args].
     cmd = 'task'     ifTrue: [^self cmdTask: args].
     cmd = 'workflow' ifTrue: [
-      "pp workflow status <id> vs pp workflow <template>"
+      "pp workflow status <id> | pp workflow cancel <id> | pp workflow <template>"
       (args size > 1 and: [(args at: 1) = 'status'])
-        ifTrue: [^self cmdWorkflowStatus: args]
-        ifFalse: [^self cmdWorkflow: args]
+        ifTrue: [^self cmdWorkflowStatus: args].
+      (args size > 1 and: [(args at: 1) = 'cancel'])
+        ifTrue: [^self cmdWorkflowCancel: args].
+      ^self cmdWorkflow: args
     ].
     cmd = 'signal'   ifTrue: [^self cmdSignal: args].
     cmd = 'log'      ifTrue: [^self cmdLog: args].
@@ -479,6 +481,25 @@ Worktree base: ~/.pp/worktrees/
     ]
   ]
 
+  method: cmdWorkflowCancel: args [
+    "pp workflow cancel <workflow-id> [--scope <scope>]"
+    | wfId theScope body |
+    args size < 3 ifTrue: [
+      'Usage: pp workflow cancel <workflow-id> [--scope <scope>]' println.
+      ^self
+    ].
+
+    wfId := args at: 2.
+    theScope := self flagValue: '--scope' in: args.
+    theScope isNil ifTrue: [theScope := scope].
+
+    body := Dictionary new.
+    body at: 'workflow_id' put: wfId.
+    body at: 'scope' put: theScope.
+
+    self post: '/api/workflow/cancel' body: body
+  ]
+
   method: showWorkflowDetail: wfId scope: wfScope [
     "Show detailed status for a single workflow."
     | body response result wf wfPayload tokens tasks allTokens allTasks cycleSignal |
@@ -797,6 +818,9 @@ Worktree base: ~/.pp/worktrees/
     '  notify   <message> [--severity info|warn|urgent] Notify the user' println.
     '  dismiss                                          Signal task completion' println.
     '  status                                           Show system status' println.
+    '  workflow <template> [--param key=val ...]        Start a workflow' println.
+    '  workflow status [<id>]                           Show workflow status' println.
+    '  workflow cancel <id> [--scope <scope>]           Cancel a running workflow' println.
     '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
     '  dashboard                                        Live system overview' println.
     '  help                                             Show this help' println.
