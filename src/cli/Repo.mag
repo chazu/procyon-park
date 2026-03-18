@@ -47,6 +47,16 @@ Repo subclass: Object
     subcmd = 'info'   ifTrue: [^self cmdInfo: args].
     subcmd = 'help'   ifTrue: [^self printUsage].
 
+    subcmd = 'worktree' ifTrue: [
+      | wtCmd |
+      wtCmd := args size > 2 ifTrue: [args at: 2] ifFalse: [''].
+      wtCmd = 'list'  ifTrue: [^self cmdWorktreeList: args].
+      wtCmd = 'ls'    ifTrue: [^self cmdWorktreeList: args].
+      wtCmd = 'clean' ifTrue: [^self cmdWorktreeClean: args].
+      self printWorktreeUsage.
+      ^self
+    ].
+
     ('Unknown repo command: ', subcmd) println.
     self printUsage
   ]
@@ -196,6 +206,169 @@ PPEOF'.
     (Json encodePretty: config) println
   ]
 
+  "--- Worktree Commands ---"
+
+  method: cmdWorktreeList: args [
+    "pp repo worktree list — list all managed worktrees."
+    | tmpFile taskList count taskDir taskDirs wtList wtDirs |
+
+    self ensureDirs.
+    count := 0.
+    tmpFile := '/tmp/pp-wt-list-', DateTime now epochSeconds printString.
+
+    "List task-level directories under worktreesDir"
+    self shellRun: 'ls "', worktreesDir, '/" 2>/dev/null > "', tmpFile, '"'.
+
+    (File exists: tmpFile) ifFalse: [
+      'No worktrees found.' println.
+      ^self
+    ].
+
+    taskList := File readFileContents: tmpFile.
+    self shellRun: 'rm -f "', tmpFile, '"'.
+
+    taskDirs := taskList split: '
+'.
+
+    taskDirs do: [:taskName |
+      taskName isEmpty ifFalse: [
+        taskDir := worktreesDir, '/', taskName.
+
+        "List subtask worktree directories within this task dir"
+        self shellRun: 'ls "', taskDir, '/" 2>/dev/null > "', tmpFile, '"'.
+
+        (File exists: tmpFile) ifTrue: [
+          | wtContents wtNames |
+          wtContents := File readFileContents: tmpFile.
+          self shellRun: 'rm -f "', tmpFile, '"'.
+          wtNames := wtContents split: '
+'.
+
+          wtNames do: [:wtName |
+            wtName isEmpty ifFalse: [
+              | wtPath |
+              wtPath := taskDir, '/', wtName.
+              count := count + 1.
+              ('  ', wtPath) println.
+              ('    workflow: ', taskName) println
+            ]
+          ]
+        ]
+      ]
+    ].
+
+    count = 0
+      ifTrue: ['No worktrees found.' println]
+      ifFalse: [('', count printString, ' worktree(s) found.') println]
+  ]
+
+  method: cmdWorktreeClean: args [
+    "pp repo worktree clean [--dry-run] — remove worktrees for completed/missing workflows."
+    | tmpFile taskList taskDirs dryRun cleaned baseUrl ppUrl |
+
+    self ensureDirs.
+    cleaned := 0.
+    dryRun := (args indexOf: '--dry-run') >= 0.
+    tmpFile := '/tmp/pp-wt-clean-', DateTime now epochSeconds printString.
+
+    "Read PP_URL for API calls"
+    ppUrl := System env: 'PP_URL'.
+    (ppUrl isNil or: [ppUrl isEmpty]) ifTrue: [ppUrl := 'http://localhost:7777'].
+
+    "List task-level directories under worktreesDir"
+    self shellRun: 'ls "', worktreesDir, '/" 2>/dev/null > "', tmpFile, '"'.
+
+    (File exists: tmpFile) ifFalse: [
+      'No worktrees to clean.' println.
+      ^self
+    ].
+
+    taskList := File readFileContents: tmpFile.
+    self shellRun: 'rm -f "', tmpFile, '"'.
+
+    taskDirs := taskList split: '
+'.
+
+    taskDirs do: [:taskName |
+      taskName isEmpty ifFalse: [
+        | taskDir shouldRemove statusResponse statusBody |
+        taskDir := worktreesDir, '/', taskName.
+        shouldRemove := false.
+
+        "Check workflow status via HTTP GET"
+        [
+          self shellRun: 'curl -s "', ppUrl, '/api/v1/workflow/status/', taskName, '" > "', tmpFile, '" 2>/dev/null'.
+          (File exists: tmpFile) ifTrue: [
+            statusResponse := File readFileContents: tmpFile.
+            self shellRun: 'rm -f "', tmpFile, '"'.
+            statusResponse isEmpty
+              ifTrue: [shouldRemove := true]
+              ifFalse: [
+                [
+                  statusBody := Json decode: statusResponse.
+                  | wfStatus |
+                  wfStatus := statusBody at: 'status' ifAbsent: [''].
+                  (wfStatus = 'completed' or: [wfStatus = 'not_found']) ifTrue: [
+                    shouldRemove := true
+                  ]
+                ] on: Exception do: [:e |
+                  "JSON parse error — treat as missing"
+                  shouldRemove := true
+                ]
+              ]
+          ] ifFalse: [
+            shouldRemove := true
+          ]
+        ] on: Exception do: [:e |
+          "Network error — treat as missing"
+          shouldRemove := true
+        ].
+
+        shouldRemove ifTrue: [
+          dryRun ifTrue: [
+            ('Would remove: ', taskDir) println.
+            cleaned := cleaned + 1
+          ] ifFalse: [
+            "Try git worktree remove first, fall back to rm -rf"
+            | wtList wtDirs |
+            self shellRun: 'ls "', taskDir, '/" 2>/dev/null > "', tmpFile, '"'.
+            (File exists: tmpFile) ifTrue: [
+              wtList := File readFileContents: tmpFile.
+              self shellRun: 'rm -f "', tmpFile, '"'.
+              wtDirs := wtList split: '
+'.
+              wtDirs do: [:wtName |
+                wtName isEmpty ifFalse: [
+                  | wtPath |
+                  wtPath := taskDir, '/', wtName.
+                  self shellRun: 'git worktree remove "', wtPath, '" 2>/dev/null || rm -rf "', wtPath, '"'
+                ]
+              ]
+            ].
+            self shellRun: 'rm -rf "', taskDir, '"'.
+            ('Removed: ', taskDir) println.
+            cleaned := cleaned + 1
+          ]
+        ]
+      ]
+    ].
+
+    self shellRun: 'rm -f "', tmpFile, '"'.
+    ('Cleaned ', cleaned printString, ' worktree(s).') println
+  ]
+
+  method: printWorktreeUsage [
+    'pp repo worktree — Worktree management' println.
+    '' println.
+    'Usage: pp repo worktree <command> [args...]' println.
+    '' println.
+    'Commands:' println.
+    '  list                 List all managed worktrees' println.
+    '  clean [--dry-run]    Remove worktrees for completed/missing workflows' println.
+    '' println.
+    'Worktrees are stored at ~/.pp/worktrees/' println
+  ]
+
   "--- Validation ---"
 
   method: validateAll [
@@ -284,6 +457,8 @@ PPEOF'.
     '  list                            List registered repositories' println.
     '  remove <name>                   Unregister a repository' println.
     '  info   <name>                   Show repository details' println.
+    '  worktree list                   List managed worktrees' println.
+    '  worktree clean [--dry-run]      Clean completed worktrees' println.
     '' println.
     'Repositories are stored at ~/.pp/repos/' println.
     'Worktrees are managed at ~/.pp/worktrees/' println
