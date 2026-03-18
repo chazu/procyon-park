@@ -106,26 +106,34 @@ Available commands:
   ]
 
   method: assembleContext: bbs scope: scope taskId: taskId [
-    "Assemble context tuples from the BBS based on this role''s constraints."
+    "Backward compat: no workflow filtering."
+    ^self assembleContext: bbs scope: scope taskId: taskId workflowInstance: ''
+  ]
+
+  method: assembleContext: bbs scope: scope taskId: taskId workflowInstance: wfInstance [
+    "Assemble context tuples from the BBS based on this role''s constraints.
+     When wfInstance is non-empty, tuples with a workflow_instance field are
+     filtered to only include those belonging to this workflow."
     | hard soft budget result conventions remaining |
     hard := contextConstraints at: 'hard' ifAbsent: [#()].
     soft := contextConstraints at: 'soft' ifAbsent: [#()].
     budget := contextConstraints at: 'budget' ifAbsent: [50].
     result := Array new: 0.
 
-    "Always include conventions"
+    "Always include conventions (global, not workflow-scoped)"
     conventions := bbs scanAll: 'convention'.
     result := result, conventions.
 
-    "Hard constraints — must include"
+    "Hard constraints — must include, filtered by workflow"
     hard do: [:spec |
       | cat tuples |
       cat := spec at: 'category'.
       tuples := bbs scan: cat scope: scope.
+      tuples := self filterByWorkflow: tuples instance: wfInstance.
       result := result, tuples
     ].
 
-    "Soft constraints — fill remaining budget"
+    "Soft constraints — fill remaining budget, filtered by workflow"
     remaining := budget - result size.
     remaining > 0 ifTrue: [
       soft do: [:spec |
@@ -133,6 +141,7 @@ Available commands:
           | cat tuples |
           cat := spec at: 'category'.
           tuples := bbs scan: cat scope: scope.
+          tuples := self filterByWorkflow: tuples instance: wfInstance.
           tuples size > remaining ifTrue: [
             tuples := tuples copyFrom: 0 to: remaining - 1
           ].
@@ -143,4 +152,17 @@ Available commands:
     ].
 
     ^result
+  ]
+
+  method: filterByWorkflow: tuples instance: wfInstance [
+    "Filter tuples: if wfInstance is set, only include tuples that either
+     have no workflow_instance field (global) or match this workflow.
+     If wfInstance is empty, return all tuples unfiltered."
+    wfInstance isEmpty ifTrue: [^tuples].
+    ^tuples select: [:t |
+      | payload tWf |
+      payload := t at: 'payload' ifAbsent: [Dictionary new].
+      tWf := payload at: 'workflow_instance' ifAbsent: [''].
+      tWf isEmpty or: [tWf = wfInstance]
+    ]
   ]

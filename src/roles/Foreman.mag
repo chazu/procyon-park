@@ -14,16 +14,18 @@ Foreman subclass: Role
 1. Find the plan: pp read decision <scope> — look for the most recent plan decision.
    The plan decision has a "subtasks" array in its payload, each with identity, role, and description.
 2. Create a feature branch from main: git checkout -b feature/<short-name>
-3. For each subtask in the plan, create a git worktree:
+3. Record the feature branch so fixers can find it:
+   pp signal feature_branch:$PP_WORKFLOW branch feature/<short-name>
+4. For each subtask in the plan, create a git worktree:
    git worktree add ~/.pp/worktrees/$PP_TASK/<subtask-identity> -b impl/<subtask-identity>
-4. Dispatch each subtask as a task with --repo and --workdir:
+5. Dispatch each subtask as a task with --repo and --workdir:
    pp task <subtask-identity> --role <role> --description "<description>" --repo $PP_REPO --workdir ~/.pp/worktrees/$PP_TASK/<subtask-identity>
-5. Poll for task completions: pp read event <scope> (look for task-complete:<subtask-identity> events).
+6. Poll for task completions: pp read event <scope> (look for task-complete:<subtask-identity> events).
    Sleep 10 seconds between polls.
-6. When a subtask completes, merge its branch: git merge impl/<subtask-identity> --no-edit
-7. After ALL subtasks complete and merge, clean up worktrees:
+7. When a subtask completes, merge its branch: git merge impl/<subtask-identity> --no-edit
+8. After ALL subtasks complete and merge, clean up worktrees:
    git worktree remove ~/.pp/worktrees/$PP_TASK/<subtask-identity>
-8. Run pp dismiss
+9. Run pp dismiss
 
 IMPORTANT: You are the ONLY agent that creates tasks. The planner writes a plan decision — you read it and dispatch. Do not expect tasks to already exist.
 

@@ -28,9 +28,8 @@ ClaudeHarness subclass: Object
     "Assemble the system prompt, spawn Claude, wait for completion."
 
     | contextTuples taskTuple taskDescription taskPayload workflowInstance env args |
-    contextTuples := role assembleContext: bbs scope: scope taskId: taskId.
 
-    "Read the task description and workflow instance"
+    "Read the task description and workflow instance first (needed for context filtering)"
     taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
     taskDescription := taskTuple notNil
       ifTrue: [(taskTuple at: 'payload') at: 'description' ifAbsent: ['No description']]
@@ -39,6 +38,9 @@ ClaudeHarness subclass: Object
       ifTrue: [taskTuple at: 'payload']
       ifFalse: [Dictionary new].
     workflowInstance := taskPayload at: 'workflow_instance' ifAbsent: [''].
+
+    "Assemble context filtered to this workflow instance"
+    contextTuples := role assembleContext: bbs scope: scope taskId: taskId workflowInstance: workflowInstance.
 
     "Build the system prompt (with workdir boundary if set)"
     systemPrompt := role primeFor: taskDescription context: contextTuples workDir: workDir repoName: repoName.
