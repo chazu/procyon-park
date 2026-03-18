@@ -8,19 +8,43 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex cueCtx startedAt index
+  instanceVars: space nextId mutex cueCtx startedAt index dataDir
 
   classMethod: new [
     ^super new initialize
   ]
 
+  classMethod: withDataDir: aPath [
+    ^super new initWithDataDir: aPath
+  ]
+
   method: initialize [
+    self initWithDataDir: nil
+  ]
+
+  method: initWithDataDir: aPath [
+    | home |
     space := TupleSpace new.
     nextId := 0.
     mutex := Mutex new.
     cueCtx := CueContext new.
     startedAt := DateTime now.
-    index := Array new: 0
+    index := Array new: 0.
+
+    "Set data directory"
+    aPath notNil
+      ifTrue: [dataDir := aPath]
+      ifFalse: [
+        home := System env: 'HOME'.
+        (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
+        dataDir := home, '/.pp/data'
+      ].
+
+    "Ensure data directory exists"
+    self ensureDataDir.
+
+    "Load persisted state"
+    self loadFromDisk
   ]
 
   method: startedAt [ ^startedAt ]
@@ -67,6 +91,7 @@ BBS subclass: Object
     d at: 'modality' put: 'linear'.
     space out: d.
     mutex critical: [index := index copyWith: d].
+    (self isDurableCategory: category) ifTrue: [self persistAfterChange].
     ^d at: 'id'
   ]
 
@@ -78,6 +103,7 @@ BBS subclass: Object
     d at: 'modality' put: 'persistent'.
     space outPersistent: d.
     mutex critical: [index := index copyWith: d].
+    self persistAfterChange.
     ^d at: 'id'
   ]
 
@@ -149,11 +175,13 @@ BBS subclass: Object
   "--- Index Management ---"
 
   method: removeFromIndex: tuple [
-    | tupleId |
+    | tupleId cat |
     tupleId := tuple at: 'id'.
+    cat := tuple at: 'category' ifAbsent: [''].
     mutex critical: [
       index := index reject: [:t | (t at: 'id') = tupleId]
-    ]
+    ].
+    (self isDurableCategory: cat) ifTrue: [self persistAfterChange]
   ]
 
   "--- Signal Operations ---"
@@ -204,6 +232,100 @@ BBS subclass: Object
     payload at: 'severity' put: severity.
     payload at: 'read' put: false.
     ^self out: 'notification' scope: scope identity: 'notify-', DateTime now epochSeconds printString payload: payload
+  ]
+
+  "--- Persistence ---"
+
+  method: ensureDataDir [
+    | proc shellArgs |
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: 'mkdir -p "', dataDir, '"'.
+    proc args: shellArgs.
+    proc run
+  ]
+
+  method: saveToDisk [
+    "Persist durable tuples to disk. Only saves tuples in categories that
+     should survive a restart (conventions, decisions, facts, templates,
+     rules, signals, artifacts, links). Skips ephemeral data."
+    | durable json proc shellArgs filePath |
+    filePath := dataDir, '/bbs.json'.
+
+    durable := mutex critical: [
+      index select: [:t |
+        | cat |
+        cat := t at: 'category' ifAbsent: [''].
+        (self isDurableCategory: cat)
+      ]
+    ].
+
+    json := Json encode: durable.
+
+    "Write atomically: write to .tmp then rename.
+     Use heredoc to avoid stdin: which may not exist."
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: 'cat << ''PPEOF'' > "', filePath, '.tmp" && mv "', filePath, '.tmp" "', filePath, '"
+', json, '
+PPEOF'.
+    proc args: shellArgs.
+    proc run
+  ]
+
+  method: loadFromDisk [
+    "Load persisted tuples from disk on startup."
+    | filePath contents tuples maxId |
+    filePath := dataDir, '/bbs.json'.
+
+    (File exists: filePath) ifFalse: [
+      'BBS: no persisted state found.' println.
+      ^self
+    ].
+
+    [
+      contents := File readFileContents: filePath.
+      contents isEmpty ifTrue: [^self].
+      tuples := Json decode: contents.
+
+      "Restore each tuple into the index and TupleSpace"
+      maxId := 0.
+      tuples do: [:t |
+        | tupleId pinned |
+        tupleId := t at: 'id' ifAbsent: [0].
+        tupleId > maxId ifTrue: [maxId := tupleId].
+        pinned := t at: 'pinned' ifAbsent: [false].
+
+        "Add to index"
+        index := index copyWith: t.
+
+        "Add to TupleSpace"
+        pinned ifTrue: [
+          space outPersistent: t
+        ] ifFalse: [
+          space out: t
+        ]
+      ].
+
+      "Set nextId past the highest restored ID"
+      nextId := maxId.
+
+      ('BBS: restored ', tuples size printString, ' tuples from disk.') println
+    ] on: Exception do: [:e |
+      ('BBS: error loading persisted state: ', e messageText) println
+    ]
+  ]
+
+  method: isDurableCategory: category [
+    "Categories that should be persisted across restarts."
+    ^#('fact' 'convention' 'decision' 'template' 'rule' 'signal' 'artifact' 'link' 'ingestion') includes: category
+  ]
+
+  method: persistAfterChange [
+    "Schedule a save to disk. Called after every index mutation."
+    self saveToDisk
   ]
 
   "--- Stats ---"

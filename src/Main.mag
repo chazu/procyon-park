@@ -125,8 +125,17 @@ Main subclass: Object
     bbs := BBS new.
     'BBS initialized.' println.
 
-    "Seed system conventions"
-    self seedConventions: bbs.
+    "Seed system conventions and templates (skips if already present from persistence)"
+    (bbs scanAll: 'convention') size = 0 ifTrue: [
+      self seedConventions: bbs
+    ] ifFalse: [
+      'System conventions loaded from disk.' println
+    ].
+    (bbs scanAll: 'template') size = 0 ifTrue: [
+      self seedTemplates: bbs
+    ] ifFalse: [
+      'Workflow templates loaded from disk.' println
+    ].
 
     "Initialize harness factory"
     harnessFactory := HarnessFactory new.
@@ -139,9 +148,6 @@ Main subclass: Object
 
     "Validate registered repos"
     Repo new validateAll.
-
-    "Seed workflow templates"
-    self seedTemplates: bbs.
 
     "Start dispatcher (runs in background process)"
     dispatcher start.
