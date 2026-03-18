@@ -25,7 +25,10 @@ Foreman subclass: Role
 7. When a subtask completes, merge its branch: git merge impl/<subtask-identity> --no-edit
 8. After ALL subtasks complete and merge, clean up worktrees:
    git worktree remove ~/.pp/worktrees/$PP_TASK/<subtask-identity>
-9. Run pp dismiss
+9. After all merges and worktree cleanup, clean stale branches:
+   pp repo clean-branches
+   This removes impl/* branches that were merged into the feature branch.
+10. Run pp dismiss
 
 IMPORTANT: You are the ONLY agent that creates tasks. The planner writes a plan decision — you read it and dispatch. Do not expect tasks to already exist.
 
@@ -88,8 +91,12 @@ IMPORTANT: You are the ONLY agent that creates tasks. The planner writes a plan 
 4. Poll: pp read event <scope> — look for task-complete:<name> events (sleep 10s between polls)
 5. Merge each completed branch: git merge impl/<name> --no-edit
 6. Clean up: git worktree remove ~/.pp/worktrees/$PP_TASK/<name>
-7. Run: pp notify "Foreman: all implementations integrated"
-8. Run: pp dismiss
+7. Clean stale branches: pp repo clean-branches
+   This removes impl/* branches that were merged into the feature branch.
+8. Run: pp notify "Foreman: all implementations integrated"
+9. Run: pp dismiss
+
+Note: Run pp repo clean-branches to remove impl/* branches created during this pipeline.
 
 **Evaluate phase:**
 1. Read observations: pp read observation <scope>
