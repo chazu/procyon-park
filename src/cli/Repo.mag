@@ -358,7 +358,7 @@ PPEOF'.
     dryRun := (args indexOf: '--dry-run') >= 0.
     deleteAll := (args indexOf: '--all') >= 0.
     repoName := self flagValue: '--repo' in: args.
-    tmpFile := '/tmp/pp_clean_', DateTime now epochSeconds printString.
+    tmpFile := '/tmp/pp-repo-clean-', DateTime now epochSeconds printString.
     deletedMerged := 0.
     deletedForce := 0.
 
