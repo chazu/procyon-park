@@ -210,7 +210,7 @@ PPEOF'.
 
   method: cmdWorktreeList: args [
     "pp repo worktree list — list all managed worktrees."
-    | tmpFile taskList count taskDir taskDirs wtList wtDirs |
+    | tmpFile taskList count taskDir taskDirs wtList wtDirs wtContents wtNames wtName wtPath |
 
     self ensureDirs.
     count := 0.
@@ -238,7 +238,6 @@ PPEOF'.
         self shellRun: 'ls "', taskDir, '/" 2>/dev/null > "', tmpFile, '"'.
 
         (File exists: tmpFile) ifTrue: [
-          | wtContents wtNames |
           wtContents := File readFileContents: tmpFile.
           self shellRun: 'rm -f "', tmpFile, '"'.
           wtNames := wtContents split: '
@@ -246,7 +245,6 @@ PPEOF'.
 
           wtNames do: [:wtName |
             wtName isEmpty ifFalse: [
-              | wtPath |
               wtPath := taskDir, '/', wtName.
               count := count + 1.
               ('  ', wtPath) println.
@@ -264,7 +262,7 @@ PPEOF'.
 
   method: cmdWorktreeClean: args [
     "pp repo worktree clean [--dry-run] — remove worktrees for completed/missing workflows."
-    | tmpFile taskList taskDirs dryRun cleaned baseUrl ppUrl |
+    | tmpFile taskList taskDirs dryRun cleaned baseUrl ppUrl taskDir shouldRemove statusResponse statusBody wfStatus wtList wtDirs wtName wtPath |
 
     self ensureDirs.
     cleaned := 0.
@@ -291,7 +289,6 @@ PPEOF'.
 
     taskDirs do: [:taskName |
       taskName isEmpty ifFalse: [
-        | taskDir shouldRemove statusResponse statusBody |
         taskDir := worktreesDir, '/', taskName.
         shouldRemove := false.
 
@@ -306,7 +303,6 @@ PPEOF'.
               ifFalse: [
                 [
                   statusBody := Json decode: statusResponse.
-                  | wfStatus |
                   wfStatus := statusBody at: 'status' ifAbsent: [''].
                   (wfStatus = 'completed' or: [wfStatus = 'not_found']) ifTrue: [
                     shouldRemove := true
@@ -330,7 +326,6 @@ PPEOF'.
             cleaned := cleaned + 1
           ] ifFalse: [
             "Try git worktree remove first, fall back to rm -rf"
-            | wtList wtDirs |
             self shellRun: 'ls "', taskDir, '/" 2>/dev/null > "', tmpFile, '"'.
             (File exists: tmpFile) ifTrue: [
               wtList := File readFileContents: tmpFile.
@@ -339,7 +334,6 @@ PPEOF'.
 '.
               wtDirs do: [:wtName |
                 wtName isEmpty ifFalse: [
-                  | wtPath |
                   wtPath := taskDir, '/', wtName.
                   self shellRun: 'git worktree remove "', wtPath, '" 2>/dev/null || rm -rf "', wtPath, '"'
                 ]
