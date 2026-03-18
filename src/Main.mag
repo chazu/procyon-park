@@ -5,7 +5,7 @@
 Main subclass: Object
 
   classMethod: start [
-    | args cmd |
+    | args cmd wtArgs |
     args := System args.
 
     args isEmpty ifTrue: [
@@ -34,6 +34,12 @@ Main subclass: Object
     cmd = 'log'      ifTrue: [^PP new runWith: args].
     cmd = 'dashboard' ifTrue: [^PP new runWith: args].
     cmd = 'repo'     ifTrue: [^Repo new runWith: args].
+    cmd = 'worktree' ifTrue: [
+      wtArgs := Array new: 0.
+      wtArgs := wtArgs copyWith: 'repo'.
+      args do: [:a | wtArgs := wtArgs copyWith: a].
+      ^Repo new runWith: wtArgs
+    ].
 
     "Help"
     cmd = 'help'    ifTrue: [^self printUsage].
@@ -75,6 +81,7 @@ Main subclass: Object
     '  workflow <template> [--param key=val ...]       Start a workflow' println.
     '  signal   <id> <key> <value>                    Upsert a signal' println.
     '  repo     add|list|remove|info                  Manage repositories' println.
+    '  worktree list|clean                            Manage worktrees' println.
     '  log      [--since <secs>] [--no-follow]        Tail notification stream' println.
     '  dashboard                                      Live system overview' println.
     '' println.

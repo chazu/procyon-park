@@ -20,7 +20,7 @@ PP subclass: Object
 
   method: runWith: args [
     "Dispatch to the appropriate command based on args."
-    | cmd |
+    | cmd wtArgs |
     args isEmpty ifTrue: [
       self printUsage.
       ^self
@@ -48,6 +48,12 @@ PP subclass: Object
     cmd = 'log'      ifTrue: [^self cmdLog: args].
     cmd = 'dashboard' ifTrue: [^self cmdDashboard: args].
     cmd = 'repo'     ifTrue: [^Repo new runWith: args].
+    cmd = 'worktree' ifTrue: [
+      wtArgs := Array new: 0.
+      wtArgs := wtArgs copyWith: 'repo'.
+      args do: [:a | wtArgs := wtArgs copyWith: a].
+      ^Repo new runWith: wtArgs
+    ].
     cmd = 'help'     ifTrue: [^self printUsage].
 
     ('Unknown command: ', cmd) println.
