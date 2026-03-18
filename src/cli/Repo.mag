@@ -210,45 +210,41 @@ PPEOF'.
 
   method: cmdWorktreeList: args [
     "pp repo worktree list — list all managed worktrees."
-    | tmpFile taskList count taskDir taskDirs wtList wtDirs wtContents wtNames wtName wtPath |
+    | listFile taskList count taskDir wtList wtPath |
 
     self ensureDirs.
     count := 0.
-    tmpFile := '/tmp/pp-wt-list-', DateTime now epochSeconds printString.
+    listFile := worktreesDir, '/.pp-ls-tmp'.
 
     "List task-level directories under worktreesDir"
-    self shellRun: 'ls "', worktreesDir, '/" 2>/dev/null > "', tmpFile, '"'.
+    self shellRun: 'ls "', worktreesDir, '" > "', listFile, '" 2>/dev/null'.
 
-    (File exists: tmpFile) ifFalse: [
+    (File exists: listFile) ifFalse: [
       'No worktrees found.' println.
       ^self
     ].
 
-    taskList := File readFileContents: tmpFile.
-    self shellRun: 'rm -f "', tmpFile, '"'.
+    taskList := File readFileContents: listFile.
+    self shellRun: 'rm -f "', listFile, '"'.
 
-    taskDirs := taskList split: '
-'.
-
-    taskDirs do: [:taskName |
-      taskName isEmpty ifFalse: [
+    (taskList split: '
+') do: [:taskName |
+      (taskName isEmpty or: [taskName startsWith: '.']) ifFalse: [
         taskDir := worktreesDir, '/', taskName.
+        count := count + 1.
+        ('  ', taskName) println.
 
         "List subtask worktree directories within this task dir"
-        self shellRun: 'ls "', taskDir, '/" 2>/dev/null > "', tmpFile, '"'.
+        self shellRun: 'ls "', taskDir, '" > "', listFile, '" 2>/dev/null'.
 
-        (File exists: tmpFile) ifTrue: [
-          wtContents := File readFileContents: tmpFile.
-          self shellRun: 'rm -f "', tmpFile, '"'.
-          wtNames := wtContents split: '
-'.
+        (File exists: listFile) ifTrue: [
+          wtList := File readFileContents: listFile.
+          self shellRun: 'rm -f "', listFile, '"'.
 
-          wtNames do: [:wtName |
-            wtName isEmpty ifFalse: [
-              wtPath := taskDir, '/', wtName.
-              count := count + 1.
-              ('  ', wtPath) println.
-              ('    workflow: ', taskName) println
+          (wtList split: '
+') do: [:wtName |
+            (wtName isEmpty or: [wtName startsWith: '.']) ifFalse: [
+              ('    ', wtName) println
             ]
           ]
         ]
@@ -257,7 +253,7 @@ PPEOF'.
 
     count = 0
       ifTrue: ['No worktrees found.' println]
-      ifFalse: [('', count printString, ' worktree(s) found.') println]
+      ifFalse: [(count printString, ' worktree dir(s) found.') println]
   ]
 
   method: cmdWorktreeClean: args [
