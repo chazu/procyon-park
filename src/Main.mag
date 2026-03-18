@@ -34,6 +34,15 @@ Main subclass: Object
     cmd = 'log'      ifTrue: [^PP new runWith: args].
     cmd = 'dashboard' ifTrue: [^PP new runWith: args].
     cmd = 'repo'     ifTrue: [^Repo new runWith: args].
+    cmd = 'clean-branches' ifTrue: [
+      wtArgs := Array new: 0.
+      wtArgs := wtArgs copyWith: 'repo'.
+      wtArgs := wtArgs copyWith: 'clean-branches'.
+      args size > 1 ifTrue: [
+        (args copyFrom: 1) do: [:a | wtArgs := wtArgs copyWith: a]
+      ].
+      ^Repo new runWith: wtArgs
+    ].
     cmd = 'worktree' ifTrue: [
       wtArgs := Array new: 0.
       wtArgs := wtArgs copyWith: 'repo'.
@@ -84,6 +93,7 @@ Main subclass: Object
     '  signal   <id> <key> <value>                    Upsert a signal' println.
     '  repo     add|list|remove|info                  Manage repositories' println.
     '  worktree list|clean                            Manage worktrees' println.
+    '  clean-branches [--dry-run] [--all]             Remove stale branches' println.
     '  log      [--since <secs>] [--no-follow]        Tail notification stream' println.
     '  dashboard                                      Live system overview' println.
     '' println.

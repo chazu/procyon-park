@@ -47,6 +47,8 @@ Repo subclass: Object
     subcmd = 'info'   ifTrue: [^self cmdInfo: args].
     subcmd = 'help'   ifTrue: [^self printUsage].
 
+    subcmd = 'clean-branches' ifTrue: [^self cmdCleanBranches: args].
+
     subcmd = 'worktree' ifTrue: [
       | wtCmd |
       wtCmd := args size > 2 ifTrue: [args at: 2] ifFalse: [''].
@@ -347,6 +349,119 @@ PPEOF'.
     ('Cleaned ', cleaned printString, ' worktree(s).') println
   ]
 
+  "--- Clean Branches Command ---"
+
+  method: cmdCleanBranches: args [
+    "pp repo clean-branches [--dry-run] [--all] [--repo <name>] — remove stale impl/feature branches."
+    | tmpFile dryRun deleteAll repoName repoConfig repoPath branchOutput branchLines mergedOutput mergedLines branch trimmed isCurrent isMerged deletedMerged deletedForce totalDeleted line |
+
+    dryRun := (args indexOf: '--dry-run') >= 0.
+    deleteAll := (args indexOf: '--all') >= 0.
+    repoName := self flagValue: '--repo' in: args.
+    tmpFile := '/tmp/pp_clean_', DateTime now epochSeconds printString.
+    deletedMerged := 0.
+    deletedForce := 0.
+
+    "Determine repo path"
+    repoPath := nil.
+    repoName notNil ifTrue: [
+      repoConfig := self repoForName: repoName.
+      repoConfig isNil ifTrue: [
+        ('Error: no repository registered with name: ', repoName) println.
+        ^self
+      ].
+      repoPath := repoConfig at: 'path' ifAbsent: [nil]
+    ].
+    repoPath isNil ifTrue: [
+      self shellRun: 'pwd > "', tmpFile, '"'.
+      repoPath := self readAndClean: tmpFile
+    ].
+
+    "Get impl/* and feature/* branches"
+    self shellRun: 'git -C "', repoPath, '" branch --list "impl/*" "feature/*" > "', tmpFile, '" 2>/dev/null'.
+    branchOutput := self readAndClean: tmpFile.
+    branchOutput isEmpty ifTrue: [
+      'No impl/* or feature/* branches found.' println.
+      ^self
+    ].
+    branchLines := branchOutput split: '
+'.
+
+    "Get merged branches"
+    self shellRun: 'git -C "', repoPath, '" branch --merged main > "', tmpFile, '" 2>/dev/null'.
+    mergedOutput := self readAndClean: tmpFile.
+    mergedLines := Array new: 0.
+    mergedOutput isEmpty ifFalse: [
+      (mergedOutput split: '
+') do: [:ml |
+        trimmed := ml trim.
+        trimmed isEmpty ifFalse: [
+          (trimmed startsWith: '* ') ifTrue: [
+            trimmed := (trimmed copyFrom: 2) trim
+          ].
+          mergedLines := mergedLines copyWith: trimmed
+        ]
+      ]
+    ].
+
+    "Process each branch"
+    branchLines do: [:line |
+      isCurrent := false.
+      trimmed := line trim.
+      trimmed isEmpty ifFalse: [
+        (trimmed startsWith: '* ') ifTrue: [
+          isCurrent := true
+        ].
+        isCurrent ifTrue: [
+          ('Skipping current branch: ', trimmed) println
+        ] ifFalse: [
+          branch := trimmed.
+          isMerged := (mergedLines indexOf: branch) >= 0.
+          isMerged ifTrue: [
+            dryRun ifTrue: [
+              ('Would delete (merged): ', branch) println
+            ] ifFalse: [
+              self shellRun: 'git -C "', repoPath, '" branch -d "', branch, '"'.
+              ('Deleted (merged): ', branch) println
+            ].
+            deletedMerged := deletedMerged + 1
+          ] ifFalse: [
+            deleteAll ifTrue: [
+              dryRun ifTrue: [
+                ('Would force-delete (unmerged): ', branch) println
+              ] ifFalse: [
+                ('⚠ Deleting UNMERGED branch: ', branch) println.
+                self shellRun: 'git -C "', repoPath, '" branch -D "', branch, '"'
+              ].
+              deletedForce := deletedForce + 1
+            ] ifFalse: [
+              ('Skipping unmerged: ', branch, ' (use --all to force-delete)') println
+            ]
+          ]
+        ]
+      ]
+    ].
+
+    "Print summary"
+    totalDeleted := deletedMerged + deletedForce.
+    dryRun ifTrue: [
+      ('Dry run: would delete ', totalDeleted printString, ' branches') println
+    ] ifFalse: [
+      ('Deleted ', totalDeleted printString, ' branches (', deletedMerged printString, ' merged, ', deletedForce printString, ' force-deleted)') println
+    ]
+  ]
+
+  method: printCleanBranchesUsage [
+    'pp repo clean-branches — Remove stale impl/feature branches' println.
+    '' println.
+    'Usage: pp repo clean-branches [--dry-run] [--all] [--repo <name>]' println.
+    '' println.
+    'Flags:' println.
+    '  --dry-run        Preview mode, no deletions' println.
+    '  --all            Also delete unmerged branches (force-delete)' println.
+    '  --repo <name>    Operate on a registered repository' println
+  ]
+
   method: printWorktreeUsage [
     'pp repo worktree — Worktree management' println.
     '' println.
@@ -449,6 +564,7 @@ PPEOF'.
     '  info   <name>                   Show repository details' println.
     '  worktree list                   List managed worktrees' println.
     '  worktree clean [--dry-run]      Clean completed worktrees' println.
+    '  clean-branches [--dry-run] [--all]  Remove stale impl/feature branches' println.
     '' println.
     'Repositories are stored at ~/.pp/repos/' println.
     'Worktrees are managed at ~/.pp/worktrees/' println
