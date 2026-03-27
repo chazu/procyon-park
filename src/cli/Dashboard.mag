@@ -223,21 +223,25 @@ DashboardController subclass: Alto::View
   ]
 
   method: handleEvent: evt [
-    | evtType keyCode runeVal |
+    | evtType keyCode runeVal quit |
     evtType := evt at: 'type' ifAbsent: [''].
     evtType = 'key' ifFalse: [
       layout notNil ifTrue: [layout handleEvent: evt].
-      ^self
-    ].
-    keyCode := evt at: 'key'.
-    runeVal := evt at: 'rune' ifAbsent: [0].
-    "q (rune 113) or Escape (key 27)"
-    (runeVal = 113 or: [keyCode = 27]) ifTrue: [
-      app notNil ifTrue: [app stop].
-      ^self
-    ].
-    layout notNil ifTrue: [layout handleEvent: evt].
-    self invalidate
+      self invalidate
+    ] ifTrue: [
+      keyCode := evt at: 'key'.
+      runeVal := evt at: 'rune' ifAbsent: [0].
+      "q (rune 113) or Escape (key 27)"
+      quit := false.
+      runeVal = 113 ifTrue: [quit := true].
+      keyCode = 27 ifTrue: [quit := true].
+      quit ifTrue: [
+        app stop
+      ] ifFalse: [
+        layout notNil ifTrue: [layout handleEvent: evt].
+        self invalidate
+      ]
+    ]
   ]
 
 
@@ -284,7 +288,7 @@ PPDashboard subclass: Object
     screen := app display screen.
 
     self fetchAndUpdate.
-    Process fork: [self refreshLoop].
+    "Skip background refresh for now"
 
     app openWindow: 'Procyon Park' content: controller controller: controller.
     app run
