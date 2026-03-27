@@ -1,0 +1,322 @@
+"Dashboard — Alto TUI dashboard for Procyon Park.
+ Displays workflows, tasks, and notifications in a live-updating layout.
+ Uses the /api/dashboard endpoint for data."
+
+import: 'Alto'
+import: 'Go'
+
+"--- Workflow list view ---"
+
+WorkflowListView subclass: Alto::View
+  instanceVars: items headerStyle normalStyle greenStyle yellowStyle dimStyle
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance initStyles.
+    ^instance
+  ]
+
+  method: initStyles [
+    items := #().
+    headerStyle := (Go::Terminal newStyle) bold: true.
+    normalStyle := Go::Terminal newStyle.
+    greenStyle := (Go::Terminal newStyle) foregroundColor: (Alto::Color green).
+    yellowStyle := (Go::Terminal newStyle) foregroundColor: (Alto::Color yellow).
+    dimStyle := (Go::Terminal newStyle) dim: true
+  ]
+
+  method: items: anArray [
+    items := anArray.
+    self invalidate
+  ]
+
+  method: displayOn: aCellBuffer [
+    | y payload identity status statusStyle line |
+    aCellBuffer putString: 'Workflows' x: 1 y: 0 style: headerStyle.
+    items size = 0 ifTrue: [
+      aCellBuffer putString: '(none)' x: 2 y: 1 style: dimStyle.
+      ^self
+    ].
+    y := 1.
+    items do: [:wf |
+      y < aCellBuffer height ifTrue: [
+        payload := wf at: 'payload' ifAbsent: [Dictionary new].
+        identity := wf at: 'identity' ifAbsent: ['?'].
+        status := payload at: 'status' ifAbsent: ['?'].
+        statusStyle := status = 'done' ifTrue: [greenStyle]
+          ifFalse: [status = 'running' ifTrue: [yellowStyle] ifFalse: [normalStyle]].
+        line := ' ', identity.
+        aCellBuffer putString: line x: 1 y: y style: normalStyle.
+        aCellBuffer putString: status x: (aCellBuffer width - status size - 1) y: y style: statusStyle.
+        y := y + 1
+      ]
+    ]
+  ]
+
+  method: handleEvent: evt [ ^self ]
+
+
+"--- Task list view ---"
+
+TaskListView subclass: Alto::View
+  instanceVars: items headerStyle normalStyle greenStyle yellowStyle cyanStyle dimStyle
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance initStyles.
+    ^instance
+  ]
+
+  method: initStyles [
+    items := #().
+    headerStyle := (Go::Terminal newStyle) bold: true.
+    normalStyle := Go::Terminal newStyle.
+    greenStyle := (Go::Terminal newStyle) foregroundColor: (Alto::Color green).
+    yellowStyle := (Go::Terminal newStyle) foregroundColor: (Alto::Color yellow).
+    cyanStyle := (Go::Terminal newStyle) foregroundColor: (Alto::Color cyan).
+    dimStyle := (Go::Terminal newStyle) dim: true
+  ]
+
+  method: items: anArray [
+    items := anArray.
+    self invalidate
+  ]
+
+  method: displayOn: aCellBuffer [
+    | y payload identity role status roleStyle line |
+    aCellBuffer putString: 'Tasks' x: 1 y: 0 style: headerStyle.
+    items size = 0 ifTrue: [
+      aCellBuffer putString: '(none)' x: 2 y: 1 style: dimStyle.
+      ^self
+    ].
+    y := 1.
+    items do: [:t |
+      y < aCellBuffer height ifTrue: [
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        identity := t at: 'identity' ifAbsent: ['?'].
+        role := payload at: 'role' ifAbsent: ['?'].
+        status := payload at: 'status' ifAbsent: ['?'].
+        roleStyle := role = 'scout' ifTrue: [cyanStyle]
+          ifFalse: [role = 'implementer' ifTrue: [greenStyle]
+          ifFalse: [role = 'reviewer' ifTrue: [yellowStyle]
+          ifFalse: [normalStyle]]].
+        line := ' ', identity, '  [', role, ']'.
+        aCellBuffer putString: line x: 1 y: y style: roleStyle.
+        aCellBuffer putString: status x: (aCellBuffer width - status size - 1) y: y style: normalStyle.
+        y := y + 1
+      ]
+    ]
+  ]
+
+  method: handleEvent: evt [ ^self ]
+
+
+"--- Notification log view ---"
+
+NotificationLogView subclass: Alto::View
+  instanceVars: items headerStyle normalStyle warnStyle urgentStyle infoStyle dimStyle
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance initStyles.
+    ^instance
+  ]
+
+  method: initStyles [
+    items := #().
+    headerStyle := (Go::Terminal newStyle) bold: true.
+    normalStyle := Go::Terminal newStyle.
+    infoStyle := (Go::Terminal newStyle) foregroundColor: (Alto::Color cyan).
+    warnStyle := (Go::Terminal newStyle) foregroundColor: (Alto::Color yellow).
+    urgentStyle := ((Go::Terminal newStyle) foregroundColor: (Alto::Color red)) bold: true.
+    dimStyle := (Go::Terminal newStyle) dim: true
+  ]
+
+  method: items: anArray [
+    items := anArray.
+    self invalidate
+  ]
+
+  method: displayOn: aCellBuffer [
+    | y payload severity message sty tag |
+    aCellBuffer putString: 'Notifications' x: 1 y: 0 style: headerStyle.
+    items size = 0 ifTrue: [
+      aCellBuffer putString: '(none)' x: 2 y: 1 style: dimStyle.
+      ^self
+    ].
+    y := 1.
+    items do: [:n |
+      y < aCellBuffer height ifTrue: [
+        payload := n at: 'payload' ifAbsent: [Dictionary new].
+        severity := payload at: 'severity' ifAbsent: ['info'].
+        message := payload at: 'message' ifAbsent: [''].
+        sty := severity = 'urgent' ifTrue: [urgentStyle]
+          ifFalse: [severity = 'warn' ifTrue: [warnStyle] ifFalse: [infoStyle]].
+        tag := '[', severity, ']'.
+        aCellBuffer putString: tag x: 1 y: y style: sty.
+        aCellBuffer putString: (' ', message) x: tag size + 1 y: y style: normalStyle.
+        y := y + 1
+      ]
+    ]
+  ]
+
+  method: handleEvent: evt [ ^self ]
+
+
+"--- Status bar view ---"
+
+StatusBarView subclass: Alto::View
+  instanceVars: statusText headerStyle dimStyle
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance initStyles.
+    ^instance
+  ]
+
+  method: initStyles [
+    statusText := 'Connecting...'.
+    headerStyle := (Go::Terminal newStyle) dim: true.
+    dimStyle := (Go::Terminal newStyle) dim: true
+  ]
+
+  method: statusText: aString [
+    statusText := aString.
+    self invalidate
+  ]
+
+  method: displayOn: aCellBuffer [
+    | i |
+    i := 0.
+    [i < aCellBuffer width] whileTrue: [
+      aCellBuffer putChar: 9472 x: i y: 0 style: dimStyle.
+      i := i + 1
+    ].
+    aCellBuffer putString: statusText x: 1 y: 1 style: headerStyle
+  ]
+
+  method: handleEvent: evt [ ^self ]
+
+
+"--- Dashboard controller ---"
+
+DashboardController subclass: Alto::View
+  instanceVars: layout app
+
+  classMethod: withLayout: aLayout app: anApp [
+    | instance |
+    instance := super new.
+    instance privateLayout: aLayout.
+    instance privateApp: anApp.
+    ^instance
+  ]
+
+  method: privateLayout: aLayout [ layout := aLayout ]
+  method: privateApp: anApp [ app := anApp ]
+
+  method: displayOn: aCellBuffer [
+    layout notNil ifTrue: [layout displayOn: aCellBuffer]
+  ]
+
+  method: handleEvent: evt [
+    | evtType keyCode |
+    evtType := evt at: 'type' ifAbsent: [''].
+    evtType = 'key' ifFalse: [
+      layout notNil ifTrue: [layout handleEvent: evt].
+      ^self
+    ].
+    keyCode := evt at: 'key'.
+    (keyCode = 113 or: [keyCode = 27]) ifTrue: [
+      app notNil ifTrue: [app stop].
+      ^self
+    ].
+    layout notNil ifTrue: [layout handleEvent: evt].
+    self invalidate
+  ]
+
+
+"--- Main dashboard app ---"
+
+PPDashboard subclass: Object
+  instanceVars: app baseUrl client workflowView taskView notifView statusBar screen
+
+  classMethod: start [
+    self new run
+  ]
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance initialize.
+    ^instance
+  ]
+
+  method: initialize [
+    baseUrl := System env: 'PP_URL'.
+    (baseUrl isNil or: [baseUrl isEmpty]) ifTrue: [baseUrl := 'http://localhost:7777'].
+    client := HttpClient new
+  ]
+
+  method: run [
+    | topSplit layout controller |
+
+    workflowView := WorkflowListView new.
+    taskView := TaskListView new.
+    notifView := NotificationLogView new.
+    statusBar := StatusBarView new.
+
+    topSplit := Alto::SplitPane horizontal: workflowView and: taskView.
+    topSplit ratio: 0.5.
+
+    layout := Alto::VBox new.
+    layout addChild: topSplit weight: 3.
+    layout addChild: notifView weight: 2.
+    layout addChild: statusBar weight: 1.
+
+    app := Alto::App new.
+    controller := DashboardController withLayout: layout app: app.
+    screen := app display screen.
+
+    self fetchAndUpdate.
+    Process fork: [self refreshLoop].
+
+    app openWindow: 'Procyon Park' content: controller controller: controller.
+    app run
+  ]
+
+  method: refreshLoop [
+    [app display running] whileTrue: [
+      Process sleep: 3000.
+      [
+        self fetchAndUpdate.
+        screen postEventKey: 0 _: 0 _: 0
+      ] on: Exception do: [:e | ]
+    ]
+  ]
+
+  method: fetchAndUpdate [
+    | response result workflows tasks notifications |
+    [
+      response := client get: baseUrl, '/api/dashboard'.
+      (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
+        result := Json decode: response.
+        workflows := result at: 'workflows' ifAbsent: [#()].
+        tasks := result at: 'tasks' ifAbsent: [#()].
+        notifications := result at: 'notifications' ifAbsent: [#()].
+        workflowView items: workflows.
+        taskView items: tasks.
+        notifView items: notifications.
+        statusBar statusText: ('Connected  |  ', workflows size printString, ' workflows  |  ',
+          tasks size printString, ' tasks  |  ',
+          notifications size printString, ' notifications  |  q to quit')
+      ] ifFalse: [
+        statusBar statusText: 'Error: no response from server'
+      ]
+    ] on: Exception do: [:e |
+      statusBar statusText: ('Error: ', e messageText)
+    ]
+  ]

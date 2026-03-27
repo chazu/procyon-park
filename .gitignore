@@ -1,3 +1,6 @@
 .maggie/
 *.image
 pp
+pp-full
+wrap/
+go

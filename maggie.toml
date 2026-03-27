@@ -3,6 +3,26 @@ name = "procyon-park"
 namespace = "ProcyonPark"
 version = "0.1.0"
 
+[dependencies]
+alto = { path = "../alto" }
+
 [source]
 dirs = ["src"]
 entry = "Main.start"
+
+[go-wrap]
+output = "wrap"
+
+[[go-wrap.packages]]
+import = "github.com/gdamore/tcell/v2"
+include = [
+  "NewEventKey", "NewEventMouse", "NewEventResize",
+  "NewRGBColor", "NewHexColor", "PaletteColor", "GetColor",
+  "ColorBlack", "ColorWhite", "ColorRed", "ColorGreen", "ColorBlue",
+  "ColorYellow", "ColorMagenta", "ColorCyan",
+  "Style", "EventKey", "EventMouse", "EventResize",
+  "CellBuffer",
+]
+
+[[go-wrap.packages]]
+import = "alto/go/terminal"
