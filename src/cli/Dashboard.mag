@@ -223,14 +223,16 @@ DashboardController subclass: Alto::View
   ]
 
   method: handleEvent: evt [
-    | evtType keyCode |
+    | evtType keyCode runeVal |
     evtType := evt at: 'type' ifAbsent: [''].
     evtType = 'key' ifFalse: [
       layout notNil ifTrue: [layout handleEvent: evt].
       ^self
     ].
     keyCode := evt at: 'key'.
-    (keyCode = 113 or: [keyCode = 27]) ifTrue: [
+    runeVal := evt at: 'rune' ifAbsent: [0].
+    "q (rune 113) or Escape (key 27)"
+    (runeVal = 113 or: [keyCode = 27]) ifTrue: [
       app notNil ifTrue: [app stop].
       ^self
     ].
