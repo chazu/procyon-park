@@ -288,7 +288,7 @@ PPDashboard subclass: Object
     screen := app display screen.
 
     self fetchAndUpdate.
-    "Skip background refresh for now"
+    Process fork: [self refreshLoop].
 
     app openWindow: 'Procyon Park' content: controller controller: controller.
     app run
