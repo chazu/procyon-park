@@ -49,6 +49,26 @@ pp event <identity> [--type T] [--summary S]       # emit an event
 pp notify <message> [--severity info|warn|urgent]   # notify the user
 ```
 
+### Discover and start workflows
+
+List available workflow templates:
+```bash
+pp read template system
+```
+
+This shows all registered workflow templates with their transitions, roles, and parameters. Always run this before starting a workflow so you know what templates exist and what `--param` keys they accept.
+
+Start a workflow from a template:
+```bash
+pp workflow <template-name> --param key=value ...
+```
+
+Check running workflow status:
+```bash
+pp workflow status
+pp workflow status <workflow-id>
+```
+
 ### Submit a plan
 Write a JSON file with subtasks, then submit it:
 ```bash
@@ -89,10 +109,21 @@ A typical interaction pattern:
 1. **Start the server** if not running: `pp serve &`
 2. **Prime yourself**: `pp prime`
 3. **Check what's going on**: `pp status`, `pp read notification`, `pp read task default`
-4. **Do work**: use standard tools (Read, Write, Edit, Bash, etc.)
-5. **Report findings**: `pp observe <id> <detail>`
-6. **Record decisions**: `pp decide <id> <detail>`
+4. **Discover workflows**: `pp read template system` — always do this before starting a workflow
+5. **Start a workflow**: `pp workflow <template> --param description="..."` — PP's harness dispatches agents automatically
+6. **Monitor progress**: `pp workflow status`, `pp read task default`, `pp log`
 7. **Notify the user** when human input is needed: `pp notify <message>`
+
+## IMPORTANT: Agent Dispatch
+
+**Do not use Claude subagents (the Agent tool) to execute PP tasks.** When you start a workflow or submit a plan, PP dispatches tasks to its own agent harness — those agents are spawned and managed by PP itself. Your role as the orchestrating Claude instance is to:
+
+- Start workflows / submit plans
+- Monitor status via `pp workflow status`, `pp read task default`, `pp log`
+- Write to the tuplespace (observe, decide, notify) as needed
+- Respond to notifications that require human input
+
+Let PP drive task execution. Do not intercept dispatched tasks and run them yourself.
 
 ## Environment Variables
 
