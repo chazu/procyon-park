@@ -192,7 +192,7 @@ Main subclass: Object
   classMethod: seedTemplates: bbs [
     | payload transitions t1 t2 pre arr |
 
-    "--- Scout-Done Template ---"
+    "--- Scout Template ---"
     transitions := Array new: 0.
 
     "T1: scout transition"
@@ -223,7 +223,7 @@ Main subclass: Object
     payload at: 'terminal_places' put: #('done').
     payload at: 'description' put: 'Simple scout research workflow'.
 
-    bbs outPinned: 'template' scope: 'system' identity: 'scout-done' payload: payload.
+    bbs outPinned: 'template' scope: 'system' identity: 'scout' payload: payload.
 
     "--- Full Pipeline Template ---"
     self seedFullPipeline: bbs.

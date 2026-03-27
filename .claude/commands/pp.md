@@ -60,7 +60,8 @@ This shows all registered workflow templates with their transitions, roles, and 
 
 Start a workflow from a template:
 ```bash
-pp workflow <template-name> --param key=value ...
+pp workflow scout --param description="..."    # single scout agent
+pp workflow full-pipeline --param description="..."  # plan→implement→review→test cycle
 ```
 
 Check running workflow status:
