@@ -32,6 +32,7 @@ Main subclass: Object
     cmd = 'workflow' ifTrue: [^PP new runWith: args].
     cmd = 'signal'   ifTrue: [^PP new runWith: args].
     cmd = 'log'      ifTrue: [^PP new runWith: args].
+    cmd = 'history'  ifTrue: [^PP new runWith: args].
     cmd = 'dashboard' ifTrue: [^PP new runWith: args].
     cmd = 'repo'     ifTrue: [^Repo new runWith: args].
     cmd = 'clean-branches' ifTrue: [
@@ -95,6 +96,7 @@ Main subclass: Object
     '  worktree list|clean                            Manage worktrees' println.
     '  clean-branches [--dry-run] [--all]             Remove stale branches' println.
     '  log      [--since <secs>] [--no-follow]        Tail notification stream' println.
+    '  history   [--since S] [--limit N] [--op O] [--category C] Query audit log' println.
     '  dashboard                                      Live system overview' println.
     '' println.
     'Other:' println.

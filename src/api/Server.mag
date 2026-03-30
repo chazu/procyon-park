@@ -56,7 +56,8 @@ ApiServer subclass: Object
     httpServer route: '/api/workflow/cancel' method: 'POST' handler: [:req | self handleWorkflowCancel: req].
     httpServer route: '/api/task/create' method: 'POST' handler: [:req | self handleTaskCreate: req].
     httpServer route: '/api/signal' method: 'POST' handler: [:req | self handleSignal: req].
-    httpServer route: '/api/dashboard' method: 'GET' handler: [:req | self handleDashboard: req]
+    httpServer route: '/api/dashboard' method: 'GET' handler: [:req | self handleDashboard: req].
+    httpServer route: '/api/history' method: 'GET' handler: [:req | self handleHistory: req]
   ]
 
   "--- Helpers ---"
@@ -530,6 +531,30 @@ ApiServer subclass: Object
 
     id := bbs upsertSignal: scope identity: identity payload: payload.
     ^self okResponse: (self okWithId: id)
+  ]
+
+  "--- History ---"
+
+  method: handleHistory: req [
+    | filters since limit op category scope identity results d |
+    filters := Dictionary new.
+    since := req queryParam: 'since'.
+    since notNil ifTrue: [filters at: 'since' put: since asInteger].
+    limit := req queryParam: 'limit'.
+    limit notNil ifTrue: [filters at: 'limit' put: limit asInteger].
+    op := req queryParam: 'op'.
+    op notNil ifTrue: [filters at: 'op' put: op].
+    category := req queryParam: 'category'.
+    category notNil ifTrue: [filters at: 'category' put: category].
+    scope := req queryParam: 'scope'.
+    scope notNil ifTrue: [filters at: 'scope' put: scope].
+    identity := req queryParam: 'identity'.
+    identity notNil ifTrue: [filters at: 'identity' put: identity].
+    results := bbs history: filters.
+    d := Dictionary new.
+    d at: 'entries' put: results.
+    d at: 'count' put: results size.
+    ^self okResponse: d
   ]
 
   "--- Dashboard ---"

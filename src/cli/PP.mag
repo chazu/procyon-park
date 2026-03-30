@@ -48,6 +48,7 @@ PP subclass: Object
     ].
     cmd = 'signal'   ifTrue: [^self cmdSignal: args].
     cmd = 'log'      ifTrue: [^self cmdLog: args].
+    cmd = 'history'  ifTrue: [^self cmdHistory: args].
     cmd = 'dashboard' ifTrue: [^self cmdDashboard: args].
     cmd = 'repo'     ifTrue: [^Repo new runWith: args].
     cmd = 'worktree' ifTrue: [
@@ -674,6 +675,59 @@ Worktree base: ~/.pp/worktrees/
     ]
   ]
 
+  method: cmdHistory: args [
+    "pp history [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I]"
+    | sinceStr limitStr op category histScope identity url sep response result entries entry ts entryOp entryCat entryScope entryIdentity |
+    sinceStr := self flagValue: '--since' in: args.
+    limitStr := self flagValue: '--limit' in: args.
+    op := self flagValue: '--op' in: args.
+    category := self flagValue: '--category' in: args.
+    histScope := self flagValue: '--scope' in: args.
+    identity := self flagValue: '--identity' in: args.
+
+    url := '/api/history?limit='.
+    limitStr notNil
+      ifTrue: [url := url, limitStr]
+      ifFalse: [url := url, '50'].
+    sinceStr notNil ifTrue: [url := url, '&since=', sinceStr].
+    op notNil ifTrue: [url := url, '&op=', op].
+    category notNil ifTrue: [url := url, '&category=', category].
+    histScope notNil ifTrue: [url := url, '&scope=', histScope].
+    identity notNil ifTrue: [url := url, '&identity=', identity].
+
+    [
+      response := client get: baseUrl, url.
+      response isNil ifTrue: [
+        'Error: no response from server' println.
+        ^self
+      ].
+      (response isKindOf: String) ifFalse: [
+        'Error: server returned non-String response' println.
+        ^self
+      ].
+      response isEmpty ifTrue: [
+        'Error: empty response from server' println.
+        ^self
+      ].
+      result := Json decode: response.
+      entries := result at: 'entries' ifAbsent: [#()].
+      entries size = 0 ifTrue: [
+        'No history entries.' println.
+        ^self
+      ].
+      entries do: [:e |
+        ts := e at: 'ts' ifAbsent: ['?'].
+        entryOp := e at: 'op' ifAbsent: ['?'].
+        entryCat := e at: 'category' ifAbsent: [''].
+        entryScope := e at: 'scope' ifAbsent: [''].
+        entryIdentity := e at: 'identity' ifAbsent: [''].
+        (ts printString, ' ', entryOp, ' ', entryCat, '/', entryScope, '/', entryIdentity) println
+      ]
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
+  ]
+
   method: cmdDashboard: args [
     "Launch the Alto TUI dashboard."
     PPDashboard start
@@ -754,6 +808,7 @@ Worktree base: ~/.pp/worktrees/
     '  workflow status [<id>]                           Show workflow status' println.
     '  workflow cancel <id> [--scope <scope>]           Cancel a running workflow' println.
     '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
+    '  history   [--since S] [--limit N] [--op O] [--category C] Query audit log' println.
     '  dashboard                                        Live system overview' println.
     '  help                                             Show this help' println.
     '' println.
