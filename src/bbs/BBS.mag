@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex cueCtx startedAt index dataDir
+  instanceVars: space nextId mutex cueCtx startedAt index dataDir historyPath
 
   classMethod: new [
     ^super new initialize
@@ -39,6 +39,8 @@ BBS subclass: Object
         (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
         dataDir := home, '/.pp/data'
       ].
+
+    historyPath := dataDir, '/history.jsonl'.
 
     "Ensure data directory exists"
     self ensureDataDir.
@@ -92,6 +94,7 @@ BBS subclass: Object
     space out: d.
     mutex critical: [index := index copyWith: d].
     (self isDurableCategory: category) ifTrue: [self persistAfterChange].
+    self appendHistory: 'out' tuple: d.
     ^d at: 'id'
   ]
 
@@ -104,6 +107,7 @@ BBS subclass: Object
     space outPersistent: d.
     mutex critical: [index := index copyWith: d].
     self persistAfterChange.
+    self appendHistory: 'out-pinned' tuple: d.
     ^d at: 'id'
   ]
 
@@ -116,6 +120,7 @@ BBS subclass: Object
     d at: 'ttl' put: ttlSeconds.
     space outAffine: d ttl: ttlSeconds.
     mutex critical: [index := index copyWith: d].
+    self appendHistory: 'out-affine' tuple: d.
     ^d at: 'id'
   ]
 
@@ -127,7 +132,10 @@ BBS subclass: Object
     | tmpl result |
     tmpl := self templateFor: category scope: scope identity: identity.
     result := space tryIn: tmpl.
-    result notNil ifTrue: [self removeFromIndex: result].
+    result notNil ifTrue: [
+      self removeFromIndex: result.
+      self appendHistory: 'consume' tuple: result
+    ].
     ^result
   ]
 
@@ -136,7 +144,10 @@ BBS subclass: Object
     | tmpl result |
     tmpl := self templateFor: category scope: scope identity: identity.
     result := space in: tmpl.
-    result notNil ifTrue: [self removeFromIndex: result].
+    result notNil ifTrue: [
+      self removeFromIndex: result.
+      self appendHistory: 'consume' tuple: result
+    ].
     ^result
   ]
 
@@ -326,6 +337,82 @@ PPEOF'.
   method: persistAfterChange [
     "Schedule a save to disk. Called after every index mutation."
     self saveToDisk
+  ]
+
+  "--- Audit History ---"
+
+  method: appendHistory: operation tuple: dict [
+    "Append a compact JSONL audit entry to the history log."
+    | entry jsonLine proc shellArgs |
+    entry := Dictionary new.
+    entry at: 'ts' put: DateTime now epochSeconds.
+    entry at: 'op' put: operation.
+    entry at: 'id' put: (dict at: 'id').
+    entry at: 'category' put: (dict at: 'category').
+    entry at: 'scope' put: (dict at: 'scope').
+    entry at: 'identity' put: (dict at: 'identity').
+    entry at: 'modality' put: (dict at: 'modality' ifAbsent: ['']).
+    jsonLine := Json encode: entry.
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: 'printf "%s\n" "', jsonLine, '" >> "', historyPath, '"'.
+    proc args: shellArgs.
+    proc run
+  ]
+
+  method: history: filters [
+    "Query the JSONL audit history with optional filters.
+     filters may contain: 'op', 'category', 'scope', 'identity', 'since', 'limit'."
+    | contents lines entries line entry matches op category scope identity since limit |
+    [
+      contents := File readFileContents: historyPath.
+    ] on: Exception do: [:e | ^Array new: 0].
+
+    lines := contents split: '
+'.
+    entries := Array new: 0.
+    lines do: [:l |
+      l isEmpty ifFalse: [
+        entry := Json decode: l.
+        entries := entries copyWith: entry
+      ]
+    ].
+
+    "Apply filters"
+    op := filters at: 'op' ifAbsent: [nil].
+    op notNil ifTrue: [
+      entries := entries select: [:e | (e at: 'op') = op]
+    ].
+
+    category := filters at: 'category' ifAbsent: [nil].
+    category notNil ifTrue: [
+      entries := entries select: [:e | (e at: 'category') = category]
+    ].
+
+    scope := filters at: 'scope' ifAbsent: [nil].
+    scope notNil ifTrue: [
+      entries := entries select: [:e | (e at: 'scope') = scope]
+    ].
+
+    identity := filters at: 'identity' ifAbsent: [nil].
+    identity notNil ifTrue: [
+      entries := entries select: [:e | (e at: 'identity') = identity]
+    ].
+
+    since := filters at: 'since' ifAbsent: [nil].
+    since notNil ifTrue: [
+      entries := entries select: [:e | (e at: 'ts') >= since]
+    ].
+
+    limit := filters at: 'limit' ifAbsent: [nil].
+    limit notNil ifTrue: [
+      entries size > limit ifTrue: [
+        entries := entries copyFrom: (entries size - limit + 1) to: entries size
+      ]
+    ].
+
+    ^entries
   ]
 
   "--- Stats ---"
