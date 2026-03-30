@@ -1,0 +1,353 @@
+"Tests for pp history audit log feature.
+ Verifies BBS JSONL audit history writing and querying from the spec.
+
+ Test classes:
+   TestHistoryWriter    — H1-H8:  audit log file writing
+   TestHistoryQuery     — H9-H16: history: query/filter method
+   TestHistoryConventions — H17-H18: source convention compliance
+
+ All temp vars at method top. No ifNil:/ifNotNil: — uses isNil/notNil ifTrue:.
+ Uses integer char codes, not dollar-sign literals.
+ Uses Array new: 0 and copyWith: for array building."
+
+"--- Test Runner ---"
+T6 subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [
+    | r |
+    r := super new.
+    r init.
+    ^r
+  ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: condition message: msg [
+    condition ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== History Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    (failed > 0) ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    (failed = 0)
+      ifTrue: [ 'ALL TESTS PASSED' println ]
+      ifFalse: [ 'SOME TESTS FAILED' println ]
+  ]
+
+  method: failed [
+    ^failed
+  ]
+
+"--- Helper: create temp dir and BBS ---"
+HistoryTestHelper subclass: Object
+
+  classMethod: makeTempDir [
+    "Returns path to a new temporary directory."
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trim
+  ]
+
+  classMethod: removeTempDir: path [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'rm -rf "', path, '"'.
+    proc args: args.
+    proc run
+  ]
+
+  classMethod: readHistoryLines: historyPath [
+    "Read history.jsonl and return non-empty lines as an Array."
+    | contents allLines lines newline |
+    newline := String with: (Character value: 10).
+    contents := File readFileContents: historyPath.
+    allLines := contents split: newline.
+    lines := Array new: 0.
+    allLines do: [:l |
+      l isEmpty ifFalse: [
+        lines := lines copyWith: l
+      ]
+    ].
+    ^lines
+  ]
+
+"=== TestHistoryWriter — H1 through H8 ==="
+TestHistoryWriter subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs historyPath lines line1 entry payload lineCount p id consumed consumeEntry allValid parseOk |
+    '--- TestHistoryWriter ---' println.
+
+    tempDir := HistoryTestHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    historyPath := tempDir, '/history.jsonl'.
+
+    "H1: After BBS new with temp dataDir, history.jsonl does not exist yet"
+    t assert: (File exists: historyPath) not message: 'H1: history.jsonl should not exist on fresh BBS'.
+
+    "H2: After out:, history.jsonl exists with exactly 1 line"
+    payload := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'e1' payload: payload.
+    t assert: (File exists: historyPath) message: 'H2a: history.jsonl should exist after out:'.
+    lines := HistoryTestHelper readHistoryLines: historyPath.
+    t assertEqual: lines size to: 1 message: 'H2b: history.jsonl should have exactly 1 line'.
+
+    "H3: Parse line as JSON, verify fields"
+    line1 := lines at: 1.
+    entry := Json decode: line1.
+    t assertEqual: (entry at: 'op') to: 'out' message: 'H3a: op should be out'.
+    t assertEqual: (entry at: 'category') to: 'event' message: 'H3b: category should be event'.
+    t assertEqual: (entry at: 'scope') to: 'test' message: 'H3c: scope should be test'.
+    t assertEqual: (entry at: 'identity') to: 'e1' message: 'H3d: identity should be e1'.
+    t assert: ((entry at: 'ts') > 0) message: 'H3e: ts should be integer > 0'.
+    t assert: ((entry at: 'id') > 0) message: 'H3f: id should be integer > 0'.
+
+    "H4: outPinned produces second line with op = out-pinned"
+    p := Dictionary new.
+    p at: 'detail' put: 'test decision'.
+    bbs outPinned: 'decision' scope: 'test' identity: 'd1' payload: p.
+    lines := HistoryTestHelper readHistoryLines: historyPath.
+    t assertEqual: lines size to: 2 message: 'H4a: history.jsonl should have 2 lines'.
+    entry := Json decode: (lines at: 2).
+    t assertEqual: (entry at: 'op') to: 'out-pinned' message: 'H4b: second line op should be out-pinned'.
+
+    "H5: outAffine produces line with op = out-affine"
+    p := Dictionary new.
+    bbs outAffine: 'event' scope: 'test' identity: 'a1' payload: p ttl: 60.
+    lines := HistoryTestHelper readHistoryLines: historyPath.
+    entry := Json decode: (lines at: 3).
+    t assertEqual: (entry at: 'op') to: 'out-affine' message: 'H5: third line op should be out-affine'.
+
+    "H6: Consuming via inp: produces a consume entry"
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'consumable1' payload: p.
+    consumed := bbs inp: 'event' scope: 'test' identity: 'consumable1'.
+    t assert: consumed notNil message: 'H6a: inp: should return the consumed tuple'.
+    lines := HistoryTestHelper readHistoryLines: historyPath.
+    consumeEntry := Json decode: (lines at: lines size).
+    t assertEqual: (consumeEntry at: 'op') to: 'consume' message: 'H6b: last entry op should be consume'.
+
+    "H7: Append-only — write 5 fresh operations, verify line count"
+    HistoryTestHelper removeTempDir: tempDir.
+    tempDir := HistoryTestHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    historyPath := tempDir, '/history.jsonl'.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'w1' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'w2' payload: p.
+    bbs outPinned: 'decision' scope: 'test' identity: 'w3' payload: p.
+    bbs outAffine: 'event' scope: 'test' identity: 'w4' payload: p ttl: 30.
+    bbs out: 'observation' scope: 'test' identity: 'w5' payload: p.
+    lines := HistoryTestHelper readHistoryLines: historyPath.
+    t assertEqual: lines size to: 5 message: 'H7: exactly 5 non-empty lines after 5 operations'.
+
+    "H8: Each line is valid JSON"
+    allValid := true.
+    lines do: [:l |
+      parseOk := true.
+      [Json decode: l] on: Exception do: [:e |
+        parseOk := false.
+        allValid := false
+      ].
+      t assert: parseOk message: 'H8: every line must be valid JSON'
+    ].
+
+    "Cleanup"
+    HistoryTestHelper removeTempDir: tempDir
+  ]
+
+"=== TestHistoryQuery — H9 through H16 ==="
+TestHistoryQuery subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs filters entries p catFilters opFilters scopeFilters sinceFilters limitFilters combinedFilters |
+    '--- TestHistoryQuery ---' println.
+
+    "H9: history: on fresh BBS returns empty array"
+    tempDir := HistoryTestHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    filters := Dictionary new.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 0 message: 'H9: fresh BBS history should be empty'.
+    HistoryTestHelper removeTempDir: tempDir.
+
+    "H10: After 3 out operations with different categories, returns 3 entries"
+    tempDir := HistoryTestHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'q1' payload: p.
+    bbs out: 'observation' scope: 'test' identity: 'q2' payload: p.
+    bbs outPinned: 'decision' scope: 'test' identity: 'q3' payload: p.
+    entries := bbs history: (Dictionary new).
+    t assertEqual: entries size to: 3 message: 'H10: 3 operations should produce 3 history entries'.
+
+    "H11: Filter by category"
+    catFilters := Dictionary new.
+    catFilters at: 'category' put: 'event'.
+    entries := bbs history: catFilters.
+    t assertEqual: entries size to: 1 message: 'H11a: category filter for event should return 1'.
+    t assertEqual: ((entries at: 1) at: 'category') to: 'event' message: 'H11b: filtered entry category should be event'.
+
+    "H12: Filter by op"
+    opFilters := Dictionary new.
+    opFilters at: 'op' put: 'out-pinned'.
+    entries := bbs history: opFilters.
+    t assertEqual: entries size to: 1 message: 'H12a: op filter for out-pinned should return 1'.
+    t assertEqual: ((entries at: 1) at: 'op') to: 'out-pinned' message: 'H12b: filtered entry op should be out-pinned'.
+
+    "H13: Filter by scope"
+    HistoryTestHelper removeTempDir: tempDir.
+    tempDir := HistoryTestHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'alpha' identity: 's1' payload: p.
+    bbs out: 'event' scope: 'beta' identity: 's2' payload: p.
+    bbs out: 'event' scope: 'alpha' identity: 's3' payload: p.
+    scopeFilters := Dictionary new.
+    scopeFilters at: 'scope' put: 'alpha'.
+    entries := bbs history: scopeFilters.
+    t assertEqual: entries size to: 2 message: 'H13a: scope filter for alpha should return 2'.
+    t assertEqual: ((entries at: 1) at: 'scope') to: 'alpha' message: 'H13b: first entry scope should be alpha'.
+    t assertEqual: ((entries at: 2) at: 'scope') to: 'alpha' message: 'H13c: second entry scope should be alpha'.
+    HistoryTestHelper removeTempDir: tempDir.
+
+    "H14: Filter by since"
+    tempDir := HistoryTestHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'ts1' payload: p.
+    sinceFilters := Dictionary new.
+    sinceFilters at: 'since' put: (DateTime now epochSeconds - 1).
+    entries := bbs history: sinceFilters.
+    t assert: (entries size >= 1) message: 'H14: since filter should return recent entries'.
+
+    "H15: Limit"
+    bbs out: 'event' scope: 'test' identity: 'ts2' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'ts3' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'ts4' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'ts5' payload: p.
+    limitFilters := Dictionary new.
+    limitFilters at: 'limit' put: 2.
+    entries := bbs history: limitFilters.
+    t assertEqual: entries size to: 2 message: 'H15a: limit 2 should return exactly 2 entries'.
+    t assertEqual: ((entries at: 2) at: 'identity') to: 'ts5' message: 'H15b: last entry should be the most recent (ts5)'.
+    HistoryTestHelper removeTempDir: tempDir.
+
+    "H16: Combined filters (category + scope)"
+    tempDir := HistoryTestHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'alpha' identity: 'c1' payload: p.
+    bbs out: 'event' scope: 'beta' identity: 'c2' payload: p.
+    bbs out: 'observation' scope: 'alpha' identity: 'c3' payload: p.
+    bbs out: 'event' scope: 'alpha' identity: 'c4' payload: p.
+    combinedFilters := Dictionary new.
+    combinedFilters at: 'category' put: 'event'.
+    combinedFilters at: 'scope' put: 'alpha'.
+    entries := bbs history: combinedFilters.
+    t assertEqual: entries size to: 2 message: 'H16a: combined category+scope filter should return 2'.
+    t assertEqual: ((entries at: 1) at: 'identity') to: 'c1' message: 'H16b: first combined entry should be c1'.
+    t assertEqual: ((entries at: 2) at: 'identity') to: 'c4' message: 'H16c: second combined entry should be c4'.
+    HistoryTestHelper removeTempDir: tempDir
+  ]
+
+"=== TestHistoryConventions — H17 and H18 ==="
+TestHistoryConventions subclass: Object
+
+  classMethod: run: t [
+    | bbsSource hasHistoryPath hasMidBlockVars lines inMethod foundBar foundCode |
+    '--- TestHistoryConventions ---' println.
+
+    "H17: BBS.mag declares historyPath in instanceVars"
+    bbsSource := File readFileContents: 'src/bbs/BBS.mag'.
+    hasHistoryPath := bbsSource includes: 'historyPath'.
+    t assert: hasHistoryPath message: 'H17: BBS.mag should declare historyPath in instanceVars'.
+
+    "H18: No mid-block temp var declarations in new methods.
+     Mid-block pattern: a line with | ... | that appears after a non-empty line
+     that is NOT the method opening line (method: / classMethod:).
+     We check the appendHistory: and history: methods specifically."
+    hasMidBlockVars := false.
+    lines := bbsSource split: (String with: (Character value: 10)).
+    inMethod := false.
+    foundBar := false.
+    foundCode := false.
+    lines do: [:l |
+      | trimmed |
+      trimmed := l trim.
+      "Detect method start"
+      ((trimmed includes: 'method: appendHistory:') or:
+       [trimmed includes: 'method: history:']) ifTrue: [
+        inMethod := true.
+        foundBar := false.
+        foundCode := false
+      ].
+      "Detect method end (closing bracket at start of line)"
+      (inMethod and: [trimmed = ']']) ifTrue: [
+        inMethod := false
+      ].
+      "Inside a method, look for | ... | patterns"
+      inMethod ifTrue: [
+        ((trimmed size > 2) and:
+         [(trimmed at: 1) = (Character value: 124)]) ifTrue: [
+          "This line starts with |"
+          foundBar ifTrue: [
+            "Already saw a | line — this might be mid-block if we saw code between"
+            foundCode ifTrue: [hasMidBlockVars := true]
+          ].
+          foundBar := true.
+          foundCode := false
+        ] ifFalse: [
+          "Non-bar, non-empty line inside method"
+          (trimmed isEmpty not and: [(trimmed at: 1) = (Character value: 34) "double-quote"] not)
+            ifTrue: [foundCode := true]
+        ]
+      ]
+    ].
+    t assert: hasMidBlockVars not message: 'H18: No mid-block temp var declarations in history methods'
+  ]
+
+"=== Main ==="
+TestHistoryMain subclass: Object
+
+  classMethod: run [
+    | t |
+    t := T6 new.
+    TestHistoryWriter run: t.
+    TestHistoryQuery run: t.
+    TestHistoryConventions run: t.
+    t report
+  ]
