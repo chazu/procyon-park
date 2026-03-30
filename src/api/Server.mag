@@ -539,17 +539,17 @@ ApiServer subclass: Object
     | filters since limit op category scope identity results d |
     filters := Dictionary new.
     since := req queryParam: 'since'.
-    since notNil ifTrue: [filters at: 'since' put: since asInteger].
+    (since notNil and: [since isEmpty not]) ifTrue: [filters at: 'since' put: since asInteger].
     limit := req queryParam: 'limit'.
-    limit notNil ifTrue: [filters at: 'limit' put: limit asInteger].
+    (limit notNil and: [limit isEmpty not]) ifTrue: [filters at: 'limit' put: limit asInteger].
     op := req queryParam: 'op'.
-    op notNil ifTrue: [filters at: 'op' put: op].
+    (op notNil and: [op isEmpty not]) ifTrue: [filters at: 'op' put: op].
     category := req queryParam: 'category'.
-    category notNil ifTrue: [filters at: 'category' put: category].
+    (category notNil and: [category isEmpty not]) ifTrue: [filters at: 'category' put: category].
     scope := req queryParam: 'scope'.
-    scope notNil ifTrue: [filters at: 'scope' put: scope].
+    (scope notNil and: [scope isEmpty not]) ifTrue: [filters at: 'scope' put: scope].
     identity := req queryParam: 'identity'.
-    identity notNil ifTrue: [filters at: 'identity' put: identity].
+    (identity notNil and: [identity isEmpty not]) ifTrue: [filters at: 'identity' put: identity].
     results := bbs history: filters.
     d := Dictionary new.
     d at: 'entries' put: results.

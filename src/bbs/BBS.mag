@@ -366,22 +366,14 @@ PPEOF'.
   method: history: filters [
     "Query the JSONL audit history with optional filters.
      filters may contain: 'op', 'category', 'scope', 'identity', 'since', 'limit'."
-    | contents lines entries line entry matches op category scope identity since limit |
-    [
-      contents := File readFileContents: historyPath.
-    ] on: Exception do: [:e | ^Array new: 0].
-    (contents isKindOf: String) ifFalse: [^Array new: 0].
+    | contents lines entries line entry matches op category scope identity since limit proc |
+    (File exists: historyPath) ifFalse: [^Array new: 0].
+    contents := ExternalProcess run: '/bin/cat' args: (Array with: historyPath).
+    (contents isNil or: [contents isEmpty]) ifTrue: [^Array new: 0].
 
-    lines := contents splitRegex: '\n'.
-    entries := Array new: 0.
-    lines do: [:l |
-      l isEmpty ifFalse: [
-        [
-          entry := Json decode: l.
-          entries := entries copyWith: entry
-        ] on: Exception do: [:e | "skip corrupt line"]
-      ]
-    ].
+    lines := contents split: ((Character lf) asString).
+    lines := lines reject: [:l | l isEmpty].
+    entries := lines collect: [:l | Json decode: l].
 
     "Apply filters"
     op := filters at: 'op' ifAbsent: [nil].
