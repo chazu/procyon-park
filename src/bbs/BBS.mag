@@ -356,7 +356,9 @@ PPEOF'.
     proc := ExternalProcess command: '/bin/sh'.
     shellArgs := Array new: 0.
     shellArgs := shellArgs copyWith: '-c'.
-    shellArgs := shellArgs copyWith: 'printf "%s\n" "', jsonLine, '" >> "', historyPath, '"'.
+    shellArgs := shellArgs copyWith: 'cat >> "', historyPath, '" << ''PPEOF''
+', jsonLine, '
+PPEOF'.
     proc args: shellArgs.
     proc run
   ]
@@ -368,14 +370,16 @@ PPEOF'.
     [
       contents := File readFileContents: historyPath.
     ] on: Exception do: [:e | ^Array new: 0].
+    (contents isKindOf: String) ifFalse: [^Array new: 0].
 
-    lines := contents split: '
-'.
+    lines := contents splitRegex: '\n'.
     entries := Array new: 0.
     lines do: [:l |
       l isEmpty ifFalse: [
-        entry := Json decode: l.
-        entries := entries copyWith: entry
+        [
+          entry := Json decode: l.
+          entries := entries copyWith: entry
+        ] on: Exception do: [:e | "skip corrupt line"]
       ]
     ].
 
@@ -408,7 +412,7 @@ PPEOF'.
     limit := filters at: 'limit' ifAbsent: [nil].
     limit notNil ifTrue: [
       entries size > limit ifTrue: [
-        entries := entries copyFrom: (entries size - limit + 1) to: entries size
+        entries := entries copyFrom: (entries size - limit) to: entries size
       ]
     ].
 

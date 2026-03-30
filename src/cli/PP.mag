@@ -808,7 +808,7 @@ Worktree base: ~/.pp/worktrees/
     '  workflow status [<id>]                           Show workflow status' println.
     '  workflow cancel <id> [--scope <scope>]           Cancel a running workflow' println.
     '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
-    '  history   [--since S] [--limit N] [--op O] [--category C] Query audit log' println.
+    '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
     '  dashboard                                        Live system overview' println.
     '  help                                             Show this help' println.
     '' println.

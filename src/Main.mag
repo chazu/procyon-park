@@ -96,7 +96,7 @@ Main subclass: Object
     '  worktree list|clean                            Manage worktrees' println.
     '  clean-branches [--dry-run] [--all]             Remove stale branches' println.
     '  log      [--since <secs>] [--no-follow]        Tail notification stream' println.
-    '  history   [--since S] [--limit N] [--op O] [--category C] Query audit log' println.
+    '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
     '  dashboard                                      Live system overview' println.
     '' println.
     'Other:' println.
@@ -223,9 +223,9 @@ Main subclass: Object
     payload at: 'transitions' put: transitions.
     payload at: 'start_places' put: #('request').
     payload at: 'terminal_places' put: #('done').
-    payload at: 'description' put: 'Simple scout research workflow'.
+    payload at: 'description' put: 'Scout mission: research a topic, write findings document'.
 
-    bbs outPinned: 'template' scope: 'system' identity: 'scout' payload: payload.
+    bbs outPinned: 'template' scope: 'system' identity: 'scout-mission' payload: payload.
 
     "--- Full Pipeline Template ---"
     self seedFullPipeline: bbs.
