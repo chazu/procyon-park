@@ -92,9 +92,11 @@ BBS subclass: Object
     d at: 'pinned' put: false.
     d at: 'modality' put: 'linear'.
     space out: d.
-    mutex critical: [index := index copyWith: d].
+    mutex critical: [
+      index := index copyWith: d.
+      self appendHistory: 'out' tuple: d
+    ].
     (self isDurableCategory: category) ifTrue: [self persistAfterChange].
-    self appendHistory: 'out' tuple: d.
     ^d at: 'id'
   ]
 
@@ -105,9 +107,11 @@ BBS subclass: Object
     d at: 'pinned' put: true.
     d at: 'modality' put: 'persistent'.
     space outPersistent: d.
-    mutex critical: [index := index copyWith: d].
+    mutex critical: [
+      index := index copyWith: d.
+      self appendHistory: 'out-pinned' tuple: d
+    ].
     self persistAfterChange.
-    self appendHistory: 'out-pinned' tuple: d.
     ^d at: 'id'
   ]
 
@@ -119,8 +123,10 @@ BBS subclass: Object
     d at: 'modality' put: 'affine'.
     d at: 'ttl' put: ttlSeconds.
     space outAffine: d ttl: ttlSeconds.
-    mutex critical: [index := index copyWith: d].
-    self appendHistory: 'out-affine' tuple: d.
+    mutex critical: [
+      index := index copyWith: d.
+      self appendHistory: 'out-affine' tuple: d
+    ].
     ^d at: 'id'
   ]
 
@@ -134,7 +140,7 @@ BBS subclass: Object
     result := space tryIn: tmpl.
     result notNil ifTrue: [
       self removeFromIndex: result.
-      self appendHistory: 'consume' tuple: result
+      mutex critical: [self appendHistory: 'consume' tuple: result]
     ].
     ^result
   ]
@@ -146,7 +152,7 @@ BBS subclass: Object
     result := space in: tmpl.
     result notNil ifTrue: [
       self removeFromIndex: result.
-      self appendHistory: 'consume' tuple: result
+      mutex critical: [self appendHistory: 'consume' tuple: result]
     ].
     ^result
   ]

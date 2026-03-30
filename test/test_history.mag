@@ -76,7 +76,7 @@ HistoryTestHelper subclass: Object
     args := args copyWith: 'mktemp -d'.
     proc args: args.
     proc run.
-    ^proc stdout trim
+    ^proc stdout trimBoth
   ]
 
   classMethod: removeTempDir: path [
@@ -91,10 +91,10 @@ HistoryTestHelper subclass: Object
 
   classMethod: readHistoryLines: historyPath [
     "Read history.jsonl and return non-empty lines as an Array."
-    | contents allLines lines newline |
-    newline := String with: (Character value: 10).
+    | contents allLines lines |
     contents := File readFileContents: historyPath.
-    allLines := contents split: newline.
+    allLines := contents split: '
+'.
     lines := Array new: 0.
     allLines do: [:l |
       l isEmpty ifFalse: [
@@ -104,11 +104,19 @@ HistoryTestHelper subclass: Object
     ^lines
   ]
 
+  classMethod: tryDecode: aString [
+    "Try to decode JSON. Returns the decoded object or nil on failure."
+    | result |
+    result := nil.
+    [result := Json decode: aString] on: Exception do: [:e | result := nil].
+    ^result
+  ]
+
 "=== TestHistoryWriter — H1 through H8 ==="
 TestHistoryWriter subclass: Object
 
   classMethod: run: t [
-    | tempDir bbs historyPath lines line1 entry payload lineCount p id consumed consumeEntry allValid parseOk |
+    | tempDir bbs historyPath lines line1 entry payload p consumed consumeEntry allValid parseOk jsonOk |
     '--- TestHistoryWriter ---' println.
 
     tempDir := HistoryTestHelper makeTempDir.
@@ -126,14 +134,26 @@ TestHistoryWriter subclass: Object
     t assertEqual: lines size to: 1 message: 'H2b: history.jsonl should have exactly 1 line'.
 
     "H3: Parse line as JSON, verify fields"
-    line1 := lines at: 1.
-    entry := Json decode: line1.
-    t assertEqual: (entry at: 'op') to: 'out' message: 'H3a: op should be out'.
-    t assertEqual: (entry at: 'category') to: 'event' message: 'H3b: category should be event'.
-    t assertEqual: (entry at: 'scope') to: 'test' message: 'H3c: scope should be test'.
-    t assertEqual: (entry at: 'identity') to: 'e1' message: 'H3d: identity should be e1'.
-    t assert: ((entry at: 'ts') > 0) message: 'H3e: ts should be integer > 0'.
-    t assert: ((entry at: 'id') > 0) message: 'H3f: id should be integer > 0'.
+    line1 := lines at: 0.
+    entry := HistoryTestHelper tryDecode: line1.
+    jsonOk := entry notNil.
+    t assert: jsonOk message: 'H3-pre: history line must be valid JSON'.
+    jsonOk ifTrue: [
+      t assertEqual: (entry at: 'op') to: 'out' message: 'H3a: op should be out'.
+      t assertEqual: (entry at: 'category') to: 'event' message: 'H3b: category should be event'.
+      t assertEqual: (entry at: 'scope') to: 'test' message: 'H3c: scope should be test'.
+      t assertEqual: (entry at: 'identity') to: 'e1' message: 'H3d: identity should be e1'.
+      t assert: ((entry at: 'ts') > 0) message: 'H3e: ts should be integer > 0'.
+      t assert: ((entry at: 'id') > 0) message: 'H3f: id should be integer > 0'
+    ] ifFalse: [
+      ('  H3 SKIPPED: line content is not JSON: [', line1, ']') println.
+      t assert: false message: 'H3a: op should be out (skipped: not valid JSON)'.
+      t assert: false message: 'H3b: category should be event (skipped: not valid JSON)'.
+      t assert: false message: 'H3c: scope should be test (skipped: not valid JSON)'.
+      t assert: false message: 'H3d: identity should be e1 (skipped: not valid JSON)'.
+      t assert: false message: 'H3e: ts should be integer > 0 (skipped: not valid JSON)'.
+      t assert: false message: 'H3f: id should be integer > 0 (skipped: not valid JSON)'
+    ].
 
     "H4: outPinned produces second line with op = out-pinned"
     p := Dictionary new.
@@ -141,15 +161,19 @@ TestHistoryWriter subclass: Object
     bbs outPinned: 'decision' scope: 'test' identity: 'd1' payload: p.
     lines := HistoryTestHelper readHistoryLines: historyPath.
     t assertEqual: lines size to: 2 message: 'H4a: history.jsonl should have 2 lines'.
-    entry := Json decode: (lines at: 2).
-    t assertEqual: (entry at: 'op') to: 'out-pinned' message: 'H4b: second line op should be out-pinned'.
+    entry := HistoryTestHelper tryDecode: (lines at: 1).
+    entry notNil
+      ifTrue: [t assertEqual: (entry at: 'op') to: 'out-pinned' message: 'H4b: second line op should be out-pinned']
+      ifFalse: [t assert: false message: 'H4b: second line op should be out-pinned (not valid JSON)'].
 
     "H5: outAffine produces line with op = out-affine"
     p := Dictionary new.
     bbs outAffine: 'event' scope: 'test' identity: 'a1' payload: p ttl: 60.
     lines := HistoryTestHelper readHistoryLines: historyPath.
-    entry := Json decode: (lines at: 3).
-    t assertEqual: (entry at: 'op') to: 'out-affine' message: 'H5: third line op should be out-affine'.
+    entry := HistoryTestHelper tryDecode: (lines at: 2).
+    entry notNil
+      ifTrue: [t assertEqual: (entry at: 'op') to: 'out-affine' message: 'H5: third line op should be out-affine']
+      ifFalse: [t assert: false message: 'H5: third line op should be out-affine (not valid JSON)'].
 
     "H6: Consuming via inp: produces a consume entry"
     p := Dictionary new.
@@ -157,8 +181,10 @@ TestHistoryWriter subclass: Object
     consumed := bbs inp: 'event' scope: 'test' identity: 'consumable1'.
     t assert: consumed notNil message: 'H6a: inp: should return the consumed tuple'.
     lines := HistoryTestHelper readHistoryLines: historyPath.
-    consumeEntry := Json decode: (lines at: lines size).
-    t assertEqual: (consumeEntry at: 'op') to: 'consume' message: 'H6b: last entry op should be consume'.
+    consumeEntry := HistoryTestHelper tryDecode: (lines at: lines size - 1).
+    consumeEntry notNil
+      ifTrue: [t assertEqual: (consumeEntry at: 'op') to: 'consume' message: 'H6b: last entry op should be consume']
+      ifFalse: [t assert: false message: 'H6b: last entry op should be consume (not valid JSON)'].
 
     "H7: Append-only — write 5 fresh operations, verify line count"
     HistoryTestHelper removeTempDir: tempDir.
@@ -175,12 +201,10 @@ TestHistoryWriter subclass: Object
     t assertEqual: lines size to: 5 message: 'H7: exactly 5 non-empty lines after 5 operations'.
 
     "H8: Each line is valid JSON"
-    allValid := true.
     lines do: [:l |
       parseOk := true.
       [Json decode: l] on: Exception do: [:e |
-        parseOk := false.
-        allValid := false
+        parseOk := false
       ].
       t assert: parseOk message: 'H8: every line must be valid JSON'
     ].
@@ -219,14 +243,18 @@ TestHistoryQuery subclass: Object
     catFilters at: 'category' put: 'event'.
     entries := bbs history: catFilters.
     t assertEqual: entries size to: 1 message: 'H11a: category filter for event should return 1'.
-    t assertEqual: ((entries at: 1) at: 'category') to: 'event' message: 'H11b: filtered entry category should be event'.
+    entries size > 0
+      ifTrue: [t assertEqual: ((entries at: 0) at: 'category') to: 'event' message: 'H11b: filtered entry category should be event']
+      ifFalse: [t assert: false message: 'H11b: filtered entry category should be event (no entries)'].
 
     "H12: Filter by op"
     opFilters := Dictionary new.
     opFilters at: 'op' put: 'out-pinned'.
     entries := bbs history: opFilters.
     t assertEqual: entries size to: 1 message: 'H12a: op filter for out-pinned should return 1'.
-    t assertEqual: ((entries at: 1) at: 'op') to: 'out-pinned' message: 'H12b: filtered entry op should be out-pinned'.
+    entries size > 0
+      ifTrue: [t assertEqual: ((entries at: 0) at: 'op') to: 'out-pinned' message: 'H12b: filtered entry op should be out-pinned']
+      ifFalse: [t assert: false message: 'H12b: filtered entry op should be out-pinned (no entries)'].
 
     "H13: Filter by scope"
     HistoryTestHelper removeTempDir: tempDir.
@@ -240,8 +268,15 @@ TestHistoryQuery subclass: Object
     scopeFilters at: 'scope' put: 'alpha'.
     entries := bbs history: scopeFilters.
     t assertEqual: entries size to: 2 message: 'H13a: scope filter for alpha should return 2'.
-    t assertEqual: ((entries at: 1) at: 'scope') to: 'alpha' message: 'H13b: first entry scope should be alpha'.
-    t assertEqual: ((entries at: 2) at: 'scope') to: 'alpha' message: 'H13c: second entry scope should be alpha'.
+    entries size >= 2
+      ifTrue: [
+        t assertEqual: ((entries at: 0) at: 'scope') to: 'alpha' message: 'H13b: first entry scope should be alpha'.
+        t assertEqual: ((entries at: 1) at: 'scope') to: 'alpha' message: 'H13c: second entry scope should be alpha'
+      ]
+      ifFalse: [
+        t assert: false message: 'H13b: first entry scope should be alpha (not enough entries)'.
+        t assert: false message: 'H13c: second entry scope should be alpha (not enough entries)'
+      ].
     HistoryTestHelper removeTempDir: tempDir.
 
     "H14: Filter by since"
@@ -263,7 +298,9 @@ TestHistoryQuery subclass: Object
     limitFilters at: 'limit' put: 2.
     entries := bbs history: limitFilters.
     t assertEqual: entries size to: 2 message: 'H15a: limit 2 should return exactly 2 entries'.
-    t assertEqual: ((entries at: 2) at: 'identity') to: 'ts5' message: 'H15b: last entry should be the most recent (ts5)'.
+    entries size >= 2
+      ifTrue: [t assertEqual: ((entries at: 1) at: 'identity') to: 'ts5' message: 'H15b: last entry should be the most recent (ts5)']
+      ifFalse: [t assert: false message: 'H15b: last entry should be the most recent (not enough entries)'].
     HistoryTestHelper removeTempDir: tempDir.
 
     "H16: Combined filters (category + scope)"
@@ -279,8 +316,15 @@ TestHistoryQuery subclass: Object
     combinedFilters at: 'scope' put: 'alpha'.
     entries := bbs history: combinedFilters.
     t assertEqual: entries size to: 2 message: 'H16a: combined category+scope filter should return 2'.
-    t assertEqual: ((entries at: 1) at: 'identity') to: 'c1' message: 'H16b: first combined entry should be c1'.
-    t assertEqual: ((entries at: 2) at: 'identity') to: 'c4' message: 'H16c: second combined entry should be c4'.
+    entries size >= 2
+      ifTrue: [
+        t assertEqual: ((entries at: 0) at: 'identity') to: 'c1' message: 'H16b: first combined entry should be c1'.
+        t assertEqual: ((entries at: 1) at: 'identity') to: 'c4' message: 'H16c: second combined entry should be c4'
+      ]
+      ifFalse: [
+        t assert: false message: 'H16b: first combined entry should be c1 (not enough entries)'.
+        t assert: false message: 'H16c: second combined entry should be c4 (not enough entries)'
+      ].
     HistoryTestHelper removeTempDir: tempDir
   ]
 
@@ -288,7 +332,7 @@ TestHistoryQuery subclass: Object
 TestHistoryConventions subclass: Object
 
   classMethod: run: t [
-    | bbsSource hasHistoryPath hasMidBlockVars lines inMethod foundBar foundCode |
+    | bbsSource hasHistoryPath hasMidBlockVars lines inMethod foundBar foundCode trimmed pipeChar quoteChar |
     '--- TestHistoryConventions ---' println.
 
     "H17: BBS.mag declares historyPath in instanceVars"
@@ -296,18 +340,17 @@ TestHistoryConventions subclass: Object
     hasHistoryPath := bbsSource includes: 'historyPath'.
     t assert: hasHistoryPath message: 'H17: BBS.mag should declare historyPath in instanceVars'.
 
-    "H18: No mid-block temp var declarations in new methods.
-     Mid-block pattern: a line with | ... | that appears after a non-empty line
-     that is NOT the method opening line (method: / classMethod:).
-     We check the appendHistory: and history: methods specifically."
+    "H18: No mid-block temp var declarations in new methods."
     hasMidBlockVars := false.
-    lines := bbsSource split: (String with: (Character value: 10)).
+    pipeChar := Character value: 124.
+    quoteChar := Character value: 34.
+    lines := bbsSource split: '
+'.
     inMethod := false.
     foundBar := false.
     foundCode := false.
     lines do: [:l |
-      | trimmed |
-      trimmed := l trim.
+      trimmed := l trimBoth.
       "Detect method start"
       ((trimmed includes: 'method: appendHistory:') or:
        [trimmed includes: 'method: history:']) ifTrue: [
@@ -322,7 +365,7 @@ TestHistoryConventions subclass: Object
       "Inside a method, look for | ... | patterns"
       inMethod ifTrue: [
         ((trimmed size > 2) and:
-         [(trimmed at: 1) = (Character value: 124)]) ifTrue: [
+         [(trimmed at: 0) = pipeChar]) ifTrue: [
           "This line starts with |"
           foundBar ifTrue: [
             "Already saw a | line — this might be mid-block if we saw code between"
@@ -331,13 +374,43 @@ TestHistoryConventions subclass: Object
           foundBar := true.
           foundCode := false
         ] ifFalse: [
-          "Non-bar, non-empty line inside method"
-          (trimmed isEmpty not and: [(trimmed at: 1) = (Character value: 34) "double-quote"] not)
-            ifTrue: [foundCode := true]
+          "Non-bar, non-empty line inside method — skip comments (start with double-quote)"
+          trimmed isEmpty ifFalse: [
+            (trimmed at: 0) = quoteChar ifFalse: [
+              foundCode := true
+            ]
+          ]
         ]
       ]
     ].
     t assert: hasMidBlockVars not message: 'H18: No mid-block temp var declarations in history methods'
+  ]
+
+"=== TestHistoryApiAndCli — H19-H22: verify routing and help text ==="
+TestHistoryApiAndCli subclass: Object
+
+  classMethod: run: t [
+    | serverSource ppSource mainSource |
+    '--- TestHistoryApiAndCli ---' println.
+
+    "H19: Server.mag has /api/history GET route"
+    serverSource := File readFileContents: 'src/api/Server.mag'.
+    t assert: (serverSource includes: '/api/history') message: 'H19a: Server.mag should have /api/history route'.
+    t assert: (serverSource includes: 'handleHistory:') message: 'H19b: Server.mag should have handleHistory: handler'.
+    t assert: (serverSource includes: 'GET') message: 'H19c: history route should use GET method'.
+
+    "H20: PP.mag has history command dispatch"
+    ppSource := File readFileContents: 'src/cli/PP.mag'.
+    t assert: (ppSource includes: 'cmdHistory:') message: 'H20a: PP.mag should have cmdHistory: method'.
+    t assert: (ppSource includes: 'history') message: 'H20b: PP.mag should dispatch history command'.
+
+    "H21: Main.mag routes history command"
+    mainSource := File readFileContents: 'src/Main.mag'.
+    t assert: (mainSource includes: 'history') message: 'H21: Main.mag should route history command'.
+
+    "H22: Help text includes history in both PP.mag and Main.mag"
+    t assert: (ppSource includes: 'Query audit log') message: 'H22a: PP.mag help text should mention audit log'.
+    t assert: (mainSource includes: 'Query audit log') message: 'H22b: Main.mag help text should mention audit log'
   ]
 
 "=== Main ==="
@@ -346,8 +419,21 @@ TestHistoryMain subclass: Object
   classMethod: run [
     | t |
     t := T6 new.
-    TestHistoryWriter run: t.
-    TestHistoryQuery run: t.
-    TestHistoryConventions run: t.
+    [TestHistoryWriter run: t] on: Exception do: [:e |
+      ('TestHistoryWriter CRASHED: ', e messageText) println.
+      t assert: false message: 'TestHistoryWriter crashed'
+    ].
+    [TestHistoryQuery run: t] on: Exception do: [:e |
+      ('TestHistoryQuery CRASHED: ', e messageText) println.
+      t assert: false message: 'TestHistoryQuery crashed'
+    ].
+    [TestHistoryConventions run: t] on: Exception do: [:e |
+      ('TestHistoryConventions CRASHED: ', e messageText) println.
+      t assert: false message: 'TestHistoryConventions crashed'
+    ].
+    [TestHistoryApiAndCli run: t] on: Exception do: [:e |
+      ('TestHistoryApiAndCli CRASHED: ', e messageText) println.
+      t assert: false message: 'TestHistoryApiAndCli crashed'
+    ].
     t report
   ]
