@@ -596,7 +596,10 @@ WorkflowEngine subclass: Object
     bbs emitEvent: scope identity: 'workflow-failed:', instanceId type: 'workflow-failed' summary: reason.
 
     "Notify user"
-    bbs notify: ('Workflow failed: ', instanceId, ' — ', reason) scope: scope severity: 'urgent'
+    bbs notify: ('Workflow failed: ', instanceId, ' — ', reason) scope: scope severity: 'urgent'.
+
+    "Clean up worktree directory"
+    self cleanupWorktree: instanceId
   ]
 
   method: completeWorkflow: wf [
@@ -618,5 +621,20 @@ WorkflowEngine subclass: Object
     bbs emitEvent: scope identity: 'workflow-complete:', instanceId type: 'workflow-complete' summary: 'Workflow completed: ', instanceId.
 
     "Notify user"
-    bbs notify: ('Workflow completed: ', instanceId) scope: scope severity: 'info'
+    bbs notify: ('Workflow completed: ', instanceId) scope: scope severity: 'info'.
+
+    "Clean up worktree directory"
+    self cleanupWorktree: instanceId
+  ]
+
+  method: cleanupWorktree: instanceId [
+    "Remove the worktree directory for a completed/failed workflow."
+    | home worktreeDir |
+    home := System env: 'HOME'.
+    (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
+    worktreeDir := home, '/.pp/worktrees/', instanceId.
+    [Shell run: 'rm -rf "', worktreeDir, '"']
+      on: Exception do: [:e |
+        ('  Warning: could not clean up worktree: ', e messageText) println
+      ]
   ]
