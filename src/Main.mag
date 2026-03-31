@@ -84,6 +84,7 @@ Main subclass: Object
     '  workflow <template> [--param key=val ...]       Start a workflow' println.
     '  workflow status [<id>]                         Show workflow status' println.
     '  workflow cancel <id> [--scope <scope>]         Cancel a running workflow' println.
+    '  workflow wait <id> [--timeout <secs>]          Block until workflow completes' println.
     '  signal   <id> <key> <value>                    Upsert a signal' println.
     '  repo     add|list|remove|info                  Manage repositories' println.
     '  worktree list|clean                            Manage worktrees' println.

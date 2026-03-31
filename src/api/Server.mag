@@ -53,6 +53,7 @@ ApiServer subclass: Object
     httpServer route: '/api/notifications/stream' method: 'GET' handler: [:req | self handleNotificationStream: req].
     httpServer route: '/api/plan' method: 'POST' handler: [:req | self handlePlan: req].
     httpServer route: '/api/workflow/start' method: 'POST' handler: [:req | self handleWorkflowStart: req].
+    httpServer route: '/api/workflow/status' method: 'POST' handler: [:req | self handleWorkflowStatus: req].
     httpServer route: '/api/workflow/cancel' method: 'POST' handler: [:req | self handleWorkflowCancel: req].
     httpServer route: '/api/task/create' method: 'POST' handler: [:req | self handleTaskCreate: req].
     httpServer route: '/api/signal' method: 'POST' handler: [:req | self handleSignal: req].
@@ -422,6 +423,43 @@ ApiServer subclass: Object
     ^self okResponse: d
   ]
 
+
+  "--- Workflow Status ---"
+
+  method: handleWorkflowStatus: req [
+    "POST /api/workflow/status — get workflow status by ID.
+     Body: {workflow_id, scope?}
+     Returns: {status, workflow_id, template, started_at, ...}"
+    | body wfId scope wf wfPayload d |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    wfId := body at: 'workflow_id' ifAbsent: [nil].
+    wfId isNil ifTrue: [^self errorResponse: 400 message: 'workflow_id required'].
+    scope := body at: 'scope' ifAbsent: ['default'].
+
+    "Find the workflow — try given scope, then scan all"
+    wf := bbs rdp: 'workflow' scope: scope identity: wfId.
+    wf isNil ifTrue: [
+      wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = wfId] ifNone: [nil]
+    ].
+    wf isNil ifTrue: [^self errorResponse: 404 message: 'workflow not found'].
+
+    wfPayload := wf at: 'payload'.
+    d := Dictionary new.
+    d at: 'workflow_id' put: wfId.
+    d at: 'status' put: (wfPayload at: 'status' ifAbsent: ['unknown']).
+    d at: 'template' put: (wfPayload at: 'template' ifAbsent: ['?']).
+    d at: 'started_at' put: (wfPayload at: 'started_at' ifAbsent: [0]).
+    (wfPayload at: 'completed_at' ifAbsent: [nil]) notNil ifTrue: [
+      d at: 'completed_at' put: (wfPayload at: 'completed_at')
+    ].
+    (wfPayload at: 'failed_at' ifAbsent: [nil]) notNil ifTrue: [
+      d at: 'failed_at' put: (wfPayload at: 'failed_at').
+      d at: 'failure_reason' put: (wfPayload at: 'failure_reason' ifAbsent: [''])
+    ].
+    ^self okResponse: d
+  ]
 
   "--- Workflow Cancel ---"
 

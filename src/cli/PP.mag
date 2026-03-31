@@ -43,6 +43,8 @@ PP subclass: Object
         ifTrue: [^self cmdWorkflowStatus: args].
       (args size > 1 and: [(args at: 1) = 'cancel'])
         ifTrue: [^self cmdWorkflowCancel: args].
+      (args size > 1 and: [(args at: 1) = 'wait'])
+        ifTrue: [^self cmdWorkflowWait: args].
       ^self cmdWorkflow: args
     ].
     cmd = 'signal'    ifTrue: [^self cmdSignal: args].
@@ -500,6 +502,48 @@ Worktree base: ~/.pp/worktrees/
     self post: '/api/workflow/cancel' body: body
   ]
 
+  method: cmdWorkflowWait: args [
+    "pp workflow wait <workflow-id> [--scope <scope>] [--timeout <seconds>]
+     Block until the workflow reaches a terminal state (completed, failed, cancelled).
+     Default timeout: 3600 seconds (1 hour). Returns the final status."
+    | wfId theScope timeoutStr maxWait body response result status elapsed |
+    args size < 3 ifTrue: [
+      'Usage: pp workflow wait <workflow-id> [--scope <scope>] [--timeout <seconds>]' println.
+      ^self
+    ].
+
+    wfId := args at: 2.
+    theScope := self flagValue: '--scope' in: args.
+    theScope isNil ifTrue: [theScope := scope].
+    timeoutStr := self flagValue: '--timeout' in: args.
+    maxWait := timeoutStr notNil ifTrue: [timeoutStr asInteger] ifFalse: [3600].
+
+    body := Dictionary new.
+    body at: 'workflow_id' put: wfId.
+    body at: 'scope' put: theScope.
+
+    elapsed := 0.
+    [elapsed < maxWait] whileTrue: [
+      [
+        response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/workflow/status -H "Content-Type: application/json" -d ''', (Json encode: body), ''''.
+        (response notNil and: [response isEmpty not]) ifTrue: [
+          result := Json decode: response.
+          status := result at: 'status' ifAbsent: ['unknown'].
+          (status = 'completed' or: [status = 'failed' or: [status = 'cancelled']]) ifTrue: [
+            (Json encodePretty: result) println.
+            ^self
+          ]
+        ]
+      ] on: Exception do: [:e |
+        ('Error checking workflow status: ', e messageText) println
+      ].
+      Process sleep: 10000.
+      elapsed := elapsed + 10
+    ].
+
+    ('Timeout: workflow ', wfId, ' did not complete within ', maxWait printString, ' seconds') println
+  ]
+
   method: showWorkflowDetail: wfId scope: wfScope [
     "Show detailed status for a single workflow."
     | body response result wf wfPayload tokens tasks allTokens allTasks cycleSignal |
@@ -829,6 +873,7 @@ Worktree base: ~/.pp/worktrees/
     '  workflow <template> [--param key=val ...]        Start a workflow' println.
     '  workflow status [<id>]                           Show workflow status' println.
     '  workflow cancel <id> [--scope <scope>]           Cancel a running workflow' println.
+    '  workflow wait <id> [--timeout <secs>]            Block until workflow completes' println.
     '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
     '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
     '  dashboard                                        Live system overview' println.
