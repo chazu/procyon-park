@@ -48,7 +48,7 @@ ClaudeHarness subclass: Object
     "Spawn Claude"
     ('Starting Claude harness for ', role name, ' task: ', taskId) println.
 
-    "Ensure sessions directory exists and set output file path"
+    "Ensure sessions directory exists for transcript capture"
     home := System env: 'HOME'.
     (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
     sessionsDir := home, '/.pp/sessions'.
@@ -61,8 +61,6 @@ ClaudeHarness subclass: Object
     args := args copyWith: systemPrompt.
     args := args copyWith: '--allowedTools'.
     args := args copyWith: 'Bash,Read,Write,Edit,Glob,Grep'.
-    args := args copyWith: '--output-file'.
-    args := args copyWith: outputFile.
     args := args copyWith: '-p'.
     args := args copyWith: taskDescription.
 
@@ -84,7 +82,7 @@ ClaudeHarness subclass: Object
 
     "Check result"
     process isSuccess ifTrue: [
-      ('Harness completed: ', taskId, ' (session: ', outputFile, ')') println
+      ('Harness completed: ', taskId) println
     ] ifFalse: [
       ('Harness failed: ', taskId, ' (exit ', process exitCode printString, ')') println.
       ('stderr: ', process stderr) println
