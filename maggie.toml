@@ -2,6 +2,7 @@
 name = "procyon-park"
 namespace = "ProcyonPark"
 version = "0.1.0"
+output = "pp"
 
 [dependencies]
 alto = { path = "../alto" }
@@ -28,5 +29,5 @@ include = [
 import = "alto/go/terminal"
 
 [test]
-dirs = ["src/...", "test"]
+dirs = ["src", "src/bbs", "src/api", "src/cli", "src/dispatcher", "src/harness", "src/roles", "test"]
 entry = "TestWorkflowRefactorMain.run"

@@ -248,21 +248,16 @@ BBS subclass: Object
   "--- Persistence ---"
 
   method: ensureDataDir [
-    | proc shellArgs |
-    proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
-    shellArgs := shellArgs copyWith: 'mkdir -p "', dataDir, '"'.
-    proc args: shellArgs.
-    proc run
+    Shell run: 'mkdir -p "', dataDir, '"'
   ]
 
   method: saveToDisk [
     "Persist durable tuples to disk. Only saves tuples in categories that
      should survive a restart (conventions, decisions, facts, templates,
      rules, signals, artifacts, links). Skips ephemeral data."
-    | durable json proc shellArgs filePath |
+    | durable json filePath tmpPath |
     filePath := dataDir, '/bbs.json'.
+    tmpPath := filePath, '.tmp'.
 
     durable := mutex critical: [
       index select: [:t |
@@ -274,16 +269,9 @@ BBS subclass: Object
 
     json := Json encode: durable.
 
-    "Write atomically: write to .tmp then rename.
-     Use heredoc to avoid stdin: which may not exist."
-    proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
-    shellArgs := shellArgs copyWith: 'cat << ''PPEOF'' > "', filePath, '.tmp" && mv "', filePath, '.tmp" "', filePath, '"
-', json, '
-PPEOF'.
-    proc args: shellArgs.
-    proc run
+    "Write atomically: write to .tmp then rename"
+    File writeFileContents: tmpPath contents: json.
+    Shell run: 'mv "', tmpPath, '" "', filePath, '"'
   ]
 
   method: loadFromDisk [
@@ -343,7 +331,7 @@ PPEOF'.
 
   method: appendHistory: operation tuple: dict [
     "Append a compact JSONL audit entry to the history log."
-    | entry jsonLine proc shellArgs |
+    | entry jsonLine |
     entry := Dictionary new.
     entry at: 'ts' put: DateTime now epochSeconds.
     entry at: 'op' put: operation.
@@ -353,22 +341,15 @@ PPEOF'.
     entry at: 'identity' put: (dict at: 'identity').
     entry at: 'modality' put: (dict at: 'modality' ifAbsent: ['']).
     jsonLine := Json encode: entry.
-    proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
-    shellArgs := shellArgs copyWith: 'cat >> "', historyPath, '" << ''PPEOF''
-', jsonLine, '
-PPEOF'.
-    proc args: shellArgs.
-    proc run
+    File appendToFile: historyPath contents: jsonLine, (Character lf asString)
   ]
 
   method: history: filters [
     "Query the JSONL audit history with optional filters.
      filters may contain: 'op', 'category', 'scope', 'identity', 'since', 'limit'."
-    | contents lines entries line entry matches op category scope identity since limit proc |
+    | contents lines entries line entry matches op category scope identity since limit |
     (File exists: historyPath) ifFalse: [^Array new: 0].
-    contents := ExternalProcess run: '/bin/cat' args: (Array with: historyPath).
+    contents := File readFileContents: historyPath.
     (contents isNil or: [contents isEmpty]) ifTrue: [^Array new: 0].
 
     lines := contents split: ((Character lf) asString).

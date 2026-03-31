@@ -437,3 +437,5 @@ TestHistoryMain subclass: Object
     ].
     t report
   ]
+
+TestHistoryMain run

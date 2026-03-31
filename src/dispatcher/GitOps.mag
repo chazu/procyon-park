@@ -1,0 +1,41 @@
+"GitOps — utility class wrapping common git operations for WorkflowEngine.
+ Methods that are critical to workflow correctness signal Error on failure.
+ Cleanup helpers only warn."
+
+GitOps subclass: Object
+
+  classMethod: createFeatureBranch: branchName in: repoPath [
+    "git checkout -b <branchName> in repoPath. Signals Error on failure."
+    Shell runChecked: 'git -C "', repoPath, '" checkout -b "', branchName, '"'
+  ]
+
+  classMethod: createWorktree: worktreeDir branch: implBranch in: repoPath [
+    "Create parent dir and git worktree add. Signals Error on failure."
+    Shell runChecked: 'mkdir -p "$(dirname "', worktreeDir, '")" && git -C "', repoPath, '" worktree add "', worktreeDir, '" -b "', implBranch, '"'
+  ]
+
+  classMethod: checkoutBranch: branchName in: repoPath [
+    "git checkout <branchName>. Signals Error on failure."
+    Shell runChecked: 'git -C "', repoPath, '" checkout "', branchName, '"'
+  ]
+
+  classMethod: mergeBranch: sourceBranch in: repoPath [
+    "git merge <sourceBranch> --no-edit. Signals Error on failure."
+    Shell runChecked: 'git -C "', repoPath, '" merge "', sourceBranch, '" --no-edit'
+  ]
+
+  classMethod: removeWorktree: worktreeDir in: repoPath [
+    "git worktree remove. Warns on failure (does not signal)."
+    [Shell runChecked: 'git -C "', repoPath, '" worktree remove "', worktreeDir, '"']
+      on: Exception do: [:e |
+        ('GitOps warning: worktree remove failed: ', e messageText) println
+      ]
+  ]
+
+  classMethod: deleteBranch: branchName in: repoPath [
+    "git branch -d <branchName>. Warns on failure (does not signal)."
+    [Shell runChecked: 'git -C "', repoPath, '" branch -d "', branchName, '"']
+      on: Exception do: [:e |
+        ('GitOps warning: branch delete failed: ', e messageText) println
+      ]
+  ]

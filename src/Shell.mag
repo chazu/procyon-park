@@ -1,0 +1,59 @@
+"Shell — utility class that consolidates ExternalProcess boilerplate
+ for running shell commands. Provides three class methods:
+   Shell run: cmd        — fire-and-forget (no output capture)
+   Shell capture: cmd    — run and return stdout as a String
+   Shell runChecked: cmd — run and signal Error on non-zero exit"
+
+Shell subclass: Object
+
+  classMethod: run: cmd [
+    "Fire-and-forget shell command. No output capture."
+    | proc shellArgs |
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: cmd.
+    proc args: shellArgs.
+    proc run
+  ]
+
+  classMethod: capture: cmd [
+    "Run a shell command and return its stdout as a String.
+     Uses a temp file to capture output reliably."
+    | proc shellArgs tmpFile raw result |
+    tmpFile := '/tmp/pp-shell-capture-', DateTime now epochSeconds printString.
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: cmd, ' > "', tmpFile, '" 2>&1'.
+    proc args: shellArgs.
+    proc run.
+
+    (File exists: tmpFile) ifFalse: [^''].
+    raw := File readFileContents: tmpFile.
+
+    "Clean up temp file"
+    self run: 'rm -f "', tmpFile, '"'.
+
+    "Strip trailing newlines"
+    result := raw.
+    [result size > 0 and: [(result copyFrom: result size - 1) = ((Character lf) asString)]] whileTrue: [
+      result := result copyFrom: 0 to: result size - 1
+    ].
+    ^result
+  ]
+
+  classMethod: runChecked: cmd [
+    "Run a shell command and signal an Error if it exits non-zero.
+     Returns nil on success."
+    | proc shellArgs |
+    proc := ExternalProcess command: '/bin/sh'.
+    shellArgs := Array new: 0.
+    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := shellArgs copyWith: cmd.
+    proc args: shellArgs.
+    proc run.
+    proc isSuccess ifFalse: [
+      Error signal: 'Shell command failed (exit ', proc exitCode printString, '): ', cmd
+    ]
+  ]

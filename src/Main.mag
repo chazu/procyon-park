@@ -4,6 +4,12 @@
 
 Main subclass: Object
 
+  classMethod: ppCommands [
+    "Commands that route to PP (thin HTTP client)."
+    ^#('observe' 'decide' 'event' 'plan' 'read' 'notify' 'dismiss'
+       'status' 'prime' 'task' 'workflow' 'signal' 'log' 'history' 'dashboard')
+  ]
+
   classMethod: start [
     | args cmd wtArgs |
     args := System args.
@@ -16,25 +22,13 @@ Main subclass: Object
     cmd := args at: 0.
 
     "Server"
-    cmd = 'serve'   ifTrue: [^self startServer: (args copyFrom: 1)].
+    cmd = 'serve' ifTrue: [^self startServer: (args copyFrom: 1)].
 
     "Agent communication (thin HTTP client commands)"
-    cmd = 'observe'  ifTrue: [^PP new runWith: args].
-    cmd = 'decide'   ifTrue: [^PP new runWith: args].
-    cmd = 'event'    ifTrue: [^PP new runWith: args].
-    cmd = 'plan'     ifTrue: [^PP new runWith: args].
-    cmd = 'read'     ifTrue: [^PP new runWith: args].
-    cmd = 'notify'   ifTrue: [^PP new runWith: args].
-    cmd = 'dismiss'  ifTrue: [^PP new runWith: args].
-    cmd = 'status'   ifTrue: [^PP new runWith: args].
-    cmd = 'prime'    ifTrue: [^PP new runWith: args].
-    cmd = 'task'     ifTrue: [^PP new runWith: args].
-    cmd = 'workflow' ifTrue: [^PP new runWith: args].
-    cmd = 'signal'   ifTrue: [^PP new runWith: args].
-    cmd = 'log'      ifTrue: [^PP new runWith: args].
-    cmd = 'history'  ifTrue: [^PP new runWith: args].
-    cmd = 'dashboard' ifTrue: [^PP new runWith: args].
-    cmd = 'repo'     ifTrue: [^Repo new runWith: args].
+    (self ppCommands includes: cmd) ifTrue: [^PP new runWith: args].
+
+    "Repo management"
+    cmd = 'repo' ifTrue: [^Repo new runWith: args].
     cmd = 'clean-branches' ifTrue: [
       wtArgs := Array new: 0.
       wtArgs := wtArgs copyWith: 'repo'.
@@ -52,13 +46,12 @@ Main subclass: Object
     ].
 
     "Help"
-    cmd = 'help'    ifTrue: [^self printUsage].
-    cmd = '--help'  ifTrue: [^self printUsage].
-    cmd = '-h'      ifTrue: [^self printUsage].
+    (cmd = 'help' or: [cmd = '--help' or: [cmd = '-h']])
+      ifTrue: [^self printUsage].
 
     "Version"
-    cmd = 'version' ifTrue: [^self printVersion].
-    cmd = '--version' ifTrue: [^self printVersion].
+    (cmd = 'version' or: [cmd = '--version'])
+      ifTrue: [^self printVersion].
 
     ('Unknown command: ', cmd) println.
     '' println.
@@ -192,306 +185,8 @@ Main subclass: Object
   ]
 
   classMethod: seedTemplates: bbs [
-    | payload transitions t1 t2 pre arr |
-
-    "--- Scout Template ---"
-    transitions := Array new: 0.
-
-    "T1: setup — automatic, create worktree"
-    t1 := Dictionary new.
-    t1 at: 'id' put: 'setup'.
-    t1 at: 'in' put: #('request').
-    t1 at: 'out' put: #('ready').
-    t1 at: 'action' put: 'create-worktree'.
-    transitions := transitions copyWith: t1.
-
-    "T2: scout transition"
-    t2 := Dictionary new.
-    t2 at: 'id' put: 'scout'.
-    t2 at: 'in' put: #('ready').
-    t2 at: 'out' put: #('scouting').
-    t2 at: 'role' put: 'scout'.
-    t2 at: 'description' put: '{{description}}'.
-    transitions := transitions copyWith: t2.
-
-    "T3: complete transition (automatic, precondition: task-complete event)"
-    t1 := Dictionary new.
-    t1 at: 'id' put: 'complete'.
-    t1 at: 'in' put: #('scouting').
-    t1 at: 'out' put: #('done').
-    pre := Dictionary new.
-    pre at: 'category' put: 'event'.
-    pre at: 'identity' put: 'task-complete:{{instance}}:task:scout'.
-    arr := Array new: 0.
-    arr := arr copyWith: pre.
-    t1 at: 'preconditions' put: arr.
-    transitions := transitions copyWith: t1.
-
-    payload := Dictionary new.
-    payload at: 'transitions' put: transitions.
-    payload at: 'start_places' put: #('request').
-    payload at: 'terminal_places' put: #('done').
-    payload at: 'description' put: 'Scout mission: research a topic, write findings document'.
-
-    bbs outPinned: 'template' scope: 'system' identity: 'scout-mission' payload: payload.
-
-    "--- Full Pipeline Template ---"
-    self seedFullPipeline: bbs.
-
-    "--- Story Template ---"
-    self seedStoryTemplate: bbs.
-
-    'Workflow templates seeded.' println
-  ]
-
-  classMethod: seedFullPipeline: bbs [
-    | payload transitions t |
-
-    transitions := Array new: 0.
-
-    "T0: setup — automatic, create worktree"
-    t := Dictionary new.
-    t at: 'id' put: 'setup'.
-    t at: 'in' put: #('request').
-    t at: 'out' put: #('planning').
-    t at: 'action' put: 'create-worktree'.
-    transitions := transitions copyWith: t.
-
-    "T1: plan"
-    t := Dictionary new.
-    t at: 'id' put: 'plan'.
-    t at: 'in' put: #('planning').
-    t at: 'out' put: #('plan_ready').
-    t at: 'role' put: 'planner'.
-    t at: 'description' put: 'Create implementation plan for: {{description}}'.
-    transitions := transitions copyWith: t.
-
-    "T2: dispatch_integrate — foreman"
-    t := Dictionary new.
-    t at: 'id' put: 'dispatch_integrate'.
-    t at: 'in' put: #('plan_ready').
-    t at: 'out' put: #('integrated').
-    t at: 'role' put: 'foreman'.
-    t at: 'description' put: 'Dispatch implementers and integrate results for: {{description}}'.
-    transitions := transitions copyWith: t.
-
-    "T3: fork — automatic"
-    t := Dictionary new.
-    t at: 'id' put: 'fork'.
-    t at: 'in' put: #('integrated').
-    t at: 'out' put: #('reviewing' 'testing').
-    t at: 'preconditions' put: (self taskCompletePrecondition: 'dispatch_integrate').
-    transitions := transitions copyWith: t.
-
-    "T4: review"
-    t := Dictionary new.
-    t at: 'id' put: 'review'.
-    t at: 'in' put: #('reviewing').
-    t at: 'out' put: #('review_done').
-    t at: 'role' put: 'reviewer'.
-    t at: 'description' put: 'Review implementation for: {{description}}'.
-    transitions := transitions copyWith: t.
-
-    "T5: test"
-    t := Dictionary new.
-    t at: 'id' put: 'test'.
-    t at: 'in' put: #('testing').
-    t at: 'out' put: #('test_done').
-    t at: 'role' put: 'tester'.
-    t at: 'description' put: 'Test implementation for: {{description}}'.
-    transitions := transitions copyWith: t.
-
-    "T6: evaluate — foreman"
-    t := Dictionary new.
-    t at: 'id' put: 'evaluate'.
-    t at: 'in' put: #('review_done' 'test_done').
-    t at: 'out' put: #('evaluating').
-    t at: 'role' put: 'foreman'.
-    t at: 'description' put: 'Evaluate review and test results for: {{description}}'.
-    transitions := transitions copyWith: t.
-
-    "T7a: pass"
-    t := Dictionary new.
-    t at: 'id' put: 'pass'.
-    t at: 'in' put: #('evaluating').
-    t at: 'out' put: #('merging').
-    t at: 'preconditions' put: (self verdictPrecondition: 'pass').
-    transitions := transitions copyWith: t.
-
-    "T7b: fix_needed"
-    t := Dictionary new.
-    t at: 'id' put: 'fix_needed'.
-    t at: 'in' put: #('evaluating').
-    t at: 'out' put: #('fixing').
-    t at: 'preconditions' put: (self verdictPrecondition: 'fix').
-    transitions := transitions copyWith: t.
-
-    "T7c: exhausted"
-    t := Dictionary new.
-    t at: 'id' put: 'exhausted'.
-    t at: 'in' put: #('evaluating').
-    t at: 'out' put: #('merging').
-    t at: 'preconditions' put: (self verdictPrecondition: 'exhausted').
-    transitions := transitions copyWith: t.
-
-    "T8: fix"
-    t := Dictionary new.
-    t at: 'id' put: 'fix'.
-    t at: 'in' put: #('fixing').
-    t at: 'out' put: #('fix_done').
-    t at: 'role' put: 'fixer'.
-    t at: 'description' put: 'Fix issues found in review/test for: {{description}}'.
-    transitions := transitions copyWith: t.
-
-    "T9: re_review"
-    t := Dictionary new.
-    t at: 'id' put: 're_review'.
-    t at: 'in' put: #('fix_done').
-    t at: 'out' put: #('reviewing' 'testing').
-    t at: 'preconditions' put: (self taskCompletePrecondition: 'fix').
-    transitions := transitions copyWith: t.
-
-    "T10: integrate — automatic, merge worktree"
-    t := Dictionary new.
-    t at: 'id' put: 'integrate'.
-    t at: 'in' put: #('merging').
-    t at: 'out' put: #('merged').
-    t at: 'action' put: 'merge-worktree'.
-    transitions := transitions copyWith: t.
-
-    "T11: notify — automatic, notify head"
-    t := Dictionary new.
-    t at: 'id' put: 'notify'.
-    t at: 'in' put: #('merged').
-    t at: 'out' put: #('done').
-    t at: 'action' put: 'notify-head'.
-    transitions := transitions copyWith: t.
-
-    payload := Dictionary new.
-    payload at: 'transitions' put: transitions.
-    payload at: 'start_places' put: #('request').
-    payload at: 'terminal_places' put: #('done').
-    payload at: 'description' put: 'Full pipeline: plan, implement, review+test, fix cycle'.
-
-    bbs outPinned: 'template' scope: 'system' identity: 'full-pipeline' payload: payload
-  ]
-
-  classMethod: seedStoryTemplate: bbs [
-    | payload transitions t pre arr |
-
-    transitions := Array new: 0.
-
-    "T1: setup — automatic, create worktree"
-    t := Dictionary new.
-    t at: 'id' put: 'setup'.
-    t at: 'in' put: #('request').
-    t at: 'out' put: #('ready').
-    t at: 'action' put: 'create-worktree'.
-    transitions := transitions copyWith: t.
-
-    "T2: implement"
-    t := Dictionary new.
-    t at: 'id' put: 'implement'.
-    t at: 'in' put: #('ready').
-    t at: 'out' put: #('implemented').
-    t at: 'role' put: 'implementer'.
-    t at: 'description' put: '{{description}}'.
-    transitions := transitions copyWith: t.
-
-    "T3: review"
-    t := Dictionary new.
-    t at: 'id' put: 'review'.
-    t at: 'in' put: #('implemented').
-    t at: 'out' put: #('reviewed').
-    t at: 'role' put: 'reviewer'.
-    t at: 'description' put: 'Review implementation for: {{description}}'.
-    pre := Dictionary new.
-    pre at: 'category' put: 'event'.
-    pre at: 'identity' put: 'task-complete:{{instance}}:task:implement'.
-    arr := Array new: 0.
-    arr := arr copyWith: pre.
-    t at: 'preconditions' put: arr.
-    transitions := transitions copyWith: t.
-
-    "T4: pass"
-    t := Dictionary new.
-    t at: 'id' put: 'pass'.
-    t at: 'in' put: #('reviewed').
-    t at: 'out' put: #('merging').
-    pre := Dictionary new.
-    pre at: 'category' put: 'signal'.
-    pre at: 'identity' put: 'verdict:{{instance}}'.
-    pre at: 'constraint' put: '{decision: "pass"}'.
-    arr := Array new: 0.
-    arr := arr copyWith: pre.
-    t at: 'preconditions' put: arr.
-    transitions := transitions copyWith: t.
-
-    "T5: integrate — automatic, merge worktree"
-    t := Dictionary new.
-    t at: 'id' put: 'integrate'.
-    t at: 'in' put: #('merging').
-    t at: 'out' put: #('merged').
-    t at: 'action' put: 'merge-worktree'.
-    transitions := transitions copyWith: t.
-
-    "T6: notify — automatic, notify head"
-    t := Dictionary new.
-    t at: 'id' put: 'notify'.
-    t at: 'in' put: #('merged').
-    t at: 'out' put: #('done').
-    t at: 'action' put: 'notify-head'.
-    transitions := transitions copyWith: t.
-
-    "T7: fail"
-    t := Dictionary new.
-    t at: 'id' put: 'fail'.
-    t at: 'in' put: #('reviewed').
-    t at: 'out' put: #('fixing').
-    pre := Dictionary new.
-    pre at: 'category' put: 'signal'.
-    pre at: 'identity' put: 'verdict:{{instance}}'.
-    pre at: 'constraint' put: '{decision: "fix"}'.
-    arr := Array new: 0.
-    arr := arr copyWith: pre.
-    t at: 'preconditions' put: arr.
-    transitions := transitions copyWith: t.
-
-    "T8: fix"
-    t := Dictionary new.
-    t at: 'id' put: 'fix'.
-    t at: 'in' put: #('fixing').
-    t at: 'out' put: #('implemented').
-    t at: 'role' put: 'fixer'.
-    t at: 'description' put: 'Fix issues found in review for: {{description}}'.
-    transitions := transitions copyWith: t.
-
-    payload := Dictionary new.
-    payload at: 'transitions' put: transitions.
-    payload at: 'start_places' put: #('request').
-    payload at: 'terminal_places' put: #('done').
-    payload at: 'description' put: 'Single-task: implement in worktree, review, integrate'.
-
-    bbs outPinned: 'template' scope: 'system' identity: 'story' payload: payload
-  ]
-
-  classMethod: taskCompletePrecondition: transitionId [
-    | pre arr |
-    pre := Dictionary new.
-    pre at: 'category' put: 'event'.
-    pre at: 'identity' put: 'task-complete:{{instance}}:task:', transitionId.
-    arr := Array new: 0.
-    arr := arr copyWith: pre.
-    ^arr
-  ]
-
-  classMethod: verdictPrecondition: verdictValue [
-    | pre arr |
-    pre := Dictionary new.
-    pre at: 'category' put: 'signal'.
-    pre at: 'identity' put: 'verdict:{{instance}}'.
-    pre at: 'constraint' put: '{decision: "', verdictValue, '"}'.
-    arr := Array new: 0.
-    arr := arr copyWith: pre.
-    ^arr
+    | loader repos |
+    loader := TemplateLoader new.
+    repos := loader allRepoConfigs.
+    loader seedAll: bbs repos: repos
   ]

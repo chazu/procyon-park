@@ -1,0 +1,563 @@
+"Spec-based tests for pp history audit log feature.
+ Tests from the specification, not the implementation.
+
+ Test classes:
+   TestHistoryWriterSpec   — HS1-HS10: audit log writing correctness from spec
+   TestHistoryQuerySpec    — HS11-HS20: query/filter method from spec
+   TestHistoryEdgeCases    — HS21-HS28: edge cases and robustness
+   TestHistorySourceSpec   — HS29-HS36: source convention and API compliance
+
+ All temp vars at method top. No ifNil:/ifNotNil: — uses isNil/notNil ifTrue:.
+ Uses integer char codes, not dollar-sign literals.
+ Uses Array new: 0 and copyWith: for array building."
+
+"--- Test Runner ---"
+T6S subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [
+    | r |
+    r := super new.
+    r init.
+    ^r
+  ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: condition message: msg [
+    condition ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== History Spec Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    (failed > 0) ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    (failed = 0)
+      ifTrue: [ 'ALL TESTS PASSED' println ]
+      ifFalse: [ 'SOME TESTS FAILED' println ]
+  ]
+
+  method: failed [
+    ^failed
+  ]
+
+"--- Helper ---"
+HistorySpecHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: removeTempDir: path [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'rm -rf "', path, '"'.
+    proc args: args.
+    proc run
+  ]
+
+  classMethod: readHistoryLines: historyPath [
+    | contents allLines lines |
+    contents := File readFileContents: historyPath.
+    allLines := contents split: '
+'.
+    lines := Array new: 0.
+    allLines do: [:l |
+      l isEmpty ifFalse: [
+        lines := lines copyWith: l
+      ]
+    ].
+    ^lines
+  ]
+
+  classMethod: tryDecode: aString [
+    | result |
+    result := nil.
+    [result := Json decode: aString] on: Exception do: [:e | result := nil].
+    ^result
+  ]
+
+"=== TestHistoryWriterSpec — HS1 through HS10 ==="
+TestHistoryWriterSpec subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs historyPath lines entry p consumed payload jsonOk entry2 entry3 entry4 entry5 allValid first second firstTs secondTs |
+    '--- TestHistoryWriterSpec ---' println.
+
+    "HS1: Spec says history.jsonl must NOT exist on a fresh BBS (no mutations yet)"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    historyPath := tempDir, '/history.jsonl'.
+    t assert: (File exists: historyPath) not message: 'HS1: fresh BBS must not create history.jsonl'.
+    HistorySpecHelper removeTempDir: tempDir.
+
+    "HS2: Spec says every out: call must produce exactly one JSONL entry"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    historyPath := tempDir, '/history.jsonl'.
+    payload := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'e1' payload: payload.
+    t assert: (File exists: historyPath) message: 'HS2a: history.jsonl must exist after out:'.
+    lines := HistorySpecHelper readHistoryLines: historyPath.
+    t assertEqual: lines size to: 1 message: 'HS2b: exactly 1 line after 1 out:'.
+
+    "HS3: Spec says each entry must contain ts, op, id, category, scope, identity, modality"
+    entry := HistorySpecHelper tryDecode: (lines at: 0).
+    jsonOk := entry notNil.
+    t assert: jsonOk message: 'HS3-pre: entry must be valid JSON'.
+    jsonOk ifTrue: [
+      t assertEqual: (entry at: 'op') to: 'out' message: 'HS3a: op field must be out'.
+      t assertEqual: (entry at: 'category') to: 'event' message: 'HS3b: category field'.
+      t assertEqual: (entry at: 'scope') to: 'test' message: 'HS3c: scope field'.
+      t assertEqual: (entry at: 'identity') to: 'e1' message: 'HS3d: identity field'.
+      t assert: ((entry at: 'ts') > 0) message: 'HS3e: ts must be positive integer'.
+      t assert: ((entry at: 'id') >= 0) message: 'HS3f: id must be non-negative integer'.
+      t assert: ((entry at: 'modality') isKindOf: String) message: 'HS3g: modality must be a string'
+    ] ifFalse: [
+      "Register failures for skipped assertions"
+      t assert: false message: 'HS3a: op field (skipped: invalid JSON)'.
+      t assert: false message: 'HS3b: category field (skipped)'.
+      t assert: false message: 'HS3c: scope field (skipped)'.
+      t assert: false message: 'HS3d: identity field (skipped)'.
+      t assert: false message: 'HS3e: ts (skipped)'.
+      t assert: false message: 'HS3f: id (skipped)'.
+      t assert: false message: 'HS3g: modality (skipped)'
+    ].
+
+    "HS4: Spec says outPinned: must produce op = 'out-pinned'"
+    p := Dictionary new.
+    bbs outPinned: 'decision' scope: 'test' identity: 'd1' payload: p.
+    lines := HistorySpecHelper readHistoryLines: historyPath.
+    t assertEqual: lines size to: 2 message: 'HS4a: 2 lines after 2 ops'.
+    entry2 := HistorySpecHelper tryDecode: (lines at: 1).
+    entry2 notNil
+      ifTrue: [t assertEqual: (entry2 at: 'op') to: 'out-pinned' message: 'HS4b: op must be out-pinned']
+      ifFalse: [t assert: false message: 'HS4b: op must be out-pinned (invalid JSON)'].
+
+    "HS5: Spec says outAffine: must produce op = 'out-affine'"
+    bbs outAffine: 'event' scope: 'test' identity: 'a1' payload: p ttl: 60.
+    lines := HistorySpecHelper readHistoryLines: historyPath.
+    entry3 := HistorySpecHelper tryDecode: (lines at: 2).
+    entry3 notNil
+      ifTrue: [t assertEqual: (entry3 at: 'op') to: 'out-affine' message: 'HS5: op must be out-affine']
+      ifFalse: [t assert: false message: 'HS5: op must be out-affine (invalid JSON)'].
+
+    "HS6: Spec says inp: (consume) must produce op = 'consume'"
+    bbs out: 'event' scope: 'test' identity: 'to-consume' payload: p.
+    consumed := bbs inp: 'event' scope: 'test' identity: 'to-consume'.
+    t assert: consumed notNil message: 'HS6a: inp: must return consumed tuple'.
+    lines := HistorySpecHelper readHistoryLines: historyPath.
+    "Should have: out(e1), out-pinned(d1), out-affine(a1), out(to-consume), consume(to-consume)"
+    entry4 := HistorySpecHelper tryDecode: (lines at: lines size - 1).
+    entry4 notNil
+      ifTrue: [t assertEqual: (entry4 at: 'op') to: 'consume' message: 'HS6b: consume op must appear']
+      ifFalse: [t assert: false message: 'HS6b: consume op must appear (invalid JSON)'].
+
+    "HS7: Spec says payload must NOT be in history (compact log)"
+    entry5 := HistorySpecHelper tryDecode: (lines at: 0).
+    entry5 notNil ifTrue: [
+      t assert: ((entry5 at: 'payload' ifAbsent: [nil]) isNil) message: 'HS7: entry must not include payload'
+    ] ifFalse: [
+      t assert: false message: 'HS7: entry must not include payload (invalid JSON)'
+    ].
+
+    "HS8: Spec says log is append-only — multiple writes accumulate"
+    HistorySpecHelper removeTempDir: tempDir.
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    historyPath := tempDir, '/history.jsonl'.
+    bbs out: 'event' scope: 'test' identity: 'ao1' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'ao2' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'ao3' payload: p.
+    lines := HistorySpecHelper readHistoryLines: historyPath.
+    t assertEqual: lines size to: 3 message: 'HS8: 3 operations must produce 3 lines (append-only)'.
+
+    "HS9: Spec says entries must be in chronological order (ts non-decreasing)"
+    lines size >= 2 ifTrue: [
+      first := HistorySpecHelper tryDecode: (lines at: 0).
+      second := HistorySpecHelper tryDecode: (lines at: 1).
+      (first notNil and: [second notNil]) ifTrue: [
+        firstTs := first at: 'ts'.
+        secondTs := second at: 'ts'.
+        t assert: (secondTs >= firstTs) message: 'HS9: entries must be in chronological order'
+      ] ifFalse: [
+        t assert: false message: 'HS9: entries must be in chronological order (invalid JSON)'
+      ]
+    ] ifFalse: [
+      t assert: false message: 'HS9: not enough lines to verify order'
+    ].
+
+    "HS10: Each line must be valid JSON (JSONL format)"
+    allValid := true.
+    lines do: [:l |
+      (HistorySpecHelper tryDecode: l) isNil ifTrue: [allValid := false]
+    ].
+    t assert: allValid message: 'HS10: every line must be valid JSON'.
+
+    HistorySpecHelper removeTempDir: tempDir
+  ]
+
+"=== TestHistoryQuerySpec — HS11 through HS20 ==="
+TestHistoryQuerySpec subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs p filters entries entry1Identity entry2Identity |
+    '--- TestHistoryQuerySpec ---' println.
+
+    "HS11: Spec says querying fresh BBS returns empty array"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    filters := Dictionary new.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 0 message: 'HS11: fresh BBS history must be empty'.
+    HistorySpecHelper removeTempDir: tempDir.
+
+    "HS12: Spec says unfiltered query returns all entries"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'q1' payload: p.
+    bbs out: 'observation' scope: 'test' identity: 'q2' payload: p.
+    bbs outPinned: 'decision' scope: 'test' identity: 'q3' payload: p.
+    entries := bbs history: (Dictionary new).
+    t assertEqual: entries size to: 3 message: 'HS12: unfiltered query must return all 3 entries'.
+
+    "HS13: Filter by category returns only matching entries"
+    filters := Dictionary new.
+    filters at: 'category' put: 'event'.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 1 message: 'HS13a: category=event filter must return 1'.
+    entries size > 0 ifTrue: [
+      t assertEqual: ((entries at: 0) at: 'category') to: 'event' message: 'HS13b: filtered entry must have category=event'
+    ] ifFalse: [
+      t assert: false message: 'HS13b: filtered entry must have category=event (no entries)'
+    ].
+
+    "HS14: Filter by op returns only matching entries"
+    filters := Dictionary new.
+    filters at: 'op' put: 'out-pinned'.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 1 message: 'HS14: op=out-pinned filter must return 1'.
+
+    "HS15: Filter by scope"
+    HistorySpecHelper removeTempDir: tempDir.
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'alpha' identity: 's1' payload: p.
+    bbs out: 'event' scope: 'beta' identity: 's2' payload: p.
+    bbs out: 'event' scope: 'alpha' identity: 's3' payload: p.
+    filters := Dictionary new.
+    filters at: 'scope' put: 'alpha'.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 2 message: 'HS15: scope=alpha filter must return 2'.
+
+    "HS16: Filter by identity"
+    filters := Dictionary new.
+    filters at: 'identity' put: 's2'.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 1 message: 'HS16: identity=s2 filter must return 1'.
+    entries size > 0 ifTrue: [
+      t assertEqual: ((entries at: 0) at: 'identity') to: 's2' message: 'HS16b: must match identity s2'
+    ] ifFalse: [
+      t assert: false message: 'HS16b: must match identity s2 (no entries)'
+    ].
+    HistorySpecHelper removeTempDir: tempDir.
+
+    "HS17: Filter by since timestamp"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'ts1' payload: p.
+    filters := Dictionary new.
+    filters at: 'since' put: (DateTime now epochSeconds - 5).
+    entries := bbs history: filters.
+    t assert: (entries size >= 1) message: 'HS17a: since filter must return recent entries'.
+    "Also test with future timestamp to get zero"
+    filters := Dictionary new.
+    filters at: 'since' put: (DateTime now epochSeconds + 9999).
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 0 message: 'HS17b: since filter with future timestamp must return 0'.
+    HistorySpecHelper removeTempDir: tempDir.
+
+    "HS18: Limit returns last N entries (spec says tail, not head)"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'lim1' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'lim2' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'lim3' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'lim4' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'lim5' payload: p.
+    filters := Dictionary new.
+    filters at: 'limit' put: 2.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 2 message: 'HS18a: limit=2 must return exactly 2'.
+    entries size >= 2 ifTrue: [
+      "Last entry should be the most recent one (lim5)"
+      t assertEqual: ((entries at: 1) at: 'identity') to: 'lim5' message: 'HS18b: last entry must be most recent (lim5)'.
+      "First of the 2 should be lim4"
+      t assertEqual: ((entries at: 0) at: 'identity') to: 'lim4' message: 'HS18c: first entry in limit window must be lim4'
+    ] ifFalse: [
+      t assert: false message: 'HS18b: last entry must be most recent (not enough entries)'.
+      t assert: false message: 'HS18c: first entry in limit window (not enough entries)'
+    ].
+
+    "HS19: Limit larger than entry count returns all entries"
+    filters := Dictionary new.
+    filters at: 'limit' put: 100.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 5 message: 'HS19: limit=100 on 5 entries must return all 5'.
+
+    "HS20: Combined filters (category + scope + limit)"
+    HistorySpecHelper removeTempDir: tempDir.
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'alpha' identity: 'c1' payload: p.
+    bbs out: 'observation' scope: 'alpha' identity: 'c2' payload: p.
+    bbs out: 'event' scope: 'beta' identity: 'c3' payload: p.
+    bbs out: 'event' scope: 'alpha' identity: 'c4' payload: p.
+    bbs out: 'event' scope: 'alpha' identity: 'c5' payload: p.
+    filters := Dictionary new.
+    filters at: 'category' put: 'event'.
+    filters at: 'scope' put: 'alpha'.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 3 message: 'HS20a: combined category+scope filter must return 3'.
+    "Apply limit on top"
+    filters at: 'limit' put: 2.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 2 message: 'HS20b: combined + limit=2 must return 2'.
+    entries size >= 2 ifTrue: [
+      t assertEqual: ((entries at: 1) at: 'identity') to: 'c5' message: 'HS20c: last combined entry must be c5'
+    ] ifFalse: [
+      t assert: false message: 'HS20c: last combined entry (not enough entries)'
+    ].
+    HistorySpecHelper removeTempDir: tempDir
+  ]
+
+"=== TestHistoryEdgeCases — HS21 through HS28 ==="
+TestHistoryEdgeCases subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs p entries filters historyPath lines entry specialEntry result |
+    '--- TestHistoryEdgeCases ---' println.
+
+    "HS21: Spec says history: on missing file must return empty array (not crash)"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "Delete the history file if it exists, then query"
+    entries := bbs history: (Dictionary new).
+    t assertEqual: entries size to: 0 message: 'HS21: missing history file must return empty array'.
+
+    "HS22: Spec says in: (blocking consume) also logs consume operation"
+    "We can only test this with inp: since in: blocks. inp: was already tested."
+    "Instead verify that inp: on non-existent tuple returns nil and does NOT crash history"
+    result := bbs inp: 'event' scope: 'test' identity: 'nonexistent'.
+    t assert: result isNil message: 'HS22a: inp: for nonexistent tuple must return nil'.
+    entries := bbs history: (Dictionary new).
+    t assertEqual: entries size to: 0 message: 'HS22b: failed inp: must not write to history'.
+
+    "HS23: Entries from inp: consume should have the tuple's original identity"
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'to-eat' payload: p.
+    result := bbs inp: 'event' scope: 'test' identity: 'to-eat'.
+    entries := bbs history: (Dictionary new).
+    "Should be 2 entries: out + consume"
+    t assertEqual: entries size to: 2 message: 'HS23a: out+consume must produce 2 entries'.
+    entries size >= 2 ifTrue: [
+      t assertEqual: ((entries at: 1) at: 'identity') to: 'to-eat' message: 'HS23b: consume entry must have original identity'
+    ] ifFalse: [
+      t assert: false message: 'HS23b: consume entry identity (not enough entries)'
+    ].
+    HistorySpecHelper removeTempDir: tempDir.
+
+    "HS24: Special characters in identity/scope should not corrupt JSONL"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    historyPath := tempDir, '/history.jsonl'.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test-scope' identity: 'id-with-dash' payload: p.
+    lines := HistorySpecHelper readHistoryLines: historyPath.
+    t assertEqual: lines size to: 1 message: 'HS24a: entry with dashes must produce 1 line'.
+    specialEntry := HistorySpecHelper tryDecode: (lines at: 0).
+    specialEntry notNil
+      ifTrue: [
+        t assertEqual: (specialEntry at: 'scope') to: 'test-scope' message: 'HS24b: scope with dash preserved'.
+        t assertEqual: (specialEntry at: 'identity') to: 'id-with-dash' message: 'HS24c: identity with dash preserved'
+      ]
+      ifFalse: [
+        t assert: false message: 'HS24b: scope with dash (invalid JSON)'.
+        t assert: false message: 'HS24c: identity with dash (invalid JSON)'
+      ].
+    HistorySpecHelper removeTempDir: tempDir.
+
+    "HS25: Limit of 1 returns only the last entry"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'first' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'second' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'third' payload: p.
+    filters := Dictionary new.
+    filters at: 'limit' put: 1.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 1 message: 'HS25a: limit=1 must return exactly 1'.
+    entries size > 0 ifTrue: [
+      t assertEqual: ((entries at: 0) at: 'identity') to: 'third' message: 'HS25b: limit=1 must return the LAST entry'
+    ] ifFalse: [
+      t assert: false message: 'HS25b: limit=1 entry (no entries)'
+    ].
+    HistorySpecHelper removeTempDir: tempDir.
+
+    "HS26: Limit of 0 should return empty or all (test actual behavior)"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'z1' payload: p.
+    bbs out: 'event' scope: 'test' identity: 'z2' payload: p.
+    filters := Dictionary new.
+    filters at: 'limit' put: 0.
+    entries := bbs history: filters.
+    "Limit 0 should logically return 0 entries"
+    t assertEqual: entries size to: 0 message: 'HS26: limit=0 must return 0 entries'.
+    HistorySpecHelper removeTempDir: tempDir.
+
+    "HS27: upsertSignal should produce TWO history entries (consume + out) since it calls inp: then out:"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    p at: 'detail' put: 'test signal'.
+    "First upsert creates one out: entry (no prior to consume)"
+    bbs upsertSignal: 'test' identity: 'sig1' payload: p.
+    entries := bbs history: (Dictionary new).
+    t assert: (entries size >= 1) message: 'HS27a: first upsertSignal must produce at least 1 entry'.
+    "Second upsert should consume the old and write a new one"
+    bbs upsertSignal: 'test' identity: 'sig1' payload: p.
+    entries := bbs history: (Dictionary new).
+    "First upsert: 1 out. Second upsert: 1 consume + 1 out = 2 more. Total: 3"
+    t assert: (entries size >= 3) message: 'HS27b: second upsertSignal must produce consume+out (total >= 3)'.
+    HistorySpecHelper removeTempDir: tempDir.
+
+    "HS28: Multiple categories in same BBS, filtered correctly"
+    tempDir := HistorySpecHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    p := Dictionary new.
+    bbs out: 'event' scope: 'test' identity: 'mc1' payload: p.
+    bbs outPinned: 'decision' scope: 'test' identity: 'mc2' payload: p.
+    bbs out: 'observation' scope: 'test' identity: 'mc3' payload: p.
+    bbs outPinned: 'fact' scope: 'test' identity: 'mc4' payload: p.
+    filters := Dictionary new.
+    filters at: 'category' put: 'decision'.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 1 message: 'HS28a: category=decision must return 1'.
+    filters := Dictionary new.
+    filters at: 'category' put: 'fact'.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 1 message: 'HS28b: category=fact must return 1'.
+    filters := Dictionary new.
+    filters at: 'op' put: 'out'.
+    entries := bbs history: filters.
+    t assertEqual: entries size to: 2 message: 'HS28c: op=out must return 2 (event + observation)'.
+    HistorySpecHelper removeTempDir: tempDir
+  ]
+
+"=== TestHistorySourceSpec — HS29 through HS36 ==="
+TestHistorySourceSpec subclass: Object
+
+  classMethod: run: t [
+    | bbsSource serverSource ppSource mainSource |
+    '--- TestHistorySourceSpec ---' println.
+
+    "HS29: BBS.mag declares historyPath in instanceVars"
+    bbsSource := File readFileContents: 'src/bbs/BBS.mag'.
+    t assert: (bbsSource includes: 'historyPath') message: 'HS29: BBS.mag must declare historyPath'.
+
+    "HS30: BBS.mag has appendHistory:tuple: method"
+    t assert: (bbsSource includes: 'appendHistory:') message: 'HS30: BBS.mag must have appendHistory: method'.
+
+    "HS31: BBS.mag has history: query method"
+    t assert: (bbsSource includes: 'method: history:') message: 'HS31: BBS.mag must have history: method'.
+
+    "HS32: appendHistory uses >> (append) not > (overwrite) — verified via heredoc pattern"
+    t assert: (bbsSource includes: '>>') message: 'HS32: appendHistory must use >> for append-only writes'.
+
+    "HS33: Server.mag has GET /api/history endpoint"
+    serverSource := File readFileContents: 'src/api/Server.mag'.
+    t assert: (serverSource includes: '/api/history') message: 'HS33a: Server.mag must have /api/history route'.
+    t assert: (serverSource includes: 'handleHistory:') message: 'HS33b: Server.mag must have handleHistory: handler'.
+
+    "HS34: PP.mag has cmdHistory: and dispatches history command"
+    ppSource := File readFileContents: 'src/cli/PP.mag'.
+    t assert: (ppSource includes: 'cmdHistory:') message: 'HS34a: PP.mag must have cmdHistory: method'.
+    t assert: (ppSource includes: 'history') message: 'HS34b: PP.mag must dispatch history command'.
+
+    "HS35: Main.mag routes history command"
+    mainSource := File readFileContents: 'src/Main.mag'.
+    t assert: (mainSource includes: 'history') message: 'HS35: Main.mag must route history command'.
+
+    "HS36: Help text mentions history in both PP.mag and Main.mag"
+    t assert: (ppSource includes: 'Query audit log') message: 'HS36a: PP.mag help text must mention audit log'.
+    t assert: (mainSource includes: 'Query audit log') message: 'HS36b: Main.mag help text must mention audit log'.
+    "HS36c: Help text mentions --scope and --identity flags"
+    t assert: (ppSource includes: '--scope') message: 'HS36c: PP.mag help must mention --scope flag'.
+    t assert: (ppSource includes: '--identity') message: 'HS36d: PP.mag help must mention --identity flag'
+  ]
+
+"=== Main ==="
+TestHistorySpecMain subclass: Object
+
+  classMethod: run [
+    | t |
+    t := T6S new.
+    [TestHistoryWriterSpec run: t] on: Exception do: [:e |
+      ('TestHistoryWriterSpec CRASHED: ', e messageText) println.
+      t assert: false message: 'TestHistoryWriterSpec crashed'
+    ].
+    [TestHistoryQuerySpec run: t] on: Exception do: [:e |
+      ('TestHistoryQuerySpec CRASHED: ', e messageText) println.
+      t assert: false message: 'TestHistoryQuerySpec crashed'
+    ].
+    [TestHistoryEdgeCases run: t] on: Exception do: [:e |
+      ('TestHistoryEdgeCases CRASHED: ', e messageText) println.
+      t assert: false message: 'TestHistoryEdgeCases crashed'
+    ].
+    [TestHistorySourceSpec run: t] on: Exception do: [:e |
+      ('TestHistorySourceSpec CRASHED: ', e messageText) println.
+      t assert: false message: 'TestHistorySourceSpec crashed'
+    ].
+    t report
+  ]

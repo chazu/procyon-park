@@ -1,0 +1,162 @@
+"TemplateLoader — discovers and loads CUE workflow template files.
+
+ Two-tier discovery:
+   System workflows:  ~/.pp/workflows/*.cue  (scope: 'system')
+   Repo workflows:    <repoPath>/.pp/workflows/*.cue  (scope: <repoName>)
+
+ On first run, copies built-in templates to ~/.pp/workflows/.
+ If the directory already exists, leaves it alone (user-managed).
+
+ All temp vars at method top. No ifNil:/ifNotNil: — uses isNil/notNil ifTrue:.
+ Uses Array new: 0 and copyWith: for array building."
+
+TemplateLoader subclass: Object
+  instanceVars: cueCtx ppDir workflowsDir builtinDir
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: initialize [
+    | home |
+    home := System env: 'HOME'.
+    (home isNil or: [home isEmpty]) ifTrue: [
+      home := '/tmp'
+    ].
+    cueCtx := CueContext new.
+    ppDir := home, '/.pp'.
+    workflowsDir := ppDir, '/workflows'.
+    builtinDir := File workingDirectory, '/workflows'
+  ]
+
+  method: workflowsDir [ ^workflowsDir ]
+  method: builtinDir [ ^builtinDir ]
+
+  method: seedAll: bbs repos: repos [
+    "Main entry point: ensure system workflows exist, load all templates."
+    self ensureSystemWorkflows.
+    self loadSystemTemplates: bbs.
+    self loadRepoTemplates: bbs repos: repos
+  ]
+
+  method: ensureSystemWorkflows [
+    "Create ~/.pp/workflows/ if missing, copy built-in templates there."
+    | check |
+    check := Shell capture: 'test -d "', workflowsDir, '" && echo exists || echo missing'.
+    (check = 'missing') ifTrue: [
+      Shell run: 'mkdir -p "', workflowsDir, '"'.
+      self copyBuiltinTemplates.
+      'System workflow templates installed to ~/.pp/workflows/' println
+    ]
+  ]
+
+  method: copyBuiltinTemplates [
+    "Copy all .cue files from the built-in workflows/ directory."
+    | fileList |
+    fileList := Shell capture: 'ls "', builtinDir, '/" 2>/dev/null | grep "\.cue$"'.
+    fileList isEmpty ifTrue: [^self].
+
+    (fileList split: (Character lf asString)) do: [:fname |
+      (fname isEmpty not and: [fname size > 4]) ifTrue: [
+        Shell run: 'cp "', builtinDir, '/', fname, '" "', workflowsDir, '/', fname, '"'
+      ]
+    ]
+  ]
+
+  method: loadSystemTemplates: bbs [
+    "Scan ~/.pp/workflows/*.cue, load each, seed into BBS with scope 'system'."
+    | files |
+    files := self listCueFiles: workflowsDir.
+    files do: [:fname |
+      | path identity payload |
+      path := workflowsDir, '/', fname.
+      identity := fname copyFrom: 0 to: fname size - 4.
+      payload := self loadTemplateFile: path.
+      payload notNil ifTrue: [
+        bbs outPinned: 'template' scope: 'system' identity: identity payload: payload
+      ]
+    ].
+    ('Loaded ', files size printString, ' system workflow template(s).') println
+  ]
+
+  method: loadRepoTemplates: bbs repos: repos [
+    "For each repo, scan <repoPath>/.pp/workflows/*.cue, seed with scope <repoName>."
+    | repoWorkflowsDir files |
+    repos do: [:repo |
+      | repoName repoPath |
+      repoName := repo at: 'name' ifAbsent: [nil].
+      repoPath := repo at: 'path' ifAbsent: [nil].
+      (repoName notNil and: [repoPath notNil]) ifTrue: [
+        repoWorkflowsDir := repoPath, '/.pp/workflows'.
+        files := self listCueFiles: repoWorkflowsDir.
+        files do: [:fname |
+          | path identity payload |
+          path := repoWorkflowsDir, '/', fname.
+          identity := fname copyFrom: 0 to: fname size - 4.
+          payload := self loadTemplateFile: path.
+          payload notNil ifTrue: [
+            bbs outPinned: 'template' scope: repoName identity: identity payload: payload
+          ]
+        ].
+        files size > 0 ifTrue: [
+          ('Loaded ', files size printString, ' workflow template(s) for repo: ', repoName) println
+        ]
+      ]
+    ]
+  ]
+
+  method: loadTemplateFile: path [
+    "Load a single CUE file, return Dictionary payload or nil on error."
+    | cueResult payload |
+    [
+      cueResult := cueCtx loadFile: path.
+      payload := cueResult value toMaggie value.
+      ^payload
+    ] on: Exception do: [:e |
+      ('ERROR: failed to load workflow template: ', path) println.
+      ('  ', e messageText) println.
+      ('Fatal: malformed CUE template — cannot continue.') println.
+      System exit: 1.
+      ^nil
+    ]
+  ]
+
+  method: listCueFiles: dir [
+    "Return Array of .cue filenames in dir, or empty Array if dir missing."
+    | fileList result |
+    result := Array new: 0.
+    fileList := Shell capture: 'ls "', dir, '/" 2>/dev/null | grep "\.cue$" 2>/dev/null'.
+    fileList isEmpty ifTrue: [^result].
+
+    (fileList split: (Character lf asString)) do: [:fname |
+      (fname isEmpty not and: [fname size > 4]) ifTrue: [
+        result := result copyWith: fname
+      ]
+    ].
+    ^result
+  ]
+
+  method: allRepoConfigs [
+    "Return Array of repo config Dictionaries from ~/.pp/repos/."
+    | reposDir fileList repos |
+    repos := Array new: 0.
+    reposDir := ppDir, '/repos'.
+
+    (File exists: reposDir) ifFalse: [^repos].
+
+    fileList := Shell capture: 'ls "', reposDir, '/" 2>/dev/null | grep "\.json$"'.
+    fileList isEmpty ifTrue: [^repos].
+
+    (fileList split: (Character lf asString)) do: [:fname |
+      | configPath contents config |
+      (fname isEmpty not and: [fname size > 5]) ifTrue: [
+        configPath := reposDir, '/', fname.
+        [
+          contents := File readFileContents: configPath.
+          config := Json decode: contents.
+          repos := repos copyWith: config
+        ] on: Exception do: [:e | "skip bad configs" ]
+      ]
+    ].
+    ^repos
+  ]

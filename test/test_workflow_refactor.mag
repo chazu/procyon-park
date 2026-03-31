@@ -9,6 +9,7 @@
    TestWorktreeSignalKeys    — WR41-WR46: worktree signal key consistency
    TestNotifyHead            — WR47-WR50: notify-head action behavior
    TestConventionCompliance  — WR51-WR56: source convention checks
+   TestSpawnWorkflow         — WR57-WR63: spawn-workflow action and child lifecycle
 
  All temp vars at method top. No ifNil:/ifNotNil: — uses isNil/notNil ifTrue:.
  Uses integer char codes, not dollar-sign literals.
@@ -100,8 +101,12 @@ WRHelper subclass: Object
   ]
 
   classMethod: seedStoryTemplate: bbs [
-    "Seed the story template into the given BBS."
-    Main seedStoryTemplate: bbs
+    "Seed the story template into the given BBS from CUE file."
+    | cueCtx cueResult payload |
+    cueCtx := CueContext new.
+    cueResult := cueCtx loadFile: (File workingDirectory, '/workflows/story.cue').
+    payload := cueResult value toMaggie value.
+    bbs outPinned: 'template' scope: 'system' identity: 'story' payload: payload
   ]
 
   classMethod: makeEngine: bbs [
@@ -961,9 +966,9 @@ TestConventionCompliance subclass: Object
     "WR54: Uses copyWith: for array growth (not add:)"
     t assert: (weSource includes: 'copyWith:') message: 'WR54: must use copyWith: for array growth'.
 
-    "WR55: Uses ExternalProcess command: '/bin/sh' pattern for shell commands"
-    t assert: (weSource includes: 'ExternalProcess command:') message: 'WR55a: must use ExternalProcess for shell commands'.
-    t assert: (weSource includes: '/bin/sh') message: 'WR55b: must use /bin/sh for shell execution'.
+    "WR55: Uses GitOps for git operations (refactored from ExternalProcess)"
+    t assert: (weSource includes: 'GitOps') message: 'WR55a: must use GitOps for git operations'.
+    t assert: (weSource includes: 'createFeatureBranch:') message: 'WR55b: must use GitOps createFeatureBranch:'.
 
     "WR56: No mid-block temp var declarations in new methods"
     hasMidBlockVars := false.
@@ -1010,6 +1015,160 @@ TestConventionCompliance subclass: Object
     t assert: hasMidBlockVars not message: 'WR56: no mid-block temp var declarations in action methods'
   ]
 
+"=== TestSpawnWorkflow — WR57 through WR63 ==="
+TestSpawnWorkflow subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs engine parentId childWfs childWf childId tokens waitingTokens signals spawnSignals childPayload parentParams childParams tokenPayload secondId depthParams errored transitions spawnConfig spawnParams tr1 tr2 payload scoutPayload |
+    '--- TestSpawnWorkflow ---' println.
+
+    "WR57: Spawn creates child workflow"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    "Seed a minimal scout-mission template"
+    scoutPayload := Dictionary new.
+    scoutPayload at: 'transitions' put: (Array new: 0).
+    scoutPayload at: 'start_places' put: #('begin').
+    scoutPayload at: 'terminal_places' put: #('scouted').
+    bbs outPinned: 'template' scope: 'system' identity: 'scout-mission' payload: scoutPayload.
+
+    "Build multi-scout-style template programmatically"
+    transitions := Array new: 0.
+    spawnConfig := Dictionary new.
+    spawnConfig at: 'template' put: 'scout-mission'.
+    spawnParams := Dictionary new.
+    spawnParams at: 'description' put: '{{description}}'.
+    spawnConfig at: 'params' put: spawnParams.
+
+    tr1 := Dictionary new.
+    tr1 at: 'id' put: 'spawn-scout'.
+    tr1 at: 'in' put: #('request').
+    tr1 at: 'out' put: #('scouted').
+    tr1 at: 'action' put: 'spawn-workflow'.
+    tr1 at: 'spawn' put: spawnConfig.
+    transitions := transitions copyWith: tr1.
+
+    tr2 := Dictionary new.
+    tr2 at: 'id' put: 'complete'.
+    tr2 at: 'in' put: #('scouted').
+    tr2 at: 'out' put: #('done').
+    transitions := transitions copyWith: tr2.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('request').
+    payload at: 'terminal_places' put: #('done').
+    bbs outPinned: 'template' scope: 'system' identity: 'multi-scout' payload: payload.
+
+    "Instantiate parent workflow"
+    engine := WRHelper makeEngine: bbs.
+    parentParams := Dictionary new.
+    parentParams at: 'description' put: 'scan all repos'.
+    parentId := engine instantiate: 'multi-scout' scope: 'default' params: parentParams.
+    engine advance.
+
+    "Verify a child workflow exists with template = scout-mission"
+    childWfs := (bbs scanAll: 'workflow') select: [:w |
+      ((w at: 'payload') at: 'template') = 'scout-mission'
+    ].
+    t assert: (childWfs size > 0) message: 'WR57: spawn must create child workflow with template scout-mission'.
+
+    "Capture child ID for later tests"
+    childWf := childWfs at: 0.
+    childId := childWf at: 'identity'.
+
+    "WR58: Spawn output tokens are waiting"
+    tokens := bbs scanAll: 'token'.
+    waitingTokens := tokens select: [:tok |
+      tokenPayload := tok at: 'payload'.
+      ((tokenPayload at: 'workflow_instance' ifAbsent: ['']) = parentId) and:
+        [((tokenPayload at: 'place') = 'scouted') and:
+          [(tokenPayload at: 'status') = 'waiting']]
+    ].
+    t assert: (waitingTokens size > 0) message: 'WR58: spawn output tokens at scouted must have status waiting'.
+
+    "WR59: Child-spawn signal written"
+    signals := bbs scan: 'signal' scope: parentId.
+    spawnSignals := signals select: [:s |
+      (s at: 'identity') startsWith: 'child-spawn:spawn-scout:'
+    ].
+    t assert: (spawnSignals size > 0) message: 'WR59: child-spawn signal must exist in parent scope'.
+
+    "WR60: Token promotion on child completion"
+    "Manually complete the child workflow"
+    bbs inp: 'workflow' scope: 'default' identity: childId.
+    childPayload := childWf at: 'payload'.
+    childPayload at: 'status' put: 'completed'.
+    bbs out: 'workflow' scope: 'default' identity: childId payload: childPayload.
+    bbs emitEvent: 'default' identity: 'workflow-complete:', childId type: 'workflow-complete' summary: 'Child done'.
+
+    "Advance parent to promote waiting tokens"
+    engine advance.
+
+    "Token was promoted from waiting to positive, then the 'complete' transition
+     fired in the same tick consuming it and producing a token at 'done'.
+     Verify by checking for a positive token at 'done'."
+    tokens := bbs scanAll: 'token'.
+    waitingTokens := tokens select: [:tok |
+      tokenPayload := tok at: 'payload'.
+      ((tokenPayload at: 'workflow_instance' ifAbsent: ['']) = parentId) and:
+        [((tokenPayload at: 'place') = 'done') and:
+          [(tokenPayload at: 'status') = 'positive']]
+    ].
+    t assert: (waitingTokens size > 0) message: 'WR60: parent must reach done after child workflow completes'.
+
+    "WR61: Param interpolation"
+    childPayload := (bbs scanAll: 'workflow') detect: [:w |
+      (w at: 'identity') = childId
+    ] ifNone: [nil].
+    childPayload notNil ifTrue: [
+      childParams := (childPayload at: 'payload') at: 'params' ifAbsent: [Dictionary new].
+      t assertEqual: (childParams at: 'description' ifAbsent: ['']) to: 'scan all repos' message: 'WR61: child params must contain interpolated parent description'
+    ] ifFalse: [
+      t assert: false message: 'WR61: child workflow not found for param check'
+    ].
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR62: Unique instance IDs"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: (Array new: 0).
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'uniq-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    parentId := engine instantiate: 'uniq-tmpl' scope: 'default' params: (Dictionary new).
+    secondId := engine instantiate: 'uniq-tmpl' scope: 'default' params: (Dictionary new).
+    t assert: (parentId ~= secondId) message: 'WR62: two rapid instantiations must produce distinct instance IDs'.
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR63: Spawn depth limit"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: (Array new: 0).
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'depth-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    depthParams := Dictionary new.
+    depthParams at: '_depth' put: 11.
+    errored := false.
+    [engine instantiate: 'depth-tmpl' scope: 'default' params: depthParams]
+      on: Error do: [:e | errored := true].
+    t assert: errored message: 'WR63: instantiate with _depth=11 must signal Error'.
+
+    WRHelper removeTempDir: tempDir
+  ]
+
 "=== Main ==="
 TestWorkflowRefactorMain subclass: Object
 
@@ -1046,6 +1205,11 @@ TestWorkflowRefactorMain subclass: Object
     [TestStoryIntegration run: t] on: Exception do: [:e |
       ('TestStoryIntegration CRASHED: ', e messageText) println.
       t assert: false message: 'TestStoryIntegration crashed'
+    ].
+    "Spawn workflow tests"
+    [TestSpawnWorkflow run: t] on: Exception do: [:e |
+      ('TestSpawnWorkflow CRASHED: ', e messageText) println.
+      t assert: false message: 'TestSpawnWorkflow crashed'
     ].
     t report
   ]

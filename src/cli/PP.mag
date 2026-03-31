@@ -28,36 +28,35 @@ PP subclass: Object
 
     cmd := args at: 0.
 
-    cmd = 'observe'  ifTrue: [^self cmdObserve: args].
-    cmd = 'decide'   ifTrue: [^self cmdDecide: args].
-    cmd = 'event'    ifTrue: [^self cmdEvent: args].
-    cmd = 'plan'     ifTrue: [^self cmdPlan: args].
-    cmd = 'read'     ifTrue: [^self cmdRead: args].
-    cmd = 'notify'   ifTrue: [^self cmdNotify: args].
-    cmd = 'dismiss'  ifTrue: [^self cmdDismiss: args].
-    cmd = 'status'   ifTrue: [^self cmdStatus: args].
-    cmd = 'prime'    ifTrue: [^self cmdPrime: args].
-    cmd = 'task'     ifTrue: [^self cmdTask: args].
-    cmd = 'workflow' ifTrue: [
-      "pp workflow status <id> | pp workflow cancel <id> | pp workflow <template>"
+    cmd = 'observe'   ifTrue: [^self cmdObserve: args].
+    cmd = 'decide'    ifTrue: [^self cmdDecide: args].
+    cmd = 'event'     ifTrue: [^self cmdEvent: args].
+    cmd = 'plan'      ifTrue: [^self cmdPlan: args].
+    cmd = 'read'      ifTrue: [^self cmdRead: args].
+    cmd = 'notify'    ifTrue: [^self cmdNotify: args].
+    cmd = 'dismiss'   ifTrue: [^self cmdDismiss: args].
+    cmd = 'status'    ifTrue: [^self cmdStatus: args].
+    cmd = 'prime'     ifTrue: [^self cmdPrime: args].
+    cmd = 'task'      ifTrue: [^self cmdTask: args].
+    cmd = 'workflow'  ifTrue: [
       (args size > 1 and: [(args at: 1) = 'status'])
         ifTrue: [^self cmdWorkflowStatus: args].
       (args size > 1 and: [(args at: 1) = 'cancel'])
         ifTrue: [^self cmdWorkflowCancel: args].
       ^self cmdWorkflow: args
     ].
-    cmd = 'signal'   ifTrue: [^self cmdSignal: args].
-    cmd = 'log'      ifTrue: [^self cmdLog: args].
-    cmd = 'history'  ifTrue: [^self cmdHistory: args].
+    cmd = 'signal'    ifTrue: [^self cmdSignal: args].
+    cmd = 'log'       ifTrue: [^self cmdLog: args].
+    cmd = 'history'   ifTrue: [^self cmdHistory: args].
     cmd = 'dashboard' ifTrue: [^self cmdDashboard: args].
-    cmd = 'repo'     ifTrue: [^Repo new runWith: args].
-    cmd = 'worktree' ifTrue: [
+    cmd = 'repo'      ifTrue: [^Repo new runWith: args].
+    cmd = 'worktree'  ifTrue: [
       wtArgs := Array new: 0.
       wtArgs := wtArgs copyWith: 'repo'.
       args do: [:a | wtArgs := wtArgs copyWith: a].
       ^Repo new runWith: wtArgs
     ].
-    cmd = 'help'     ifTrue: [^self printUsage].
+    cmd = 'help'      ifTrue: [^self printUsage].
 
     ('Unknown command: ', cmd) println.
     self printUsage

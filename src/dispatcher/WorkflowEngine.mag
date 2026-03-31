@@ -22,14 +22,30 @@ WorkflowEngine subclass: Object
      3. Write initial tokens at start places
      Returns the workflow instance ID."
 
-    | template instanceId workflowPayload templatePayload startPlaces |
+    | template instanceId workflowPayload templatePayload startPlaces repoConfig |
 
     "Read the template"
     template := bbs rdp: 'template' scope: 'system' identity: templateIdentity.
+    template isNil ifTrue: [
+      template := bbs rdp: 'template' scope: scope identity: templateIdentity
+    ].
     template isNil ifTrue: [Error signal: 'Template not found: ', templateIdentity].
 
+    "Check spawn recursion depth limit"
+    ((params at: '_depth' ifAbsent: [0]) > 10) ifTrue: [
+      Error signal: 'Spawn depth limit exceeded (max 10)'
+    ].
+
+    "Auto-infer repo from scope if not specified"
+    (params at: 'repo' ifAbsent: [nil]) isNil ifTrue: [
+      repoConfig := Repo new repoForName: scope.
+      repoConfig notNil ifTrue: [
+        params at: 'repo' put: scope
+      ]
+    ].
+
     "Generate instance ID"
-    instanceId := templateIdentity, '-', DateTime now epochSeconds printString.
+    instanceId := templateIdentity, '-', DateTime now epochSeconds printString, '-', bbs assignId printString.
 
     "Write workflow instance tuple"
     workflowPayload := Dictionary new.
@@ -90,6 +106,9 @@ WorkflowEngine subclass: Object
 
     "Read the template for transition definitions"
     template := bbs rdp: 'template' scope: 'system' identity: templateId.
+    template isNil ifTrue: [
+      template := bbs rdp: 'template' scope: scope identity: templateId
+    ].
     template isNil ifTrue: [^self]. "Template missing — skip"
 
     templatePayload := template at: 'payload'.
@@ -150,10 +169,23 @@ WorkflowEngine subclass: Object
     ].
 
     waitingTokens do: [:tok |
-      | transId taskCompleteId evt tokIdentity newPayload |
+      | transId taskCompleteId evt tokIdentity newPayload sigId sigPay chId chScope chEvt |
       transId := (tok at: 'payload') at: 'transition_id' ifAbsent: [''].
       taskCompleteId := 'task-complete:', instanceId, ':task:', transId.
       evt := bbs rdp: 'event' scope: scope identity: taskCompleteId.
+      evt isNil ifTrue: [
+        "Check for child workflow completion via child-spawn signals"
+        (bbs scan: 'signal' scope: instanceId) do: [:sig |
+          sigId := sig at: 'identity'.
+          (sigId startsWith: 'child-spawn:', transId, ':') ifTrue: [
+            sigPay := sig at: 'payload'.
+            chId := sigPay at: 'child_instance'.
+            chScope := sigPay at: 'child_scope'.
+            chEvt := bbs rdp: 'event' scope: chScope identity: 'workflow-complete:', chId.
+            chEvt notNil ifTrue: [evt := chEvt]
+          ]
+        ]
+      ].
       evt notNil ifTrue: [
         "Promote: consume waiting token, produce positive token"
         tokIdentity := tok at: 'identity'.
@@ -203,6 +235,10 @@ WorkflowEngine subclass: Object
 
     "Produce output tokens — if role-bearing, status is 'waiting' until task completes"
     tokenStatus := role notNil ifTrue: ['waiting'] ifFalse: ['positive'].
+    action := transition at: 'action' ifAbsent: [nil].
+    action notNil ifTrue: [
+      action = 'spawn-workflow' ifTrue: [tokenStatus := 'waiting']
+    ].
     outPlaces do: [:place |
       | tokenPayload |
       tokenPayload := Dictionary new.
@@ -217,7 +253,7 @@ WorkflowEngine subclass: Object
     "Check for built-in action dispatch (no agent spawned)"
     action := transition at: 'action' ifAbsent: [nil].
     action notNil ifTrue: [
-      self executeAction: action transition: transition instance: instanceId.
+      self executeAction: action transition: transition instance: instanceId params: params.
       ^consumedTokens
     ].
 
@@ -252,17 +288,18 @@ WorkflowEngine subclass: Object
 
   "--- Action Dispatch ---"
 
-  method: executeAction: action transition: transition instance: instanceId [
+  method: executeAction: action transition: transition instance: instanceId params: params [
     "Dispatch a built-in action. No agent spawned — runs inline."
-    action = 'create-worktree' ifTrue: [^self actionCreateWorktree: transition instance: instanceId].
-    action = 'merge-worktree' ifTrue: [^self actionMergeWorktree: transition instance: instanceId].
+    action = 'create-worktree' ifTrue: [^self actionCreateWorktree: transition instance: instanceId params: params].
+    action = 'merge-worktree' ifTrue: [^self actionMergeWorktree: transition instance: instanceId params: params].
+    action = 'spawn-workflow' ifTrue: [^self actionSpawnWorkflow: transition instance: instanceId params: params].
     action = 'notify-head' ifTrue: [^self actionNotifyHead: transition instance: instanceId].
 
     "Unknown action — observe and continue"
     ExternalProcess run: 'pp' args: (Array with: 'observe' with: 'unknown-action' with: ('Unknown action: ', action))
   ]
 
-  method: actionCreateWorktree: transition instance: instanceId [
+  method: actionCreateWorktree: transition instance: instanceId params: params [
     "Create a feature branch and worktree for the workflow instance.
      1. Read repo signal for path (fall back to PP_REPO_PATH or cwd).
      2. Create feature branch from main.
@@ -270,12 +307,21 @@ WorkflowEngine subclass: Object
      4. Write worktree signal for downstream transitions.
      5. Checkout main in original repo."
 
-    | repo repoPath home featureBranch worktreeDir implBranch payload proc shellArgs cmd |
+    | repo repoPath repoName repoConfig home featureBranch worktreeDir implBranch payload scope wf |
 
-    "1. Determine repo path"
-    repo := bbs rdp: 'signal' scope: instanceId identity: 'repo'.
-    repo notNil ifTrue: [
-      repoPath := (repo at: 'payload') at: 'path'
+    "1. Determine repo path — priority: params['repo'] → signal → env → cwd"
+    repoName := params at: 'repo' ifAbsent: [nil].
+    repoName notNil ifTrue: [
+      repoConfig := Repo new repoForName: repoName.
+      repoConfig notNil ifTrue: [
+        repoPath := repoConfig at: 'path' ifAbsent: [nil]
+      ]
+    ].
+    repoPath isNil ifTrue: [
+      repo := bbs rdp: 'signal' scope: instanceId identity: 'repo'.
+      repo notNil ifTrue: [
+        repoPath := (repo at: 'payload') at: 'path'
+      ]
     ].
     repoPath isNil ifTrue: [
       repoPath := System env: 'PP_REPO_PATH'
@@ -293,25 +339,30 @@ WorkflowEngine subclass: Object
     implBranch := 'impl/', instanceId.
     worktreeDir := home, '/.pp/worktrees/', instanceId, '/impl'.
 
+    "Find scope for error reporting"
+    scope := self scopeForInstance: instanceId.
+
     "2. Create feature branch from main"
-    cmd := 'git -C "', repoPath, '" checkout -b "', featureBranch, '"'.
-    proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
-    shellArgs := shellArgs copyWith: cmd.
-    proc args: shellArgs.
-    proc run.
-    ('  Created feature branch: ', featureBranch) println.
+    [
+      GitOps createFeatureBranch: featureBranch in: repoPath.
+      ('  Created feature branch: ', featureBranch) println
+    ] on: Exception do: [:e |
+      ('  ERROR: failed to create feature branch: ', e messageText) println.
+      bbs notify: ('create-worktree failed: could not create branch ', featureBranch, ' — ', e messageText)
+        scope: scope severity: 'urgent'.
+      ^self
+    ].
 
     "3. Create worktree for implementation"
-    cmd := 'mkdir -p "', home, '/.pp/worktrees/', instanceId, '" && git -C "', repoPath, '" worktree add "', worktreeDir, '" -b "', implBranch, '"'.
-    proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
-    shellArgs := shellArgs copyWith: cmd.
-    proc args: shellArgs.
-    proc run.
-    ('  Created worktree: ', worktreeDir) println.
+    [
+      GitOps createWorktree: worktreeDir branch: implBranch in: repoPath.
+      ('  Created worktree: ', worktreeDir) println
+    ] on: Exception do: [:e |
+      ('  ERROR: failed to create worktree: ', e messageText) println.
+      bbs notify: ('create-worktree failed: could not create worktree for ', instanceId, ' — ', e messageText)
+        scope: scope severity: 'urgent'.
+      ^self
+    ].
 
     "4. Write worktree signal for downstream transitions"
     payload := Dictionary new.
@@ -323,23 +374,19 @@ WorkflowEngine subclass: Object
     ('  Wrote worktree signal for: ', instanceId) println.
 
     "5. Checkout main in original repo so it is not left on the feature branch"
-    cmd := 'git -C "', repoPath, '" checkout main'.
-    proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
-    shellArgs := shellArgs copyWith: cmd.
-    proc args: shellArgs.
-    proc run.
+    [GitOps checkoutBranch: 'main' in: repoPath]
+      on: Exception do: [:e |
+        ('  WARNING: could not restore main in ', repoPath, ': ', e messageText) println
+      ].
     ('  Restored main in: ', repoPath) println
   ]
 
-  method: actionMergeWorktree: transition instance: instanceId [
+  method: actionMergeWorktree: transition instance: instanceId params: params [
     "Merge the impl branch back into the feature branch, clean up the worktree."
-    | info payload repoPath featureBranch implBranch worktreeDir scope proc shellArgs wf mergeOk obsPayload |
+    | info payload repoPath featureBranch implBranch worktreeDir scope obsPayload |
 
     "Find scope from the workflow tuple"
-    wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
-    scope := wf notNil ifTrue: [wf at: 'scope'] ifFalse: ['default'].
+    scope := self scopeForInstance: instanceId.
 
     "1. Read the worktree signal"
     info := bbs rdp: 'signal' scope: instanceId identity: 'worktree'.
@@ -359,17 +406,8 @@ WorkflowEngine subclass: Object
     ('merge-worktree: merging ', implBranch, ' into ', featureBranch, ' in ', repoPath) println.
 
     "2. Checkout the feature branch"
-    mergeOk := true.
     [
-      proc := ExternalProcess command: '/bin/sh'.
-      shellArgs := Array new: 0.
-      shellArgs := shellArgs copyWith: '-c'.
-      shellArgs := shellArgs copyWith: 'git -C "', repoPath, '" checkout "', featureBranch, '"'.
-      proc args: shellArgs.
-      proc run.
-      proc isSuccess ifFalse: [
-        Error signal: 'checkout failed'
-      ]
+      GitOps checkoutBranch: featureBranch in: repoPath
     ] on: Exception do: [:e |
       ('merge-worktree: checkout failed: ', e messageText) println.
       obsPayload := Dictionary new.
@@ -377,21 +415,12 @@ WorkflowEngine subclass: Object
       bbs out: 'observation' scope: scope identity: 'merge-checkout-failed' payload: obsPayload.
       bbs notify: ('Merge failed: could not checkout ', featureBranch, ' — ', e messageText)
         scope: scope severity: 'urgent'.
-      mergeOk := false
+      ^self
     ].
-    mergeOk ifFalse: [^self].
 
-    "Merge the impl branch"
+    "3. Merge the impl branch"
     [
-      proc := ExternalProcess command: '/bin/sh'.
-      shellArgs := Array new: 0.
-      shellArgs := shellArgs copyWith: '-c'.
-      shellArgs := shellArgs copyWith: 'git -C "', repoPath, '" merge "', implBranch, '" --no-edit'.
-      proc args: shellArgs.
-      proc run.
-      proc isSuccess ifFalse: [
-        Error signal: 'merge failed'
-      ]
+      GitOps mergeBranch: implBranch in: repoPath
     ] on: Exception do: [:e |
       ('merge-worktree: merge failed: ', e messageText) println.
       obsPayload := Dictionary new.
@@ -399,46 +428,20 @@ WorkflowEngine subclass: Object
       bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
       bbs notify: ('Merge conflict: ', implBranch, ' into ', featureBranch, ' — human intervention required')
         scope: scope severity: 'urgent'.
-      mergeOk := false
-    ].
-    mergeOk ifFalse: [^self].
-
-    "3. Clean up the worktree"
-    [
-      proc := ExternalProcess command: '/bin/sh'.
-      shellArgs := Array new: 0.
-      shellArgs := shellArgs copyWith: '-c'.
-      shellArgs := shellArgs copyWith: 'git -C "', repoPath, '" worktree remove "', worktreeDir, '"'.
-      proc args: shellArgs.
-      proc run
-    ] on: Exception do: [:e |
-      ('merge-worktree: worktree remove warning: ', e messageText) println
+      ^self
     ].
 
-    [
-      proc := ExternalProcess command: '/bin/sh'.
-      shellArgs := Array new: 0.
-      shellArgs := shellArgs copyWith: '-c'.
-      shellArgs := shellArgs copyWith: 'git -C "', repoPath, '" branch -d "', implBranch, '"'.
-      proc args: shellArgs.
-      proc run
-    ] on: Exception do: [:e |
-      ('merge-worktree: branch delete warning: ', e messageText) println
-    ].
+    "4. Clean up the worktree and impl branch"
+    GitOps removeWorktree: worktreeDir in: repoPath.
+    GitOps deleteBranch: implBranch in: repoPath.
 
-    "4. Checkout main so repo is not left on feature branch"
-    [
-      proc := ExternalProcess command: '/bin/sh'.
-      shellArgs := Array new: 0.
-      shellArgs := shellArgs copyWith: '-c'.
-      shellArgs := shellArgs copyWith: 'git -C "', repoPath, '" checkout main'.
-      proc args: shellArgs.
-      proc run
-    ] on: Exception do: [:e |
-      ('merge-worktree: checkout main warning: ', e messageText) println
-    ].
+    "5. Checkout main so repo is not left on feature branch"
+    [GitOps checkoutBranch: 'main' in: repoPath]
+      on: Exception do: [:e |
+        ('merge-worktree: checkout main warning: ', e messageText) println
+      ].
 
-    "5. Write observation recording the merge"
+    "6. Write observation recording the merge"
     obsPayload := Dictionary new.
     obsPayload at: 'detail' put: ('Merged ', implBranch, ' into ', featureBranch).
     obsPayload at: 'repoPath' put: repoPath.
@@ -454,7 +457,7 @@ WorkflowEngine subclass: Object
     | workflow scope desc pd observations msg payload |
     "Look up workflow — scan all to find regardless of scope"
     workflow := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
-    scope := workflow notNil ifTrue: [workflow at: 'scope'] ifFalse: ['default'].
+    scope := self scopeForInstance: instanceId.
     desc := instanceId.
     workflow notNil ifTrue: [
       pd := (workflow at: 'payload') at: 'description' ifAbsent: [nil].
@@ -473,6 +476,53 @@ WorkflowEngine subclass: Object
     payload at: 'severity' put: 'info'.
     payload at: 'workflow' put: instanceId.
     bbs out: 'notification' scope: 'system' identity: 'workflow-complete:', instanceId payload: payload
+  ]
+
+  method: actionSpawnWorkflow: transition instance: instanceId params: params [
+    "Spawn a child workflow. Output tokens are already 'waiting'.
+     They promote when the child workflow completes."
+    | spawnConfig childTemplate childScope childParams childInstanceId signalPayload mergedParams |
+
+    spawnConfig := transition at: 'spawn' ifAbsent: [nil].
+    spawnConfig isNil ifTrue: [
+      ('spawn-workflow: missing spawn config on transition ', (transition at: 'id')) println.
+      ^self
+    ].
+
+    childTemplate := spawnConfig at: 'template'.
+
+    "Child scope: from spawn config, else parent scope"
+    childScope := spawnConfig at: 'scope' ifAbsent: [nil].
+    childScope isNil ifTrue: [
+      childScope := self scopeForInstance: instanceId
+    ].
+
+    "Merge params: copy parent, overlay spawn-level overrides with interpolation"
+    mergedParams := Dictionary new.
+    params keysAndValuesDo: [:k :v | mergedParams at: k put: v].
+    childParams := spawnConfig at: 'params' ifAbsent: [Dictionary new].
+    childParams keysAndValuesDo: [:k :v |
+      (v isKindOf: String)
+        ifTrue: [mergedParams at: k put: (self resolveParams: v with: params)]
+        ifFalse: [mergedParams at: k put: v]
+    ].
+
+    "Increment spawn depth counter"
+    mergedParams at: '_depth' put: (params at: '_depth' ifAbsent: [0]) + 1.
+
+    "Instantiate the child"
+    childInstanceId := self instantiate: childTemplate scope: childScope params: mergedParams.
+
+    "Write signal keyed to transition AND child ID"
+    signalPayload := Dictionary new.
+    signalPayload at: 'child_instance' put: childInstanceId.
+    signalPayload at: 'child_template' put: childTemplate.
+    signalPayload at: 'child_scope' put: childScope.
+    signalPayload at: 'parent_transition' put: (transition at: 'id').
+    bbs upsertSignal: instanceId identity: 'child-spawn:', (transition at: 'id'), ':', childInstanceId payload: signalPayload.
+
+    ('  Spawned child workflow: ', childInstanceId, ' from ', (transition at: 'id')) println.
+    bbs notify: ('Spawned child workflow: ', childInstanceId) scope: childScope severity: 'info'
   ]
 
   "--- Precondition Checking ---"
@@ -519,6 +569,13 @@ WorkflowEngine subclass: Object
   ]
 
   "--- Workflow Completion ---"
+
+  method: scopeForInstance: instanceId [
+    "Look up the scope for a workflow instance. Returns 'default' if not found."
+    | wf |
+    wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
+    ^wf notNil ifTrue: [wf at: 'scope'] ifFalse: ['default']
+  ]
 
   method: completeWorkflow: wf [
     "Mark a workflow as complete, emit events, notify user."
