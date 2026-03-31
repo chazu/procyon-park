@@ -817,6 +817,17 @@ TestStoryIntegration subclass: Object
     bbs emitEvent: 'default' identity: 'task-complete:', instanceId, ':task:review' type: 'task-complete' summary: 'done'.
     engine advance.
 
+    "Set up a git repo in tempDir so merge-worktree can succeed"
+    Shell run: 'cd "', tempDir, '" && git init && git commit --allow-empty -m "init" && git checkout -b "feature/', instanceId, '" && git checkout -b "impl/', instanceId, '" && git commit --allow-empty -m "impl work"'.
+
+    "Seed a worktree signal pointing at the test git repo"
+    payload := Dictionary new.
+    payload at: 'workdir' put: tempDir, '/impl'.
+    payload at: 'branch' put: 'impl/', instanceId.
+    payload at: 'feature_branch' put: 'feature/', instanceId.
+    payload at: 'repo_path' put: tempDir.
+    bbs upsertSignal: instanceId identity: 'worktree' payload: payload.
+
     "Now token should be at 'reviewed'. Need a pass verdict signal."
     "Write verdict signal"
     payload := Dictionary new.

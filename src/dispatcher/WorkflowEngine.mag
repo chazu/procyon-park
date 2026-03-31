@@ -391,9 +391,7 @@ WorkflowEngine subclass: Object
     "1. Read the worktree signal"
     info := bbs rdp: 'signal' scope: instanceId identity: 'worktree'.
     info isNil ifTrue: [
-      ('merge-worktree: no worktree signal for ', instanceId) println.
-      bbs notify: ('merge-worktree: missing worktree signal for ', instanceId)
-        scope: scope severity: 'urgent'.
+      self failWorkflow: instanceId reason: 'merge-worktree: no worktree signal'.
       ^self
     ].
 
@@ -413,8 +411,7 @@ WorkflowEngine subclass: Object
       obsPayload := Dictionary new.
       obsPayload at: 'detail' put: ('Checkout failed: ', e messageText).
       bbs out: 'observation' scope: scope identity: 'merge-checkout-failed' payload: obsPayload.
-      bbs notify: ('Merge failed: could not checkout ', featureBranch, ' — ', e messageText)
-        scope: scope severity: 'urgent'.
+      self failWorkflow: instanceId reason: 'Merge failed: could not checkout ', featureBranch, ' — ', e messageText.
       ^self
     ].
 
@@ -426,8 +423,7 @@ WorkflowEngine subclass: Object
       obsPayload := Dictionary new.
       obsPayload at: 'detail' put: ('Merge conflict: ', implBranch, ' into ', featureBranch, ' — ', e messageText).
       bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
-      bbs notify: ('Merge conflict: ', implBranch, ' into ', featureBranch, ' — human intervention required')
-        scope: scope severity: 'urgent'.
+      self failWorkflow: instanceId reason: 'Merge conflict: ', implBranch, ' into ', featureBranch, ' — human intervention required'.
       ^self
     ].
 
@@ -575,6 +571,32 @@ WorkflowEngine subclass: Object
     | wf |
     wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
     ^wf notNil ifTrue: [wf at: 'scope'] ifFalse: ['default']
+  ]
+
+  method: failWorkflow: instanceId reason: reason [
+    "Mark a workflow as failed. Consumes output tokens at current places
+     so downstream transitions cannot fire."
+    | scope wf payload allTokens instanceTokens |
+    scope := self scopeForInstance: instanceId.
+
+    ('Workflow FAILED: ', instanceId, ' — ', reason) println.
+
+    "Consume and rewrite workflow tuple with failed status"
+    wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
+    wf notNil ifTrue: [
+      bbs inp: 'workflow' scope: scope identity: instanceId.
+      payload := wf at: 'payload'.
+      payload at: 'status' put: 'failed'.
+      payload at: 'failed_at' put: DateTime now epochSeconds.
+      payload at: 'failure_reason' put: reason.
+      bbs out: 'workflow' scope: scope identity: instanceId payload: payload
+    ].
+
+    "Emit failure event"
+    bbs emitEvent: scope identity: 'workflow-failed:', instanceId type: 'workflow-failed' summary: reason.
+
+    "Notify user"
+    bbs notify: ('Workflow failed: ', instanceId, ' — ', reason) scope: scope severity: 'urgent'
   ]
 
   method: completeWorkflow: wf [
