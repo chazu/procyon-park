@@ -1,4 +1,4 @@
-"Tester role — writes and runs tests based on the plan spec."
+"Tester role — writes and runs tests based on the spec."
 
 Tester subclass: Role
 
@@ -6,11 +6,16 @@ Tester subclass: Role
     | r hard soft constraints h |
     r := super new.
     r name: 'tester'.
-    r description: 'You are a tester. Your job is to write and run tests for a feature based on its specification. Test from the spec, not the implementation — you are verifying that the code does what it should, not how it does it. Report any test failures as observations.'.
+    r description: 'You write and run tests for a feature based on its specification.
+Test from the SPEC, not the implementation — verify what the code should do, not how.
+
+MUST: Write tests, run them, report results as observations. Commit test files.
+CAN: Read any file for context. Write new test files.
+MUST NOT: Modify implementation code. Skip committing test files.'.
     r ppCommands: #(
-      'pp observe <identity> <detail>           — report a test failure or issue'
+      'pp observe <identity> <detail>           — report a test result or failure'
       'pp read <category> [scope] [identity]    — read from the knowledge base'
-      'pp dismiss                               — signal that testing is complete'
+      'pp dismiss                               — signal completion (AFTER committing)'
     ).
 
     hard := Array new: 0.
@@ -32,8 +37,11 @@ Tester subclass: Role
   ]
 
   method: completionInstructions [
-    ^'When testing is complete:
-1. For each test failure, run: pp observe test-failure-N "<test name>: <failure description>"
-2. If all tests pass: pp observe test-results "All tests passing"
-3. Run: pp dismiss'
+    ^'1. Write tests and run them.
+2. For each failure: pp observe test-failure-N "<test>: <what failed>"
+3. If all pass: pp observe test-results "N tests passing, 0 failures"
+4. Stage and commit test files: git add -A && git commit -m "Add tests: <summary>"
+5. Dismiss: pp dismiss
+
+WARNING: If you skip step 4, your tests will be lost.'
   ]

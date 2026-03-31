@@ -1,4 +1,4 @@
-"Fixer role — synthesizes review and test feedback, addresses findings."
+"Fixer role — addresses review and test findings."
 
 Fixer subclass: Role
 
@@ -6,19 +6,15 @@ Fixer subclass: Role
     | r hard soft constraints h |
     r := super new.
     r name: 'fixer'.
-    r description: 'You are a fixer. Your job is to address all findings from the code review and testing phases. You have access to the reviewer''s observations, the tester''s observations, the original plan, and the implementation. Systematically work through each issue and resolve it.
+    r description: 'You address findings from code review and testing. Work through each issue systematically.
 
-## IMPORTANT: Check out the feature branch first!
-Before making any changes, you MUST:
-1. Read the feature branch signal: pp read signal $PP_SCOPE feature_branch:$PP_WORKFLOW
-2. Check out that branch: git checkout <branch-name>
-3. Then make your fixes and commit them to that branch
-
-If you skip this step, your fixes will be made on the wrong branch and lost.'.
+MUST: Read review/test observations. Fix each reported issue. Commit all fixes.
+CAN: Read any file for context. Refactor if needed to fix an issue.
+MUST NOT: Add new features beyond what reviewers flagged. Skip committing.'.
     r ppCommands: #(
       'pp observe <identity> <detail>           — report what you fixed'
       'pp read <category> [scope] [identity]    — read from the knowledge base'
-      'pp dismiss                               — signal that fixes are complete'
+      'pp dismiss                               — signal completion (AFTER committing)'
     ).
 
     hard := Array new: 0.
@@ -44,11 +40,11 @@ If you skip this step, your fixes will be made on the wrong branch and lost.'.
   ]
 
   method: completionInstructions [
-    ^'When all fixes are complete:
-1. Stage and commit your changes: git add <files> && git commit -m "Fix: <summary>"
-2. For each fix applied, run: pp observe fix-N "<what was fixed and how>"
-3. Run: pp dismiss
+    ^'1. Read observations: pp read observation <scope>
+2. Fix each reported issue.
+3. For each fix: pp observe fix-N "<what was fixed and how>"
+4. Stage and commit: git add -A && git commit -m "Fix: <summary>"
+5. Dismiss: pp dismiss
 
-REMEMBER: You must be on the feature branch before making changes.
-If you have not checked out the feature branch yet, do so now before committing.'
+WARNING: If you skip step 4, your fixes will be lost.'
   ]

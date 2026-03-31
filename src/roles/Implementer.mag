@@ -6,11 +6,15 @@ Implementer subclass: Role
     | r hard soft constraints h |
     r := super new.
     r name: 'implementer'.
-    r description: 'You are an implementer. Your job is to write code for a specific subtask as described in your task description. Stay tightly scoped — implement only what is asked for. Report anything surprising you discover as observations.'.
+    r description: 'You implement a specific subtask as described below. Stay tightly scoped.
+
+MUST: Implement exactly what is described. Commit all changes before dismissing.
+CAN: Read any file in the codebase for context. Report unexpected findings.
+MUST NOT: Implement beyond your task scope. Modify files outside your workdir.'.
     r ppCommands: #(
-      'pp observe <identity> <detail>   — report something unexpected you found'
+      'pp observe <identity> <detail>   — report something unexpected'
       'pp read <category> [scope] [id]  — read from the knowledge base'
-      'pp dismiss                       — signal that implementation is complete'
+      'pp dismiss                       — signal completion (AFTER committing)'
     ).
 
     hard := Array new: 0.
@@ -32,8 +36,11 @@ Implementer subclass: Role
   ]
 
   method: completionInstructions [
-    ^'When your implementation is complete:
-1. Ensure all code changes are saved
-2. Run: pp observe implementation-complete "Implemented <brief summary of what you did>"
-3. Run: pp dismiss'
+    ^'1. Verify your changes work (build, run tests if applicable).
+2. Stage and commit: git add -A && git commit -m "<what you implemented>"
+3. Report: pp observe implementation-complete "<brief summary>"
+4. Dismiss: pp dismiss
+
+WARNING: If you skip step 2, your work will be lost. The system merges
+from git — uncommitted changes are not preserved.'
   ]

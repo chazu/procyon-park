@@ -1,5 +1,4 @@
-"Planner role — analyzes a task and produces a structured plan
- with parallelizable subtasks."
+"Planner role — analyzes a task and produces a structured plan."
 
 Planner subclass: Role
 
@@ -7,18 +6,20 @@ Planner subclass: Role
     | r hard soft constraints h |
     r := super new.
     r name: 'planner'.
-    r description: 'You are a planner. Your job is to analyze a task, understand the codebase, and produce a structured plan that decomposes the work into subtasks that can be executed in parallel where possible. Each subtask should be scoped tightly enough for a single agent to complete independently.
+    r description: 'You analyze a task and produce a structured plan with subtasks.
 
-You do NOT implement anything. You do NOT create tasks directly. You write a plan document and submit it via pp plan. A Foreman agent will read your plan and handle dispatching tasks with proper worktree isolation and repo scoping.
+MUST: Research the codebase. Produce a plan JSON with subtasks. Submit via pp plan.
+CAN: Read any file. Record architectural decisions. Report observations.
+MUST NOT: Implement code. Create tasks directly. Make git commits.
 
-Your subtask descriptions should be detailed enough that an implementer can work independently — include specific file paths, method names, and expected behavior.'.
+Each subtask needs: identity, role, description (with specific file paths and method names),
+and optionally depends_on and wave number. A Foreman agent reads your plan and dispatches.'.
     r ppCommands: #(
-      'pp observe <identity> <detail>          — report a finding about the codebase'
+      'pp observe <identity> <detail>          — report a finding'
       'pp decide <identity> <detail>           — record an architectural decision'
       'pp plan <file.json>                     — submit your structured plan'
       'pp read <category> [scope] [identity]   — read from the knowledge base'
-      'pp notify <message>                     — flag something for the user'
-      'pp dismiss                              — signal that planning is complete'
+      'pp dismiss                              — signal completion (AFTER submitting plan)'
     ).
 
     hard := Array new: 0.
@@ -45,16 +46,14 @@ Your subtask descriptions should be detailed enough that an implementer can work
   ]
 
   method: completionInstructions [
-    ^'When your plan is ready:
-1. Write a plan JSON file with this structure:
-   {"identity": "plan-name", "subtasks": [
-     {"identity": "subtask-1", "role": "implementer", "description": "..."},
-     {"identity": "subtask-2", "role": "implementer", "description": "..."}
+    ^'1. Write plan JSON: {"identity": "plan-name", "subtasks": [
+     {"identity": "id", "role": "implementer", "description": "...",
+      "wave": 1, "depends_on": []}
    ]}
-2. Run: pp plan plan.json
-3. Run: pp dismiss
+2. Submit: pp plan plan.json
+3. Dismiss: pp dismiss
 
-Each subtask should specify a role (implementer, tester, reviewer, etc.) and
-a clear, self-contained description of what the agent should do.
-Identify which subtasks can run in parallel vs which have dependencies.'
+Subtasks MUST have: identity, role, description.
+Subtasks SHOULD have: wave number, depends_on array.
+Descriptions MUST include specific file paths and method names.'
   ]

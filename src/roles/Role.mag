@@ -37,15 +37,15 @@ You are working in repository: **', aRepoName, '**'
       prompt := prompt, '
 Working directory: ', aWorkDir, '
 
-## CRITICAL: Workspace Boundary
-You MUST only create, modify, or delete files within your working directory:
+## WORKSPACE BOUNDARY (ENFORCED)
+You MUST only create, modify, or delete files within:
   ', aWorkDir, '
-Do NOT:
+
+You MUST NOT:
 - Modify files outside this directory
 - Use absolute paths to write elsewhere
-- Run git commit, git push, or git checkout in other repositories
 - cd to directories outside your workspace
-Any changes outside your working directory will be detected and reverted.
+Violations will be detected and reverted.
 '
     ].
 
@@ -69,40 +69,42 @@ Any changes outside your working directory will be detected and reverted.
 
     prompt := prompt, '
 
-## Communication
-You communicate with the Procyon Park coordination system using the `pp` command-line tool.
-The server URL and your task context are pre-configured in your environment.
+## Commands
+', self commandReference, '
 
-Available commands:
-'.
-    ppCommands do: [:cmd |
-      prompt := prompt, '  ', cmd, '
-'
-    ].
+## Rules (in priority order)
+1. MUST commit all code changes before dismissing (git add + git commit).
+2. MUST NOT modify files outside your working directory.
+3. MUST NOT coordinate with other agents directly — all coordination flows through pp.
+4. MUST report unexpected findings via pp observe.
+5. MUST follow the completion steps below exactly, in order.
 
-    prompt := prompt, '
-
-## Rules
-- Do NOT attempt to coordinate with other agents directly.
-- All coordination flows through the tuplespace via `pp`.
-- Report observations about anything unexpected you discover.
-- Do NOT modify files outside your working directory.
-- When you are done, signal completion as described below.
-
+## Completion Steps
 ', self completionInstructions.
 
     ^prompt
   ]
 
+  method: commandReference [
+    | ref |
+    ref := ''.
+    ppCommands do: [:cmd |
+      ref := ref, '  ', cmd, '
+'
+    ].
+    ^ref
+  ]
+
   method: systemPromptHeader [
-    ^'You are a ', name, ' agent working within the Procyon Park orchestration system.
+    ^'You are a ', name, ' agent in the Procyon Park orchestration system.
 
 ', description
   ]
 
   method: completionInstructions [
     "Subclasses override this for role-specific completion behavior."
-    ^'When your work is complete, run: pp dismiss'
+    ^'1. git add -A && git commit -m "<summary of changes>"
+2. pp dismiss'
   ]
 
   method: assembleContext: bbs scope: scope taskId: taskId [
