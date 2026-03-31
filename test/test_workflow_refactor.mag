@@ -1,0 +1,1053 @@
+"Tests for workflow engine refactor: action transitions, worktree management,
+ and story workflow template.
+
+ Test classes:
+   TestActionDispatch        — WR1-WR8:   action transition framework
+   TestStoryTemplate         — WR9-WR24:  story workflow template seeding
+   TestWorkdirThreading      — WR25-WR30: worktree signal threading into tasks
+   TestStoryIntegration      — WR31-WR40: story workflow instantiation and advancement
+   TestWorktreeSignalKeys    — WR41-WR46: worktree signal key consistency
+   TestNotifyHead            — WR47-WR50: notify-head action behavior
+   TestConventionCompliance  — WR51-WR56: source convention checks
+
+ All temp vars at method top. No ifNil:/ifNotNil: — uses isNil/notNil ifTrue:.
+ Uses integer char codes, not dollar-sign literals.
+ Uses Array new: 0 and copyWith: for array building."
+
+"--- Test Runner ---"
+WRT subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [
+    | r |
+    r := super new.
+    r init.
+    ^r
+  ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: condition message: msg [
+    condition ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Workflow Refactor Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    (failed > 0) ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    (failed = 0)
+      ifTrue: [ 'ALL TESTS PASSED' println ]
+      ifFalse: [ 'SOME TESTS FAILED' println ]
+  ]
+
+  method: failed [
+    ^failed
+  ]
+
+"--- Helper: create temp BBS ---"
+WRHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: removeTempDir: path [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'rm -rf "', path, '"'.
+    proc args: args.
+    proc run
+  ]
+
+  classMethod: makeBBS [
+    "Create a BBS with a temp data directory."
+    | tempDir |
+    tempDir := self makeTempDir.
+    ^BBS withDataDir: tempDir
+  ]
+
+  classMethod: seedStoryTemplate: bbs [
+    "Seed the story template into the given BBS."
+    Main seedStoryTemplate: bbs
+  ]
+
+  classMethod: makeEngine: bbs [
+    "Create a WorkflowEngine on the given BBS."
+    ^WorkflowEngine on: bbs
+  ]
+
+  classMethod: findTokens: instanceId in: bbs [
+    "Return all tokens for a workflow instance."
+    | allTokens |
+    allTokens := bbs scanAll: 'token'.
+    ^allTokens select: [:t |
+      ((t at: 'payload') at: 'workflow_instance' ifAbsent: ['']) = instanceId
+    ]
+  ]
+
+  classMethod: findTokensAtPlace: place instance: instanceId in: bbs [
+    "Return tokens at a specific place for a workflow instance."
+    | allTokens |
+    allTokens := self findTokens: instanceId in: bbs.
+    ^allTokens select: [:t |
+      ((t at: 'payload') at: 'place') = place
+    ]
+  ]
+
+  classMethod: findTasks: instanceId in: bbs [
+    "Return all task tuples for a workflow instance."
+    | allTasks |
+    allTasks := bbs scanAll: 'task'.
+    ^allTasks select: [:t |
+      ((t at: 'payload') at: 'workflow_instance' ifAbsent: ['']) = instanceId
+    ]
+  ]
+
+"=== TestActionDispatch — WR1 through WR8 ==="
+TestActionDispatch subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs engine payload transitions tr1 tokens tasks allTokens positiveTokens tr2 taskTokens tr3 |
+    '--- TestActionDispatch ---' println.
+
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    "WR1: Spec says action transitions produce output tokens with status positive"
+    "Seed a minimal template with one action transition (use notify-head to avoid git side effects)"
+    transitions := Array new: 0.
+    tr1 := Dictionary new.
+    tr1 at: 'id' put: 'test-action'.
+    tr1 at: 'in' put: #('start').
+    tr1 at: 'out' put: #('end').
+    tr1 at: 'action' put: 'notify-head'.
+    transitions := transitions copyWith: tr1.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'test-action-tmpl' payload: payload.
+
+    "Instantiate and advance"
+    engine := WRHelper makeEngine: bbs.
+    engine instantiate: 'test-action-tmpl' scope: 'default' params: (Dictionary new).
+    engine advance.
+
+    "Check tokens — there should be a token at 'end' with status 'positive'"
+    allTokens := bbs scanAll: 'token'.
+    positiveTokens := allTokens select: [:tok |
+      | tp |
+      tp := tok at: 'payload'.
+      (tp at: 'place') = 'end' and: [(tp at: 'status') = 'positive']
+    ].
+    t assert: (positiveTokens size > 0) message: 'WR1: action transition must produce output token with status positive'.
+
+    "WR2: Spec says action transitions must NOT create task tuples"
+    tasks := bbs scanAll: 'task'.
+    t assertEqual: tasks size to: 0 message: 'WR2: action transition must not create any task tuple'.
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR3: Spec says role-bearing transitions still create task tuples (existing behavior)"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    transitions := Array new: 0.
+    tr2 := Dictionary new.
+    tr2 at: 'id' put: 'test-role'.
+    tr2 at: 'in' put: #('start').
+    tr2 at: 'out' put: #('end').
+    tr2 at: 'role' put: 'implementer'.
+    tr2 at: 'description' put: 'test task'.
+    transitions := transitions copyWith: tr2.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'test-role-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    engine instantiate: 'test-role-tmpl' scope: 'default' params: (Dictionary new).
+    engine advance.
+
+    tasks := bbs scanAll: 'task'.
+    t assert: (tasks size > 0) message: 'WR3: role-bearing transition must create a task tuple'.
+
+    "WR4: Role-bearing transition output tokens should have status waiting"
+    taskTokens := bbs scanAll: 'token'.
+    taskTokens := taskTokens select: [:tok |
+      ((tok at: 'payload') at: 'place') = 'end'
+    ].
+    taskTokens size > 0
+      ifTrue: [
+        t assertEqual: (((taskTokens at: 0) at: 'payload') at: 'status') to: 'waiting' message: 'WR4: role-bearing transition tokens must have status waiting'
+      ]
+      ifFalse: [
+        t assert: false message: 'WR4: role-bearing transition tokens must have status waiting (no tokens found)'
+      ].
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR5: Spec says unknown action names should not crash"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    transitions := Array new: 0.
+    tr3 := Dictionary new.
+    tr3 at: 'id' put: 'unknown-act'.
+    tr3 at: 'in' put: #('start').
+    tr3 at: 'out' put: #('end').
+    tr3 at: 'action' put: 'nonexistent-action'.
+    transitions := transitions copyWith: tr3.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'test-unknown-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    engine instantiate: 'test-unknown-tmpl' scope: 'default' params: (Dictionary new).
+    [engine advance.
+     t assert: true message: 'WR5: unknown action must not crash engine'
+    ] on: Exception do: [:e |
+      t assert: false message: 'WR5: unknown action must not crash engine (crashed: ', e messageText, ')'
+    ].
+
+    "WR6: Action transitions should consume input tokens"
+    allTokens := bbs scanAll: 'token'.
+    positiveTokens := allTokens select: [:tok |
+      ((tok at: 'payload') at: 'place') = 'start' and:
+      [((tok at: 'payload') at: 'status') = 'positive']
+    ].
+    t assertEqual: positiveTokens size to: 0 message: 'WR6: action transition must consume input tokens'.
+
+    "WR7: Action transitions should produce output tokens even for unknown actions"
+    positiveTokens := allTokens select: [:tok |
+      ((tok at: 'payload') at: 'place') = 'end'
+    ].
+    t assert: (positiveTokens size > 0) message: 'WR7: unknown action must still produce output tokens'.
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR8: Transition with BOTH action and role — spec says action takes priority (dispatched before role check)"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    transitions := Array new: 0.
+    tr1 := Dictionary new.
+    tr1 at: 'id' put: 'both'.
+    tr1 at: 'in' put: #('start').
+    tr1 at: 'out' put: #('end').
+    tr1 at: 'action' put: 'notify-head'.
+    tr1 at: 'role' put: 'implementer'.
+    transitions := transitions copyWith: tr1.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'test-both-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    engine instantiate: 'test-both-tmpl' scope: 'default' params: (Dictionary new).
+    engine advance.
+
+    "Action dispatch should prevent task creation"
+    tasks := bbs scanAll: 'task'.
+    t assertEqual: tasks size to: 0 message: 'WR8: when action and role both present, action dispatches first — no task created'.
+
+    WRHelper removeTempDir: tempDir
+  ]
+
+"=== TestStoryTemplate — WR9 through WR24 ==="
+TestStoryTemplate subclass: Object
+
+  classMethod: findTransition: transId in: transitions [
+    "Find a transition by id in the transitions array."
+    ^transitions detect: [:tr | (tr at: 'id') = transId] ifNone: [nil]
+  ]
+
+  classMethod: run: t [
+    | tempDir bbs template templatePayload transitions tr trId trAction trRole trDesc trIn trOut trPreconditions pre |
+    '--- TestStoryTemplate ---' println.
+
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    "Seed the story template"
+    WRHelper seedStoryTemplate: bbs.
+
+    "WR9: Spec says template 'story' must exist after seeding"
+    template := bbs rdp: 'template' scope: 'system' identity: 'story'.
+    t assert: template notNil message: 'WR9: story template must exist in BBS after seeding'.
+
+    template isNil ifTrue: [
+      "Cannot continue without template"
+      WRHelper removeTempDir: tempDir.
+      ^self
+    ].
+
+    templatePayload := template at: 'payload'.
+
+    "WR10: Spec says start_places includes 'request'"
+    t assertEqual: ((templatePayload at: 'start_places') at: 0) to: 'request' message: 'WR10: start_places must include request'.
+
+    "WR11: Spec says terminal_places includes 'done'"
+    t assertEqual: ((templatePayload at: 'terminal_places') at: 0) to: 'done' message: 'WR11: terminal_places must include done'.
+
+    "WR12: Spec says template must have at least 8 transitions (9 with re_review)"
+    transitions := templatePayload at: 'transitions'.
+    t assert: (transitions size >= 8) message: 'WR12: story template must have at least 8 transitions'.
+
+    "WR13: T1 (setup) — action=create-worktree, no role"
+    tr := self findTransition: 'setup' in: transitions.
+    t assert: tr notNil message: 'WR13a: T1 setup must exist'.
+    tr notNil ifTrue: [
+      t assertEqual: (tr at: 'action' ifAbsent: [nil]) to: 'create-worktree' message: 'WR13b: T1 action must be create-worktree'.
+      t assert: (tr at: 'role' ifAbsent: [nil]) isNil message: 'WR13c: T1 must not have a role'.
+      t assertEqual: ((tr at: 'in') at: 0) to: 'request' message: 'WR13d: T1 in must include request'.
+      t assertEqual: ((tr at: 'out') at: 0) to: 'ready' message: 'WR13e: T1 out must include ready'
+    ].
+
+    "WR14: T2 (implement) — role=implementer, description={{description}}"
+    tr := self findTransition: 'implement' in: transitions.
+    t assert: tr notNil message: 'WR14a: T2 implement must exist'.
+    tr notNil ifTrue: [
+      t assertEqual: (tr at: 'role') to: 'implementer' message: 'WR14b: T2 role must be implementer'.
+      t assert: (tr at: 'action' ifAbsent: [nil]) isNil message: 'WR14c: T2 must not have an action'.
+      t assertEqual: (tr at: 'description') to: '{{description}}' message: 'WR14d: T2 description must use {{description}} param'
+    ].
+
+    "WR15: T3 (review) — role=reviewer, precondition on implement task-complete"
+    tr := self findTransition: 'review' in: transitions.
+    t assert: tr notNil message: 'WR15a: T3 review must exist'.
+    tr notNil ifTrue: [
+      t assertEqual: (tr at: 'role') to: 'reviewer' message: 'WR15b: T3 role must be reviewer'.
+      trPreconditions := tr at: 'preconditions' ifAbsent: [#()].
+      t assert: (trPreconditions size > 0) message: 'WR15c: T3 must have at least 1 precondition'.
+      trPreconditions size > 0 ifTrue: [
+        pre := trPreconditions at: 0.
+        t assertEqual: (pre at: 'category') to: 'event' message: 'WR15d: T3 precondition category must be event'.
+        t assertEqual: (pre at: 'identity') to: 'task-complete:{{instance}}:task:implement' message: 'WR15e: T3 precondition identity must reference implement task'
+      ] ifFalse: [
+        t assert: false message: 'WR15d: T3 precondition (no preconditions)'.
+        t assert: false message: 'WR15e: T3 precondition (no preconditions)'
+      ]
+    ].
+
+    "WR16: T4 (pass) — verdict precondition for pass"
+    tr := self findTransition: 'pass' in: transitions.
+    t assert: tr notNil message: 'WR16a: T4 pass must exist'.
+    tr notNil ifTrue: [
+      t assertEqual: ((tr at: 'in') at: 0) to: 'reviewed' message: 'WR16b: T4 in must include reviewed'.
+      t assertEqual: ((tr at: 'out') at: 0) to: 'merging' message: 'WR16c: T4 out must include merging'.
+      trPreconditions := tr at: 'preconditions' ifAbsent: [#()].
+      trPreconditions size > 0 ifTrue: [
+        pre := trPreconditions at: 0.
+        t assertEqual: (pre at: 'category') to: 'signal' message: 'WR16d: T4 precondition must be signal category'.
+        t assert: ((pre at: 'constraint') includes: 'pass') message: 'WR16e: T4 constraint must include pass'
+      ] ifFalse: [
+        t assert: false message: 'WR16d: T4 precondition (no preconditions)'.
+        t assert: false message: 'WR16e: T4 constraint (no preconditions)'
+      ]
+    ].
+
+    "WR17: T5 (integrate) — action=merge-worktree"
+    tr := self findTransition: 'integrate' in: transitions.
+    t assert: tr notNil message: 'WR17a: T5 integrate must exist'.
+    tr notNil ifTrue: [
+      t assertEqual: (tr at: 'action' ifAbsent: [nil]) to: 'merge-worktree' message: 'WR17b: T5 action must be merge-worktree'.
+      t assert: (tr at: 'role' ifAbsent: [nil]) isNil message: 'WR17c: T5 must not have a role'
+    ].
+
+    "WR18: T6 (notify) — action=notify-head"
+    tr := self findTransition: 'notify' in: transitions.
+    t assert: tr notNil message: 'WR18a: T6 notify must exist'.
+    tr notNil ifTrue: [
+      t assertEqual: (tr at: 'action' ifAbsent: [nil]) to: 'notify-head' message: 'WR18b: T6 action must be notify-head'.
+      t assert: (tr at: 'role' ifAbsent: [nil]) isNil message: 'WR18c: T6 must not have a role'
+    ].
+
+    "WR19: T7 (fail) — verdict precondition for fix"
+    tr := self findTransition: 'fail' in: transitions.
+    t assert: tr notNil message: 'WR19a: T7 fail must exist'.
+    tr notNil ifTrue: [
+      t assertEqual: ((tr at: 'in') at: 0) to: 'reviewed' message: 'WR19b: T7 in must include reviewed'.
+      t assertEqual: ((tr at: 'out') at: 0) to: 'fixing' message: 'WR19c: T7 out must include fixing'.
+      trPreconditions := tr at: 'preconditions' ifAbsent: [#()].
+      trPreconditions size > 0 ifTrue: [
+        pre := trPreconditions at: 0.
+        t assertEqual: (pre at: 'category') to: 'signal' message: 'WR19d: T7 precondition must be signal category'.
+        t assert: ((pre at: 'constraint') includes: 'fix') message: 'WR19e: T7 constraint must include fix'
+      ] ifFalse: [
+        t assert: false message: 'WR19d: T7 precondition (no preconditions)'.
+        t assert: false message: 'WR19e: T7 constraint (no preconditions)'
+      ]
+    ].
+
+    "WR20: T8 (fix) — role=fixer, outputs back to implemented (loop)"
+    tr := self findTransition: 'fix' in: transitions.
+    t assert: tr notNil message: 'WR20a: T8 fix must exist'.
+    tr notNil ifTrue: [
+      t assertEqual: (tr at: 'role') to: 'fixer' message: 'WR20b: T8 role must be fixer'.
+      t assertEqual: ((tr at: 'out') at: 0) to: 'implemented' message: 'WR20c: T8 out must include implemented for loop-back'.
+      t assertEqual: ((tr at: 'in') at: 0) to: 'fixing' message: 'WR20d: T8 in must include fixing'
+    ].
+
+    "WR21: Spec says description must be 'Single-task: implement in worktree, review, integrate'"
+    t assertEqual: (templatePayload at: 'description') to: 'Single-task: implement in worktree, review, integrate' message: 'WR21: template description must match spec'.
+
+    "WR22: Action transitions (T1, T5, T6) must all have no role"
+    t assert: ((self findTransition: 'setup' in: transitions) at: 'role' ifAbsent: [nil]) isNil message: 'WR22a: T1 setup must have no role'.
+    t assert: ((self findTransition: 'integrate' in: transitions) at: 'role' ifAbsent: [nil]) isNil message: 'WR22b: T5 integrate must have no role'.
+    t assert: ((self findTransition: 'notify' in: transitions) at: 'role' ifAbsent: [nil]) isNil message: 'WR22c: T6 notify must have no role'.
+
+    "WR23: Agentic transitions (T2, T3, T8) must all have no action"
+    t assert: ((self findTransition: 'implement' in: transitions) at: 'action' ifAbsent: [nil]) isNil message: 'WR23a: T2 implement must have no action'.
+    t assert: ((self findTransition: 'review' in: transitions) at: 'action' ifAbsent: [nil]) isNil message: 'WR23b: T3 review must have no action'.
+    t assert: ((self findTransition: 'fix' in: transitions) at: 'action' ifAbsent: [nil]) isNil message: 'WR23c: T8 fix must have no action'.
+
+    "WR24: Places form connected graph from request to done"
+    "Verify all intermediate places are both produced and consumed (using id-based lookup)"
+    tr := self findTransition: 'setup' in: transitions.
+    t assertEqual: ((tr at: 'out') at: 0) to: 'ready' message: 'WR24a: setup produces ready'.
+    tr := self findTransition: 'implement' in: transitions.
+    t assertEqual: ((tr at: 'in') at: 0) to: 'ready' message: 'WR24b: implement consumes ready'.
+    t assertEqual: ((tr at: 'out') at: 0) to: 'implemented' message: 'WR24c: implement produces implemented'.
+    tr := self findTransition: 'review' in: transitions.
+    t assertEqual: ((tr at: 'in') at: 0) to: 'implemented' message: 'WR24d: review consumes implemented'.
+    t assertEqual: ((tr at: 'out') at: 0) to: 'reviewed' message: 'WR24e: review produces reviewed'.
+    tr := self findTransition: 'pass' in: transitions.
+    t assertEqual: ((tr at: 'in') at: 0) to: 'reviewed' message: 'WR24f: pass consumes reviewed'.
+    t assertEqual: ((tr at: 'out') at: 0) to: 'merging' message: 'WR24g: pass produces merging'.
+    tr := self findTransition: 'integrate' in: transitions.
+    t assertEqual: ((tr at: 'in') at: 0) to: 'merging' message: 'WR24h: integrate consumes merging'.
+    t assertEqual: ((tr at: 'out') at: 0) to: 'merged' message: 'WR24i: integrate produces merged'.
+    tr := self findTransition: 'notify' in: transitions.
+    t assertEqual: ((tr at: 'in') at: 0) to: 'merged' message: 'WR24j: notify consumes merged'.
+    t assertEqual: ((tr at: 'out') at: 0) to: 'done' message: 'WR24k: notify produces done'.
+
+    WRHelper removeTempDir: tempDir
+  ]
+
+"=== TestWorkdirThreading — WR25 through WR30 ==="
+TestWorkdirThreading subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs engine transitions tr1 tr2 payload instanceId tasks taskPayload wtPayload |
+    '--- TestWorkdirThreading ---' println.
+
+    "WR25: Spec says when worktree signal exists, task payload gets workdir"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    "Create a template with a role-bearing transition"
+    transitions := Array new: 0.
+    tr1 := Dictionary new.
+    tr1 at: 'id' put: 'impl'.
+    tr1 at: 'in' put: #('start').
+    tr1 at: 'out' put: #('end').
+    tr1 at: 'role' put: 'implementer'.
+    tr1 at: 'description' put: 'test'.
+    transitions := transitions copyWith: tr1.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'test-wt-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    instanceId := engine instantiate: 'test-wt-tmpl' scope: 'default' params: (Dictionary new).
+
+    "Write a worktree signal for this instance — mimics what create-worktree would write"
+    wtPayload := Dictionary new.
+    wtPayload at: 'workdir' put: '/tmp/test-worktree/impl'.
+    wtPayload at: 'branch' put: 'impl/test-123'.
+    wtPayload at: 'feature_branch' put: 'feature/test-123'.
+    wtPayload at: 'repo_path' put: '/tmp/test-repo'.
+    bbs upsertSignal: instanceId identity: 'worktree' payload: wtPayload.
+
+    engine advance.
+
+    tasks := bbs scanAll: 'task'.
+    t assert: (tasks size > 0) message: 'WR25a: task must be created'.
+    tasks size > 0 ifTrue: [
+      taskPayload := (tasks at: 0) at: 'payload'.
+      t assertEqual: (taskPayload at: 'workdir' ifAbsent: [nil]) to: '/tmp/test-worktree/impl' message: 'WR25b: task payload must include workdir from worktree signal'.
+      t assertEqual: (taskPayload at: 'repo' ifAbsent: [nil]) to: '/tmp/test-repo' message: 'WR25c: task payload must include repo from worktree signal'
+    ] ifFalse: [
+      t assert: false message: 'WR25b: task payload workdir (no tasks created)'.
+      t assert: false message: 'WR25c: task payload repo (no tasks created)'
+    ].
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR26: Spec says when NO worktree signal exists, task should NOT have workdir"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    transitions := Array new: 0.
+    tr2 := Dictionary new.
+    tr2 at: 'id' put: 'impl2'.
+    tr2 at: 'in' put: #('start').
+    tr2 at: 'out' put: #('end').
+    tr2 at: 'role' put: 'implementer'.
+    tr2 at: 'description' put: 'test no worktree'.
+    transitions := transitions copyWith: tr2.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'test-nowt-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    engine instantiate: 'test-nowt-tmpl' scope: 'default' params: (Dictionary new).
+    engine advance.
+
+    tasks := bbs scanAll: 'task'.
+    tasks size > 0 ifTrue: [
+      taskPayload := (tasks at: 0) at: 'payload'.
+      t assert: (taskPayload at: 'workdir' ifAbsent: [nil]) isNil message: 'WR26: without worktree signal, task must not have workdir'
+    ] ifFalse: [
+      t assert: false message: 'WR26: without worktree signal, task must not have workdir (no tasks)'
+    ].
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR27: Spec says workflow params repo is propagated into task payload"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    transitions := Array new: 0.
+    tr1 := Dictionary new.
+    tr1 at: 'id' put: 'impl3'.
+    tr1 at: 'in' put: #('start').
+    tr1 at: 'out' put: #('end').
+    tr1 at: 'role' put: 'implementer'.
+    tr1 at: 'description' put: 'test repo param'.
+    transitions := transitions copyWith: tr1.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'test-repo-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    payload := Dictionary new.
+    payload at: 'repo' put: 'my-repo'.
+    engine instantiate: 'test-repo-tmpl' scope: 'default' params: payload.
+    engine advance.
+
+    tasks := bbs scanAll: 'task'.
+    tasks size > 0 ifTrue: [
+      taskPayload := (tasks at: 0) at: 'payload'.
+      t assertEqual: (taskPayload at: 'repo' ifAbsent: [nil]) to: 'my-repo' message: 'WR27: repo from params must appear in task payload'
+    ] ifFalse: [
+      t assert: false message: 'WR27: repo from params (no tasks)'
+    ].
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR28: Spec says description is interpolated with params"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    transitions := Array new: 0.
+    tr1 := Dictionary new.
+    tr1 at: 'id' put: 'impl4'.
+    tr1 at: 'in' put: #('start').
+    tr1 at: 'out' put: #('end').
+    tr1 at: 'role' put: 'implementer'.
+    tr1 at: 'description' put: 'Implement: {{description}}'.
+    transitions := transitions copyWith: tr1.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'test-interp-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    payload := Dictionary new.
+    payload at: 'description' put: 'add login'.
+    engine instantiate: 'test-interp-tmpl' scope: 'default' params: payload.
+    engine advance.
+
+    tasks := bbs scanAll: 'task'.
+    tasks size > 0 ifTrue: [
+      taskPayload := (tasks at: 0) at: 'payload'.
+      t assertEqual: (taskPayload at: 'description') to: 'Implement: add login' message: 'WR28: description must be interpolated with params'
+    ] ifFalse: [
+      t assert: false message: 'WR28: description interpolation (no tasks)'
+    ].
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR29: Spec says worktree signal overrides repo from params"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    transitions := Array new: 0.
+    tr1 := Dictionary new.
+    tr1 at: 'id' put: 'impl5'.
+    tr1 at: 'in' put: #('start').
+    tr1 at: 'out' put: #('end').
+    tr1 at: 'role' put: 'implementer'.
+    tr1 at: 'description' put: 'test override'.
+    transitions := transitions copyWith: tr1.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'test-override-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    payload := Dictionary new.
+    payload at: 'repo' put: 'original-repo'.
+    instanceId := engine instantiate: 'test-override-tmpl' scope: 'default' params: payload.
+
+    "Write worktree signal with different repo"
+    wtPayload := Dictionary new.
+    wtPayload at: 'workdir' put: '/tmp/override-worktree'.
+    wtPayload at: 'repo_path' put: '/tmp/override-repo'.
+    bbs upsertSignal: instanceId identity: 'worktree' payload: wtPayload.
+
+    engine advance.
+
+    tasks := bbs scanAll: 'task'.
+    tasks size > 0 ifTrue: [
+      taskPayload := (tasks at: 0) at: 'payload'.
+      t assertEqual: (taskPayload at: 'workdir' ifAbsent: [nil]) to: '/tmp/override-worktree' message: 'WR29a: worktree signal workdir must override'.
+      t assertEqual: (taskPayload at: 'repo' ifAbsent: [nil]) to: '/tmp/override-repo' message: 'WR29b: worktree signal repo must override params repo'
+    ] ifFalse: [
+      t assert: false message: 'WR29a: worktree signal override (no tasks)'.
+      t assert: false message: 'WR29b: worktree signal override (no tasks)'
+    ].
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR30: Spec says instance ID is interpolated into precondition identities"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    WRHelper seedStoryTemplate: bbs.
+
+    engine := WRHelper makeEngine: bbs.
+    instanceId := engine instantiate: 'story' scope: 'default' params: (Dictionary new).
+
+    "Advance — T1 setup fires (action). Then T2 implement should fire (no preconditions)"
+    engine advance.
+    engine advance.
+
+    "Now token should be at 'implemented' with status waiting (T2 implement is role-bearing)"
+    "T3 review has a precondition requiring task-complete event"
+    "Simulate task completion"
+    bbs emitEvent: 'default' identity: 'task-complete:', instanceId, ':task:implement' type: 'task-complete' summary: 'done'.
+
+    "Advance to promote waiting token and try to fire review"
+    engine advance.
+
+    "Check that review task was created — this proves the precondition identity was properly interpolated"
+    tasks := WRHelper findTasks: instanceId in: bbs.
+    tasks := tasks select: [:tk |
+      ((tk at: 'payload') at: 'role' ifAbsent: ['']) = 'reviewer'
+    ].
+    t assert: (tasks size > 0) message: 'WR30: review task must be created after implement completes (precondition interpolation works)'.
+
+    WRHelper removeTempDir: tempDir
+  ]
+
+"=== TestStoryIntegration — WR31 through WR40 ==="
+TestStoryIntegration subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs engine instanceId tokens positiveTokens tasks tokPlace tokStatus implTasks reviewTasks |
+    '--- TestStoryIntegration ---' println.
+
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    WRHelper seedStoryTemplate: bbs.
+
+    engine := WRHelper makeEngine: bbs.
+
+    "WR31: Spec says instantiate story creates initial token at 'request'"
+    instanceId := engine instantiate: 'story' scope: 'default' params: (Dictionary new).
+    tokens := WRHelper findTokens: instanceId in: bbs.
+    t assertEqual: tokens size to: 1 message: 'WR31a: instantiation must create exactly 1 token'.
+    tokens size > 0 ifTrue: [
+      tokPlace := (tokens at: 0) at: 'payload'.
+      t assertEqual: (tokPlace at: 'place') to: 'request' message: 'WR31b: initial token must be at place request'.
+      t assertEqual: (tokPlace at: 'status') to: 'positive' message: 'WR31c: initial token status must be positive'
+    ] ifFalse: [
+      t assert: false message: 'WR31b: initial token place (no tokens)'.
+      t assert: false message: 'WR31c: initial token status (no tokens)'
+    ].
+
+    "WR32: Spec says T1 setup fires on first advance (action transition, no preconditions)"
+    engine advance.
+    tokens := WRHelper findTokens: instanceId in: bbs.
+    positiveTokens := tokens select: [:tok |
+      ((tok at: 'payload') at: 'status') = 'positive'
+    ].
+    "After setup fires: token at 'request' consumed, token at 'ready' produced (positive)"
+    "Also T2 implement should fire since 'ready' is now available"
+    "Actually both transitions may fire in the same advance tick if setup produces positive token"
+    "Let's check what tokens exist"
+    t assert: (tokens size > 0) message: 'WR32: tokens must exist after first advance'.
+
+    "WR33: After advance, either token is at 'ready' (if only T1 fired) or at 'implemented' (if both T1 and T2 fired)"
+    "Since T1 is an action (produces positive), and T2 has no preconditions and ready has a positive token, both might fire in same tick"
+    "Check: no task tuple means T2 hasn't fired yet"
+    tasks := WRHelper findTasks: instanceId in: bbs.
+    implTasks := tasks select: [:tk |
+      ((tk at: 'payload') at: 'transition_id' ifAbsent: ['']) = 'implement'
+    ].
+
+    implTasks size > 0
+      ifTrue: [
+        "T2 also fired — token should be at implemented/waiting"
+        t assert: true message: 'WR33: T2 implement fired (task created)'.
+        "WR34: Token at implemented should have status waiting"
+        tokens := WRHelper findTokensAtPlace: 'implemented' instance: instanceId in: bbs.
+        tokens size > 0 ifTrue: [
+          t assertEqual: (((tokens at: 0) at: 'payload') at: 'status') to: 'waiting' message: 'WR34: implemented token must have status waiting'
+        ] ifFalse: [
+          t assert: false message: 'WR34: implemented token status (no token at implemented)'
+        ]
+      ]
+      ifFalse: [
+        "Only T1 fired — token should be at ready/positive"
+        tokens := WRHelper findTokensAtPlace: 'ready' instance: instanceId in: bbs.
+        t assert: (tokens size > 0) message: 'WR33: after T1 fires, token must be at ready'.
+        "WR34: Advance again to fire T2"
+        engine advance.
+        implTasks := WRHelper findTasks: instanceId in: bbs.
+        implTasks := implTasks select: [:tk |
+          ((tk at: 'payload') at: 'transition_id' ifAbsent: ['']) = 'implement'
+        ].
+        t assert: (implTasks size > 0) message: 'WR34: T2 implement must fire and create task tuple'
+      ].
+
+    "WR35: Implement task must have role=implementer"
+    implTasks := WRHelper findTasks: instanceId in: bbs.
+    implTasks := implTasks select: [:tk |
+      ((tk at: 'payload') at: 'transition_id' ifAbsent: ['']) = 'implement'
+    ].
+    implTasks size > 0 ifTrue: [
+      t assertEqual: (((implTasks at: 0) at: 'payload') at: 'role') to: 'implementer' message: 'WR35: implement task role must be implementer'
+    ] ifFalse: [
+      t assert: false message: 'WR35: implement task role (no implement task found)'
+    ].
+
+    "WR36: Spec says review transition should NOT fire until implement task completes"
+    engine advance.
+    reviewTasks := WRHelper findTasks: instanceId in: bbs.
+    reviewTasks := reviewTasks select: [:tk |
+      ((tk at: 'payload') at: 'role' ifAbsent: ['']) = 'reviewer'
+    ].
+    t assertEqual: reviewTasks size to: 0 message: 'WR36: review task must NOT exist before implement completes'.
+
+    "WR37: After task-complete event for implement, token should be promoted"
+    bbs emitEvent: 'default' identity: 'task-complete:', instanceId, ':task:implement' type: 'task-complete' summary: 'done'.
+    engine advance.
+
+    "Check: implemented token should now be positive (promoted from waiting)"
+    "And review transition may have fired"
+    reviewTasks := WRHelper findTasks: instanceId in: bbs.
+    reviewTasks := reviewTasks select: [:tk |
+      ((tk at: 'payload') at: 'role' ifAbsent: ['']) = 'reviewer'
+    ].
+    t assert: (reviewTasks size > 0) message: 'WR37: review task must exist after implement completes and advance'.
+
+    "WR38: Spec says workflow status is 'running' while in progress"
+    tokens := bbs scanAll: 'workflow'.
+    tokens := tokens select: [:w | (w at: 'identity') = instanceId].
+    tokens size > 0 ifTrue: [
+      t assertEqual: (((tokens at: 0) at: 'payload') at: 'status') to: 'running' message: 'WR38: workflow status must be running while in progress'
+    ] ifFalse: [
+      t assert: false message: 'WR38: workflow status (not found)'
+    ].
+
+    "WR39: After all tokens reach done, workflow status changes to completed"
+    "Simulate: complete review, issue pass verdict, let remaining auto-actions fire"
+    bbs emitEvent: 'default' identity: 'task-complete:', instanceId, ':task:review' type: 'task-complete' summary: 'done'.
+    engine advance.
+
+    "Now token should be at 'reviewed'. Need a pass verdict signal."
+    "Write verdict signal"
+    payload := Dictionary new.
+    payload at: 'decision' put: 'pass'.
+    bbs upsertSignal: 'default' identity: 'verdict:', instanceId payload: payload.
+
+    "Advance several times to fire pass, integrate, notify transitions"
+    engine advance.
+    engine advance.
+    engine advance.
+    "One more advance for completion detection (checked at start of advanceInstance:)"
+    engine advance.
+
+    "Check workflow completion"
+    tokens := bbs scanAll: 'workflow'.
+    tokens := tokens select: [:w | (w at: 'identity') = instanceId].
+    tokens size > 0 ifTrue: [
+      tokStatus := ((tokens at: 0) at: 'payload') at: 'status'.
+      t assertEqual: tokStatus to: 'completed' message: 'WR39: workflow status must be completed after all tokens reach done'
+    ] ifFalse: [
+      t assert: false message: 'WR39: workflow status completed (not found)'
+    ].
+
+    "WR40: Spec says workflow has completed_at timestamp"
+    tokens size > 0 ifTrue: [
+      t assert: (((tokens at: 0) at: 'payload') at: 'completed_at' ifAbsent: [nil]) notNil message: 'WR40: completed workflow must have completed_at'
+    ] ifFalse: [
+      t assert: false message: 'WR40: completed_at (workflow not found)'
+    ].
+
+    WRHelper removeTempDir: tempDir
+  ]
+
+"=== TestWorktreeSignalKeys — WR41 through WR46 ==="
+TestWorktreeSignalKeys subclass: Object
+
+  classMethod: run: t [
+    | weSource createMatch mergeMatch createKeys mergeKeys |
+    '--- TestWorktreeSignalKeys ---' println.
+
+    "These tests verify that the keys written by create-worktree match
+     the keys read by merge-worktree and the workdir threading code.
+     This is a cross-cutting consistency check from the spec."
+
+    weSource := File readFileContents: 'src/dispatcher/WorkflowEngine.mag'.
+
+    "WR41: Spec says create-worktree writes workdir key"
+    t assert: (weSource includes: 'at: ''workdir'' put: worktreeDir') message: 'WR41: create-worktree must write workdir key'.
+
+    "WR42: Spec says create-worktree writes repo_path key"
+    t assert: (weSource includes: 'at: ''repo_path'' put: repoPath') message: 'WR42: create-worktree must write repo_path key'.
+
+    "WR43: Spec says create-worktree writes feature_branch key"
+    t assert: (weSource includes: 'at: ''feature_branch'' put: featureBranch') message: 'WR43: create-worktree must write feature_branch key'.
+
+    "WR44: Spec says create-worktree writes branch key"
+    t assert: (weSource includes: 'at: ''branch'' put: implBranch') message: 'WR44: create-worktree must write branch key'.
+
+    "WR45: Spec says merge-worktree must read with SAME keys create-worktree writes"
+    "create-worktree writes: workdir, branch, feature_branch, repo_path"
+    "merge-worktree must read these same keys (not camelCase variants)"
+    t assert: (weSource includes: 'payload at: ''repo_path''') message: 'WR45a: merge-worktree must read repo_path (snake_case, matching create-worktree)'.
+    t assert: (weSource includes: 'payload at: ''feature_branch''') message: 'WR45b: merge-worktree must read feature_branch (snake_case, matching create-worktree)'.
+
+    "WR46: Check that merge-worktree does NOT use camelCase keys (common bug)"
+    "If merge uses repoPath instead of repo_path, it will get nil"
+    t assert: (weSource includes: 'payload at: ''repoPath''') not message: 'WR46a: merge-worktree must NOT read camelCase repoPath — use repo_path'.
+    t assert: (weSource includes: 'payload at: ''featureBranch''') not message: 'WR46b: merge-worktree must NOT read camelCase featureBranch — use feature_branch'.
+    t assert: (weSource includes: 'payload at: ''implBranch''') not message: 'WR46c: merge-worktree must NOT read camelCase implBranch — use branch'.
+    t assert: (weSource includes: 'payload at: ''worktreeDir''') not message: 'WR46d: merge-worktree must NOT read camelCase worktreeDir — use workdir'
+  ]
+
+"=== TestNotifyHead — WR47 through WR50 ==="
+TestNotifyHead subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs engine transitions tr1 payload instanceId notifications notifPayload weSource |
+    '--- TestNotifyHead ---' println.
+
+    "WR47: Spec says notify-head writes a notification tuple"
+    tempDir := WRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    transitions := Array new: 0.
+    tr1 := Dictionary new.
+    tr1 at: 'id' put: 'test-notify'.
+    tr1 at: 'in' put: #('start').
+    tr1 at: 'out' put: #('end').
+    tr1 at: 'action' put: 'notify-head'.
+    transitions := transitions copyWith: tr1.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'test-notify-tmpl' payload: payload.
+
+    engine := WRHelper makeEngine: bbs.
+    instanceId := engine instantiate: 'test-notify-tmpl' scope: 'default' params: (Dictionary new).
+
+    [
+      engine advance.
+      t assert: true message: 'WR47a: notify-head action must not crash'
+    ] on: Exception do: [:e |
+      t assert: false message: 'WR47a: notify-head action must not crash (crashed: ', e messageText, ')'
+    ].
+
+    "Check that a notification was written"
+    notifications := bbs scanAll: 'notification'.
+    t assert: (notifications size > 0) message: 'WR47b: notify-head must write at least one notification'.
+
+    WRHelper removeTempDir: tempDir.
+
+    "WR48: Spec says notify-head reads workflow tuple using at: 'payload' (not message send)"
+    weSource := File readFileContents: 'src/dispatcher/WorkflowEngine.mag'.
+    t assert: (weSource includes: 'workflow payload at:') not message: 'WR48: notify-head must NOT use workflow payload (message send) — use (workflow at: ''payload'')'.
+
+    "WR49: Spec says notification includes the instance ID"
+    "Verify the notification identity includes the instance ID pattern"
+    t assert: (weSource includes: 'workflow-complete:') message: 'WR49: notification identity must include workflow-complete: prefix'.
+
+    "WR50: Spec says notification severity is info"
+    t assert: (weSource includes: 'severity'' put: ''info') message: 'WR50: notification severity must be info'
+  ]
+
+"=== TestConventionCompliance — WR51 through WR56 ==="
+TestConventionCompliance subclass: Object
+
+  classMethod: run: t [
+    | weSource mainSource lines inMethod foundBar foundCode trimmed hasMidBlockVars pipeChar quoteChar |
+    '--- TestConventionCompliance ---' println.
+
+    weSource := File readFileContents: 'src/dispatcher/WorkflowEngine.mag'.
+    mainSource := File readFileContents: 'src/Main.mag'.
+
+    "WR51: WorkflowEngine.mag uses instanceVars: keyword form"
+    t assert: (weSource includes: 'instanceVars:') message: 'WR51: WorkflowEngine.mag must use instanceVars: keyword form'.
+
+    "WR52: No ifNil:/ifNotNil: in WorkflowEngine.mag"
+    t assert: (weSource includes: 'ifNil:') not message: 'WR52a: must not use ifNil: in WorkflowEngine.mag'.
+    t assert: (weSource includes: 'ifNotNil:') not message: 'WR52b: must not use ifNotNil: in WorkflowEngine.mag'.
+
+    "WR53: Uses notNil ifTrue: / isNil ifTrue: pattern"
+    t assert: (weSource includes: 'notNil ifTrue:') message: 'WR53a: must use notNil ifTrue: pattern'.
+    t assert: (weSource includes: 'isNil ifTrue:') message: 'WR53b: must use isNil ifTrue: pattern'.
+
+    "WR54: Uses copyWith: for array growth (not add:)"
+    t assert: (weSource includes: 'copyWith:') message: 'WR54: must use copyWith: for array growth'.
+
+    "WR55: Uses ExternalProcess command: '/bin/sh' pattern for shell commands"
+    t assert: (weSource includes: 'ExternalProcess command:') message: 'WR55a: must use ExternalProcess for shell commands'.
+    t assert: (weSource includes: '/bin/sh') message: 'WR55b: must use /bin/sh for shell execution'.
+
+    "WR56: No mid-block temp var declarations in new methods"
+    hasMidBlockVars := false.
+    pipeChar := Character value: 124.
+    quoteChar := Character value: 34.
+    lines := weSource split: '
+'.
+    inMethod := false.
+    foundBar := false.
+    foundCode := false.
+    lines do: [:l |
+      trimmed := l trimBoth.
+      "Detect method start"
+      ((trimmed includes: 'method: actionCreateWorktree:') or:
+       [(trimmed includes: 'method: actionMergeWorktree:') or:
+        [(trimmed includes: 'method: actionNotifyHead:') or:
+         [trimmed includes: 'method: executeAction:']]]) ifTrue: [
+        inMethod := true.
+        foundBar := false.
+        foundCode := false
+      ].
+      "Detect method end"
+      (inMethod and: [trimmed = ']']) ifTrue: [
+        inMethod := false
+      ].
+      "Inside a method, look for | ... | patterns"
+      inMethod ifTrue: [
+        ((trimmed size > 2) and:
+         [(trimmed at: 0) = pipeChar]) ifTrue: [
+          foundBar ifTrue: [
+            foundCode ifTrue: [hasMidBlockVars := true]
+          ].
+          foundBar := true.
+          foundCode := false
+        ] ifFalse: [
+          trimmed isEmpty ifFalse: [
+            (trimmed at: 0) = quoteChar ifFalse: [
+              foundCode := true
+            ]
+          ]
+        ]
+      ]
+    ].
+    t assert: hasMidBlockVars not message: 'WR56: no mid-block temp var declarations in action methods'
+  ]
+
+"=== Main ==="
+TestWorkflowRefactorMain subclass: Object
+
+  classMethod: run [
+    | t |
+    t := WRT new.
+    "Run source-only tests first (no BBS, no git side effects)"
+    [TestConventionCompliance run: t] on: Exception do: [:e |
+      ('TestConventionCompliance CRASHED: ', e messageText) println.
+      t assert: false message: 'TestConventionCompliance crashed'
+    ].
+    [TestWorktreeSignalKeys run: t] on: Exception do: [:e |
+      ('TestWorktreeSignalKeys CRASHED: ', e messageText) println.
+      t assert: false message: 'TestWorktreeSignalKeys crashed'
+    ].
+    "Template and notification tests (BBS but no git side effects)"
+    [TestStoryTemplate run: t] on: Exception do: [:e |
+      ('TestStoryTemplate CRASHED: ', e messageText) println.
+      t assert: false message: 'TestStoryTemplate crashed'
+    ].
+    [TestNotifyHead run: t] on: Exception do: [:e |
+      ('TestNotifyHead CRASHED: ', e messageText) println.
+      t assert: false message: 'TestNotifyHead crashed'
+    ].
+    [TestWorkdirThreading run: t] on: Exception do: [:e |
+      ('TestWorkdirThreading CRASHED: ', e messageText) println.
+      t assert: false message: 'TestWorkdirThreading crashed'
+    ].
+    "Action dispatch and integration tests (may trigger git operations)"
+    [TestActionDispatch run: t] on: Exception do: [:e |
+      ('TestActionDispatch CRASHED: ', e messageText) println.
+      t assert: false message: 'TestActionDispatch crashed'
+    ].
+    [TestStoryIntegration run: t] on: Exception do: [:e |
+      ('TestStoryIntegration CRASHED: ', e messageText) println.
+      t assert: false message: 'TestStoryIntegration crashed'
+    ].
+    t report
+  ]
+
+TestWorkflowRefactorMain run
