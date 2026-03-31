@@ -27,7 +27,7 @@ ClaudeHarness subclass: Object
   method: run [
     "Assemble the system prompt, spawn Claude, wait for completion."
 
-    | contextTuples taskTuple taskDescription taskPayload workflowInstance env args |
+    | contextTuples taskTuple taskDescription taskPayload workflowInstance env args home sessionsDir outputFile |
 
     "Read the task description and workflow instance first (needed for context filtering)"
     taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
@@ -48,12 +48,21 @@ ClaudeHarness subclass: Object
     "Spawn Claude"
     ('Starting Claude harness for ', role name, ' task: ', taskId) println.
 
+    "Ensure sessions directory exists and set output file path"
+    home := System env: 'HOME'.
+    (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
+    sessionsDir := home, '/.pp/sessions'.
+    Shell run: 'mkdir -p "', sessionsDir, '"'.
+    outputFile := sessionsDir, '/', taskId, '.jsonl'.
+
     "Build args array (cannot use #() literal — it treats vars as symbols)"
     args := Array new: 0.
     args := args copyWith: '--system-prompt'.
     args := args copyWith: systemPrompt.
     args := args copyWith: '--allowedTools'.
     args := args copyWith: 'Bash,Read,Write,Edit,Glob,Grep'.
+    args := args copyWith: '--output-file'.
+    args := args copyWith: outputFile.
     args := args copyWith: '-p'.
     args := args copyWith: taskDescription.
 
@@ -75,7 +84,7 @@ ClaudeHarness subclass: Object
 
     "Check result"
     process isSuccess ifTrue: [
-      ('Harness completed: ', taskId) println
+      ('Harness completed: ', taskId, ' (session: ', outputFile, ')') println
     ] ifFalse: [
       ('Harness failed: ', taskId, ' (exit ', process exitCode printString, ')') println.
       ('stderr: ', process stderr) println

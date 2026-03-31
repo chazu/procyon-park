@@ -330,8 +330,10 @@ BBS subclass: Object
   "--- Audit History ---"
 
   method: appendHistory: operation tuple: dict [
-    "Append a compact JSONL audit entry to the history log."
+    "Append a compact JSONL audit entry to the history log.
+     Rotates when file exceeds 10MB."
     | entry jsonLine |
+    self rotateHistoryIfNeeded.
     entry := Dictionary new.
     entry at: 'ts' put: DateTime now epochSeconds.
     entry at: 'op' put: operation.
@@ -342,6 +344,19 @@ BBS subclass: Object
     entry at: 'modality' put: (dict at: 'modality' ifAbsent: ['']).
     jsonLine := Json encode: entry.
     File appendToFile: historyPath contents: jsonLine, (Character lf asString)
+  ]
+
+  method: rotateHistoryIfNeeded [
+    "Rotate history.jsonl when it exceeds 10MB. Keeps one backup (.1)."
+    | sizeStr size |
+    (File exists: historyPath) ifFalse: [^self].
+    sizeStr := Shell capture: 'stat -f%z "', historyPath, '" 2>/dev/null || stat -c%s "', historyPath, '" 2>/dev/null'.
+    sizeStr isEmpty ifTrue: [^self].
+    [size := sizeStr asInteger] on: Exception do: [:e | ^self].
+    size > 10485760 ifTrue: [
+      Shell run: 'mv "', historyPath, '" "', historyPath, '.1"'.
+      ('BBS: rotated history log (', size printString, ' bytes)') println
+    ]
   ]
 
   method: history: filters [
