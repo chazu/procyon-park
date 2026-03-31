@@ -2,6 +2,7 @@
 description: "Full pipeline: plan, implement, review+test, fix cycle"
 start_places: ["request"]
 terminal_places: ["done"]
+max_review_cycles: 3
 
 transitions: [
 	{

@@ -97,7 +97,7 @@ WorkflowEngine subclass: Object
 
   method: advanceInstance: wf [
     "Advance a single workflow instance."
-    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params |
+    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params maxCycles cycleSignal cycleCount verdictPayload |
 
     instanceId := wf at: 'identity'.
     scope := wf at: 'scope'.
@@ -144,6 +144,30 @@ WorkflowEngine subclass: Object
     "Build params with instance available for interpolation"
     params := wfPayload at: 'params' ifAbsent: [Dictionary new].
     params at: 'instance' put: instanceId.
+
+    "Enforce review cycle cap: if max_review_cycles is set and exceeded,
+     override any 'fix' verdict with 'exhausted' so the workflow exits the loop"
+    maxCycles := templatePayload at: 'max_review_cycles' ifAbsent: [nil].
+    maxCycles notNil ifTrue: [
+      cycleSignal := bbs rdp: 'signal' scope: scope identity: 'review_cycle:', instanceId.
+      cycleSignal notNil ifTrue: [
+        cycleCount := (cycleSignal at: 'payload') at: 'count' ifAbsent: [0].
+        cycleCount >= maxCycles ifTrue: [
+          "Check if there is a 'fix' verdict — override to 'exhausted'"
+          cycleSignal := bbs rdp: 'signal' scope: scope identity: 'verdict:', instanceId.
+          cycleSignal notNil ifTrue: [
+            (((cycleSignal at: 'payload') at: 'decision' ifAbsent: ['']) = 'fix') ifTrue: [
+              ('  Review cycle cap reached (', maxCycles printString, ') — overriding verdict to exhausted') println.
+              verdictPayload := Dictionary new.
+              verdictPayload at: 'decision' put: 'exhausted'.
+              verdictPayload at: 'reason' put: 'Review cycle cap exceeded'.
+              bbs upsertSignal: scope identity: 'verdict:', instanceId payload: verdictPayload.
+              bbs notify: ('Review cycle cap reached for ', instanceId, ' — forcing exhausted') scope: scope severity: 'warn'
+            ]
+          ]
+        ]
+      ]
+    ].
 
     "Track consumed tokens within this tick to prevent double-firing"
     consumedTokens := Array new: 0.

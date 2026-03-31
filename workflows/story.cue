@@ -2,6 +2,7 @@
 description: "Single-task: implement in worktree, review, integrate"
 start_places: ["request"]
 terminal_places: ["done"]
+max_review_cycles: 3
 
 transitions: [
 	{
