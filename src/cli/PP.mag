@@ -643,13 +643,37 @@ Worktree base: ~/.pp/worktrees/
     "Compute initial since epoch"
     since := DateTime now epochSeconds - sinceOffset.
 
+    "Non-following mode: single fetch via curl (avoids HttpClient blocking bug)"
+    follow ifFalse: [
+      sinceStr := since printString.
+      url := baseUrl, '/api/notifications/stream?since=', sinceStr, '&wait=0'.
+      response := Shell capture: 'curl -s "', url, '"'.
+      (response notNil and: [response isEmpty not]) ifTrue: [
+        [
+          result := Json decode: response.
+          notifications := result at: 'notifications' ifAbsent: [#()].
+          notifications do: [:notif |
+            payload := notif.
+            createdAt := payload at: 'created_at' ifAbsent: [0].
+            severity := payload at: 'severity' ifAbsent: ['info'].
+            message := payload at: 'message' ifAbsent: [''].
+            dt := DateTime fromEpoch: createdAt.
+            ts := dt printString.
+            (ts, ' [', severity, '] ', message) println
+          ]
+        ] on: Exception do: [:e |
+          ('Error: ', e messageText) println
+        ]
+      ].
+      ^self
+    ].
+
+    "Following mode: long-poll loop via HttpClient"
     [true] whileTrue: [
       sinceStr := since printString.
-      "Pass wait=0 when not following so server returns immediately"
-      waitParam := follow ifTrue: ['1'] ifFalse: ['0'].
-      url := '/api/notifications/stream?since=', sinceStr, '&wait=', waitParam.
+      url := baseUrl, '/api/notifications/stream?since=', sinceStr, '&wait=1'.
       [
-        response := client get: baseUrl, url.
+        response := client get: url.
         (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
           result := Json decode: response.
           notifications := result at: 'notifications' ifAbsent: [#()].
@@ -669,7 +693,6 @@ Worktree base: ~/.pp/worktrees/
       ] on: Exception do: [:e |
         ('Error polling notifications: ', e messageText) println
       ].
-      follow ifFalse: [^self].
       Process sleep: 2000
     ]
   ]
