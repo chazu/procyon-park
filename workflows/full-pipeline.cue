@@ -41,7 +41,7 @@ transitions: [
 		in:          ["reviewing"]
 		out:         ["review_done"]
 		role:        "reviewer"
-		description: "Review implementation for: {{description}}"
+		description: "Review implementation for: {{description}}. IMPORTANT: When done, write observations about what you found."
 	},
 	{
 		id:          "test"
@@ -55,7 +55,7 @@ transitions: [
 		in:          ["review_done", "test_done"]
 		out:         ["evaluating"]
 		role:        "foreman"
-		description: "Evaluate review and test results for: {{description}}"
+		description: "Evaluate review and test results for: {{description}}. Read observations from reviewers/testers. Write verdict: pp signal verdict:{{instance}} decision pass (or fix/exhausted). Also write review cycle count: pp signal review_cycle:{{instance}} count N."
 	},
 	{
 		id:  "pass"
