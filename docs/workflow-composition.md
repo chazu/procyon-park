@@ -82,9 +82,15 @@ This waits for a specific event to appear in the tuplespace before firing.
 
 Rules are standing reactive patterns in the BBS. They have `consumes` (patterns to match and consume), `requires` (patterns that must exist but aren't consumed), and `produces` (tuples to write). They support glob matching (`identity_match: "foo:*"`) and CUE constraint validation. Rules can fire across workflows — they operate on the global tuplespace.
 
-## What You Can't Do (Yet)
+## What You Can Do Now
 
-- **Sub-workflows**: No way to instantiate a workflow from within a transition. A transition can only spawn a single-role task or run a built-in action.
+- **Sub-workflows**: `spawn-workflow` action instantiates a child workflow from a parent transition. Parent tokens wait until the child completes.
+- **Wave dispatch**: `dispatch-waves` action reads an epic's children (or a plan decision) and dispatches them as parallel story workflows, grouped by wave number.
+- **Agent timeouts**: Harness wraps claude with 30-minute wall clock timeout and --max-turns 200.
+- **Review cycle cap**: Templates can set `max_review_cycles` to prevent infinite fix loops.
+
+## Current Limitations
+
 - **Dynamic transition creation**: The template is static once instantiated. You can't add transitions at runtime.
 - **Cross-workflow token passing**: Each workflow has its own token namespace. Workflows can only communicate via signals/events in the shared BBS.
-- **Timeouts**: No transition-level or workflow-level timeout. A stuck waiting token stays forever.
+- **Wave-level merge**: Stories in a wave create separate feature branches. No shared branch across a wave (each story merges independently).

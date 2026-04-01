@@ -267,9 +267,11 @@ pp workflow my-template --param description="Build widgets" --param repo=alto
 
 | Template | Use | Transitions |
 |----------|-----|-------------|
-| `full-pipeline` | Plan → dispatch → review+test → evaluate → merge | 13 |
+| `full-pipeline` | Plan → dispatch-waves → review+test → evaluate → merge | 13 |
 | `story` | Implement → review → fix cycle → merge | 8 |
 | `story-lite` | Implement → merge (no review) | 4 |
 | `scout-mission` | Research task → findings doc | 3 |
 | `feature-design` | Idea → epic → stories → review → finalize | 10 |
 | `multi-scout` | Spawn parallel scout missions | 2 |
+| `workitem-plan` | Research → decompose work item into child stories | 4 |
+| `workitem-review` | Review and refine work item tree | 3 |
