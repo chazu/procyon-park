@@ -48,12 +48,16 @@ and optionally depends_on and wave number. A Foreman agent reads your plan and d
   method: completionInstructions [
     ^'1. Write plan JSON: {"identity": "plan-name", "subtasks": [
      {"identity": "id", "role": "implementer", "description": "...",
-      "wave": 1, "depends_on": []}
+      "wave": 1, "depends_on": [], "template": "story", "repo": "repo-name"}
    ]}
 2. Submit: pp plan plan.json
 3. Dismiss: pp dismiss
 
-Subtasks MUST have: identity, role, description.
-Subtasks SHOULD have: wave number, depends_on array.
-Descriptions MUST include specific file paths and method names.'
+Subtask fields:
+  MUST:   identity, role, description (with specific file paths and methods)
+  MUST:   wave (integer — 1 = no deps, 2 = after wave 1, etc.)
+  SHOULD: depends_on (array of subtask identities)
+  SHOULD: repo (which registered repo this task targets)
+  CAN:    template — "story" (default, has review cycle) or "story-lite" (no review, for mechanical changes like renames, config edits, adding tests)
+  CAN:    batch — string tag to group small tasks into one agent session. Tasks with the same batch value in the same wave are combined into a single workflow. Use for 2+ trivial tasks that touch the same repo.'
   ]

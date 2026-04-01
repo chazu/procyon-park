@@ -480,10 +480,10 @@ WorkflowEngine subclass: Object
   method: actionDispatchWaves: transition instance: instanceId params: params [
     "Engine-driven wave dispatch. Reads the plan decision from BBS,
      groups subtasks by wave, dispatches wave 1 immediately.
-     Subsequent waves are dispatched by promoteWaitingTokens when
+     Subsequent waves are dispatched by checkWaveCompletion when
      the previous wave completes."
 
-    | scope decisions plan subtasks waves maxWave waveSignal wavePayload |
+    | scope decisions plan subtasks maxWave wavePayload planPayload w |
 
     scope := self scopeForInstance: instanceId.
 
@@ -491,9 +491,8 @@ WorkflowEngine subclass: Object
     decisions := bbs scan: 'decision' scope: scope.
     plan := nil.
     decisions do: [:d |
-      | p |
-      p := d at: 'payload'.
-      (p at: 'subtasks' ifAbsent: [nil]) notNil ifTrue: [plan := d]
+      planPayload := d at: 'payload'.
+      (planPayload at: 'subtasks' ifAbsent: [nil]) notNil ifTrue: [plan := d]
     ].
     plan isNil ifTrue: [
       ('dispatch-waves: no plan decision found in scope ', scope) println.
@@ -508,20 +507,20 @@ WorkflowEngine subclass: Object
       ^self
     ].
 
-    "2. Group subtasks by wave"
+    "2. Find max wave number"
     maxWave := 1.
     subtasks do: [:st |
-      | w |
       w := st at: 'wave' ifAbsent: [1].
       w > maxWave ifTrue: [maxWave := w]
     ].
 
-    "3. Write wave tracking signal"
+    "3. Write wave tracking signal (includes params for subsequent waves)"
     wavePayload := Dictionary new.
     wavePayload at: 'current_wave' put: 1.
     wavePayload at: 'max_wave' put: maxWave.
     wavePayload at: 'transition_id' put: (transition at: 'id').
     wavePayload at: 'subtasks' put: subtasks.
+    wavePayload at: 'params' put: params.
     bbs upsertSignal: instanceId identity: 'wave-dispatch' payload: wavePayload.
 
     "4. Dispatch wave 1"
@@ -533,46 +532,86 @@ WorkflowEngine subclass: Object
   ]
 
   method: dispatchWave: waveNum subtasks: subtasks instance: instanceId scope: scope params: params [
-    "Dispatch all subtasks in the given wave as child workflows."
-    | waveSubtasks childTemplate childParams childId waveChildIds childScope signalPayload statusPayload desc repo identity |
+    "Dispatch all subtasks in the given wave as child workflows.
+     Subtasks with the same batch tag are combined into a single workflow.
+     Reads template field to choose story vs story-lite."
+
+    | waveSubtasks childTemplate childParams childId waveChildIds childScope signalPayload statusPayload desc repo identity batchGroups batchKey batchList batchDesc |
     waveSubtasks := subtasks select: [:st | (st at: 'wave' ifAbsent: [1]) = waveNum].
     waveChildIds := Array new: 0.
 
     ('  Dispatching wave ', waveNum printString, ': ', waveSubtasks size printString, ' tasks') println.
 
+    "Group by batch tag — unbatched tasks get dispatched individually"
+    batchGroups := Dictionary new.
     waveSubtasks do: [:st |
-      desc := st at: 'description' ifAbsent: ['No description'].
-      repo := st at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]].
-      identity := st at: 'identity' ifAbsent: ['subtask'].
-      childTemplate := st at: 'template' ifAbsent: ['story'].
-      childScope := scope.
+      batchKey := st at: 'batch' ifAbsent: [nil].
+      batchKey isNil ifTrue: [
+        "No batch — dispatch individually"
+        desc := st at: 'description' ifAbsent: ['No description'].
+        repo := st at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]].
+        identity := st at: 'identity' ifAbsent: ['subtask'].
+        childTemplate := st at: 'template' ifAbsent: ['story'].
 
-      "Build child params"
+        childParams := Dictionary new.
+        childParams at: 'description' put: desc.
+        repo notNil ifTrue: [childParams at: 'repo' put: repo].
+
+        childId := self instantiate: childTemplate scope: scope params: childParams.
+        waveChildIds := waveChildIds copyWith: childId.
+
+        signalPayload := Dictionary new.
+        signalPayload at: 'child_instance' put: childId.
+        signalPayload at: 'child_scope' put: scope.
+        signalPayload at: 'wave' put: waveNum.
+        signalPayload at: 'subtask_identity' put: identity.
+        bbs upsertSignal: instanceId identity: 'wave-child:', waveNum printString, ':', childId payload: signalPayload.
+
+        ('    Dispatched: ', identity, ' → ', childId) println
+      ] ifFalse: [
+        "Batched — collect for grouped dispatch"
+        batchList := batchGroups at: batchKey ifAbsent: [nil].
+        batchList isNil ifTrue: [
+          batchList := Array new: 0.
+          batchGroups at: batchKey put: batchList
+        ].
+        batchGroups at: batchKey put: (batchList copyWith: st)
+      ]
+    ].
+
+    "Dispatch batched groups as single workflows"
+    batchGroups keysAndValuesDo: [:key :tasks |
+      batchDesc := 'Batch [', key, ']: '.
+      repo := nil.
+      childTemplate := 'story-lite'.
+      tasks do: [:st |
+        batchDesc := batchDesc, (st at: 'identity' ifAbsent: ['?']), ': ', (st at: 'description' ifAbsent: ['']), '. '.
+        repo isNil ifTrue: [repo := st at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]]].
+        "Use story (not lite) if any task in batch requests it"
+        (st at: 'template' ifAbsent: ['story-lite']) = 'story' ifTrue: [childTemplate := 'story']
+      ].
+
       childParams := Dictionary new.
-      childParams at: 'description' put: desc.
+      childParams at: 'description' put: batchDesc.
       repo notNil ifTrue: [childParams at: 'repo' put: repo].
 
-      "Instantiate child workflow"
-      childId := self instantiate: childTemplate scope: childScope params: childParams.
-
-      "Track child for wave completion"
+      childId := self instantiate: childTemplate scope: scope params: childParams.
       waveChildIds := waveChildIds copyWith: childId.
 
-      "Write child-spawn signal"
       signalPayload := Dictionary new.
       signalPayload at: 'child_instance' put: childId.
-      signalPayload at: 'child_scope' put: childScope.
+      signalPayload at: 'child_scope' put: scope.
       signalPayload at: 'wave' put: waveNum.
-      signalPayload at: 'subtask_identity' put: identity.
+      signalPayload at: 'subtask_identity' put: 'batch:', key.
       bbs upsertSignal: instanceId identity: 'wave-child:', waveNum printString, ':', childId payload: signalPayload.
 
-      ('    Dispatched: ', identity, ' → ', childId) println
+      ('    Dispatched batch [', key, '] (', tasks size printString, ' tasks) → ', childId) println
     ].
 
     "Write wave status signal"
     statusPayload := Dictionary new.
     statusPayload at: 'wave' put: waveNum.
-    statusPayload at: 'total' put: waveSubtasks size.
+    statusPayload at: 'total' put: waveChildIds size.
     statusPayload at: 'child_ids' put: waveChildIds.
     bbs upsertSignal: instanceId identity: 'wave-status:', waveNum printString payload: statusPayload
   ]
@@ -622,8 +661,8 @@ WorkflowEngine subclass: Object
       "Update the wave-dispatch signal to track current wave"
       wdPayload at: 'current_wave' put: nextWave.
       bbs upsertSignal: instanceId identity: 'wave-dispatch' payload: wdPayload.
-      "Dispatch next wave"
-      self dispatchWave: nextWave subtasks: subtasks instance: instanceId scope: scope params: (Dictionary new).
+      "Dispatch next wave (use stored params so repo etc. are preserved)"
+      self dispatchWave: nextWave subtasks: subtasks instance: instanceId scope: scope params: (wdPayload at: 'params' ifAbsent: [Dictionary new]).
       ^nil  "Not done yet — more waves to go"
     ].
 

@@ -27,7 +27,7 @@ ClaudeHarness subclass: Object
   method: run [
     "Assemble the system prompt, spawn Claude, wait for completion."
 
-    | contextTuples taskTuple taskDescription taskPayload workflowInstance env args home sessionsDir outputFile |
+    | contextTuples taskTuple taskDescription taskPayload workflowInstance env args home sessionsDir outputFile timeoutArgs |
 
     "Read the task description and workflow instance first (needed for context filtering)"
     taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
@@ -61,6 +61,8 @@ ClaudeHarness subclass: Object
     args := args copyWith: systemPrompt.
     args := args copyWith: '--allowedTools'.
     args := args copyWith: 'Bash,Read,Write,Edit,Glob,Grep'.
+    args := args copyWith: '--max-turns'.
+    args := args copyWith: '200'.
     args := args copyWith: '-p'.
     args := args copyWith: taskDescription.
 
@@ -73,8 +75,13 @@ ClaudeHarness subclass: Object
     env at: 'PP_REPO_PATH' put: workDir.
     env at: 'PP_WORKFLOW' put: workflowInstance.
 
-    process := ExternalProcess command: 'claude'.
-    process args: args.
+    "Wrap claude with 30-minute timeout to prevent silent hangs"
+    timeoutArgs := Array new: 0.
+    timeoutArgs := timeoutArgs copyWith: '1800'.
+    timeoutArgs := timeoutArgs copyWith: 'claude'.
+    args do: [:a | timeoutArgs := timeoutArgs copyWith: a].
+    process := ExternalProcess command: 'timeout'.
+    process args: timeoutArgs.
     process env: env.
     process dir: workDir.
 
