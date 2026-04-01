@@ -68,7 +68,7 @@ Main subclass: Object
     'Usage: pp <command> [args...]' println.
     '' println.
     'Server:' println.
-    '  serve [--port 7777] [--reseed-templates]        Start the Procyon Park server' println.
+    '  serve [--port 7777]                            Start the Procyon Park server' println.
     '' println.
     'Agent Commands (talk to a running server):' println.
     '  observe  <identity> <detail> [--tags t1,t2]    Report an observation' println.
@@ -107,7 +107,7 @@ Main subclass: Object
   "--- Server ---"
 
   classMethod: startServer: args [
-    | bbs api dispatcher harnessFactory port portStr reseed |
+    | bbs api dispatcher harnessFactory port portStr |
 
     'Procyon Park v0.1.0' println.
     '===================' println.
@@ -116,7 +116,6 @@ Main subclass: Object
     port := 7777.
     portStr := self flagValue: '--port' in: args.
     portStr notNil ifTrue: [port := portStr asInteger].
-    reseed := (args indexOf: '--reseed-templates') >= 0.
 
     "Initialize BBS"
     bbs := BBS new.
@@ -128,20 +127,11 @@ Main subclass: Object
     ] ifFalse: [
       'System conventions loaded from disk.' println
     ].
-    reseed ifTrue: [
-      "Remove existing templates and re-seed from CUE files"
-      (bbs scanAll: 'template') do: [:t |
-        bbs inp: 'template' scope: (t at: 'scope') identity: (t at: 'identity')
-      ].
-      self seedTemplates: bbs.
-      'Workflow templates re-seeded from CUE files.' println
-    ] ifFalse: [
-      (bbs scanAll: 'template') size = 0 ifTrue: [
-        self seedTemplates: bbs
-      ] ifFalse: [
-        'Workflow templates loaded from disk.' println
-      ]
+    "Always load templates fresh from CUE files (templates are source code, not runtime state)"
+    (bbs scanAll: 'template') do: [:t |
+      bbs inp: 'template' scope: (t at: 'scope') identity: (t at: 'identity')
     ].
+    self seedTemplates: bbs.
 
     "Initialize harness factory"
     harnessFactory := HarnessFactory new.
