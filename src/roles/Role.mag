@@ -4,6 +4,50 @@
 Role subclass: Object
   instanceVars: name description systemPromptTemplate contextConstraints ppCommands
 
+  "--- Class-side protocol: subclasses override these ---"
+
+  classMethod: roleName [ ^'role' ]
+  classMethod: roleDescription [ ^'Override roleDescription in subclass.' ]
+  classMethod: rolePpCommands [ ^#() ]
+  classMethod: hardCategories [ ^#() ]
+  classMethod: softCategories [ ^#() ]
+  classMethod: contextBudget [ ^50 ]
+
+  classMethod: new [
+    "Template method: builds a Role from class-side protocol overrides."
+    | r hard soft constraints |
+    r := super new.
+    r name: self roleName.
+    r description: self roleDescription.
+    r ppCommands: self rolePpCommands.
+
+    hard := self buildConstraintSpecs: self hardCategories.
+    soft := self buildConstraintSpecs: self softCategories.
+
+    constraints := Dictionary new.
+    constraints at: 'hard' put: hard.
+    constraints at: 'soft' put: soft.
+    constraints at: 'budget' put: self contextBudget.
+    r contextConstraints: constraints.
+
+    ^r
+  ]
+
+  classMethod: buildConstraintSpecs: categories [
+    "Convert an array of category strings into constraint spec dictionaries."
+    | specs |
+    specs := Array new: 0.
+    categories do: [:cat |
+      | h |
+      h := Dictionary new.
+      h at: 'category' put: cat.
+      specs := specs copyWith: h
+    ].
+    ^specs
+  ]
+
+  "--- Instance accessors ---"
+
   method: name [ ^name ]
   method: description [ ^description ]
   method: systemPromptTemplate [ ^systemPromptTemplate ]

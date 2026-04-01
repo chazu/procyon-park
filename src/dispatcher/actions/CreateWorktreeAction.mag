@@ -1,0 +1,85 @@
+"CreateWorktree action — creates a feature branch and worktree for a workflow instance."
+
+CreateWorktreeAction subclass: WorkflowAction
+
+  method: execute: transition instance: instanceId params: params [
+    "Create a feature branch and worktree for the workflow instance.
+     1. Read repo signal for path (fall back to PP_REPO_PATH or cwd).
+     2. Create feature branch from main.
+     3. Create worktree with impl branch.
+     4. Write worktree signal for downstream transitions.
+     5. Checkout main in original repo."
+
+    | repo repoPath repoName repoConfig home featureBranch worktreeDir implBranch payload scope |
+
+    "1. Determine repo path — priority: params['repo'] → signal → env → cwd"
+    repoName := params at: 'repo' ifAbsent: [nil].
+    repoName notNil ifTrue: [
+      repoConfig := Repo new repoForName: repoName.
+      repoConfig notNil ifTrue: [
+        repoPath := repoConfig at: 'path' ifAbsent: [nil]
+      ]
+    ].
+    repoPath isNil ifTrue: [
+      repo := bbs rdp: 'signal' scope: instanceId identity: 'repo'.
+      repo notNil ifTrue: [
+        repoPath := (repo at: 'payload') at: 'path'
+      ]
+    ].
+    repoPath isNil ifTrue: [
+      repoPath := System env: 'PP_REPO_PATH'
+    ].
+    (repoPath isNil or: [repoPath isEmpty]) ifTrue: [
+      repoPath := File workingDirectory
+    ].
+
+    home := System env: 'HOME'.
+    (home isNil or: [home isEmpty]) ifTrue: [
+      home := '/tmp'
+    ].
+
+    featureBranch := 'feature/', instanceId.
+    implBranch := 'impl/', instanceId.
+    worktreeDir := home, '/.pp/worktrees/', instanceId, '/impl'.
+
+    "Find scope for error reporting"
+    scope := engine scopeForInstance: instanceId.
+
+    "2. Create feature branch from main"
+    [
+      GitOps createFeatureBranch: featureBranch in: repoPath.
+      ('  Created feature branch: ', featureBranch) println
+    ] on: Exception do: [:e |
+      ('  ERROR: failed to create feature branch: ', e messageText) println.
+      bbs notify: ('create-worktree failed: could not create branch ', featureBranch, ' — ', e messageText)
+        scope: scope severity: 'urgent'.
+      ^self
+    ].
+
+    "3. Create worktree for implementation"
+    [
+      GitOps createWorktree: worktreeDir branch: implBranch in: repoPath.
+      ('  Created worktree: ', worktreeDir) println
+    ] on: Exception do: [:e |
+      ('  ERROR: failed to create worktree: ', e messageText) println.
+      bbs notify: ('create-worktree failed: could not create worktree for ', instanceId, ' — ', e messageText)
+        scope: scope severity: 'urgent'.
+      ^self
+    ].
+
+    "4. Write worktree signal for downstream transitions"
+    payload := Dictionary new.
+    payload at: 'workdir' put: worktreeDir.
+    payload at: 'branch' put: implBranch.
+    payload at: 'feature_branch' put: featureBranch.
+    payload at: 'repo_path' put: repoPath.
+    bbs upsertSignal: instanceId identity: 'worktree' payload: payload.
+    ('  Wrote worktree signal for: ', instanceId) println.
+
+    "5. Checkout main in original repo so it is not left on the feature branch"
+    [GitOps checkoutBranch: 'main' in: repoPath]
+      on: Exception do: [:e |
+        ('  WARNING: could not restore main in ', repoPath, ': ', e messageText) println
+      ].
+    ('  Restored main in: ', repoPath) println
+  ]

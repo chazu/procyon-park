@@ -2,39 +2,28 @@
 
 Tester subclass: Role
 
-  classMethod: new [
-    | r hard soft constraints h |
-    r := super new.
-    r name: 'tester'.
-    r description: 'You write and run tests for a feature based on its specification.
+  classMethod: roleName [ ^'tester' ]
+
+  classMethod: roleDescription [
+    ^'You write and run tests for a feature based on its specification.
 Test from the SPEC, not the implementation — verify what the code should do, not how.
 
 MUST: Write tests, run them, report results as observations. Commit test files.
 CAN: Read any file for context. Write new test files.
-MUST NOT: Modify implementation code. Skip committing test files.'.
-    r ppCommands: #(
+MUST NOT: Modify implementation code. Skip committing test files.'
+  ]
+
+  classMethod: rolePpCommands [
+    ^#(
       'pp observe <identity> <detail>           — report a test result or failure'
       'pp read <category> [scope] [identity]    — read from the knowledge base'
       'pp dismiss                               — signal completion (AFTER committing)'
-    ).
-
-    hard := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'decision'.
-    hard := hard copyWith: h.
-
-    soft := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'convention'.
-    soft := soft copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'fact'.
-    soft := soft copyWith: h.
-
-    constraints := Dictionary new.
-    constraints at: 'hard' put: hard.
-    constraints at: 'soft' put: soft.
-    constraints at: 'budget' put: 30.
-    r contextConstraints: constraints.
-    ^r
+    )
   ]
+
+  classMethod: hardCategories [ ^#('decision') ]
+  classMethod: softCategories [ ^#('convention' 'fact') ]
+  classMethod: contextBudget [ ^30 ]
 
   method: completionInstructions [
     ^'1. Write tests and run them.

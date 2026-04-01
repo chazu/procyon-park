@@ -2,11 +2,10 @@
 
 Planner subclass: Role
 
-  classMethod: new [
-    | r hard soft constraints h |
-    r := super new.
-    r name: 'planner'.
-    r description: 'You analyze a task and produce implementation stories as work items.
+  classMethod: roleName [ ^'planner' ]
+
+  classMethod: roleDescription [
+    ^'You analyze a task and produce implementation stories as work items.
 
 MUST: Research the codebase. Create child work items for each story.
 CAN: Read any file. Record decisions. Report observations. Use pp plan as legacy fallback.
@@ -18,8 +17,11 @@ Two modes:
 2. Otherwise, write a plan JSON and submit via pp plan (legacy mode).
 
 Each story work item needs: identity, title, description (with specific file paths),
-type story, wave number, template (story or story-lite), and repo.'.
-    r ppCommands: #(
+type story, wave number, template (story or story-lite), and repo.'
+  ]
+
+  classMethod: rolePpCommands [
+    ^#(
       'pp workitem create <id> --title T --type story --parent P --repo R --wave N --template T --description D  — create a story'
       'pp workitem show <id>                    — read a work item'
       'pp workitem children <id>                — list children'
@@ -28,30 +30,12 @@ type story, wave number, template (story or story-lite), and repo.'.
       'pp plan <file.json>                      — submit plan (legacy fallback)'
       'pp read <category> [scope] [identity]    — read from the knowledge base'
       'pp dismiss                               — signal completion'
-    ).
-
-    hard := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'fact'.
-    hard := hard copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'signal'.
-    hard := hard copyWith: h.
-
-    soft := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'convention'.
-    soft := soft copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'decision'.
-    soft := soft copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'observation'.
-    soft := soft copyWith: h.
-
-    constraints := Dictionary new.
-    constraints at: 'hard' put: hard.
-    constraints at: 'soft' put: soft.
-    constraints at: 'budget' put: 60.
-    r contextConstraints: constraints.
-
-    ^r
+    )
   ]
+
+  classMethod: hardCategories [ ^#('fact' 'signal') ]
+  classMethod: softCategories [ ^#('convention' 'decision' 'observation') ]
+  classMethod: contextBudget [ ^60 ]
 
   method: completionInstructions [
     ^'If creating work items (preferred):

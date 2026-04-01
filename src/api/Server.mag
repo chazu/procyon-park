@@ -35,35 +35,127 @@ ApiServer subclass: Object
 
   method: registerRoutes [
     "Health"
-    httpServer route: '/api/health' method: 'GET' handler: [:req | self handleHealth: req].
+    self get: '/api/health' do: [:req | self handleHealth: req].
 
     "Core tuplespace operations"
     httpServer route: '/api/out' method: 'POST' handler: [:req | self handleOut: req].
-    httpServer route: '/api/inp' method: 'POST' handler: [:req | self handleInp: req].
-    httpServer route: '/api/rdp' method: 'POST' handler: [:req | self handleRdp: req].
-    httpServer route: '/api/scan' method: 'POST' handler: [:req | self handleScan: req].
+    self post: '/api/inp' fields: #('category' 'scope' 'identity') do: [:body |
+      | tuple d |
+      tuple := bbs inp: (body at: 'category') scope: (body at: 'scope') identity: (body at: 'identity').
+      d := Dictionary new. d at: 'tuple' put: tuple.
+      self okResponse: d
+    ].
+    self post: '/api/rdp' fields: #('category' 'scope' 'identity') do: [:body |
+      | tuple d |
+      tuple := bbs rdp: (body at: 'category') scope: (body at: 'scope') identity: (body at: 'identity').
+      d := Dictionary new. d at: 'tuple' put: tuple.
+      self okResponse: d
+    ].
+    self post: '/api/scan' fields: #('category') do: [:body |
+      | tuples d |
+      (body includesKey: 'scope')
+        ifTrue: [tuples := bbs scan: (body at: 'category') scope: (body at: 'scope')]
+        ifFalse: [tuples := bbs scanAll: (body at: 'category')].
+      d := Dictionary new. d at: 'tuples' put: tuples. d at: 'count' put: tuples size.
+      self okResponse: d
+    ].
 
     "Convenience endpoints"
-    httpServer route: '/api/observe' method: 'POST' handler: [:req | self handleObserve: req].
-    httpServer route: '/api/decide' method: 'POST' handler: [:req | self handleDecide: req].
-    httpServer route: '/api/event' method: 'POST' handler: [:req | self handleEvent: req].
-    httpServer route: '/api/notify' method: 'POST' handler: [:req | self handleNotify: req].
-    httpServer route: '/api/dismiss' method: 'POST' handler: [:req | self handleDismiss: req].
-    httpServer route: '/api/notifications' method: 'GET' handler: [:req | self handleNotifications: req].
-    httpServer route: '/api/notifications/stream' method: 'GET' handler: [:req | self handleNotificationStream: req].
-    httpServer route: '/api/plan' method: 'POST' handler: [:req | self handlePlan: req].
-    httpServer route: '/api/workflow/start' method: 'POST' handler: [:req | self handleWorkflowStart: req].
+    self post: '/api/observe' fields: #('scope' 'identity' 'detail') do: [:body |
+      | id |
+      id := bbs observe: (body at: 'scope')
+               identity: (body at: 'identity')
+               detail: (body at: 'detail')
+               tags: (body at: 'tags' ifAbsent: [#()])
+               task: (body at: 'task' ifAbsent: ['']).
+      self okResponse: (self okWithId: id)
+    ].
+    self post: '/api/decide' fields: #('scope' 'identity' 'detail') do: [:body |
+      | id |
+      id := bbs decide: (body at: 'scope')
+               identity: (body at: 'identity')
+               detail: (body at: 'detail')
+               rationale: (body at: 'rationale' ifAbsent: [''])
+               task: (body at: 'task' ifAbsent: ['']).
+      self okResponse: (self okWithId: id)
+    ].
+    self post: '/api/event' fields: #('scope' 'identity') do: [:body |
+      | id |
+      id := bbs emitEvent: (body at: 'scope')
+                identity: (body at: 'identity')
+                type: (body at: 'type' ifAbsent: ['generic'])
+                summary: (body at: 'summary' ifAbsent: ['']).
+      self okResponse: (self okWithId: id)
+    ].
+    self post: '/api/notify' fields: #('message') do: [:body |
+      | id |
+      id := bbs notify: (body at: 'message')
+               scope: (body at: 'scope' ifAbsent: ['system'])
+               severity: (body at: 'severity' ifAbsent: ['info']).
+      self okResponse: (self okWithId: id)
+    ].
+    self post: '/api/dismiss' fields: #('task_id' 'scope') do: [:body |
+      | d |
+      bbs emitEvent: (body at: 'scope')
+          identity: 'task-complete:', (body at: 'task_id')
+          type: 'task-complete'
+          summary: 'Agent dismissed'.
+      bbs notify: ('Agent completed task: ', (body at: 'task_id'))
+          scope: (body at: 'scope')
+          severity: 'info'.
+      d := Dictionary new. d at: 'status' put: 'dismissed'.
+      self okResponse: d
+    ].
+    self get: '/api/notifications' do: [:req | self handleNotifications: req].
+    self get: '/api/notifications/stream' do: [:req | self handleNotificationStream: req].
+    self post: '/api/plan' fields: #('scope' 'identity' 'subtasks') do: [:body |
+      | scope identity subtasks planPayload d |
+      scope := body at: 'scope'. identity := body at: 'identity'. subtasks := body at: 'subtasks'.
+      planPayload := Dictionary new.
+      planPayload at: 'detail' put: 'Plan: ', identity.
+      planPayload at: 'subtasks' put: subtasks.
+      planPayload at: 'task' put: (body at: 'task' ifAbsent: ['']).
+      bbs outPinned: 'decision' scope: scope identity: 'plan:', identity payload: planPayload.
+      d := Dictionary new.
+      d at: 'status' put: 'ok'. d at: 'plan_id' put: identity. d at: 'subtasks' put: subtasks size.
+      self okResponse: d
+    ].
+    self post: '/api/workflow/start' fields: #('template' 'scope') do: [:body |
+      | instanceId d |
+      dispatcher isNil ifTrue: [
+        self errorResponse: 500 message: 'No dispatcher configured'
+      ] ifFalse: [
+        instanceId := dispatcher instantiateWorkflow: (body at: 'template') scope: (body at: 'scope') params: (body at: 'params' ifAbsent: [Dictionary new]).
+        d := Dictionary new. d at: 'status' put: 'ok'. d at: 'workflow_id' put: instanceId.
+        self okResponse: d
+      ]
+    ].
     httpServer route: '/api/workflow/status' method: 'POST' handler: [:req | self handleWorkflowStatus: req].
     httpServer route: '/api/workflow/cancel' method: 'POST' handler: [:req | self handleWorkflowCancel: req].
-    httpServer route: '/api/task/create' method: 'POST' handler: [:req | self handleTaskCreate: req].
+    self post: '/api/task/create' fields: #('scope' 'identity' 'role' 'description') do: [:body |
+      | taskPayload id |
+      taskPayload := Dictionary new.
+      taskPayload at: 'role' put: (body at: 'role').
+      taskPayload at: 'status' put: 'pending'.
+      taskPayload at: 'description' put: (body at: 'description').
+      (body includesKey: 'workdir') ifTrue: [taskPayload at: 'workdir' put: (body at: 'workdir')].
+      (body includesKey: 'workflow_instance') ifTrue: [taskPayload at: 'workflow_instance' put: (body at: 'workflow_instance')].
+      (body includesKey: 'repo') ifTrue: [taskPayload at: 'repo' put: (body at: 'repo')].
+      id := bbs out: 'task' scope: (body at: 'scope') identity: (body at: 'identity') payload: taskPayload.
+      self okResponse: (self okWithId: id)
+    ].
+    self post: '/api/signal' fields: #('scope' 'identity' 'payload') do: [:body |
+      | id |
+      id := bbs upsertSignal: (body at: 'scope') identity: (body at: 'identity') payload: (body at: 'payload').
+      self okResponse: (self okWithId: id)
+    ].
     httpServer route: '/api/workitem/create' method: 'POST' handler: [:req | self handleWorkitemCreate: req].
     httpServer route: '/api/workitem/update' method: 'POST' handler: [:req | self handleWorkitemUpdate: req].
     httpServer route: '/api/workitem/comment' method: 'POST' handler: [:req | self handleWorkitemComment: req].
     httpServer route: '/api/workitem/add-child' method: 'POST' handler: [:req | self handleWorkitemAddChild: req].
     httpServer route: '/api/workitem/run' method: 'POST' handler: [:req | self handleWorkitemRun: req].
-    httpServer route: '/api/signal' method: 'POST' handler: [:req | self handleSignal: req].
-    httpServer route: '/api/dashboard' method: 'GET' handler: [:req | self handleDashboard: req].
-    httpServer route: '/api/history' method: 'GET' handler: [:req | self handleHistory: req]
+    self get: '/api/dashboard' do: [:req | self handleDashboard: req].
+    self get: '/api/history' do: [:req | self handleHistory: req]
   ]
 
   "--- Helpers ---"
@@ -102,6 +194,26 @@ ApiServer subclass: Object
       ]
     ].
     ^nil
+  ]
+
+  method: post: path fields: fields do: aBlock [
+    "Register a POST route with auto JSON parsing and field validation.
+     aBlock receives the parsed body Dictionary."
+    httpServer route: path method: 'POST' handler: [:req |
+      | body err |
+      body := self parseBody: req.
+      body isNil ifTrue: [self errorResponse: 400 message: 'Invalid JSON'] ifFalse: [
+        err := self requireFields: fields in: body.
+        err notNil ifTrue: [self errorResponse: 400 message: err] ifFalse: [
+          aBlock value: body
+        ]
+      ]
+    ]
+  ]
+
+  method: get: path do: aBlock [
+    "Register a GET route. aBlock receives the request."
+    httpServer route: path method: 'GET' handler: [:req | aBlock value: req]
   ]
 
   method: makeResult: key value: val [
@@ -196,142 +308,7 @@ ApiServer subclass: Object
     ^self okResponse: (self okWithId: id)
   ]
 
-  method: handleInp: req [
-    | body err tuple d |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('category' 'scope' 'identity') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    tuple := bbs inp: (body at: 'category') scope: (body at: 'scope') identity: (body at: 'identity').
-    d := Dictionary new.
-    d at: 'tuple' put: tuple.
-    ^self okResponse: d
-  ]
-
-  method: handleRdp: req [
-    | body err tuple d |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('category' 'scope' 'identity') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    tuple := bbs rdp: (body at: 'category') scope: (body at: 'scope') identity: (body at: 'identity').
-    d := Dictionary new.
-    d at: 'tuple' put: tuple.
-    ^self okResponse: d
-  ]
-
-  method: handleScan: req [
-    | body err tuples d |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('category') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    (body includesKey: 'scope')
-      ifTrue: [tuples := bbs scan: (body at: 'category') scope: (body at: 'scope')]
-      ifFalse: [tuples := bbs scanAll: (body at: 'category')].
-
-    d := Dictionary new.
-    d at: 'tuples' put: tuples.
-    d at: 'count' put: tuples size.
-    ^self okResponse: d
-  ]
-
   "--- Convenience Endpoints ---"
-
-  method: handleObserve: req [
-    | body err id |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('scope' 'identity' 'detail') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    id := bbs observe: (body at: 'scope')
-               identity: (body at: 'identity')
-               detail: (body at: 'detail')
-               tags: (body at: 'tags' ifAbsent: [#()])
-               task: (body at: 'task' ifAbsent: ['']).
-
-    ^self okResponse: (self okWithId: id)
-  ]
-
-  method: handleDecide: req [
-    | body err id |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('scope' 'identity' 'detail') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    id := bbs decide: (body at: 'scope')
-               identity: (body at: 'identity')
-               detail: (body at: 'detail')
-               rationale: (body at: 'rationale' ifAbsent: [''])
-               task: (body at: 'task' ifAbsent: ['']).
-
-    ^self okResponse: (self okWithId: id)
-  ]
-
-  method: handleEvent: req [
-    | body err id |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('scope' 'identity') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    id := bbs emitEvent: (body at: 'scope')
-                identity: (body at: 'identity')
-                type: (body at: 'type' ifAbsent: ['generic'])
-                summary: (body at: 'summary' ifAbsent: ['']).
-
-    ^self okResponse: (self okWithId: id)
-  ]
-
-  method: handleNotify: req [
-    | body err id |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('message') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    id := bbs notify: (body at: 'message')
-               scope: (body at: 'scope' ifAbsent: ['system'])
-               severity: (body at: 'severity' ifAbsent: ['info']).
-
-    ^self okResponse: (self okWithId: id)
-  ]
-
-  method: handleDismiss: req [
-    | body err d |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('task_id' 'scope') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    "Emit a task-complete event"
-    bbs emitEvent: (body at: 'scope')
-        identity: 'task-complete:', (body at: 'task_id')
-        type: 'task-complete'
-        summary: 'Agent dismissed'.
-
-    "Notify the user"
-    bbs notify: ('Agent completed task: ', (body at: 'task_id'))
-        scope: (body at: 'scope')
-        severity: 'info'.
-
-    d := Dictionary new.
-    d at: 'status' put: 'dismissed'.
-    ^self okResponse: d
-  ]
 
   method: handleNotifications: req [
     | since notifications filtered d |
@@ -398,62 +375,6 @@ ApiServer subclass: Object
     ^self okResponse: d
   ]
 
-  method: handlePlan: req [
-    "Record a plan as a pinned decision. Does NOT create task tuples —
-     the Foreman reads the plan decision and dispatches tasks with proper
-     repo scoping and worktree isolation."
-    | body err scope identity subtasks planPayload d |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('scope' 'identity' 'subtasks') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    scope := body at: 'scope'.
-    identity := body at: 'identity'.
-    subtasks := body at: 'subtasks'.
-
-    "Record the plan as a decision — task creation is the Foreman's job"
-    planPayload := Dictionary new.
-    planPayload at: 'detail' put: 'Plan: ', identity.
-    planPayload at: 'subtasks' put: subtasks.
-    planPayload at: 'task' put: (body at: 'task' ifAbsent: ['']).
-    bbs outPinned: 'decision' scope: scope identity: 'plan:', identity payload: planPayload.
-
-    d := Dictionary new.
-    d at: 'status' put: 'ok'.
-    d at: 'plan_id' put: identity.
-    d at: 'subtasks' put: subtasks size.
-    ^self okResponse: d
-  ]
-
-  "--- Workflow Start ---"
-
-  method: handleWorkflowStart: req [
-    | body err templateId scope params d instanceId |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('template' 'scope') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    templateId := body at: 'template'.
-    scope := body at: 'scope'.
-    params := body at: 'params' ifAbsent: [Dictionary new].
-
-    "Instantiate the workflow"
-    dispatcher isNil ifTrue: [
-      ^self errorResponse: 500 message: 'No dispatcher configured'
-    ].
-    instanceId := dispatcher instantiateWorkflow: templateId scope: scope params: params.
-
-    d := Dictionary new.
-    d at: 'status' put: 'ok'.
-    d at: 'workflow_id' put: instanceId.
-    ^self okResponse: d
-  ]
-
-
   "--- Workflow Status ---"
 
   method: handleWorkflowStatus: req [
@@ -515,11 +436,11 @@ ApiServer subclass: Object
       ^self errorResponse: 409 message: 'workflow already ', taskStatus
     ].
 
-    "Consume and rewrite workflow as cancelled"
-    bbs inp: 'workflow' scope: scope identity: wfId.
-    payload at: 'status' put: 'cancelled'.
-    payload at: 'cancelled_at' put: DateTime now epochSeconds.
-    bbs out: 'workflow' scope: scope identity: wfId payload: payload.
+    "Atomically update workflow to cancelled"
+    bbs update: 'workflow' scope: scope identity: wfId do: [:p |
+      p at: 'status' put: 'cancelled'.
+      p at: 'cancelled_at' put: DateTime now epochSeconds
+    ].
 
     "Cancel pending/dispatched tasks"
     cancelledCount := 0.
@@ -530,9 +451,9 @@ ApiServer subclass: Object
       taskStatus := taskPayload at: 'status' ifAbsent: [''].
       ((taskPayload at: 'workflow_instance' ifAbsent: ['']) = wfId
         and: [taskStatus = 'pending' or: [taskStatus = 'dispatched']]) ifTrue: [
-        bbs inp: 'task' scope: scope identity: taskIdentity.
-        taskPayload at: 'status' put: 'cancelled'.
-        bbs out: 'task' scope: scope identity: taskIdentity payload: taskPayload.
+        bbs update: 'task' scope: scope identity: taskIdentity do: [:p |
+          p at: 'status' put: 'cancelled'
+        ].
         cancelledCount := cancelledCount + 1
       ]
     ].
@@ -549,57 +470,7 @@ ApiServer subclass: Object
   ]
 
 
-  "--- Task/Signal Endpoints ---"
-
-  method: handleTaskCreate: req [
-    "POST /api/task/create — create a single task tuple."
-    | body err taskPayload scope identity id |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('scope' 'identity' 'role' 'description') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    scope := body at: 'scope'.
-    identity := body at: 'identity'.
-
-    taskPayload := Dictionary new.
-    taskPayload at: 'role' put: (body at: 'role').
-    taskPayload at: 'status' put: 'pending'.
-    taskPayload at: 'description' put: (body at: 'description').
-
-    (body includesKey: 'workdir') ifTrue: [
-      taskPayload at: 'workdir' put: (body at: 'workdir')
-    ].
-
-    (body includesKey: 'workflow_instance') ifTrue: [
-      taskPayload at: 'workflow_instance' put: (body at: 'workflow_instance')
-    ].
-
-    (body includesKey: 'repo') ifTrue: [
-      taskPayload at: 'repo' put: (body at: 'repo')
-    ].
-
-    id := bbs out: 'task' scope: scope identity: identity payload: taskPayload.
-    ^self okResponse: (self okWithId: id)
-  ]
-
-  method: handleSignal: req [
-    "POST /api/signal — upsert a signal tuple."
-    | body err scope identity payload id |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    err := self requireFields: #('scope' 'identity' 'payload') in: body.
-    err notNil ifTrue: [^self errorResponse: 400 message: err].
-
-    scope := body at: 'scope'.
-    identity := body at: 'identity'.
-    payload := body at: 'payload'.
-
-    id := bbs upsertSignal: scope identity: identity payload: payload.
-    ^self okResponse: (self okWithId: id)
-  ]
+  "--- Task/Signal Endpoints (inlined into registerRoutes) ---"
 
   "--- Work Items ---"
 

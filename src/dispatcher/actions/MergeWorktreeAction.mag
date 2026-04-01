@@ -1,0 +1,70 @@
+"MergeWorktree action — merges the impl branch back into the feature branch, cleans up."
+
+MergeWorktreeAction subclass: WorkflowAction
+
+  method: execute: transition instance: instanceId params: params [
+    "Merge the impl branch back into the feature branch, clean up the worktree."
+    | info payload repoPath featureBranch implBranch worktreeDir scope obsPayload |
+
+    "Find scope from the workflow tuple"
+    scope := engine scopeForInstance: instanceId.
+
+    "1. Read the worktree signal"
+    info := bbs rdp: 'signal' scope: instanceId identity: 'worktree'.
+    info isNil ifTrue: [
+      engine failWorkflow: instanceId reason: 'merge-worktree: no worktree signal'.
+      ^self
+    ].
+
+    payload := info at: 'payload'.
+    repoPath := payload at: 'repo_path'.
+    featureBranch := payload at: 'feature_branch'.
+    implBranch := payload at: 'branch'.
+    worktreeDir := payload at: 'workdir'.
+
+    ('merge-worktree: merging ', implBranch, ' into ', featureBranch, ' in ', repoPath) println.
+
+    "2. Checkout the feature branch"
+    [
+      GitOps checkoutBranch: featureBranch in: repoPath
+    ] on: Exception do: [:e |
+      ('merge-worktree: checkout failed: ', e messageText) println.
+      obsPayload := Dictionary new.
+      obsPayload at: 'detail' put: ('Checkout failed: ', e messageText).
+      bbs out: 'observation' scope: scope identity: 'merge-checkout-failed' payload: obsPayload.
+      engine failWorkflow: instanceId reason: 'Merge failed: could not checkout ', featureBranch, ' — ', e messageText.
+      ^self
+    ].
+
+    "3. Merge the impl branch"
+    [
+      GitOps mergeBranch: implBranch in: repoPath
+    ] on: Exception do: [:e |
+      ('merge-worktree: merge failed: ', e messageText) println.
+      obsPayload := Dictionary new.
+      obsPayload at: 'detail' put: ('Merge conflict: ', implBranch, ' into ', featureBranch, ' — ', e messageText).
+      bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
+      engine failWorkflow: instanceId reason: 'Merge conflict: ', implBranch, ' into ', featureBranch, ' — human intervention required'.
+      ^self
+    ].
+
+    "4. Clean up the worktree and impl branch"
+    GitOps removeWorktree: worktreeDir in: repoPath.
+    GitOps deleteBranch: implBranch in: repoPath.
+
+    "5. Checkout main so repo is not left on feature branch"
+    [GitOps checkoutBranch: 'main' in: repoPath]
+      on: Exception do: [:e |
+        ('merge-worktree: checkout main warning: ', e messageText) println
+      ].
+
+    "6. Write observation recording the merge"
+    obsPayload := Dictionary new.
+    obsPayload at: 'detail' put: ('Merged ', implBranch, ' into ', featureBranch).
+    obsPayload at: 'repoPath' put: repoPath.
+    obsPayload at: 'featureBranch' put: featureBranch.
+    obsPayload at: 'implBranch' put: implBranch.
+    bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
+
+    ('merge-worktree: complete — merged ', implBranch, ' into ', featureBranch) println
+  ]

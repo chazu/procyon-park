@@ -1,0 +1,28 @@
+"NotifyHead action — sends a workflow-complete notification."
+
+NotifyHeadAction subclass: WorkflowAction
+
+  method: execute: transition instance: instanceId params: params [
+    "Send a workflow-complete notification with description and observation count."
+    | workflow scope desc pd observations msg payload |
+    workflow := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
+    scope := engine scopeForInstance: instanceId.
+    desc := instanceId.
+    workflow notNil ifTrue: [
+      pd := (workflow at: 'payload') at: 'description' ifAbsent: [nil].
+      pd notNil ifTrue: [desc := pd]
+    ].
+
+    observations := bbs scan: 'observation' scope: instanceId.
+
+    msg := 'Workflow complete: ', desc.
+    observations size > 0 ifTrue: [
+      msg := msg, ' (', observations size printString, ' observations recorded)'
+    ].
+
+    payload := Dictionary new.
+    payload at: 'message' put: msg.
+    payload at: 'severity' put: 'info'.
+    payload at: 'workflow' put: instanceId.
+    bbs out: 'notification' scope: 'system' identity: 'workflow-complete:', instanceId payload: payload
+  ]

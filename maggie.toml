@@ -33,5 +33,5 @@ include = [
 import = "alto/go/terminal"
 
 [test]
-dirs = ["src", "src/bbs", "src/api", "src/cli", "src/dispatcher", "src/harness", "src/roles", "test"]
+dirs = ["src", "src/bbs", "src/api", "src/cli", "src/collections", "src/dispatcher", "src/dispatcher/actions", "src/harness", "src/roles", "test"]
 entry = "TestWorkflowRefactorMain.run"

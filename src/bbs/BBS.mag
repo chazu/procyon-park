@@ -73,24 +73,10 @@ BBS subclass: Object
 
   "--- Core Write Operations ---"
 
-  method: buildTuple: category scope: scope identity: identity payload: payload [
-    | d |
-    d := Dictionary new.
-    d at: 'id' put: self assignId.
-    d at: 'category' put: category.
-    d at: 'scope' put: scope.
-    d at: 'identity' put: identity.
-    d at: 'payload' put: payload.
-    d at: 'created_at' put: DateTime now epochSeconds.
-    ^d
-  ]
-
   method: out: category scope: scope identity: identity payload: payload [
     | d |
     Categories validate: category.
-    d := self buildTuple: category scope: scope identity: identity payload: payload.
-    d at: 'pinned' put: false.
-    d at: 'modality' put: 'linear'.
+    d := Tuple linear: category scope: scope identity: identity payload: payload id: self assignId.
     space out: d.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'out' tuple: d.
@@ -101,9 +87,7 @@ BBS subclass: Object
   method: outPinned: category scope: scope identity: identity payload: payload [
     | d |
     Categories validate: category.
-    d := self buildTuple: category scope: scope identity: identity payload: payload.
-    d at: 'pinned' put: true.
-    d at: 'modality' put: 'persistent'.
+    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId.
     space outPersistent: d.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'out-pinned' tuple: d.
@@ -114,10 +98,7 @@ BBS subclass: Object
   method: outAffine: category scope: scope identity: identity payload: payload ttl: ttlSeconds [
     | d |
     Categories validate: category.
-    d := self buildTuple: category scope: scope identity: identity payload: payload.
-    d at: 'pinned' put: false.
-    d at: 'modality' put: 'affine'.
-    d at: 'ttl' put: ttlSeconds.
+    d := Tuple affine: category scope: scope identity: identity payload: payload id: self assignId ttl: ttlSeconds.
     space outAffine: d ttl: ttlSeconds.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'out-affine' tuple: d.
@@ -207,6 +188,66 @@ BBS subclass: Object
     ]
   ]
 
+  method: removeFromIndexUnsafe: tuple [
+    "Remove a tuple from the index without acquiring the mutex.
+     Caller MUST hold the mutex. Does not trigger persistence."
+    | tupleId |
+    tupleId := tuple at: 'id'.
+    index := index reject: [:t | (t at: 'id') = tupleId]
+  ]
+
+  "--- Atomic Update Operations ---"
+
+  method: update: category scope: scope identity: identity do: aBlock [
+    "Atomically consume a tuple, apply aBlock to its payload, and re-write.
+     aBlock receives the payload Dictionary and may mutate it in place.
+     Returns the new tuple id, or nil if no matching tuple was found."
+    | tmpl result payload d |
+    tmpl := self templateFor: category scope: scope identity: identity.
+    result := space tryIn: tmpl.
+    result isNil ifTrue: [^nil].
+
+    mutex critical: [self removeFromIndexUnsafe: result].
+    self appendHistory: 'consume' tuple: result.
+
+    payload := result at: 'payload'.
+    aBlock value: payload.
+
+    d := Tuple linear: category scope: scope identity: identity payload: payload id: self assignId.
+    space out: d.
+    mutex critical: [index := index copyWith: d].
+    self appendHistory: 'out' tuple: d.
+    (self isDurableCategory: category) ifTrue: [self persistAfterChange].
+    ^d at: 'id'
+  ]
+
+  method: updatePinned: category scope: scope identity: identity do: aBlock [
+    "Atomically replace a pinned tuple after applying aBlock to its payload.
+     Returns the new tuple id, or nil if no matching tuple was found."
+    | existing payload d |
+    existing := self findInIndex: category scope: scope identity: identity.
+    existing isNil ifTrue: [^nil].
+
+    payload := existing at: 'payload'.
+    aBlock value: payload.
+
+    "Remove all matching from index, write new pinned tuple"
+    mutex critical: [
+      index := index reject: [:t |
+        (t at: 'category') = category and:
+          [(t at: 'scope') = scope and:
+            [(t at: 'identity') = identity]]
+      ]
+    ].
+
+    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId.
+    space outPersistent: d.
+    mutex critical: [index := index copyWith: d].
+    self appendHistory: 'upsert-pinned' tuple: d.
+    self persistAfterChange.
+    ^d at: 'id'
+  ]
+
   "--- Signal Operations ---"
 
   method: upsertSignal: scope identity: identity payload: payload [
@@ -233,9 +274,7 @@ BBS subclass: Object
     ].
 
     "Write new pinned tuple"
-    d := self buildTuple: category scope: scope identity: identity payload: payload.
-    d at: 'pinned' put: true.
-    d at: 'modality' put: 'persistent'.
+    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId.
     space outPersistent: d.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'upsert-pinned' tuple: d.

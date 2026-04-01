@@ -1,0 +1,23 @@
+"Base class for extracted workflow actions.
+ Each subclass implements a single built-in action for the WorkflowEngine."
+
+WorkflowAction subclass: Object
+  instanceVars: engine bbs
+
+  classMethod: on: anEngine [
+    | a |
+    a := super new.
+    a engine: anEngine.
+    a bbs: anEngine bbs.
+    ^a
+  ]
+
+  method: engine [ ^engine ]
+  method: engine: anEngine [ engine := anEngine ]
+  method: bbs [ ^bbs ]
+  method: bbs: aBBS [ bbs := aBBS ]
+
+  method: execute: transition instance: instanceId params: params [
+    "Subclasses override this to implement the action."
+    Error signal: 'Subclass must override execute:instance:params:'
+  ]

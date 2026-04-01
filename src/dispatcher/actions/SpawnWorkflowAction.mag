@@ -1,0 +1,50 @@
+"SpawnWorkflow action — spawns a child workflow from a parent transition."
+
+SpawnWorkflowAction subclass: WorkflowAction
+
+  method: execute: transition instance: instanceId params: params [
+    "Spawn a child workflow. Output tokens are already 'waiting'.
+     They promote when the child workflow completes."
+    | spawnConfig childTemplate childScope childParams childInstanceId signalPayload mergedParams |
+
+    spawnConfig := transition at: 'spawn' ifAbsent: [nil].
+    spawnConfig isNil ifTrue: [
+      ('spawn-workflow: missing spawn config on transition ', (transition at: 'id')) println.
+      ^self
+    ].
+
+    childTemplate := spawnConfig at: 'template'.
+
+    "Child scope: from spawn config, else parent scope"
+    childScope := spawnConfig at: 'scope' ifAbsent: [nil].
+    childScope isNil ifTrue: [
+      childScope := engine scopeForInstance: instanceId
+    ].
+
+    "Merge params: copy parent, overlay spawn-level overrides with interpolation"
+    mergedParams := Dictionary new.
+    params keysAndValuesDo: [:k :v | mergedParams at: k put: v].
+    childParams := spawnConfig at: 'params' ifAbsent: [Dictionary new].
+    childParams keysAndValuesDo: [:k :v |
+      (v isKindOf: String)
+        ifTrue: [mergedParams at: k put: (engine resolveParams: v with: params)]
+        ifFalse: [mergedParams at: k put: v]
+    ].
+
+    "Increment spawn depth counter"
+    mergedParams at: '_depth' put: (params at: '_depth' ifAbsent: [0]) + 1.
+
+    "Instantiate the child"
+    childInstanceId := engine instantiate: childTemplate scope: childScope params: mergedParams.
+
+    "Write signal keyed to transition AND child ID"
+    signalPayload := Dictionary new.
+    signalPayload at: 'child_instance' put: childInstanceId.
+    signalPayload at: 'child_template' put: childTemplate.
+    signalPayload at: 'child_scope' put: childScope.
+    signalPayload at: 'parent_transition' put: (transition at: 'id').
+    bbs upsertSignal: instanceId identity: 'child-spawn:', (transition at: 'id'), ':', childInstanceId payload: signalPayload.
+
+    ('  Spawned child workflow: ', childInstanceId, ' from ', (transition at: 'id')) println.
+    bbs notify: ('Spawned child workflow: ', childInstanceId) scope: childScope severity: 'info'
+  ]

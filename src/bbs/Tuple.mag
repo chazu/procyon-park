@@ -1,0 +1,45 @@
+"Tuple — factory for BBS tuple dictionaries.
+ Reduces 6-8 line Dictionary construction blocks to 1-2 lines."
+
+Tuple subclass: Object
+
+  classMethod: category: cat scope: scope identity: identity payload: payload id: anId [
+    "Core factory: builds a standard tuple Dictionary with all required fields."
+    | d |
+    d := Dictionary new.
+    d at: 'id' put: anId.
+    d at: 'category' put: cat.
+    d at: 'scope' put: scope.
+    d at: 'identity' put: identity.
+    d at: 'payload' put: payload.
+    d at: 'created_at' put: DateTime now epochSeconds.
+    ^d
+  ]
+
+  classMethod: linear: cat scope: scope identity: identity payload: payload id: anId [
+    "Build a linear (non-pinned) tuple."
+    | d |
+    d := self category: cat scope: scope identity: identity payload: payload id: anId.
+    d at: 'pinned' put: false.
+    d at: 'modality' put: 'linear'.
+    ^d
+  ]
+
+  classMethod: pinned: cat scope: scope identity: identity payload: payload id: anId [
+    "Build a pinned (persistent) tuple."
+    | d |
+    d := self category: cat scope: scope identity: identity payload: payload id: anId.
+    d at: 'pinned' put: true.
+    d at: 'modality' put: 'persistent'.
+    ^d
+  ]
+
+  classMethod: affine: cat scope: scope identity: identity payload: payload id: anId ttl: ttlSeconds [
+    "Build an affine (TTL-bounded) tuple."
+    | d |
+    d := self category: cat scope: scope identity: identity payload: payload id: anId.
+    d at: 'pinned' put: false.
+    d at: 'modality' put: 'affine'.
+    d at: 'ttl' put: ttlSeconds.
+    ^d
+  ]

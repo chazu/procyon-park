@@ -2,38 +2,27 @@
 
 Implementer subclass: Role
 
-  classMethod: new [
-    | r hard soft constraints h |
-    r := super new.
-    r name: 'implementer'.
-    r description: 'You implement a specific subtask as described below. Stay tightly scoped.
+  classMethod: roleName [ ^'implementer' ]
+
+  classMethod: roleDescription [
+    ^'You implement a specific subtask as described below. Stay tightly scoped.
 
 MUST: Implement exactly what is described. Commit all changes before dismissing.
 CAN: Read any file in the codebase for context. Report unexpected findings.
-MUST NOT: Implement beyond your task scope. Modify files outside your workdir.'.
-    r ppCommands: #(
+MUST NOT: Implement beyond your task scope. Modify files outside your workdir.'
+  ]
+
+  classMethod: rolePpCommands [
+    ^#(
       'pp observe <identity> <detail>   — report something unexpected'
       'pp read <category> [scope] [id]  — read from the knowledge base'
       'pp dismiss                       — signal completion (AFTER committing)'
-    ).
-
-    hard := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'decision'.
-    hard := hard copyWith: h.
-
-    soft := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'convention'.
-    soft := soft copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'fact'.
-    soft := soft copyWith: h.
-
-    constraints := Dictionary new.
-    constraints at: 'hard' put: hard.
-    constraints at: 'soft' put: soft.
-    constraints at: 'budget' put: 40.
-    r contextConstraints: constraints.
-    ^r
+    )
   ]
+
+  classMethod: hardCategories [ ^#('decision') ]
+  classMethod: softCategories [ ^#('convention' 'fact') ]
+  classMethod: contextBudget [ ^40 ]
 
   method: completionInstructions [
     ^'1. Verify your changes work (build, run tests if applicable).

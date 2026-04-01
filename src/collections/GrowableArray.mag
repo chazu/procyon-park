@@ -1,0 +1,105 @@
+"GrowableArray — amortized O(1) append via doubling growth strategy.
+ Wraps an Array with size tracking and capacity management."
+
+GrowableArray subclass: Object
+  instanceVars: storage count
+
+  classMethod: new [
+    ^super new init: 8
+  ]
+
+  classMethod: new: initialCapacity [
+    ^super new init: initialCapacity
+  ]
+
+  method: init: capacity [
+    storage := Array new: capacity.
+    count := 0
+  ]
+
+  method: add: anObject [
+    "Append an element, growing if necessary."
+    count >= storage size ifTrue: [self grow].
+    count := count + 1.
+    storage at: count put: anObject
+  ]
+
+  method: grow [
+    "Double the capacity."
+    | newStorage |
+    newStorage := Array new: storage size * 2.
+    1 to: count do: [:i | newStorage at: i put: (storage at: i)].
+    storage := newStorage
+  ]
+
+  method: size [ ^count ]
+
+  method: at: index [
+    (index < 1 or: [index > count]) ifTrue: [Error signal: 'Index out of bounds'].
+    ^storage at: index
+  ]
+
+  method: do: aBlock [
+    1 to: count do: [:i | aBlock value: (storage at: i)]
+  ]
+
+  method: select: aBlock [
+    | result |
+    result := GrowableArray new.
+    1 to: count do: [:i |
+      | elem |
+      elem := storage at: i.
+      (aBlock value: elem) ifTrue: [result add: elem]
+    ].
+    ^result
+  ]
+
+  method: collect: aBlock [
+    | result |
+    result := GrowableArray new.
+    1 to: count do: [:i |
+      result add: (aBlock value: (storage at: i))
+    ].
+    ^result
+  ]
+
+  method: reject: aBlock [
+    | result |
+    result := GrowableArray new.
+    1 to: count do: [:i |
+      | elem |
+      elem := storage at: i.
+      (aBlock value: elem) ifFalse: [result add: elem]
+    ].
+    ^result
+  ]
+
+  method: detect: aBlock ifNone: noneBlock [
+    1 to: count do: [:i |
+      | elem |
+      elem := storage at: i.
+      (aBlock value: elem) ifTrue: [^elem]
+    ].
+    ^noneBlock value
+  ]
+
+  method: includes: anObject [
+    1 to: count do: [:i |
+      (storage at: i) = anObject ifTrue: [^true]
+    ].
+    ^false
+  ]
+
+  method: isEmpty [ ^count = 0 ]
+
+  method: asArray [
+    "Return a plain Array containing only the live elements."
+    | result |
+    result := Array new: count.
+    1 to: count do: [:i | result at: i put: (storage at: i)].
+    ^result
+  ]
+
+  method: printString [
+    ^'GrowableArray(', count printString, ')'
+  ]

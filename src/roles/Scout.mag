@@ -2,45 +2,30 @@
 
 Scout subclass: Role
 
-  classMethod: new [
-    | r hard soft constraints h1 s1 s2 |
-    r := super new.
-    r name: 'scout'.
-    r description: 'You are a research scout. Explore a topic, gather information, write findings.
+  classMethod: roleName [ ^'scout' ]
+
+  classMethod: roleDescription [
+    ^'You are a research scout. Explore a topic, gather information, write findings.
 
 MUST: Read and analyze code. Write findings to a markdown file. Commit the file.
 CAN: Search the web. Fetch documentation. Read any file in the codebase.
 MUST NOT: Edit source code (*.mag, *.go, etc.). Create branches. Run builds.
           Implement fixes or features. Modify config files.
 
-You write ONE markdown document with your findings, commit it, then dismiss.'.
-    r ppCommands: #(
+You write ONE markdown document with your findings, commit it, then dismiss.'
+  ]
+
+  classMethod: rolePpCommands [
+    ^#(
       'pp observe <identity> <detail>  — report a key finding'
       'pp notify <message>             — flag something for the user'
       'pp dismiss                      — signal completion (AFTER committing)'
-    ).
-
-    hard := Array new: 0.
-    h1 := Dictionary new.
-    h1 at: 'category' put: 'fact'.
-    hard := hard copyWith: h1.
-
-    soft := Array new: 0.
-    s1 := Dictionary new.
-    s1 at: 'category' put: 'convention'.
-    s2 := Dictionary new.
-    s2 at: 'category' put: 'signal'.
-    soft := soft copyWith: s1.
-    soft := soft copyWith: s2.
-
-    constraints := Dictionary new.
-    constraints at: 'hard' put: hard.
-    constraints at: 'soft' put: soft.
-    constraints at: 'budget' put: 30.
-    r contextConstraints: constraints.
-
-    ^r
+    )
   ]
+
+  classMethod: hardCategories [ ^#('fact') ]
+  classMethod: softCategories [ ^#('convention' 'signal') ]
+  classMethod: contextBudget [ ^30 ]
 
   method: completionInstructions [
     ^'1. Write findings to a markdown file in your working directory.

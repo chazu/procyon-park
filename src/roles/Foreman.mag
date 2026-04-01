@@ -3,11 +3,10 @@
 
 Foreman subclass: Role
 
-  classMethod: new [
-    | r hard soft constraints h |
-    r := super new.
-    r name: 'foreman'.
-    r description: 'You evaluate review and test results and decide whether the work passes.
+  classMethod: roleName [ ^'foreman' ]
+
+  classMethod: roleDescription [
+    ^'You evaluate review and test results and decide whether the work passes.
 
 MUST do, in order:
 1. Read observations from reviewers and testers: pp read observation <scope>
@@ -23,40 +22,22 @@ MUST do, in order:
 
 MUST NOT: Skip writing the verdict signal (stalls the workflow).
 MUST NOT: Dispatch tasks or workflows (the engine handles dispatch).
-CAN: Read any tuples for context. Write observations about findings.'.
+CAN: Read any tuples for context. Write observations about findings.'
+  ]
 
-    r ppCommands: #(
+  classMethod: rolePpCommands [
+    ^#(
       'pp read <category> [scope] [identity]  — read from knowledge base'
       'pp observe <identity> <detail>          — report a finding'
       'pp signal <id> <key> <value>            — write verdict/cycle signal'
       'pp notify <message>                     — flag something for the user'
       'pp dismiss                              — signal completion'
-    ).
-
-    hard := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'observation'.
-    hard := hard copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'decision'.
-    hard := hard copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'event'.
-    hard := hard copyWith: h.
-
-    soft := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'convention'.
-    soft := soft copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'fact'.
-    soft := soft copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'signal'.
-    soft := soft copyWith: h.
-
-    constraints := Dictionary new.
-    constraints at: 'hard' put: hard.
-    constraints at: 'soft' put: soft.
-    constraints at: 'budget' put: 60.
-    r contextConstraints: constraints.
-
-    ^r
+    )
   ]
+
+  classMethod: hardCategories [ ^#('observation' 'decision' 'event') ]
+  classMethod: softCategories [ ^#('convention' 'fact' 'signal') ]
+  classMethod: contextBudget [ ^60 ]
 
   method: completionInstructions [
     ^'1. Read observations: pp read observation <scope>

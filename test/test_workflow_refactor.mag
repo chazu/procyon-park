@@ -865,46 +865,47 @@ TestStoryIntegration subclass: Object
 TestWorktreeSignalKeys subclass: Object
 
   classMethod: run: t [
-    | weSource createMatch mergeMatch createKeys mergeKeys |
+    | createSource mergeSource |
     '--- TestWorktreeSignalKeys ---' println.
 
     "These tests verify that the keys written by create-worktree match
      the keys read by merge-worktree and the workdir threading code.
      This is a cross-cutting consistency check from the spec."
 
-    weSource := File readFileContents: 'src/dispatcher/WorkflowEngine.mag'.
+    createSource := File readFileContents: 'src/dispatcher/actions/CreateWorktreeAction.mag'.
+    mergeSource := File readFileContents: 'src/dispatcher/actions/MergeWorktreeAction.mag'.
 
     "WR41: Spec says create-worktree writes workdir key"
-    t assert: (weSource includes: 'at: ''workdir'' put: worktreeDir') message: 'WR41: create-worktree must write workdir key'.
+    t assert: (createSource includes: 'at: ''workdir'' put: worktreeDir') message: 'WR41: create-worktree must write workdir key'.
 
     "WR42: Spec says create-worktree writes repo_path key"
-    t assert: (weSource includes: 'at: ''repo_path'' put: repoPath') message: 'WR42: create-worktree must write repo_path key'.
+    t assert: (createSource includes: 'at: ''repo_path'' put: repoPath') message: 'WR42: create-worktree must write repo_path key'.
 
     "WR43: Spec says create-worktree writes feature_branch key"
-    t assert: (weSource includes: 'at: ''feature_branch'' put: featureBranch') message: 'WR43: create-worktree must write feature_branch key'.
+    t assert: (createSource includes: 'at: ''feature_branch'' put: featureBranch') message: 'WR43: create-worktree must write feature_branch key'.
 
     "WR44: Spec says create-worktree writes branch key"
-    t assert: (weSource includes: 'at: ''branch'' put: implBranch') message: 'WR44: create-worktree must write branch key'.
+    t assert: (createSource includes: 'at: ''branch'' put: implBranch') message: 'WR44: create-worktree must write branch key'.
 
     "WR45: Spec says merge-worktree must read with SAME keys create-worktree writes"
     "create-worktree writes: workdir, branch, feature_branch, repo_path"
     "merge-worktree must read these same keys (not camelCase variants)"
-    t assert: (weSource includes: 'payload at: ''repo_path''') message: 'WR45a: merge-worktree must read repo_path (snake_case, matching create-worktree)'.
-    t assert: (weSource includes: 'payload at: ''feature_branch''') message: 'WR45b: merge-worktree must read feature_branch (snake_case, matching create-worktree)'.
+    t assert: (mergeSource includes: 'payload at: ''repo_path''') message: 'WR45a: merge-worktree must read repo_path (snake_case, matching create-worktree)'.
+    t assert: (mergeSource includes: 'payload at: ''feature_branch''') message: 'WR45b: merge-worktree must read feature_branch (snake_case, matching create-worktree)'.
 
     "WR46: Check that merge-worktree does NOT use camelCase keys (common bug)"
     "If merge uses repoPath instead of repo_path, it will get nil"
-    t assert: (weSource includes: 'payload at: ''repoPath''') not message: 'WR46a: merge-worktree must NOT read camelCase repoPath — use repo_path'.
-    t assert: (weSource includes: 'payload at: ''featureBranch''') not message: 'WR46b: merge-worktree must NOT read camelCase featureBranch — use feature_branch'.
-    t assert: (weSource includes: 'payload at: ''implBranch''') not message: 'WR46c: merge-worktree must NOT read camelCase implBranch — use branch'.
-    t assert: (weSource includes: 'payload at: ''worktreeDir''') not message: 'WR46d: merge-worktree must NOT read camelCase worktreeDir — use workdir'
+    t assert: (mergeSource includes: 'payload at: ''repoPath''') not message: 'WR46a: merge-worktree must NOT read camelCase repoPath — use repo_path'.
+    t assert: (mergeSource includes: 'payload at: ''featureBranch''') not message: 'WR46b: merge-worktree must NOT read camelCase featureBranch — use feature_branch'.
+    t assert: (mergeSource includes: 'payload at: ''implBranch''') not message: 'WR46c: merge-worktree must NOT read camelCase implBranch — use branch'.
+    t assert: (mergeSource includes: 'payload at: ''worktreeDir''') not message: 'WR46d: merge-worktree must NOT read camelCase worktreeDir — use workdir'
   ]
 
 "=== TestNotifyHead — WR47 through WR50 ==="
 TestNotifyHead subclass: Object
 
   classMethod: run: t [
-    | tempDir bbs engine transitions tr1 payload instanceId notifications notifPayload weSource |
+    | tempDir bbs engine transitions tr1 payload instanceId notifications notifPayload nhSource |
     '--- TestNotifyHead ---' println.
 
     "WR47: Spec says notify-head writes a notification tuple"
@@ -942,22 +943,22 @@ TestNotifyHead subclass: Object
     WRHelper removeTempDir: tempDir.
 
     "WR48: Spec says notify-head reads workflow tuple using at: 'payload' (not message send)"
-    weSource := File readFileContents: 'src/dispatcher/WorkflowEngine.mag'.
-    t assert: (weSource includes: 'workflow payload at:') not message: 'WR48: notify-head must NOT use workflow payload (message send) — use (workflow at: ''payload'')'.
+    nhSource := File readFileContents: 'src/dispatcher/actions/NotifyHeadAction.mag'.
+    t assert: (nhSource includes: 'workflow payload at:') not message: 'WR48: notify-head must NOT use workflow payload (message send) — use (workflow at: ''payload'')'.
 
     "WR49: Spec says notification includes the instance ID"
     "Verify the notification identity includes the instance ID pattern"
-    t assert: (weSource includes: 'workflow-complete:') message: 'WR49: notification identity must include workflow-complete: prefix'.
+    t assert: (nhSource includes: 'workflow-complete:') message: 'WR49: notification identity must include workflow-complete: prefix'.
 
     "WR50: Spec says notification severity is info"
-    t assert: (weSource includes: 'severity'' put: ''info') message: 'WR50: notification severity must be info'
+    t assert: (nhSource includes: 'severity'' put: ''info') message: 'WR50: notification severity must be info'
   ]
 
 "=== TestConventionCompliance — WR51 through WR56 ==="
 TestConventionCompliance subclass: Object
 
   classMethod: run: t [
-    | weSource mainSource lines inMethod foundBar foundCode trimmed hasMidBlockVars pipeChar quoteChar |
+    | weSource mainSource lines inMethod foundBar foundCode trimmed hasMidBlockVars pipeChar quoteChar cwSource |
     '--- TestConventionCompliance ---' println.
 
     weSource := File readFileContents: 'src/dispatcher/WorkflowEngine.mag'.
@@ -977,9 +978,10 @@ TestConventionCompliance subclass: Object
     "WR54: Uses copyWith: for array growth (not add:)"
     t assert: (weSource includes: 'copyWith:') message: 'WR54: must use copyWith: for array growth'.
 
-    "WR55: Uses GitOps for git operations (refactored from ExternalProcess)"
-    t assert: (weSource includes: 'GitOps') message: 'WR55a: must use GitOps for git operations'.
-    t assert: (weSource includes: 'createFeatureBranch:') message: 'WR55b: must use GitOps createFeatureBranch:'.
+    "WR55: Uses GitOps for git operations (in extracted action classes)"
+    cwSource := File readFileContents: 'src/dispatcher/actions/CreateWorktreeAction.mag'.
+    t assert: (cwSource includes: 'GitOps') message: 'WR55a: must use GitOps for git operations'.
+    t assert: (cwSource includes: 'createFeatureBranch:') message: 'WR55b: must use GitOps createFeatureBranch:'.
 
     "WR56: No mid-block temp var declarations in new methods"
     hasMidBlockVars := false.

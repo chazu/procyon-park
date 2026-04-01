@@ -2,15 +2,28 @@
  Instantiates workflows from templates and advances token positions."
 
 WorkflowEngine subclass: Object
-  instanceVars: bbs cueCtx
+  instanceVars: bbs cueCtx actions
 
   classMethod: on: aBBS [
     ^super new initBBS: aBBS
   ]
 
+  method: bbs [ ^bbs ]
+
   method: initBBS: aBBS [
     bbs := aBBS.
-    cueCtx := CueContext new
+    cueCtx := CueContext new.
+    self registerActions
+  ]
+
+  method: registerActions [
+    "Build registry of action name → action instance."
+    actions := Dictionary new.
+    actions at: 'create-worktree' put: (CreateWorktreeAction on: self).
+    actions at: 'merge-worktree' put: (MergeWorktreeAction on: self).
+    actions at: 'spawn-workflow' put: (SpawnWorkflowAction on: self).
+    actions at: 'dispatch-waves' put: (DispatchWavesAction on: self).
+    actions at: 'notify-head' put: (NotifyHeadAction on: self)
   ]
 
   "--- Workflow Instantiation ---"
@@ -215,12 +228,11 @@ WorkflowEngine subclass: Object
         evt := self checkWaveCompletion: instanceId scope: scope transitionId: transId
       ].
       evt notNil ifTrue: [
-        "Promote: consume waiting token, produce positive token"
+        "Promote: atomically update waiting token to positive"
         tokIdentity := tok at: 'identity'.
-        bbs inp: 'token' scope: scope identity: tokIdentity.
-        newPayload := tok at: 'payload'.
-        newPayload at: 'status' put: 'positive'.
-        bbs out: 'token' scope: scope identity: tokIdentity payload: newPayload.
+        bbs update: 'token' scope: scope identity: tokIdentity do: [:p |
+          p at: 'status' put: 'positive'
+        ].
         ('  Promoted waiting token: ', tokIdentity) println.
         bbs notify: ('Token promoted: ', tokIdentity) scope: scope severity: 'info'
       ]
@@ -317,465 +329,20 @@ WorkflowEngine subclass: Object
   "--- Action Dispatch ---"
 
   method: executeAction: action transition: transition instance: instanceId params: params [
-    "Dispatch a built-in action. No agent spawned — runs inline."
-    action = 'create-worktree' ifTrue: [^self actionCreateWorktree: transition instance: instanceId params: params].
-    action = 'merge-worktree' ifTrue: [^self actionMergeWorktree: transition instance: instanceId params: params].
-    action = 'spawn-workflow' ifTrue: [^self actionSpawnWorkflow: transition instance: instanceId params: params].
-    action = 'dispatch-waves' ifTrue: [^self actionDispatchWaves: transition instance: instanceId params: params].
-    action = 'notify-head' ifTrue: [^self actionNotifyHead: transition instance: instanceId].
+    "Dispatch a built-in action via the registry. No agent spawned — runs inline."
+    | handler |
+    handler := actions at: action ifAbsent: [nil].
+    handler notNil ifTrue: [
+      ^handler execute: transition instance: instanceId params: params
+    ].
 
     "Unknown action — observe and continue"
     ExternalProcess run: 'pp' args: (Array with: 'observe' with: 'unknown-action' with: ('Unknown action: ', action))
   ]
 
-  method: actionCreateWorktree: transition instance: instanceId params: params [
-    "Create a feature branch and worktree for the workflow instance.
-     1. Read repo signal for path (fall back to PP_REPO_PATH or cwd).
-     2. Create feature branch from main.
-     3. Create worktree with impl branch.
-     4. Write worktree signal for downstream transitions.
-     5. Checkout main in original repo."
-
-    | repo repoPath repoName repoConfig home featureBranch worktreeDir implBranch payload scope wf |
-
-    "1. Determine repo path — priority: params['repo'] → signal → env → cwd"
-    repoName := params at: 'repo' ifAbsent: [nil].
-    repoName notNil ifTrue: [
-      repoConfig := Repo new repoForName: repoName.
-      repoConfig notNil ifTrue: [
-        repoPath := repoConfig at: 'path' ifAbsent: [nil]
-      ]
-    ].
-    repoPath isNil ifTrue: [
-      repo := bbs rdp: 'signal' scope: instanceId identity: 'repo'.
-      repo notNil ifTrue: [
-        repoPath := (repo at: 'payload') at: 'path'
-      ]
-    ].
-    repoPath isNil ifTrue: [
-      repoPath := System env: 'PP_REPO_PATH'
-    ].
-    (repoPath isNil or: [repoPath isEmpty]) ifTrue: [
-      repoPath := File workingDirectory
-    ].
-
-    home := System env: 'HOME'.
-    (home isNil or: [home isEmpty]) ifTrue: [
-      home := '/tmp'
-    ].
-
-    featureBranch := 'feature/', instanceId.
-    implBranch := 'impl/', instanceId.
-    worktreeDir := home, '/.pp/worktrees/', instanceId, '/impl'.
-
-    "Find scope for error reporting"
-    scope := self scopeForInstance: instanceId.
-
-    "2. Create feature branch from main"
-    [
-      GitOps createFeatureBranch: featureBranch in: repoPath.
-      ('  Created feature branch: ', featureBranch) println
-    ] on: Exception do: [:e |
-      ('  ERROR: failed to create feature branch: ', e messageText) println.
-      bbs notify: ('create-worktree failed: could not create branch ', featureBranch, ' — ', e messageText)
-        scope: scope severity: 'urgent'.
-      ^self
-    ].
-
-    "3. Create worktree for implementation"
-    [
-      GitOps createWorktree: worktreeDir branch: implBranch in: repoPath.
-      ('  Created worktree: ', worktreeDir) println
-    ] on: Exception do: [:e |
-      ('  ERROR: failed to create worktree: ', e messageText) println.
-      bbs notify: ('create-worktree failed: could not create worktree for ', instanceId, ' — ', e messageText)
-        scope: scope severity: 'urgent'.
-      ^self
-    ].
-
-    "4. Write worktree signal for downstream transitions"
-    payload := Dictionary new.
-    payload at: 'workdir' put: worktreeDir.
-    payload at: 'branch' put: implBranch.
-    payload at: 'feature_branch' put: featureBranch.
-    payload at: 'repo_path' put: repoPath.
-    bbs upsertSignal: instanceId identity: 'worktree' payload: payload.
-    ('  Wrote worktree signal for: ', instanceId) println.
-
-    "5. Checkout main in original repo so it is not left on the feature branch"
-    [GitOps checkoutBranch: 'main' in: repoPath]
-      on: Exception do: [:e |
-        ('  WARNING: could not restore main in ', repoPath, ': ', e messageText) println
-      ].
-    ('  Restored main in: ', repoPath) println
-  ]
-
-  method: actionMergeWorktree: transition instance: instanceId params: params [
-    "Merge the impl branch back into the feature branch, clean up the worktree."
-    | info payload repoPath featureBranch implBranch worktreeDir scope obsPayload |
-
-    "Find scope from the workflow tuple"
-    scope := self scopeForInstance: instanceId.
-
-    "1. Read the worktree signal"
-    info := bbs rdp: 'signal' scope: instanceId identity: 'worktree'.
-    info isNil ifTrue: [
-      self failWorkflow: instanceId reason: 'merge-worktree: no worktree signal'.
-      ^self
-    ].
-
-    payload := info at: 'payload'.
-    repoPath := payload at: 'repo_path'.
-    featureBranch := payload at: 'feature_branch'.
-    implBranch := payload at: 'branch'.
-    worktreeDir := payload at: 'workdir'.
-
-    ('merge-worktree: merging ', implBranch, ' into ', featureBranch, ' in ', repoPath) println.
-
-    "2. Checkout the feature branch"
-    [
-      GitOps checkoutBranch: featureBranch in: repoPath
-    ] on: Exception do: [:e |
-      ('merge-worktree: checkout failed: ', e messageText) println.
-      obsPayload := Dictionary new.
-      obsPayload at: 'detail' put: ('Checkout failed: ', e messageText).
-      bbs out: 'observation' scope: scope identity: 'merge-checkout-failed' payload: obsPayload.
-      self failWorkflow: instanceId reason: 'Merge failed: could not checkout ', featureBranch, ' — ', e messageText.
-      ^self
-    ].
-
-    "3. Merge the impl branch"
-    [
-      GitOps mergeBranch: implBranch in: repoPath
-    ] on: Exception do: [:e |
-      ('merge-worktree: merge failed: ', e messageText) println.
-      obsPayload := Dictionary new.
-      obsPayload at: 'detail' put: ('Merge conflict: ', implBranch, ' into ', featureBranch, ' — ', e messageText).
-      bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
-      self failWorkflow: instanceId reason: 'Merge conflict: ', implBranch, ' into ', featureBranch, ' — human intervention required'.
-      ^self
-    ].
-
-    "4. Clean up the worktree and impl branch"
-    GitOps removeWorktree: worktreeDir in: repoPath.
-    GitOps deleteBranch: implBranch in: repoPath.
-
-    "5. Checkout main so repo is not left on feature branch"
-    [GitOps checkoutBranch: 'main' in: repoPath]
-      on: Exception do: [:e |
-        ('merge-worktree: checkout main warning: ', e messageText) println
-      ].
-
-    "6. Write observation recording the merge"
-    obsPayload := Dictionary new.
-    obsPayload at: 'detail' put: ('Merged ', implBranch, ' into ', featureBranch).
-    obsPayload at: 'repoPath' put: repoPath.
-    obsPayload at: 'featureBranch' put: featureBranch.
-    obsPayload at: 'implBranch' put: implBranch.
-    bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
-
-    ('merge-worktree: complete — merged ', implBranch, ' into ', featureBranch) println
-  ]
-
-  method: actionDispatchWaves: transition instance: instanceId params: params [
-    "Engine-driven wave dispatch. Reads subtasks from either:
-     1. A work item's children (if params['workitem'] is set)
-     2. A plan decision's subtasks array (legacy fallback)
-     Groups by wave, dispatches wave 1 immediately."
-
-    | scope subtasks maxWave wavePayload w epicId epicItem children childItems childItem childPayload decisions plan planPayload st |
-
-    scope := self scopeForInstance: instanceId.
-    subtasks := nil.
-
-    "1a. Try work item path: read children of an epic"
-    epicId := params at: 'workitem' ifAbsent: [nil].
-    epicId notNil ifTrue: [
-      epicItem := (bbs scanAll: 'workitem') detect: [:wi |
-        (wi at: 'identity') = epicId
-      ] ifNone: [nil].
-      epicItem notNil ifTrue: [
-        children := (epicItem at: 'payload') at: 'children' ifAbsent: [#()].
-        children isEmpty ifFalse: [
-          "Build subtasks array from children work items"
-          subtasks := Array new: 0.
-          children do: [:cid |
-            childItem := (bbs scanAll: 'workitem') detect: [:wi |
-              (wi at: 'identity') = cid
-            ] ifNone: [nil].
-            childItem notNil ifTrue: [
-              childPayload := childItem at: 'payload'.
-              st := Dictionary new.
-              st at: 'identity' put: (childItem at: 'identity').
-              st at: 'description' put: (childPayload at: 'description' ifAbsent: [childPayload at: 'title' ifAbsent: ['']]).
-              st at: 'wave' put: (childPayload at: 'wave' ifAbsent: [1]).
-              st at: 'template' put: (childPayload at: 'template' ifAbsent: ['story']).
-              st at: 'repo' put: (childPayload at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]]).
-              st at: 'batch' put: (childPayload at: 'batch' ifAbsent: [nil]).
-              st at: 'role' put: 'implementer'.
-              subtasks := subtasks copyWith: st
-            ]
-          ].
-          ('dispatch-waves: loaded ', subtasks size printString, ' subtasks from work item ', epicId) println
-        ]
-      ]
-    ].
-
-    "1b. Legacy fallback: read plan decision"
-    subtasks isNil ifTrue: [
-      decisions := bbs scan: 'decision' scope: scope.
-      plan := nil.
-      decisions do: [:d |
-        planPayload := d at: 'payload'.
-        (planPayload at: 'subtasks' ifAbsent: [nil]) notNil ifTrue: [plan := d]
-      ].
-      plan notNil ifTrue: [
-        subtasks := (plan at: 'payload') at: 'subtasks'
-      ]
-    ].
-
-    (subtasks isNil or: [subtasks isEmpty]) ifTrue: [
-      ('dispatch-waves: no subtasks found') println.
-      self failWorkflow: instanceId reason: 'dispatch-waves: no subtasks found (no work item children or plan decision)'.
-      ^self
-    ].
-
-    "2. Find max wave number"
-    maxWave := 1.
-    subtasks do: [:st |
-      w := st at: 'wave' ifAbsent: [1].
-      w > maxWave ifTrue: [maxWave := w]
-    ].
-
-    "3. Write wave tracking signal (includes params for subsequent waves)"
-    wavePayload := Dictionary new.
-    wavePayload at: 'current_wave' put: 1.
-    wavePayload at: 'max_wave' put: maxWave.
-    wavePayload at: 'transition_id' put: (transition at: 'id').
-    wavePayload at: 'subtasks' put: subtasks.
-    wavePayload at: 'params' put: params.
-    bbs upsertSignal: instanceId identity: 'wave-dispatch' payload: wavePayload.
-
-    "4. Dispatch wave 1"
-    self dispatchWave: 1 subtasks: subtasks instance: instanceId scope: scope params: params.
-
-    ('  dispatch-waves: ', subtasks size printString, ' subtasks across ', maxWave printString, ' waves. Wave 1 dispatched.') println.
-    bbs notify: ('Wave dispatch started: ', subtasks size printString, ' subtasks, ', maxWave printString, ' waves')
-      scope: scope severity: 'info'
-  ]
-
-  method: dispatchWave: waveNum subtasks: subtasks instance: instanceId scope: scope params: params [
-    "Dispatch all subtasks in the given wave as child workflows.
-     Subtasks with the same batch tag are combined into a single workflow.
-     Reads template field to choose story vs story-lite."
-
-    | waveSubtasks childTemplate childParams childId waveChildIds childScope signalPayload statusPayload desc repo identity batchGroups batchKey batchList batchDesc |
-    waveSubtasks := subtasks select: [:st | (st at: 'wave' ifAbsent: [1]) = waveNum].
-    waveChildIds := Array new: 0.
-
-    ('  Dispatching wave ', waveNum printString, ': ', waveSubtasks size printString, ' tasks') println.
-
-    "Group by batch tag — unbatched tasks get dispatched individually"
-    batchGroups := Dictionary new.
-    waveSubtasks do: [:st |
-      batchKey := st at: 'batch' ifAbsent: [nil].
-      batchKey isNil ifTrue: [
-        "No batch — dispatch individually"
-        desc := st at: 'description' ifAbsent: ['No description'].
-        repo := st at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]].
-        identity := st at: 'identity' ifAbsent: ['subtask'].
-        childTemplate := st at: 'template' ifAbsent: ['story'].
-
-        childParams := Dictionary new.
-        childParams at: 'description' put: desc.
-        repo notNil ifTrue: [childParams at: 'repo' put: repo].
-
-        childId := self instantiate: childTemplate scope: scope params: childParams.
-        waveChildIds := waveChildIds copyWith: childId.
-
-        signalPayload := Dictionary new.
-        signalPayload at: 'child_instance' put: childId.
-        signalPayload at: 'child_scope' put: scope.
-        signalPayload at: 'wave' put: waveNum.
-        signalPayload at: 'subtask_identity' put: identity.
-        bbs upsertSignal: instanceId identity: 'wave-child:', waveNum printString, ':', childId payload: signalPayload.
-
-        ('    Dispatched: ', identity, ' → ', childId) println
-      ] ifFalse: [
-        "Batched — collect for grouped dispatch"
-        batchList := batchGroups at: batchKey ifAbsent: [nil].
-        batchList isNil ifTrue: [
-          batchList := Array new: 0.
-          batchGroups at: batchKey put: batchList
-        ].
-        batchGroups at: batchKey put: (batchList copyWith: st)
-      ]
-    ].
-
-    "Dispatch batched groups as single workflows"
-    batchGroups keysAndValuesDo: [:key :tasks |
-      batchDesc := 'Batch [', key, ']: '.
-      repo := nil.
-      childTemplate := 'story-lite'.
-      tasks do: [:st |
-        batchDesc := batchDesc, (st at: 'identity' ifAbsent: ['?']), ': ', (st at: 'description' ifAbsent: ['']), '. '.
-        repo isNil ifTrue: [repo := st at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]]].
-        "Use story (not lite) if any task in batch requests it"
-        (st at: 'template' ifAbsent: ['story-lite']) = 'story' ifTrue: [childTemplate := 'story']
-      ].
-
-      childParams := Dictionary new.
-      childParams at: 'description' put: batchDesc.
-      repo notNil ifTrue: [childParams at: 'repo' put: repo].
-
-      childId := self instantiate: childTemplate scope: scope params: childParams.
-      waveChildIds := waveChildIds copyWith: childId.
-
-      signalPayload := Dictionary new.
-      signalPayload at: 'child_instance' put: childId.
-      signalPayload at: 'child_scope' put: scope.
-      signalPayload at: 'wave' put: waveNum.
-      signalPayload at: 'subtask_identity' put: 'batch:', key.
-      bbs upsertSignal: instanceId identity: 'wave-child:', waveNum printString, ':', childId payload: signalPayload.
-
-      ('    Dispatched batch [', key, '] (', tasks size printString, ' tasks) → ', childId) println
-    ].
-
-    "Write wave status signal"
-    statusPayload := Dictionary new.
-    statusPayload at: 'wave' put: waveNum.
-    statusPayload at: 'total' put: waveChildIds size.
-    statusPayload at: 'child_ids' put: waveChildIds.
-    bbs upsertSignal: instanceId identity: 'wave-status:', waveNum printString payload: statusPayload
-  ]
-
   method: checkWaveCompletion: instanceId scope: scope transitionId: transId [
-    "Check if all waves dispatched by dispatch-waves are complete.
-     If the current wave is done, dispatch the next wave.
-     If the final wave is done, return a synthetic event to trigger promotion.
-     Returns an event (truthy) if all waves complete, nil otherwise."
-
-    | waveDispatch wdPayload currentWave maxWave subtasks waveStatus wsPayload childIds allDone childWf childStatus nextWave |
-
-    "Read the wave-dispatch signal"
-    waveDispatch := bbs rdp: 'signal' scope: instanceId identity: 'wave-dispatch'.
-    waveDispatch isNil ifTrue: [^nil].
-    wdPayload := waveDispatch at: 'payload'.
-    (wdPayload at: 'transition_id') = transId ifFalse: [^nil].
-
-    currentWave := wdPayload at: 'current_wave'.
-    maxWave := wdPayload at: 'max_wave'.
-    subtasks := wdPayload at: 'subtasks'.
-
-    "Check if current wave's children are all complete"
-    waveStatus := bbs rdp: 'signal' scope: instanceId identity: 'wave-status:', currentWave printString.
-    waveStatus isNil ifTrue: [^nil].
-    wsPayload := waveStatus at: 'payload'.
-    childIds := wsPayload at: 'child_ids' ifAbsent: [#()].
-
-    allDone := true.
-    childIds do: [:cid |
-      childWf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = cid] ifNone: [nil].
-      childWf isNil ifTrue: [allDone := false].
-      childWf notNil ifTrue: [
-        childStatus := (childWf at: 'payload') at: 'status' ifAbsent: ['running'].
-        (childStatus = 'completed' or: [childStatus = 'failed']) ifFalse: [allDone := false]
-      ]
-    ].
-
-    allDone ifFalse: [^nil].
-
-    ('  Wave ', currentWave printString, ' complete (', childIds size printString, ' workflows)') println.
-    bbs notify: ('Wave ', currentWave printString, ' of ', maxWave printString, ' complete') scope: scope severity: 'info'.
-
-    "If there are more waves, dispatch the next one"
-    currentWave < maxWave ifTrue: [
-      nextWave := currentWave + 1.
-      "Update the wave-dispatch signal to track current wave"
-      wdPayload at: 'current_wave' put: nextWave.
-      bbs upsertSignal: instanceId identity: 'wave-dispatch' payload: wdPayload.
-      "Dispatch next wave (use stored params so repo etc. are preserved)"
-      self dispatchWave: nextWave subtasks: subtasks instance: instanceId scope: scope params: (wdPayload at: 'params' ifAbsent: [Dictionary new]).
-      ^nil  "Not done yet — more waves to go"
-    ].
-
-    "All waves complete — return truthy to trigger token promotion"
-    ('  All ', maxWave printString, ' waves complete for ', instanceId) println.
-    bbs notify: ('All waves complete for ', instanceId) scope: scope severity: 'info'.
-    ^waveDispatch  "Return the signal as a truthy value"
-  ]
-
-  method: actionNotifyHead: transition instance: instanceId [
-    "Send a workflow-complete notification with description and observation count."
-    | workflow scope desc pd observations msg payload |
-    "Look up workflow — scan all to find regardless of scope"
-    workflow := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
-    scope := self scopeForInstance: instanceId.
-    desc := instanceId.
-    workflow notNil ifTrue: [
-      pd := (workflow at: 'payload') at: 'description' ifAbsent: [nil].
-      pd notNil ifTrue: [desc := pd]
-    ].
-
-    observations := bbs scan: 'observation' scope: instanceId.
-
-    msg := 'Workflow complete: ', desc.
-    observations size > 0 ifTrue: [
-      msg := msg, ' (', observations size printString, ' observations recorded)'
-    ].
-
-    payload := Dictionary new.
-    payload at: 'message' put: msg.
-    payload at: 'severity' put: 'info'.
-    payload at: 'workflow' put: instanceId.
-    bbs out: 'notification' scope: 'system' identity: 'workflow-complete:', instanceId payload: payload
-  ]
-
-  method: actionSpawnWorkflow: transition instance: instanceId params: params [
-    "Spawn a child workflow. Output tokens are already 'waiting'.
-     They promote when the child workflow completes."
-    | spawnConfig childTemplate childScope childParams childInstanceId signalPayload mergedParams |
-
-    spawnConfig := transition at: 'spawn' ifAbsent: [nil].
-    spawnConfig isNil ifTrue: [
-      ('spawn-workflow: missing spawn config on transition ', (transition at: 'id')) println.
-      ^self
-    ].
-
-    childTemplate := spawnConfig at: 'template'.
-
-    "Child scope: from spawn config, else parent scope"
-    childScope := spawnConfig at: 'scope' ifAbsent: [nil].
-    childScope isNil ifTrue: [
-      childScope := self scopeForInstance: instanceId
-    ].
-
-    "Merge params: copy parent, overlay spawn-level overrides with interpolation"
-    mergedParams := Dictionary new.
-    params keysAndValuesDo: [:k :v | mergedParams at: k put: v].
-    childParams := spawnConfig at: 'params' ifAbsent: [Dictionary new].
-    childParams keysAndValuesDo: [:k :v |
-      (v isKindOf: String)
-        ifTrue: [mergedParams at: k put: (self resolveParams: v with: params)]
-        ifFalse: [mergedParams at: k put: v]
-    ].
-
-    "Increment spawn depth counter"
-    mergedParams at: '_depth' put: (params at: '_depth' ifAbsent: [0]) + 1.
-
-    "Instantiate the child"
-    childInstanceId := self instantiate: childTemplate scope: childScope params: mergedParams.
-
-    "Write signal keyed to transition AND child ID"
-    signalPayload := Dictionary new.
-    signalPayload at: 'child_instance' put: childInstanceId.
-    signalPayload at: 'child_template' put: childTemplate.
-    signalPayload at: 'child_scope' put: childScope.
-    signalPayload at: 'parent_transition' put: (transition at: 'id').
-    bbs upsertSignal: instanceId identity: 'child-spawn:', (transition at: 'id'), ':', childInstanceId payload: signalPayload.
-
-    ('  Spawned child workflow: ', childInstanceId, ' from ', (transition at: 'id')) println.
-    bbs notify: ('Spawned child workflow: ', childInstanceId) scope: childScope severity: 'info'
+    "Delegate to DispatchWavesAction for wave completion checking."
+    ^(actions at: 'dispatch-waves') checkWaveCompletion: instanceId scope: scope transitionId: transId
   ]
 
   "--- Precondition Checking ---"
@@ -833,20 +400,16 @@ WorkflowEngine subclass: Object
   method: failWorkflow: instanceId reason: reason [
     "Mark a workflow as failed. Consumes output tokens at current places
      so downstream transitions cannot fire."
-    | scope wf payload allTokens instanceTokens |
+    | scope |
     scope := self scopeForInstance: instanceId.
 
     ('Workflow FAILED: ', instanceId, ' — ', reason) println.
 
-    "Consume and rewrite workflow tuple with failed status"
-    wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
-    wf notNil ifTrue: [
-      bbs inp: 'workflow' scope: scope identity: instanceId.
-      payload := wf at: 'payload'.
-      payload at: 'status' put: 'failed'.
-      payload at: 'failed_at' put: DateTime now epochSeconds.
-      payload at: 'failure_reason' put: reason.
-      bbs out: 'workflow' scope: scope identity: instanceId payload: payload
+    "Atomically update workflow status to failed"
+    bbs update: 'workflow' scope: scope identity: instanceId do: [:p |
+      p at: 'status' put: 'failed'.
+      p at: 'failed_at' put: DateTime now epochSeconds.
+      p at: 'failure_reason' put: reason
     ].
 
     "Emit failure event"
@@ -861,18 +424,17 @@ WorkflowEngine subclass: Object
 
   method: completeWorkflow: wf [
     "Mark a workflow as complete, emit events, notify user."
-    | instanceId scope payload |
+    | instanceId scope |
     instanceId := wf at: 'identity'.
     scope := wf at: 'scope'.
 
     ('Workflow complete: ', instanceId) println.
 
-    "Consume the workflow tuple and rewrite with completed status"
-    bbs inp: 'workflow' scope: scope identity: instanceId.
-    payload := wf at: 'payload'.
-    payload at: 'status' put: 'completed'.
-    payload at: 'completed_at' put: DateTime now epochSeconds.
-    bbs out: 'workflow' scope: scope identity: instanceId payload: payload.
+    "Atomically update workflow status to completed"
+    bbs update: 'workflow' scope: scope identity: instanceId do: [:p |
+      p at: 'status' put: 'completed'.
+      p at: 'completed_at' put: DateTime now epochSeconds
+    ].
 
     "Emit completion event"
     bbs emitEvent: scope identity: 'workflow-complete:', instanceId type: 'workflow-complete' summary: 'Workflow completed: ', instanceId.

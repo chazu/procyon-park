@@ -26,22 +26,21 @@ Scheduler subclass: Object
 
   method: dispatch [
     "Scan for pending tasks and dispatch them to available slots."
-    | allTasks pendingTasks count |
+    | allTasks pendingTasks count pending |
     self availableSlots <= 0 ifTrue: [^self].
 
     allTasks := bbs scanAll: 'task'.
 
     "Filter to pending"
-    pendingTasks := Array new: 0.
+    pending := GrowableArray new.
     allTasks do: [:t |
       | status |
       status := (t at: 'payload') at: 'status' ifAbsent: [''].
-      status = 'pending' ifTrue: [
-        pendingTasks := pendingTasks copyWith: t
-      ]
+      status = 'pending' ifTrue: [pending add: t]
     ].
 
-    pendingTasks size = 0 ifTrue: [^self].
+    pending size = 0 ifTrue: [^self].
+    pendingTasks := pending asArray.
 
     "Dispatch as many as we have slots for"
     count := pendingTasks size.
@@ -60,11 +59,11 @@ Scheduler subclass: Object
     payload := task at: 'payload'.
     role := payload at: 'role'.
 
-    "Claim: consume and rewrite with status dispatched"
-    bbs inp: 'task' scope: scope identity: taskId.
-    payload at: 'status' put: 'dispatched'.
-    payload at: 'dispatched_at' put: DateTime now epochSeconds.
-    bbs out: 'task' scope: scope identity: taskId payload: payload.
+    "Claim: atomically update status to dispatched"
+    bbs update: 'task' scope: scope identity: taskId do: [:p |
+      p at: 'status' put: 'dispatched'.
+      p at: 'dispatched_at' put: DateTime now epochSeconds
+    ].
 
     ('Dispatching task: ', taskId, ' (role: ', role, ')') println.
     bbs notify: ('Task dispatched: ', taskId, ' (role: ', role, ')') scope: scope severity: 'info'.

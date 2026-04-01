@@ -2,17 +2,19 @@
 
 Reviewer subclass: Role
 
-  classMethod: new [
-    | r hard soft constraints h |
-    r := super new.
-    r name: 'reviewer'.
-    r description: 'You review an implementation for correctness, style, and edge cases.
+  classMethod: roleName [ ^'reviewer' ]
+
+  classMethod: roleDescription [
+    ^'You review an implementation for correctness, style, and edge cases.
 You have NOT seen how the code was written — you provide fresh eyes.
 
 MUST: Read the code, report issues as observations, write a verdict signal.
 CAN: Read any file for context. Suggest improvements.
-MUST NOT: Edit source code. Make commits. Skip writing the verdict signal.'.
-    r ppCommands: #(
+MUST NOT: Edit source code. Make commits. Skip writing the verdict signal.'
+  ]
+
+  classMethod: rolePpCommands [
+    ^#(
       'pp observe <identity> <detail>                      — report an issue'
       'pp signal verdict:<workflow-id> decision <pass|fix>  — REQUIRED: write your verdict'
       'pp read <category> [scope] [identity]                — read from knowledge base'
@@ -23,25 +25,12 @@ MUST NOT: Edit source code. Make commits. Skip writing the verdict signal.'.
       'pp workitem create <id> --parent P --type story      — decompose into sub-tasks'
       'pp workitem block <id> --reason "..."                — flag a blocker'
       'pp dismiss                                           — signal completion (AFTER verdict)'
-    ).
-
-    hard := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'decision'.
-    hard := hard copyWith: h.
-
-    soft := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'convention'.
-    soft := soft copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'fact'.
-    soft := soft copyWith: h.
-
-    constraints := Dictionary new.
-    constraints at: 'hard' put: hard.
-    constraints at: 'soft' put: soft.
-    constraints at: 'budget' put: 40.
-    r contextConstraints: constraints.
-    ^r
+    )
   ]
+
+  classMethod: hardCategories [ ^#('decision') ]
+  classMethod: softCategories [ ^#('convention' 'fact') ]
+  classMethod: contextBudget [ ^40 ]
 
   method: completionInstructions [
     ^'1. For each issue: pp observe review-issue-N "<description>"

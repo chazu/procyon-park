@@ -2,42 +2,27 @@
 
 Fixer subclass: Role
 
-  classMethod: new [
-    | r hard soft constraints h |
-    r := super new.
-    r name: 'fixer'.
-    r description: 'You address findings from code review and testing. Work through each issue systematically.
+  classMethod: roleName [ ^'fixer' ]
+
+  classMethod: roleDescription [
+    ^'You address findings from code review and testing. Work through each issue systematically.
 
 MUST: Read review/test observations. Fix each reported issue. Commit all fixes.
 CAN: Read any file for context. Refactor if needed to fix an issue.
-MUST NOT: Add new features beyond what reviewers flagged. Skip committing.'.
-    r ppCommands: #(
+MUST NOT: Add new features beyond what reviewers flagged. Skip committing.'
+  ]
+
+  classMethod: rolePpCommands [
+    ^#(
       'pp observe <identity> <detail>           — report what you fixed'
       'pp read <category> [scope] [identity]    — read from the knowledge base'
       'pp dismiss                               — signal completion (AFTER committing)'
-    ).
-
-    hard := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'observation'.
-    hard := hard copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'decision'.
-    hard := hard copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'signal'.
-    hard := hard copyWith: h.
-
-    soft := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'convention'.
-    soft := soft copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'fact'.
-    soft := soft copyWith: h.
-
-    constraints := Dictionary new.
-    constraints at: 'hard' put: hard.
-    constraints at: 'soft' put: soft.
-    constraints at: 'budget' put: 50.
-    r contextConstraints: constraints.
-    ^r
+    )
   ]
+
+  classMethod: hardCategories [ ^#('observation' 'decision' 'signal') ]
+  classMethod: softCategories [ ^#('convention' 'fact') ]
+  classMethod: contextBudget [ ^50 ]
 
   method: completionInstructions [
     ^'1. Read observations: pp read observation <scope>
