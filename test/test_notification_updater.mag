@@ -174,7 +174,7 @@ TestNotificationUpdater subclass: Object
     updater := PPNotificationUpdater for: listView model: model.
     updater rebuildList.
     t assertEqual: (listView items size) to: 1 message: 'NU1 info format count'.
-    t assertEqual: (listView items at: 1) to: '[info] System started' message: 'NU2 info format text'
+    t assertEqual: (listView items at: 0) to: '[info] System started' message: 'NU2 info format text'
   ]
 
   classMethod: testFormatWarn: t [
@@ -186,7 +186,7 @@ TestNotificationUpdater subclass: Object
     model notifications: notifications.
     updater := PPNotificationUpdater for: listView model: model.
     updater rebuildList.
-    t assertEqual: (listView items at: 1) to: '[warn] Disk space low' message: 'NU3 warn format text'
+    t assertEqual: (listView items at: 0) to: '[warn] Disk space low' message: 'NU3 warn format text'
   ]
 
   classMethod: testFormatUrgent: t [
@@ -198,7 +198,7 @@ TestNotificationUpdater subclass: Object
     model notifications: notifications.
     updater := PPNotificationUpdater for: listView model: model.
     updater rebuildList.
-    t assertEqual: (listView items at: 1) to: '[urgent] Server down' message: 'NU4 urgent format text'
+    t assertEqual: (listView items at: 0) to: '[urgent] Server down' message: 'NU4 urgent format text'
   ]
 
   classMethod: testModelUpdateTriggersRebuild: t [
@@ -215,7 +215,7 @@ TestNotificationUpdater subclass: Object
     model notifications: notifications.
     model changed: #data.
     t assertEqual: (listView items size) to: 2 message: 'NU6 update triggers rebuild count'.
-    t assertEqual: (listView items at: 1) to: '[info] Hello' message: 'NU7 update first item'.
+    t assertEqual: (listView items at: 0) to: '[info] Hello' message: 'NU7 update first item'.
     t assertEqual: (listView items at: 2) to: '[urgent] Alert' message: 'NU8 update second item'
   ]
 
@@ -241,7 +241,7 @@ TestNotificationUpdater subclass: Object
     model notifications: notifications.
     updater := PPNotificationUpdater for: listView model: model.
     updater rebuildList.
-    t assertEqual: (listView items at: 1) to: '[info] ' message: 'NU10 nil payload defaults'
+    t assertEqual: (listView items at: 0) to: '[info] ' message: 'NU10 nil payload defaults'
   ]
 
   classMethod: testEmptyPayloadFields: t [
@@ -253,7 +253,7 @@ TestNotificationUpdater subclass: Object
     model notifications: notifications.
     updater := PPNotificationUpdater for: listView model: model.
     updater rebuildList.
-    t assertEqual: (listView items at: 1) to: '[info] ' message: 'NU11 empty payload fields defaults'
+    t assertEqual: (listView items at: 0) to: '[info] ' message: 'NU11 empty payload fields defaults'
   ]
 
   classMethod: testEmptyNotifications: t [

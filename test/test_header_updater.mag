@@ -142,7 +142,7 @@ TestHeaderUpdater subclass: Object
     mockModel := MockHeaderModel new.
     mockModel connected: false.
     updater := PPHeaderUpdater for: mockLabel model: mockModel.
-    r assert: (mockLabel text = 'PP Dashboard | DISCONNECTED')
+    r assert: (mockLabel text = 'PP Dashboard | DISCONNECTED | q to quit')
       message: 'HU1: disconnected state should show DISCONNECTED'
   ]
 
@@ -159,7 +159,7 @@ TestHeaderUpdater subclass: Object
     mockModel health: health.
     updater := PPHeaderUpdater for: mockLabel model: mockModel.
     txt := mockLabel text.
-    r assert: (txt = 'PP Dashboard | 42 tuples | 120s uptime | http://localhost:7777')
+    r assert: (txt = 'PP Dashboard | 42 tuples | 120s uptime | http://localhost:7777 | q to quit')
       message: 'HU2: connected with health should show tuples, uptime, url'
   ]
 
@@ -171,7 +171,7 @@ TestHeaderUpdater subclass: Object
     mockModel connected: true.
     mockModel health: nil.
     updater := PPHeaderUpdater for: mockLabel model: mockModel.
-    r assert: (mockLabel text = 'PP Dashboard | connecting...')
+    r assert: (mockLabel text = 'PP Dashboard | connecting... | q to quit')
       message: 'HU3: connected with nil health should show connecting...'
   ]
 
@@ -184,7 +184,7 @@ TestHeaderUpdater subclass: Object
     health := Dictionary new.
     mockModel health: health.
     updater := PPHeaderUpdater for: mockLabel model: mockModel.
-    r assert: (mockLabel text = 'PP Dashboard | ? tuples | ?s uptime | ?')
+    r assert: (mockLabel text = 'PP Dashboard | ? tuples | ?s uptime | ? | q to quit')
       message: 'HU4: nil health values should show ? placeholders'
   ]
 
@@ -195,7 +195,7 @@ TestHeaderUpdater subclass: Object
     mockModel := MockHeaderModel new.
     mockModel connected: false.
     updater := PPHeaderUpdater for: mockLabel model: mockModel.
-    r assert: (mockLabel text = 'PP Dashboard | DISCONNECTED')
+    r assert: (mockLabel text = 'PP Dashboard | DISCONNECTED | q to quit')
       message: 'HU5a: initially disconnected'.
     "Now connect and send changed:"
     mockModel connected: true.
@@ -205,7 +205,7 @@ TestHeaderUpdater subclass: Object
     health at: 'url' put: 'localhost'.
     mockModel health: health.
     mockModel changed: #data.
-    r assert: (mockLabel text = 'PP Dashboard | 10 tuples | 5s uptime | localhost')
+    r assert: (mockLabel text = 'PP Dashboard | 10 tuples | 5s uptime | localhost | q to quit')
       message: 'HU5b: after changed: #data label should update'
   ]
 
