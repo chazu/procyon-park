@@ -1,0 +1,166 @@
+"Tests for PPDashboardModel — Story 1: data model with background polling.
+ Verifies:
+   - Initial state (empty arrays, connected=false)
+   - fetchData populates model fields from mock HTTP
+   - changed: #data is sent after fetchData
+   - Exception handling sets connected := false
+   - Recovery after error sets connected := true
+
+ All temp vars at method top. Uses [block] fork not Process fork:."
+
+"--- Mock HTTP Client ---"
+MockDashboardHttpClient subclass: Object
+  instanceVars: responses shouldFail
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance init.
+    ^instance
+  ]
+
+  method: init [
+    responses := Dictionary new.
+    shouldFail := false
+  ]
+
+  method: setResponse: url to: body [
+    responses at: url put: body
+  ]
+
+  method: shouldFail: aBoolean [
+    shouldFail := aBoolean
+  ]
+
+  method: get: url [
+    | resp |
+    shouldFail ifTrue: [
+      Exception signal: 'Mock HTTP error'
+    ].
+    resp := responses at: url ifAbsent: [nil].
+    resp ifNil: [Exception signal: 'No mock response for: ', url].
+    ^resp
+  ]
+
+"--- Mock Dependent (to verify changed: notifications) ---"
+MockDashboardDependent subclass: Object
+  instanceVars: lastAspect updateCount
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance init.
+    ^instance
+  ]
+
+  method: init [
+    lastAspect := nil.
+    updateCount := 0
+  ]
+
+  method: update: aspect [
+    lastAspect := aspect.
+    updateCount := updateCount + 1
+  ]
+
+  method: lastAspect [
+    ^lastAspect
+  ]
+
+  method: updateCount [
+    ^updateCount
+  ]
+
+"--- Test Suite ---"
+TestDashboardModel subclass: Object
+
+  classMethod: run: t [
+    | model mockClient mockDep dashJson healthJson |
+
+    "--- DM1: Initial state ---"
+    model := PPDashboardModel new.
+    t assert: model connected = false message: 'DM1a: connected initially false'.
+    t assert: model workflows size = 0 message: 'DM1b: workflows initially empty'.
+    t assert: model tasks size = 0 message: 'DM1c: tasks initially empty'.
+    t assert: model tokens size = 0 message: 'DM1d: tokens initially empty'.
+    t assert: model notifications size = 0 message: 'DM1e: notifications initially empty'.
+    t assert: model health size = 0 message: 'DM1f: health initially empty'.
+    t assert: model baseUrl = 'http://localhost:7777' message: 'DM1g: baseUrl default'.
+
+    "--- DM2: fetchData populates model from mock HTTP ---"
+    model := PPDashboardModel new.
+    mockClient := MockDashboardHttpClient new.
+    model client: mockClient.
+
+    dashJson := '{"workflows":[{"identity":"wf-1"}],"tasks":[{"identity":"t-1"},{"identity":"t-2"}],"tokens":[{"identity":"tok-1"}],"notifications":[{"identity":"n-1"}]}'.
+    healthJson := '{"tuples":42,"uptime":"10s"}'.
+    mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
+    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
+
+    model fetchData.
+
+    t assert: model connected = true message: 'DM2a: connected true after fetch'.
+    t assert: model workflows size = 1 message: 'DM2b: workflows populated'.
+    t assert: model tasks size = 2 message: 'DM2c: tasks populated'.
+    t assert: model tokens size = 1 message: 'DM2d: tokens populated'.
+    t assert: model notifications size = 1 message: 'DM2e: notifications populated'.
+    t assertEqual: (model health at: 'tuples') to: 42 message: 'DM2f: health tuples'.
+    t assertEqual: (model health at: 'uptime') to: '10s' message: 'DM2g: health uptime'.
+
+    "--- DM3: changed: #data sent after fetchData ---"
+    model := PPDashboardModel new.
+    mockClient := MockDashboardHttpClient new.
+    model client: mockClient.
+    mockDep := MockDashboardDependent new.
+    model addDependent: mockDep.
+
+    dashJson := '{"workflows":[],"tasks":[],"tokens":[],"notifications":[]}'.
+    healthJson := '{"tuples":0,"uptime":"0s"}'.
+    mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
+    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
+
+    model fetchData.
+
+    t assertEqual: mockDep lastAspect to: #data message: 'DM3a: changed: #data sent'.
+    t assert: mockDep updateCount > 0 message: 'DM3b: dependent was notified'.
+
+    "--- DM4: Exception sets connected := false ---"
+    model := PPDashboardModel new.
+    mockClient := MockDashboardHttpClient new.
+    model client: mockClient.
+    mockDep := MockDashboardDependent new.
+    model addDependent: mockDep.
+
+    mockClient shouldFail: true.
+    model fetchData.
+
+    t assert: model connected = false message: 'DM4a: connected false on error'.
+    t assertEqual: mockDep lastAspect to: #data message: 'DM4b: changed: #data sent on error'.
+
+    "--- DM5: Recovery after error ---"
+    mockClient shouldFail: false.
+    dashJson := '{"workflows":[{"identity":"wf-r"}],"tasks":[],"tokens":[],"notifications":[]}'.
+    healthJson := '{"tuples":1,"uptime":"1s"}'.
+    mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
+    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
+
+    model fetchData.
+
+    t assert: model connected = true message: 'DM5a: connected true after recovery'.
+    t assert: model workflows size = 1 message: 'DM5b: workflows populated after recovery'
+  ]
+
+"--- Entry Point ---"
+TestDashboardModelMain subclass: Object
+
+  classMethod: run [
+    | t |
+    t := WRT new.
+    '=== Dashboard Model Tests ===' println.
+    [
+      TestDashboardModel run: t
+    ] on: Exception do: [:e |
+      t assert: false message: ('TestDashboardModel crashed: ', e messageText)
+    ].
+    t report
+  ]

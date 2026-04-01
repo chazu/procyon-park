@@ -1,0 +1,286 @@
+"Tests for PPNotificationUpdater — notification ListView model dependent.
+ Verifies:
+   - Formatting with all severity levels (info, warn, urgent)
+   - BBS tuple payload unwrapping
+   - List updates on model changed: #data
+   - Nil payload handling
+   - Aspect filtering (non-#data aspects ignored)
+   - Empty notifications array
+
+ Test mocks use nested payload structure matching real BBS tuples."
+
+"--- Test Runner ---"
+NUT subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [
+    | r |
+    r := super new.
+    r init.
+    ^r
+  ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: condition message: msg [
+    condition ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Notification Updater Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    (failed > 0) ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    (failed = 0)
+      ifTrue: [ 'ALL TESTS PASSED' println ]
+      ifFalse: [ 'SOME TESTS FAILED' println ]
+  ]
+
+  method: failed [
+    ^failed
+  ]
+
+"--- Mock Model (implements addDependent: and notifications accessor) ---"
+MockNotifModel subclass: Object
+  instanceVars: dependents notificationData
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance init.
+    ^instance
+  ]
+
+  method: init [
+    dependents := Array new: 0.
+    notificationData := #()
+  ]
+
+  method: addDependent: obj [
+    dependents := dependents copyWith: obj
+  ]
+
+  method: dependents [
+    ^dependents
+  ]
+
+  method: notifications [
+    ^notificationData
+  ]
+
+  method: notifications: anArray [
+    notificationData := anArray
+  ]
+
+  method: changed: aspect [
+    dependents do: [:dep | dep update: aspect]
+  ]
+
+"--- Mock ListView (captures items: calls) ---"
+MockNotifListView subclass: Object
+  instanceVars: currentItems
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance init.
+    ^instance
+  ]
+
+  method: init [
+    currentItems := #()
+  ]
+
+  method: items: anArray [
+    currentItems := anArray
+  ]
+
+  method: items [
+    ^currentItems
+  ]
+
+"--- Helper: build a BBS-style notification tuple ---"
+NotifHelper subclass: Object
+
+  classMethod: makeTuple: severity message: message [
+    | payload tuple |
+    payload := Dictionary new.
+    payload at: 'severity' put: severity.
+    payload at: 'message' put: message.
+    tuple := Dictionary new.
+    tuple at: 'payload' put: payload.
+    ^tuple
+  ]
+
+  classMethod: makeTupleNoPayload [
+    | tuple |
+    tuple := Dictionary new.
+    ^tuple
+  ]
+
+  classMethod: makeTupleNilPayloadFields [
+    | payload tuple |
+    payload := Dictionary new.
+    tuple := Dictionary new.
+    tuple at: 'payload' put: payload.
+    ^tuple
+  ]
+
+"--- Test Class ---"
+TestNotificationUpdater subclass: Object
+
+  classMethod: run: t [
+    self testFormatInfo: t.
+    self testFormatWarn: t.
+    self testFormatUrgent: t.
+    self testModelUpdateTriggersRebuild: t.
+    self testNonDataAspectIgnored: t.
+    self testNilPayload: t.
+    self testEmptyPayloadFields: t.
+    self testEmptyNotifications: t.
+    self testRegistersAsDependent: t
+  ]
+
+  classMethod: testFormatInfo: t [
+    | model listView updater notifications |
+    model := MockNotifModel new.
+    listView := MockNotifListView new.
+    notifications := Array new: 0.
+    notifications := notifications copyWith: (NotifHelper makeTuple: 'info' message: 'System started').
+    model notifications: notifications.
+    updater := PPNotificationUpdater for: listView model: model.
+    updater rebuildList.
+    t assertEqual: (listView items size) to: 1 message: 'NU1 info format count'.
+    t assertEqual: (listView items at: 1) to: '[info] System started' message: 'NU2 info format text'
+  ]
+
+  classMethod: testFormatWarn: t [
+    | model listView updater notifications |
+    model := MockNotifModel new.
+    listView := MockNotifListView new.
+    notifications := Array new: 0.
+    notifications := notifications copyWith: (NotifHelper makeTuple: 'warn' message: 'Disk space low').
+    model notifications: notifications.
+    updater := PPNotificationUpdater for: listView model: model.
+    updater rebuildList.
+    t assertEqual: (listView items at: 1) to: '[warn] Disk space low' message: 'NU3 warn format text'
+  ]
+
+  classMethod: testFormatUrgent: t [
+    | model listView updater notifications |
+    model := MockNotifModel new.
+    listView := MockNotifListView new.
+    notifications := Array new: 0.
+    notifications := notifications copyWith: (NotifHelper makeTuple: 'urgent' message: 'Server down').
+    model notifications: notifications.
+    updater := PPNotificationUpdater for: listView model: model.
+    updater rebuildList.
+    t assertEqual: (listView items at: 1) to: '[urgent] Server down' message: 'NU4 urgent format text'
+  ]
+
+  classMethod: testModelUpdateTriggersRebuild: t [
+    | model listView updater notifications |
+    model := MockNotifModel new.
+    listView := MockNotifListView new.
+    updater := PPNotificationUpdater for: listView model: model.
+    "List should be empty initially"
+    t assertEqual: (listView items size) to: 0 message: 'NU5 initial empty'.
+    "Set notifications and trigger model changed:"
+    notifications := Array new: 0.
+    notifications := notifications copyWith: (NotifHelper makeTuple: 'info' message: 'Hello').
+    notifications := notifications copyWith: (NotifHelper makeTuple: 'urgent' message: 'Alert').
+    model notifications: notifications.
+    model changed: #data.
+    t assertEqual: (listView items size) to: 2 message: 'NU6 update triggers rebuild count'.
+    t assertEqual: (listView items at: 1) to: '[info] Hello' message: 'NU7 update first item'.
+    t assertEqual: (listView items at: 2) to: '[urgent] Alert' message: 'NU8 update second item'
+  ]
+
+  classMethod: testNonDataAspectIgnored: t [
+    | model listView updater notifications |
+    model := MockNotifModel new.
+    listView := MockNotifListView new.
+    updater := PPNotificationUpdater for: listView model: model.
+    notifications := Array new: 0.
+    notifications := notifications copyWith: (NotifHelper makeTuple: 'info' message: 'Should not appear').
+    model notifications: notifications.
+    "Send a non-#data aspect — should NOT trigger rebuild"
+    model changed: #other.
+    t assertEqual: (listView items size) to: 0 message: 'NU9 non-data aspect ignored'
+  ]
+
+  classMethod: testNilPayload: t [
+    | model listView updater notifications |
+    model := MockNotifModel new.
+    listView := MockNotifListView new.
+    notifications := Array new: 0.
+    notifications := notifications copyWith: (NotifHelper makeTupleNoPayload).
+    model notifications: notifications.
+    updater := PPNotificationUpdater for: listView model: model.
+    updater rebuildList.
+    t assertEqual: (listView items at: 1) to: '[info] ' message: 'NU10 nil payload defaults'
+  ]
+
+  classMethod: testEmptyPayloadFields: t [
+    | model listView updater notifications |
+    model := MockNotifModel new.
+    listView := MockNotifListView new.
+    notifications := Array new: 0.
+    notifications := notifications copyWith: (NotifHelper makeTupleNilPayloadFields).
+    model notifications: notifications.
+    updater := PPNotificationUpdater for: listView model: model.
+    updater rebuildList.
+    t assertEqual: (listView items at: 1) to: '[info] ' message: 'NU11 empty payload fields defaults'
+  ]
+
+  classMethod: testEmptyNotifications: t [
+    | model listView updater |
+    model := MockNotifModel new.
+    listView := MockNotifListView new.
+    updater := PPNotificationUpdater for: listView model: model.
+    updater rebuildList.
+    t assertEqual: (listView items size) to: 0 message: 'NU12 empty notifications'
+  ]
+
+  classMethod: testRegistersAsDependent: t [
+    | model listView updater deps found |
+    model := MockNotifModel new.
+    listView := MockNotifListView new.
+    updater := PPNotificationUpdater for: listView model: model.
+    deps := model dependents.
+    found := false.
+    deps do: [:d | (d = updater) ifTrue: [found := true]].
+    t assert: found message: 'NU13 registers as dependent'
+  ]
+
+"--- Entry Point ---"
+TestNotificationUpdaterMain subclass: Object
+  classMethod: run [
+    | t |
+    t := NUT new.
+    TestNotificationUpdater run: t.
+    t report
+  ]

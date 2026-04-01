@@ -1,0 +1,240 @@
+"Tests for PPHeaderUpdater — header status bar for Alto TUI dashboard.
+
+ Test classes:
+   TestHeaderUpdater — HU1-HU7: header text updates, disconnected state, nil guards
+
+ All temp vars at method top. No ifNil:/ifNotNil: — uses isNil/notNil ifTrue:.
+ Uses Array new: 0 and copyWith: for array building."
+
+"--- Test Runner ---"
+HUT subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [
+    | r |
+    r := super new.
+    r init.
+    ^r
+  ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: condition message: msg [
+    condition ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('  FAIL: ', msg) println
+    ]
+  ]
+
+  method: summary [
+    '' println.
+    ('PPHeaderUpdater Tests: ', passed printString, ' passed, ', failed printString, ' failed') println.
+    failures size > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ]
+  ]
+
+"--- Mock Label ---"
+MockLabel subclass: Object
+  instanceVars: text style
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance initMock.
+    ^instance
+  ]
+
+  method: initMock [
+    text := ''.
+    style := nil
+  ]
+
+  method: text [
+    ^text
+  ]
+
+  method: text: aString [
+    text := aString
+  ]
+
+  method: style [
+    ^style
+  ]
+
+  method: style: aStyle [
+    style := aStyle
+  ]
+
+"--- Mock Model ---"
+MockHeaderModel subclass: Object
+  instanceVars: dependents connectedFlag healthDict
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance initMock.
+    ^instance
+  ]
+
+  method: initMock [
+    dependents := Array new: 0.
+    connectedFlag := false.
+    healthDict := nil
+  ]
+
+  method: addDependent: obj [
+    dependents := dependents copyWith: obj
+  ]
+
+  method: dependents [
+    ^dependents
+  ]
+
+  method: connected [
+    ^connectedFlag
+  ]
+
+  method: connected: aBool [
+    connectedFlag := aBool
+  ]
+
+  method: health [
+    ^healthDict
+  ]
+
+  method: health: aDict [
+    healthDict := aDict
+  ]
+
+  method: changed: aspect [
+    dependents do: [:dep | dep update: aspect]
+  ]
+
+"--- Tests ---"
+TestHeaderUpdater subclass: Object
+
+  classMethod: run [
+    | r |
+    r := HUT new.
+    self testDisconnected: r.
+    self testConnectedWithHealth: r.
+    self testConnectedNilHealth: r.
+    self testConnectedNilValues: r.
+    self testChangedDataNotification: r.
+    self testAspectFiltering: r.
+    self testRegisteredAsDependent: r.
+    r summary
+  ]
+
+  "HU1: Disconnected state shows DISCONNECTED"
+  classMethod: testDisconnected: r [
+    | mockLabel mockModel updater |
+    mockLabel := MockLabel new.
+    mockModel := MockHeaderModel new.
+    mockModel connected: false.
+    updater := PPHeaderUpdater for: mockLabel model: mockModel.
+    r assert: (mockLabel text = 'PP Dashboard | DISCONNECTED')
+      message: 'HU1: disconnected state should show DISCONNECTED'
+  ]
+
+  "HU2: Connected with health dict shows tuples, uptime, url"
+  classMethod: testConnectedWithHealth: r [
+    | mockLabel mockModel updater health txt |
+    mockLabel := MockLabel new.
+    mockModel := MockHeaderModel new.
+    mockModel connected: true.
+    health := Dictionary new.
+    health at: 'tuples' put: 42.
+    health at: 'uptime' put: 120.
+    health at: 'url' put: 'http://localhost:7777'.
+    mockModel health: health.
+    updater := PPHeaderUpdater for: mockLabel model: mockModel.
+    txt := mockLabel text.
+    r assert: (txt = 'PP Dashboard | 42 tuples | 120s uptime | http://localhost:7777')
+      message: 'HU2: connected with health should show tuples, uptime, url'
+  ]
+
+  "HU3: Connected but nil health dict shows connecting"
+  classMethod: testConnectedNilHealth: r [
+    | mockLabel mockModel updater |
+    mockLabel := MockLabel new.
+    mockModel := MockHeaderModel new.
+    mockModel connected: true.
+    mockModel health: nil.
+    updater := PPHeaderUpdater for: mockLabel model: mockModel.
+    r assert: (mockLabel text = 'PP Dashboard | connecting...')
+      message: 'HU3: connected with nil health should show connecting...'
+  ]
+
+  "HU4: Connected with health but nil values shows ? placeholders"
+  classMethod: testConnectedNilValues: r [
+    | mockLabel mockModel updater health |
+    mockLabel := MockLabel new.
+    mockModel := MockHeaderModel new.
+    mockModel connected: true.
+    health := Dictionary new.
+    mockModel health: health.
+    updater := PPHeaderUpdater for: mockLabel model: mockModel.
+    r assert: (mockLabel text = 'PP Dashboard | ? tuples | ?s uptime | ?')
+      message: 'HU4: nil health values should show ? placeholders'
+  ]
+
+  "HU5: changed: #data notification updates label"
+  classMethod: testChangedDataNotification: r [
+    | mockLabel mockModel updater health |
+    mockLabel := MockLabel new.
+    mockModel := MockHeaderModel new.
+    mockModel connected: false.
+    updater := PPHeaderUpdater for: mockLabel model: mockModel.
+    r assert: (mockLabel text = 'PP Dashboard | DISCONNECTED')
+      message: 'HU5a: initially disconnected'.
+    "Now connect and send changed:"
+    mockModel connected: true.
+    health := Dictionary new.
+    health at: 'tuples' put: 10.
+    health at: 'uptime' put: 5.
+    health at: 'url' put: 'localhost'.
+    mockModel health: health.
+    mockModel changed: #data.
+    r assert: (mockLabel text = 'PP Dashboard | 10 tuples | 5s uptime | localhost')
+      message: 'HU5b: after changed: #data label should update'
+  ]
+
+  "HU6: Non-data aspects are ignored"
+  classMethod: testAspectFiltering: r [
+    | mockLabel mockModel updater |
+    mockLabel := MockLabel new.
+    mockModel := MockHeaderModel new.
+    mockModel connected: false.
+    updater := PPHeaderUpdater for: mockLabel model: mockModel.
+    mockLabel text: 'something else'.
+    mockModel changed: #selection.
+    r assert: (mockLabel text = 'something else')
+      message: 'HU6: non-data aspect should not update label'
+  ]
+
+  "HU7: Updater registers as dependent on model"
+  classMethod: testRegisteredAsDependent: r [
+    | mockLabel mockModel updater deps |
+    mockLabel := MockLabel new.
+    mockModel := MockHeaderModel new.
+    updater := PPHeaderUpdater for: mockLabel model: mockModel.
+    deps := mockModel dependents.
+    r assert: (deps size = 1)
+      message: 'HU7: updater should be registered as dependent'
+  ]
+
+"--- Entry Point ---"
+TestHeaderUpdaterMain subclass: Object
+  classMethod: run [
+    TestHeaderUpdater run
+  ]

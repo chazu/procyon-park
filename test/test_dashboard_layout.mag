@@ -1,0 +1,465 @@
+"Tests for PPDashboardLayout — Story 6: Keyboard Navigation and Workflow Detail View.
+ Verifies:
+   DL1: q key (keyRune + rune 113) exits app
+   DL2: Non-q keyRune does NOT exit app
+   DL3: Tab cycles focus across 4 children (delegated to BoxLayout super)
+   DL4: Enter on workflow list triggers detail view
+   DL5: Arrow keys navigate within lists (delegated to ListView)
+   DL6: Detail view replaces notification pane at index 3
+   DL7: Escape returns from detail view to notification pane
+   DL8: Escape when not in detail mode is a no-op
+   DL9: Detail content includes workflow identity, tokens, and tasks
+
+ All temp vars at method top. Uses Array new: 0 and copyWith:."
+
+import: 'Alto'
+
+"--- Mock App for testing ---"
+MockDashApp subclass: Object
+  instanceVars: stopped
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance init.
+    ^instance
+  ]
+
+  method: init [
+    stopped := false
+  ]
+
+  method: stop [
+    stopped := true
+  ]
+
+  method: stopped [
+    ^stopped
+  ]
+
+  method: display [
+    ^self
+  ]
+
+  method: running [
+    ^stopped not
+  ]
+
+"--- Mock HttpClient for testing ---"
+MockDashHttpClient subclass: Object
+  instanceVars: lastPostUrl lastPostBody postResponse
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance init.
+    ^instance
+  ]
+
+  method: init [
+    lastPostUrl := nil.
+    lastPostBody := nil.
+    postResponse := nil
+  ]
+
+  method: postResponse: aString [
+    postResponse := aString
+  ]
+
+  method: post: url body: body contentType: ct [
+    lastPostUrl := url.
+    lastPostBody := body.
+    ^postResponse
+  ]
+
+  method: get: url [
+    ^'{}'
+  ]
+
+  method: lastPostUrl [ ^lastPostUrl ]
+  method: lastPostBody [ ^lastPostBody ]
+
+"--- Mock client that returns proper dashboard data for DL9 ---"
+MockDashDetailClient subclass: Object
+  instanceVars: dashResp
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance init.
+    ^instance
+  ]
+
+  method: init [
+    dashResp := '{}'
+  ]
+
+  method: dashResponse: aString [
+    dashResp := aString
+  ]
+
+  method: get: url [
+    "Return dashboard data for /api/dashboard, health for /api/health"
+    (url endsWith: '/api/health') ifTrue: [^'{"tuples":10,"uptime":100}'].
+    ^dashResp
+  ]
+
+  method: post: url body: body contentType: ct [
+    ^'{}'
+  ]
+
+"--- Mock KeyEvent for testing ---"
+MockKeyEvt subclass: Object
+  instanceVars: key rune
+
+  classMethod: key: aKey rune: aRune [
+    | instance |
+    instance := super new.
+    instance initKey: aKey rune: aRune.
+    ^instance
+  ]
+
+  method: initKey: aKey rune: aRune [
+    key := aKey.
+    rune := aRune
+  ]
+
+  method: isKey [ ^true ]
+  method: isMouse [ ^false ]
+  method: key [ ^key ]
+  method: rune [ ^rune ]
+  method: mod [ ^0 ]
+
+  method: at: aKey ifAbsent: aBlock [
+    aKey = 'type' ifTrue: [^'key'].
+    aKey = 'key' ifTrue: [^key].
+    aKey = 'rune' ifTrue: [^rune].
+    aKey = 'mod' ifTrue: [^0].
+    ^aBlock value
+  ]
+
+  method: at: aKey [
+    ^self at: aKey ifAbsent: [nil]
+  ]
+
+"--- Test Runner ---"
+DLT subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [
+    | r |
+    r := super new.
+    r init.
+    ^r
+  ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: condition message: msg [
+    condition ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    | fullMsg |
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      fullMsg := msg, ' (expected: ', expected printString, ', got: ', actual printString, ')'.
+      failures := failures copyWith: fullMsg.
+      ('FAIL: ', fullMsg) println
+    ]
+  ]
+
+  method: report [
+    '' println.
+    ('Dashboard Layout Tests: ', passed printString, ' passed, ', failed printString, ' failed') println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ]
+  ]
+
+
+"--- Helper to build a test layout ---"
+TestDashLayoutHelper subclass: Object
+
+  classMethod: buildTestLayout [
+    "Build a PPDashboardLayout with mock children and return a dictionary of refs."
+    | layout mockApp header workflowList taskList notificationList listHelper model refs |
+    mockApp := MockDashApp new.
+
+    header := Alto::Label new.
+    header text: 'Test Header | q to quit'.
+
+    workflowList := Alto::ListView items: #() onSelect: [:item | ].
+    taskList := Alto::ListView items: #() onSelect: [:item | ].
+    notificationList := Alto::ListView items: #() onSelect: [:item | ].
+
+    layout := PPDashboardLayout vertical.
+    layout addChild: header weight: 1.
+    layout addChild: workflowList weight: 3.
+    layout addChild: taskList weight: 3.
+    layout addChild: notificationList weight: 3.
+
+    layout app: mockApp.
+
+    model := PPDashboardModel new.
+    layout model: model.
+    layout notificationList: notificationList.
+
+    listHelper := PPDashboardListHelper setupWorkflowList: workflowList taskList: taskList withModel: model.
+    layout listHelper: listHelper.
+
+    refs := Dictionary new.
+    refs at: 'layout' put: layout.
+    refs at: 'app' put: mockApp.
+    refs at: 'header' put: header.
+    refs at: 'workflowList' put: workflowList.
+    refs at: 'taskList' put: taskList.
+    refs at: 'notificationList' put: notificationList.
+    refs at: 'model' put: model.
+    refs at: 'listHelper' put: listHelper.
+    ^refs
+  ]
+
+
+"--- Tests ---"
+
+TestDashboardLayout subclass: Object
+
+  classMethod: run [
+    | t |
+    t := DLT new.
+    self testQKeyExitsApp: t.
+    self testNonQRuneDoesNotExit: t.
+    self testTabCyclesFocus: t.
+    self testEnterOnWorkflowListTriggersDetail: t.
+    self testArrowKeysNavigateLists: t.
+    self testDetailViewReplacesNotificationPane: t.
+    self testEscapeReturnsFromDetailView: t.
+    self testEscapeWhenNotInDetailIsNoop: t.
+    self testDetailContentIncludesWorkflowData: t.
+    t report
+  ]
+
+  classMethod: testQKeyExitsApp: t [
+    "DL1: q key (keyRune=256, rune=113) should call app stop."
+    | refs layout mockApp evt |
+    refs := TestDashLayoutHelper buildTestLayout.
+    layout := refs at: 'layout'.
+    mockApp := refs at: 'app'.
+    evt := MockKeyEvt key: 256 rune: 113.
+    layout handleEvent: evt.
+    t assert: mockApp stopped message: 'DL1: q key should stop app'
+  ]
+
+  classMethod: testNonQRuneDoesNotExit: t [
+    "DL2: A non-q rune key (e.g. 'a' = rune 97) should NOT stop app."
+    | refs layout mockApp evt |
+    refs := TestDashLayoutHelper buildTestLayout.
+    layout := refs at: 'layout'.
+    mockApp := refs at: 'app'.
+    evt := MockKeyEvt key: 256 rune: 97.
+    layout handleEvent: evt.
+    t assert: mockApp stopped not message: 'DL2: non-q rune should not stop app'
+  ]
+
+  classMethod: testTabCyclesFocus: t [
+    "DL3: Tab key cycles focusedIndex through 0,1,2,3,0."
+    | refs layout tabEvt idx0 idx1 idx2 idx3 idx4 |
+    refs := TestDashLayoutHelper buildTestLayout.
+    layout := refs at: 'layout'.
+    tabEvt := MockKeyEvt key: 9 rune: 0.
+    idx0 := layout focusedIndex.
+    layout handleEvent: tabEvt.
+    idx1 := layout focusedIndex.
+    layout handleEvent: tabEvt.
+    idx2 := layout focusedIndex.
+    layout handleEvent: tabEvt.
+    idx3 := layout focusedIndex.
+    layout handleEvent: tabEvt.
+    idx4 := layout focusedIndex.
+    t assertEqual: idx0 to: 0 message: 'DL3: initial focus at 0'.
+    t assertEqual: idx1 to: 1 message: 'DL3: first Tab goes to 1'.
+    t assertEqual: idx2 to: 2 message: 'DL3: second Tab goes to 2'.
+    t assertEqual: idx3 to: 3 message: 'DL3: third Tab goes to 3'.
+    t assertEqual: idx4 to: 0 message: 'DL3: fourth Tab wraps to 0'
+  ]
+
+  classMethod: testEnterOnWorkflowListTriggersDetail: t [
+    "DL4: Enter key when focused on workflowList (index 1) with a selected workflow
+     should switch to detail mode."
+    | refs layout model mockClient tabEvt enterEvt wfItem wfPayload wfList statusResponse |
+    refs := TestDashLayoutHelper buildTestLayout.
+    layout := refs at: 'layout'.
+    model := refs at: 'model'.
+    wfList := refs at: 'workflowList'.
+
+    "Set up a mock HTTP client on the model"
+    mockClient := MockDashHttpClient new.
+    statusResponse := '{"workflow_id":"wf-1","status":"running","template":"test-tmpl","started_at":1000}'.
+    mockClient postResponse: statusResponse.
+    model client: mockClient.
+
+    "Add a workflow item to the list and select it"
+    wfPayload := Dictionary new.
+    wfPayload at: 'status' put: 'running'.
+    wfPayload at: 'template' put: 'test-tmpl'.
+    wfItem := Dictionary new.
+    wfItem at: 'identity' put: 'wf-1'.
+    wfItem at: 'payload' put: wfPayload.
+    wfList items: ((Array new: 0) copyWith: wfItem).
+
+    "Trigger onSelect via Enter on the ListView to set selectedWorkflow in listHelper"
+    wfList handleEvent: (MockKeyEvt key: 13 rune: 0).
+
+    "Tab to focus workflowList (index 1)"
+    tabEvt := MockKeyEvt key: 9 rune: 0.
+    layout handleEvent: tabEvt.
+    t assertEqual: layout focusedIndex to: 1 message: 'DL4: focus on workflowList'.
+
+    "Press Enter on the layout"
+    enterEvt := MockKeyEvt key: 13 rune: 0.
+    layout handleEvent: enterEvt.
+    t assert: layout detailMode message: 'DL4: Enter on workflowList enables detailMode'
+  ]
+
+  classMethod: testArrowKeysNavigateLists: t [
+    "DL5: Arrow keys (up/down) navigate within a focused ListView."
+    | refs layout wfList tabEvt downEvt wfItem1 wfItem2 items p1 p2 |
+    refs := TestDashLayoutHelper buildTestLayout.
+    layout := refs at: 'layout'.
+    wfList := refs at: 'workflowList'.
+
+    "Add two workflow items"
+    p1 := Dictionary new.
+    p1 at: 'status' put: 'a'.
+    wfItem1 := Dictionary new.
+    wfItem1 at: 'identity' put: 'wf-a'.
+    wfItem1 at: 'payload' put: p1.
+
+    p2 := Dictionary new.
+    p2 at: 'status' put: 'b'.
+    wfItem2 := Dictionary new.
+    wfItem2 at: 'identity' put: 'wf-b'.
+    wfItem2 at: 'payload' put: p2.
+
+    items := Array new: 0.
+    items := items copyWith: wfItem1.
+    items := items copyWith: wfItem2.
+    wfList items: items.
+
+    "Tab to workflowList (index 1)"
+    tabEvt := MockKeyEvt key: 9 rune: 0.
+    layout handleEvent: tabEvt.
+
+    "Initially at index 0"
+    t assertEqual: wfList selectedIndex to: 0 message: 'DL5: initial selection at 0'.
+
+    "Down arrow moves to index 1"
+    downEvt := MockKeyEvt key: 258 rune: 0.
+    layout handleEvent: downEvt.
+    t assertEqual: wfList selectedIndex to: 1 message: 'DL5: down arrow moves to 1'
+  ]
+
+  classMethod: testDetailViewReplacesNotificationPane: t [
+    "DL6: showDetailPane replaces child at index 3."
+    | refs layout notifList origChild3 |
+    refs := TestDashLayoutHelper buildTestLayout.
+    layout := refs at: 'layout'.
+    notifList := refs at: 'notificationList'.
+
+    origChild3 := layout children at: 3.
+    t assert: (origChild3 = notifList) message: 'DL6: child 3 is notificationList initially'.
+
+    layout showDetailPane: #('Detail line 1' 'Detail line 2').
+    t assert: layout detailMode message: 'DL6: detailMode is true after showDetailPane'.
+    t assert: ((layout children at: 3) = notifList) not message: 'DL6: child 3 is no longer notificationList'
+  ]
+
+  classMethod: testEscapeReturnsFromDetailView: t [
+    "DL7: Escape key while in detail mode restores notification pane."
+    | refs layout notifList escEvt |
+    refs := TestDashLayoutHelper buildTestLayout.
+    layout := refs at: 'layout'.
+    notifList := refs at: 'notificationList'.
+
+    "Enter detail mode"
+    layout showDetailPane: #('Detail').
+    t assert: layout detailMode message: 'DL7: in detail mode'.
+
+    "Press Escape"
+    escEvt := MockKeyEvt key: 27 rune: 0.
+    layout handleEvent: escEvt.
+    t assert: layout detailMode not message: 'DL7: Escape exits detail mode'.
+    t assert: ((layout children at: 3) = notifList) message: 'DL7: notification pane restored'
+  ]
+
+  classMethod: testEscapeWhenNotInDetailIsNoop: t [
+    "DL8: Escape when not in detail mode does nothing harmful."
+    | refs layout notifList escEvt |
+    refs := TestDashLayoutHelper buildTestLayout.
+    layout := refs at: 'layout'.
+    notifList := refs at: 'notificationList'.
+
+    escEvt := MockKeyEvt key: 27 rune: 0.
+    layout handleEvent: escEvt.
+    t assert: layout detailMode not message: 'DL8: still not in detail mode'.
+    t assert: ((layout children at: 3) = notifList) message: 'DL8: notification pane unchanged'
+  ]
+
+  classMethod: testDetailContentIncludesWorkflowData: t [
+    "DL9: buildDetailItems includes workflow identity, tokens, and tasks."
+    | refs layout model result items foundWorkflow foundTokens foundTasks dashJson fullMockClient |
+    refs := TestDashLayoutHelper buildTestLayout.
+    layout := refs at: 'layout'.
+    model := refs at: 'model'.
+
+    "Create a mock client that returns dashboard data with tokens and tasks for wf-test"
+    dashJson := '{"workflows":[],"tasks":[{"identity":"task-1","payload":{"role":"implementer","status":"running","workflow":"wf-test"}}],"tokens":[{"identity":"tok-1","payload":{"status":"active","workflow":"wf-test"}}],"notifications":[]}'.
+    fullMockClient := MockDashDetailClient new.
+    fullMockClient dashResponse: dashJson.
+    model client: fullMockClient.
+    model fetchData.
+
+    "Build detail items for wf-test"
+    result := Dictionary new.
+    result at: 'workflow_id' put: 'wf-test'.
+    result at: 'status' put: 'running'.
+    result at: 'template' put: 'story'.
+    result at: 'started_at' put: 12345.
+
+    items := layout buildDetailItems: result forWorkflow: 'wf-test'.
+
+    "Check that items contain expected content"
+    foundWorkflow := false.
+    foundTokens := false.
+    foundTasks := false.
+    items do: [:line |
+      (line = 'Workflow: wf-test') ifTrue: [foundWorkflow := true].
+      (line = '  tok-1 [active]') ifTrue: [foundTokens := true].
+      (line = '  task-1 [implementer] running') ifTrue: [foundTasks := true]
+    ].
+    t assert: foundWorkflow message: 'DL9: detail includes workflow identity'.
+    t assert: foundTokens message: 'DL9: detail includes token data'.
+    t assert: foundTasks message: 'DL9: detail includes task data'
+  ]
+
+
+"--- Entry Point ---"
+TestDashboardLayoutMain subclass: Object
+  classMethod: run [
+    'Running Dashboard Layout Tests...' println.
+    TestDashboardLayout run
+  ]

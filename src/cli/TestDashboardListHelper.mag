@@ -1,0 +1,265 @@
+"Tests for PPDashboardListHelper — verifies list item updates,
+ correct formatting, and empty array handling."
+
+"MockListView — minimal ListView stand-in for testing."
+MockListView subclass: Object
+  instanceVars: items labelBlock onSelectBlock
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance initMock.
+    ^instance
+  ]
+
+  method: initMock [
+    items := #().
+    labelBlock := nil.
+    onSelectBlock := nil
+  ]
+
+  method: items: newItems [
+    items := newItems
+  ]
+
+  method: items [
+    ^items
+  ]
+
+  method: labelBlock: aBlock [
+    labelBlock := aBlock
+  ]
+
+  method: labelBlock [
+    ^labelBlock
+  ]
+
+  method: onSelect: aBlock [
+    onSelectBlock := aBlock
+  ]
+
+  method: onSelectBlock [
+    ^onSelectBlock
+  ]
+
+"MockDashboardModel — minimal model with dependent protocol."
+MockDashboardModel subclass: Object
+  instanceVars: workflows tasks dependents
+
+  classMethod: new [
+    | instance |
+    instance := super new.
+    instance initMockModel.
+    ^instance
+  ]
+
+  method: initMockModel [
+    workflows := #().
+    tasks := #().
+    dependents := #()
+  ]
+
+  method: workflows [
+    ^workflows
+  ]
+
+  method: workflows: anArray [
+    workflows := anArray
+  ]
+
+  method: tasks [
+    ^tasks
+  ]
+
+  method: tasks: anArray [
+    tasks := anArray
+  ]
+
+  method: addDependent: obj [
+    dependents := dependents copyWith: obj
+  ]
+
+  method: removeDependent: obj [
+    dependents := dependents reject: [:d | d = obj]
+  ]
+
+  method: dependents [
+    ^dependents
+  ]
+
+  method: changed: aspect [
+    dependents do: [:d | d update: aspect]
+  ]
+
+"TestDashboardListHelper — test runner."
+TestDashboardListHelper subclass: Object
+
+  classMethod: run [
+    self new runAll
+  ]
+
+  method: runAll [
+    self testSetupRegistersDependentOnModel.
+    self testWorkflowLabelFormat.
+    self testTaskLabelFormat.
+    self testUpdateRebuildsBothLists.
+    self testEmptyWorkflowsProduceEmptyList.
+    self testEmptyTasksProduceEmptyList.
+    self testNilWorkflowsHandledGracefully.
+    self testNilTasksHandledGracefully.
+    self testNonDataAspectIgnored.
+    self testSelectedWorkflowExposed.
+    'TestDashboardListHelper: all tests passed' println
+  ]
+
+  method: testSetupRegistersDependentOnModel [
+    | model wl tl helper |
+    model := MockDashboardModel new.
+    wl := MockListView new.
+    tl := MockListView new.
+    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
+    (model dependents size = 1) assert.
+    (model dependents first = helper) assert
+  ]
+
+  method: testWorkflowLabelFormat [
+    | model wl tl helper wfPayload wfTuple label |
+    model := MockDashboardModel new.
+    wl := MockListView new.
+    tl := MockListView new.
+    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
+
+    wfPayload := Dictionary new.
+    wfPayload at: 'status' put: 'active'.
+    wfPayload at: 'template' put: 'deploy'.
+    wfTuple := Dictionary new.
+    wfTuple at: 'identity' put: 'wf-001'.
+    wfTuple at: 'payload' put: wfPayload.
+
+    label := wl labelBlock value: wfTuple.
+    (label = 'wf-001 [active] deploy') assert
+  ]
+
+  method: testTaskLabelFormat [
+    | model wl tl helper taskPayload taskTuple label |
+    model := MockDashboardModel new.
+    wl := MockListView new.
+    tl := MockListView new.
+    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
+
+    taskPayload := Dictionary new.
+    taskPayload at: 'role' put: 'implementer'.
+    taskPayload at: 'status' put: 'running'.
+    taskTuple := Dictionary new.
+    taskTuple at: 'identity' put: 'task-042'.
+    taskTuple at: 'payload' put: taskPayload.
+
+    label := tl labelBlock value: taskTuple.
+    (label = 'task-042 [implementer] running') assert
+  ]
+
+  method: testUpdateRebuildsBothLists [
+    | model wl tl helper wfPayload wfTuple taskPayload taskTuple |
+    model := MockDashboardModel new.
+    wl := MockListView new.
+    tl := MockListView new.
+    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
+
+    wfPayload := Dictionary new.
+    wfPayload at: 'status' put: 'pending'.
+    wfPayload at: 'template' put: 'build'.
+    wfTuple := Dictionary new.
+    wfTuple at: 'identity' put: 'wf-100'.
+    wfTuple at: 'payload' put: wfPayload.
+
+    taskPayload := Dictionary new.
+    taskPayload at: 'role' put: 'reviewer'.
+    taskPayload at: 'status' put: 'waiting'.
+    taskTuple := Dictionary new.
+    taskTuple at: 'identity' put: 'task-200'.
+    taskTuple at: 'payload' put: taskPayload.
+
+    model workflows: (Array with: wfTuple).
+    model tasks: (Array with: taskTuple).
+    model changed: #data.
+
+    (wl items size = 1) assert.
+    (tl items size = 1) assert.
+    (wl items first = wfTuple) assert.
+    (tl items first = taskTuple) assert
+  ]
+
+  method: testEmptyWorkflowsProduceEmptyList [
+    | model wl tl helper |
+    model := MockDashboardModel new.
+    wl := MockListView new.
+    tl := MockListView new.
+    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
+
+    model workflows: #().
+    model changed: #data.
+    (wl items size = 0) assert
+  ]
+
+  method: testEmptyTasksProduceEmptyList [
+    | model wl tl helper |
+    model := MockDashboardModel new.
+    wl := MockListView new.
+    tl := MockListView new.
+    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
+
+    model tasks: #().
+    model changed: #data.
+    (tl items size = 0) assert
+  ]
+
+  method: testNilWorkflowsHandledGracefully [
+    | model wl tl helper |
+    model := MockDashboardModel new.
+    wl := MockListView new.
+    tl := MockListView new.
+    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
+
+    model workflows: nil.
+    model changed: #data.
+    (wl items size = 0) assert
+  ]
+
+  method: testNilTasksHandledGracefully [
+    | model wl tl helper |
+    model := MockDashboardModel new.
+    wl := MockListView new.
+    tl := MockListView new.
+    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
+
+    model tasks: nil.
+    model changed: #data.
+    (tl items size = 0) assert
+  ]
+
+  method: testNonDataAspectIgnored [
+    | model wl tl helper |
+    model := MockDashboardModel new.
+    wl := MockListView new.
+    tl := MockListView new.
+    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
+
+    model workflows: (Array with: Dictionary new).
+    model changed: #other.
+    (wl items size = 0) assert
+  ]
+
+  method: testSelectedWorkflowExposed [
+    | model wl tl helper wfTuple |
+    model := MockDashboardModel new.
+    wl := MockListView new.
+    tl := MockListView new.
+    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
+
+    (helper selectedWorkflow isNil) assert.
+
+    wfTuple := Dictionary new.
+    wfTuple at: 'identity' put: 'wf-select'.
+    wl onSelectBlock value: wfTuple.
+    (helper selectedWorkflow = wfTuple) assert
+  ]
