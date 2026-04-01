@@ -56,6 +56,11 @@ ApiServer subclass: Object
     httpServer route: '/api/workflow/status' method: 'POST' handler: [:req | self handleWorkflowStatus: req].
     httpServer route: '/api/workflow/cancel' method: 'POST' handler: [:req | self handleWorkflowCancel: req].
     httpServer route: '/api/task/create' method: 'POST' handler: [:req | self handleTaskCreate: req].
+    httpServer route: '/api/workitem/create' method: 'POST' handler: [:req | self handleWorkitemCreate: req].
+    httpServer route: '/api/workitem/update' method: 'POST' handler: [:req | self handleWorkitemUpdate: req].
+    httpServer route: '/api/workitem/comment' method: 'POST' handler: [:req | self handleWorkitemComment: req].
+    httpServer route: '/api/workitem/add-child' method: 'POST' handler: [:req | self handleWorkitemAddChild: req].
+    httpServer route: '/api/workitem/run' method: 'POST' handler: [:req | self handleWorkitemRun: req].
     httpServer route: '/api/signal' method: 'POST' handler: [:req | self handleSignal: req].
     httpServer route: '/api/dashboard' method: 'GET' handler: [:req | self handleDashboard: req].
     httpServer route: '/api/history' method: 'GET' handler: [:req | self handleHistory: req]
@@ -118,6 +123,31 @@ ApiServer subclass: Object
     d := Dictionary new.
     d at: 'id' put: anId.
     d at: 'status' put: 'ok'.
+    ^d
+  ]
+
+  method: okWithIdentity: anIdentity [
+    | d |
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'identity' put: anIdentity.
+    ^d
+  ]
+
+  method: okWithCount: key count: aCount [
+    | d |
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: key put: aCount.
+    ^d
+  ]
+
+  method: okWithWorkflow: wfId type: aType [
+    | d |
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'workflow_id' put: wfId.
+    d at: 'type' put: aType.
     ^d
   ]
 
@@ -569,6 +599,196 @@ ApiServer subclass: Object
 
     id := bbs upsertSignal: scope identity: identity payload: payload.
     ^self okResponse: (self okWithId: id)
+  ]
+
+  "--- Work Items ---"
+
+  method: handleWorkitemCreate: req [
+    "POST /api/workitem/create — create a work item (epic or story)."
+    | body scope identity payload id pinned |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    scope := body at: 'scope' ifAbsent: ['default'].
+    identity := body at: 'identity' ifAbsent: [nil].
+    identity isNil ifTrue: [^self errorResponse: 400 message: 'identity required'].
+    payload := body at: 'payload' ifAbsent: [Dictionary new].
+    pinned := body at: 'pinned' ifAbsent: [true].
+
+    pinned
+      ifTrue: [id := bbs outPinned: 'workitem' scope: scope identity: identity payload: payload]
+      ifFalse: [id := bbs out: 'workitem' scope: scope identity: identity payload: payload].
+
+    ^self okResponse: (self okWithId: id)
+  ]
+
+  method: handleWorkitemUpdate: req [
+    "POST /api/workitem/update — update fields on a work item.
+     Body: {identity, scope, fields: {status, title, ...}, cascade?}"
+    | body scope identity fields cascade item payload newPayload |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    identity := body at: 'identity' ifAbsent: [nil].
+    identity isNil ifTrue: [^self errorResponse: 400 message: 'identity required'].
+    scope := body at: 'scope' ifAbsent: ['default'].
+    fields := body at: 'fields' ifAbsent: [Dictionary new].
+    cascade := body at: 'cascade' ifAbsent: [false].
+
+    "Read existing item"
+    item := bbs rdp: 'workitem' scope: scope identity: identity.
+    item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
+
+    "Merge fields into existing payload"
+    payload := item at: 'payload'.
+    newPayload := Dictionary new.
+    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
+    fields keysAndValuesDo: [:k :v | newPayload at: k put: v].
+
+    "Consume and rewrite"
+    bbs inp: 'workitem' scope: scope identity: identity.
+    bbs outPinned: 'workitem' scope: scope identity: identity payload: newPayload.
+
+    "Cascade status to children if requested"
+    (cascade and: [fields includesKey: 'status']) ifTrue: [
+      | children childItem childPayload newChildPayload |
+      children := newPayload at: 'children' ifAbsent: [#()].
+      children do: [:childId |
+        childItem := bbs rdp: 'workitem' scope: scope identity: childId.
+        childItem notNil ifTrue: [
+          childPayload := childItem at: 'payload'.
+          newChildPayload := Dictionary new.
+          childPayload keysAndValuesDo: [:k :v | newChildPayload at: k put: v].
+          newChildPayload at: 'status' put: (fields at: 'status').
+          newChildPayload at: 'updated_at' put: DateTime now epochSeconds.
+          bbs inp: 'workitem' scope: scope identity: childId.
+          bbs outPinned: 'workitem' scope: scope identity: childId payload: newChildPayload
+        ]
+      ]
+    ].
+
+    ^self okResponse: (self okWithIdentity: identity)
+  ]
+
+  method: handleWorkitemComment: req [
+    "POST /api/workitem/comment — add a comment to a work item."
+    | body scope identity author text item payload comments comment newPayload |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    identity := body at: 'identity' ifAbsent: [nil].
+    identity isNil ifTrue: [^self errorResponse: 400 message: 'identity required'].
+    scope := body at: 'scope' ifAbsent: ['default'].
+    author := body at: 'author' ifAbsent: ['unknown'].
+    text := body at: 'text' ifAbsent: [''].
+
+    item := bbs rdp: 'workitem' scope: scope identity: identity.
+    item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
+
+    payload := item at: 'payload'.
+    comments := payload at: 'comments' ifAbsent: [#()].
+
+    comment := Dictionary new.
+    comment at: 'author' put: author.
+    comment at: 'text' put: text.
+    comment at: 'timestamp' put: DateTime now epochSeconds.
+    comments := comments copyWith: comment.
+
+    "Rewrite with new comments"
+    newPayload := Dictionary new.
+    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
+    newPayload at: 'comments' put: comments.
+    newPayload at: 'updated_at' put: DateTime now epochSeconds.
+
+    bbs inp: 'workitem' scope: scope identity: identity.
+    bbs outPinned: 'workitem' scope: scope identity: identity payload: newPayload.
+
+    ^self okResponse: (self okWithCount: 'comments' count: comments size)
+  ]
+
+  method: handleWorkitemAddChild: req [
+    "POST /api/workitem/add-child — add a child identity to a parent's children array."
+    | body scope identity child item payload children newPayload |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    identity := body at: 'identity' ifAbsent: [nil].
+    identity isNil ifTrue: [^self errorResponse: 400 message: 'identity required'].
+    scope := body at: 'scope' ifAbsent: ['default'].
+    child := body at: 'child' ifAbsent: [nil].
+    child isNil ifTrue: [^self errorResponse: 400 message: 'child required'].
+
+    item := bbs rdp: 'workitem' scope: scope identity: identity.
+    item isNil ifTrue: [^self errorResponse: 404 message: 'parent work item not found'].
+
+    payload := item at: 'payload'.
+    children := payload at: 'children' ifAbsent: [#()].
+    children := children copyWith: child.
+
+    newPayload := Dictionary new.
+    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
+    newPayload at: 'children' put: children.
+    newPayload at: 'updated_at' put: DateTime now epochSeconds.
+
+    bbs inp: 'workitem' scope: scope identity: identity.
+    bbs outPinned: 'workitem' scope: scope identity: identity payload: newPayload.
+
+    ^self okResponse: (self okWithCount: 'children' count: children size)
+  ]
+
+  method: handleWorkitemRun: req [
+    "POST /api/workitem/run — execute a work item via workflow.
+     For stories: starts a story/story-lite workflow.
+     For epics: starts an execute-epic workflow (dispatch-waves on children)."
+    | body scope identity item payload type template wfParams instanceId |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+
+    identity := body at: 'identity' ifAbsent: [nil].
+    identity isNil ifTrue: [^self errorResponse: 400 message: 'identity required'].
+    scope := body at: 'scope' ifAbsent: ['default'].
+
+    item := bbs rdp: 'workitem' scope: scope identity: identity.
+    item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
+
+    payload := item at: 'payload'.
+    type := payload at: 'type' ifAbsent: ['story'].
+
+    "Update status to in-progress"
+    self updateWorkitemStatus: identity scope: scope status: 'in-progress'.
+
+    wfParams := Dictionary new.
+    wfParams at: 'workitem' put: identity.
+    wfParams at: 'description' put: (payload at: 'description' ifAbsent: [payload at: 'title' ifAbsent: [identity]]).
+    (payload at: 'repo' ifAbsent: [nil]) notNil ifTrue: [
+      wfParams at: 'repo' put: (payload at: 'repo')
+    ].
+
+    type = 'epic' ifTrue: [
+      "Dispatch children through execute-epic"
+      template := 'full-pipeline'.
+      instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams.
+      ^self okResponse: (self okWithWorkflow: instanceId type: 'epic')
+    ].
+
+    "Story — use the template specified on the work item"
+    template := payload at: 'template' ifAbsent: ['story'].
+    instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams.
+    ^self okResponse: (self okWithWorkflow: instanceId type: 'story')
+  ]
+
+  method: updateWorkitemStatus: identity scope: scope status: newStatus [
+    "Helper: update a work item's status."
+    | item payload newPayload |
+    item := bbs rdp: 'workitem' scope: scope identity: identity.
+    item isNil ifTrue: [^self].
+    payload := item at: 'payload'.
+    newPayload := Dictionary new.
+    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
+    newPayload at: 'status' put: newStatus.
+    newPayload at: 'updated_at' put: DateTime now epochSeconds.
+    bbs inp: 'workitem' scope: scope identity: identity.
+    bbs outPinned: 'workitem' scope: scope identity: identity payload: newPayload
   ]
 
   "--- History ---"

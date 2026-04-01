@@ -5,7 +5,8 @@ Categories subclass: Object
   classMethod: valid [
     ^#('fact' 'convention' 'observation' 'decision' 'signal'
        'task' 'template' 'workflow' 'token' 'rule' 'ingestion'
-       'event' 'obstacle' 'session' 'artifact' 'link' 'notification')
+       'event' 'obstacle' 'session' 'artifact' 'link' 'notification'
+       'workitem')
   ]
 
   classMethod: isValid: aString [

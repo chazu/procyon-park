@@ -2,7 +2,7 @@
  evaluates rules, dispatches tasks, and performs housekeeping."
 
 Dispatcher subclass: Object
-  instanceVars: bbs workflowEngine ruleEngine taskDispatcher running tick
+  instanceVars: bbs workflowEngine ruleEngine scheduler running tick
 
   classMethod: on: aBBS harnessFactory: factory [
     ^super new initBBS: aBBS harnessFactory: factory
@@ -20,14 +20,14 @@ Dispatcher subclass: Object
     bbs := aBBS.
     workflowEngine := WorkflowEngine on: aBBS.
     ruleEngine := RuleEngine on: aBBS.
-    taskDispatcher := TaskDispatcher on: aBBS maxSlots: max harnessFactory: factory.
+    scheduler := Scheduler on: aBBS maxSlots: max harnessFactory: factory.
     running := false.
     tick := 0
   ]
 
   method: workflowEngine [ ^workflowEngine ]
   method: ruleEngine [ ^ruleEngine ]
-  method: taskDispatcher [ ^taskDispatcher ]
+  method: scheduler [ ^scheduler ]
 
   "--- Lifecycle ---"
 
@@ -60,10 +60,10 @@ Dispatcher subclass: Object
     tick := tick + 1.
 
     "Every tick (10s): core operations"
-    taskDispatcher checkCompleted.
+    scheduler checkCompleted.
     workflowEngine advance.
     ruleEngine evaluate.
-    taskDispatcher dispatch.
+    scheduler dispatch.
 
     "Every 6th tick (~60s): reconciliation"
     (tick \\ 6) = 0 ifTrue: [

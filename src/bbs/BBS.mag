@@ -319,7 +319,7 @@ BBS subclass: Object
 
   method: isDurableCategory: category [
     "Categories that should be persisted across restarts."
-    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token') includes: category
+    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem') includes: category
   ]
 
   method: persistAfterChange [

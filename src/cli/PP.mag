@@ -51,6 +51,7 @@ PP subclass: Object
     cmd = 'log'       ifTrue: [^self cmdLog: args].
     cmd = 'history'   ifTrue: [^self cmdHistory: args].
     cmd = 'dashboard' ifTrue: [^self cmdDashboard: args].
+    cmd = 'workitem'  ifTrue: [^WorkItemCLI new runWith: args].
     cmd = 'repo'      ifTrue: [^Repo new runWith: args].
     cmd = 'worktree'  ifTrue: [
       wtArgs := Array new: 0.

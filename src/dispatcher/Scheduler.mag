@@ -1,7 +1,7 @@
-"Task dispatcher — matches pending tasks to available agent slots
- and spawns harness processes."
+"Scheduler — matches pending agent tasks to available harness slots.
+ Only handles category 'task' with status 'pending'. Does not touch work items."
 
-TaskDispatcher subclass: Object
+Scheduler subclass: Object
   instanceVars: bbs maxSlots activeSlots harnessFactory mutex
 
   classMethod: on: aBBS maxSlots: max harnessFactory: factory [

@@ -1,0 +1,479 @@
+"WorkItemCLI — manages work items (epics, stories) in the tuplespace.
+ Work items are planning artifacts, separate from agent execution tasks."
+
+WorkItemCLI subclass: Object
+  instanceVars: baseUrl client scope
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: initialize [
+    baseUrl := System env: 'PP_URL'.
+    (baseUrl isNil or: [baseUrl isEmpty]) ifTrue: [baseUrl := 'http://localhost:7777'].
+    scope := System env: 'PP_SCOPE'.
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default'].
+    client := HttpClient new
+  ]
+
+  method: runWith: args [
+    "Dispatch pp workitem subcommands."
+    | subcmd |
+    args size < 2 ifTrue: [
+      self printUsage.
+      ^self
+    ].
+
+    subcmd := args at: 1.
+
+    subcmd = 'create'   ifTrue: [^self cmdCreate: args].
+    subcmd = 'show'     ifTrue: [^self cmdShow: args].
+    subcmd = 'list'     ifTrue: [^self cmdList: args].
+    subcmd = 'children' ifTrue: [^self cmdChildren: args].
+    subcmd = 'update'   ifTrue: [^self cmdUpdate: args].
+    subcmd = 'comment'  ifTrue: [^self cmdComment: args].
+    subcmd = 'ready'    ifTrue: [^self cmdSetStatus: args status: 'ready'].
+    subcmd = 'done'     ifTrue: [^self cmdSetStatus: args status: 'done'].
+    subcmd = 'block'    ifTrue: [^self cmdBlock: args].
+    subcmd = 'run'      ifTrue: [^self cmdRun: args].
+    subcmd = 'plan'     ifTrue: [^self cmdPlan: args].
+    subcmd = 'review'   ifTrue: [^self cmdReview: args].
+    subcmd = 'help'     ifTrue: [^self printUsage].
+
+    ('Unknown workitem command: ', subcmd) println.
+    self printUsage
+  ]
+
+  "--- Commands ---"
+
+  method: cmdCreate: args [
+    "pp workitem create <identity> --title T --type epic|story [--repo R] [--status S] [--parent P]
+       [--description D] [--template T] [--batch B] [--wave N] [--depends-on X,Y] [--label L1,L2]"
+    | identity title type repo status parent description template batch wave dependsOn labels body payload |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem create <identity> --title "Title" --type epic|story [--repo R] [--status S] [--parent P]' println.
+      ^self
+    ].
+
+    identity := args at: 2.
+    title := self flagValue: '--title' in: args.
+    type := self flagValue: '--type' in: args.
+    title isNil ifTrue: [title := identity].
+    type isNil ifTrue: [type := 'story'].
+
+    repo := self flagValue: '--repo' in: args.
+    status := self flagValue: '--status' in: args.
+    status isNil ifTrue: [status := 'backlog'].
+    parent := self flagValue: '--parent' in: args.
+    description := self flagValue: '--description' in: args.
+    description isNil ifTrue: [description := ''].
+    template := self flagValue: '--template' in: args.
+    template isNil ifTrue: [template := 'story'].
+    batch := self flagValue: '--batch' in: args.
+    wave := self flagValue: '--wave' in: args.
+    wave isNil ifTrue: [wave := 1] ifFalse: [wave := wave asInteger].
+    dependsOn := self flagValue: '--depends-on' in: args.
+    labels := self flagValue: '--label' in: args.
+
+    "Build payload"
+    payload := Dictionary new.
+    payload at: 'title' put: title.
+    payload at: 'description' put: description.
+    payload at: 'status' put: status.
+    payload at: 'type' put: type.
+    payload at: 'parent' put: parent.
+    payload at: 'children' put: (Array new: 0).
+    repo notNil ifTrue: [payload at: 'repo' put: repo].
+    payload at: 'template' put: template.
+    batch notNil ifTrue: [payload at: 'batch' put: batch].
+    payload at: 'wave' put: wave.
+    dependsOn notNil
+      ifTrue: [payload at: 'depends_on' put: (dependsOn split: ',')]
+      ifFalse: [payload at: 'depends_on' put: (Array new: 0)].
+    labels notNil
+      ifTrue: [payload at: 'labels' put: (labels split: ',')]
+      ifFalse: [payload at: 'labels' put: (Array new: 0)].
+    payload at: 'comments' put: (Array new: 0).
+    payload at: 'created_by' put: 'human'.
+    payload at: 'created_at' put: DateTime now epochSeconds.
+    payload at: 'updated_at' put: DateTime now epochSeconds.
+
+    "Determine scope — use repo if provided, else default"
+    repo notNil ifTrue: [scope := repo].
+
+    "POST to server"
+    body := Dictionary new.
+    body at: 'category' put: 'workitem'.
+    body at: 'scope' put: scope.
+    body at: 'identity' put: identity.
+    body at: 'payload' put: payload.
+    body at: 'pinned' put: true.
+
+    self post: '/api/workitem/create' body: body.
+
+    "If parent specified, add this identity to parent's children"
+    parent notNil ifTrue: [
+      self addChildToParent: identity parent: parent
+    ]
+  ]
+
+  method: cmdShow: args [
+    "pp workitem show <identity> [--repo R]"
+    | identity repo body |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem show <identity>' println.
+      ^self
+    ].
+
+    identity := args at: 2.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+
+    body := Dictionary new.
+    body at: 'category' put: 'workitem'.
+    body at: 'scope' put: scope.
+    body at: 'identity' put: identity.
+
+    self postAndFormat: '/api/rdp' body: body format: 'detail'
+  ]
+
+  method: cmdList: args [
+    "pp workitem list [--repo R] [--status S] [--type T] [--parent P] [--label L]"
+    | repo filterStatus filterType filterParent filterLabel response result tuples payload typeStr statusStr titleStr childCount |
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+    filterStatus := self flagValue: '--status' in: args.
+    filterType := self flagValue: '--type' in: args.
+    filterParent := self flagValue: '--parent' in: args.
+    filterLabel := self flagValue: '--label' in: args.
+
+    response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"workitem","scope":"', scope, '"}'''.
+    (response isNil or: [response isEmpty]) ifTrue: [
+      'No work items found.' println. ^self
+    ].
+
+    [
+      result := Json decode: response.
+      tuples := result at: 'tuples' ifAbsent: [#()].
+
+      "Apply filters"
+      filterStatus notNil ifTrue: [
+        tuples := tuples select: [:t |
+          ((t at: 'payload') at: 'status' ifAbsent: ['']) = filterStatus
+        ]
+      ].
+      filterType notNil ifTrue: [
+        tuples := tuples select: [:t |
+          ((t at: 'payload') at: 'type' ifAbsent: ['']) = filterType
+        ]
+      ].
+      filterParent notNil ifTrue: [
+        tuples := tuples select: [:t |
+          ((t at: 'payload') at: 'parent' ifAbsent: ['']) = filterParent
+        ]
+      ].
+
+      tuples size = 0 ifTrue: [
+        'No work items found.' println.
+        ^self
+      ].
+
+      tuples do: [:t |
+        payload := t at: 'payload'.
+        typeStr := payload at: 'type' ifAbsent: ['?'].
+        statusStr := payload at: 'status' ifAbsent: ['?'].
+        titleStr := payload at: 'title' ifAbsent: [''].
+        childCount := (payload at: 'children' ifAbsent: [#()]) size.
+        ((t at: 'identity'), '  [', typeStr, '] [', statusStr, ']  ', titleStr) print.
+        childCount > 0 ifTrue: [(' (', childCount printString, ' children)') print].
+        '' println
+      ]
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
+  ]
+
+  method: cmdChildren: args [
+    "pp workitem children <identity> [--repo R]"
+    | identity repo |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem children <identity>' println.
+      ^self
+    ].
+
+    identity := args at: 2.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+
+    "List items whose parent matches"
+    self cmdList: (Array with: 'workitem' with: 'list' with: '--parent' with: identity with: '--repo' with: scope)
+  ]
+
+  method: cmdUpdate: args [
+    "pp workitem update <identity> [--status S] [--title T] [--description D] [--wave N] [--depends-on X,Y] [--template T]"
+    | identity body fields status title description wave dependsOn template repo |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem update <identity> [--status S] [--title T] [--description D]' println.
+      ^self
+    ].
+
+    identity := args at: 2.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+
+    fields := Dictionary new.
+    status := self flagValue: '--status' in: args.
+    status notNil ifTrue: [fields at: 'status' put: status].
+    title := self flagValue: '--title' in: args.
+    title notNil ifTrue: [fields at: 'title' put: title].
+    description := self flagValue: '--description' in: args.
+    description notNil ifTrue: [fields at: 'description' put: description].
+    wave := self flagValue: '--wave' in: args.
+    wave notNil ifTrue: [fields at: 'wave' put: wave asInteger].
+    dependsOn := self flagValue: '--depends-on' in: args.
+    dependsOn notNil ifTrue: [fields at: 'depends_on' put: (dependsOn split: ',')].
+    template := self flagValue: '--template' in: args.
+    template notNil ifTrue: [fields at: 'template' put: template].
+    fields at: 'updated_at' put: DateTime now epochSeconds.
+
+    body := Dictionary new.
+    body at: 'identity' put: identity.
+    body at: 'scope' put: scope.
+    body at: 'fields' put: fields.
+
+    self post: '/api/workitem/update' body: body
+  ]
+
+  method: cmdComment: args [
+    "pp workitem comment <identity> <text>"
+    | identity text body repo |
+    args size < 4 ifTrue: [
+      'Usage: pp workitem comment <identity> "comment text"' println.
+      ^self
+    ].
+
+    identity := args at: 2.
+    text := args at: 3.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+
+    body := Dictionary new.
+    body at: 'identity' put: identity.
+    body at: 'scope' put: scope.
+    body at: 'author' put: 'human'.
+    body at: 'text' put: text.
+
+    self post: '/api/workitem/comment' body: body
+  ]
+
+  method: cmdSetStatus: args status: newStatus [
+    "pp workitem ready|done <identity> [--repo R]"
+    | identity repo body fields |
+    args size < 3 ifTrue: [
+      ('Usage: pp workitem ', newStatus, ' <identity>') println.
+      ^self
+    ].
+
+    identity := args at: 2.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+
+    fields := Dictionary new.
+    fields at: 'status' put: newStatus.
+    fields at: 'updated_at' put: DateTime now epochSeconds.
+
+    body := Dictionary new.
+    body at: 'identity' put: identity.
+    body at: 'scope' put: scope.
+    body at: 'fields' put: fields.
+    body at: 'cascade' put: true.
+
+    self post: '/api/workitem/update' body: body
+  ]
+
+  method: cmdBlock: args [
+    "pp workitem block <identity> --reason R"
+    | identity reason body fields repo |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem block <identity> --reason "reason"' println.
+      ^self
+    ].
+
+    identity := args at: 2.
+    reason := self flagValue: '--reason' in: args.
+    reason isNil ifTrue: [reason := ''].
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+
+    fields := Dictionary new.
+    fields at: 'status' put: 'blocked'.
+    fields at: 'block_reason' put: reason.
+    fields at: 'updated_at' put: DateTime now epochSeconds.
+
+    body := Dictionary new.
+    body at: 'identity' put: identity.
+    body at: 'scope' put: scope.
+    body at: 'fields' put: fields.
+
+    self post: '/api/workitem/update' body: body
+  ]
+
+  method: cmdRun: args [
+    "pp workitem run <identity> [--repo R]"
+    | identity repo body |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem run <identity>' println.
+      ^self
+    ].
+
+    identity := args at: 2.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+
+    body := Dictionary new.
+    body at: 'identity' put: identity.
+    body at: 'scope' put: scope.
+
+    self post: '/api/workitem/run' body: body
+  ]
+
+  method: cmdPlan: args [
+    "pp workitem plan <identity> [--repo R]"
+    | identity repo body wfParams |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem plan <identity>' println.
+      ^self
+    ].
+
+    identity := args at: 2.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+
+    "Start a workitem-plan workflow targeting this work item"
+    wfParams := Dictionary new.
+    wfParams at: 'workitem' put: identity.
+    body := Dictionary new.
+    body at: 'template' put: 'workitem-plan'.
+    body at: 'scope' put: scope.
+    body at: 'params' put: wfParams.
+    self post: '/api/workflow/start' body: body
+  ]
+
+  method: cmdReview: args [
+    "pp workitem review <identity> [--repo R]"
+    | identity repo body wfParams |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem review <identity>' println.
+      ^self
+    ].
+
+    identity := args at: 2.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+
+    "Start a workitem-review workflow targeting this work item"
+    wfParams := Dictionary new.
+    wfParams at: 'workitem' put: identity.
+    body := Dictionary new.
+    body at: 'template' put: 'workitem-review'.
+    body at: 'scope' put: scope.
+    body at: 'params' put: wfParams.
+    self post: '/api/workflow/start' body: body
+  ]
+
+  "--- Helpers ---"
+
+  method: addChildToParent: childIdentity parent: parentIdentity [
+    "Add a child identity to the parent work item's children array."
+    | body |
+    body := Dictionary new.
+    body at: 'identity' put: parentIdentity.
+    body at: 'scope' put: scope.
+    body at: 'child' put: childIdentity.
+
+    self post: '/api/workitem/add-child' body: body
+  ]
+
+  method: post: path body: dict [
+    "POST JSON and print response."
+    | url jsonBody response result |
+    url := baseUrl, path.
+    jsonBody := Json encode: dict.
+    [
+      response := Shell capture: 'curl -s -X POST "', url, '" -H "Content-Type: application/json" -d ''', jsonBody, ''''.
+      (response notNil and: [response isEmpty not]) ifTrue: [
+        result := Json decode: response.
+        (Json encodePretty: result) println
+      ]
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
+  ]
+
+  method: postAndFormat: path body: dict format: fmt [
+    "POST JSON and format the response for display."
+    | url jsonBody response result tuple payload comments |
+    url := baseUrl, path.
+    jsonBody := Json encode: dict.
+    [
+      response := Shell capture: 'curl -s -X POST "', url, '" -H "Content-Type: application/json" -d ''', jsonBody, ''''.
+      (response notNil and: [response isEmpty not]) ifTrue: [
+        result := Json decode: response.
+        tuple := result at: 'tuple' ifAbsent: [nil].
+        tuple isNil ifTrue: [
+          'Not found.' println. ^self
+        ].
+        payload := tuple at: 'payload'.
+        ('Identity:    ', (tuple at: 'identity')) println.
+        ('Type:        ', (payload at: 'type' ifAbsent: ['?'])) println.
+        ('Status:      ', (payload at: 'status' ifAbsent: ['?'])) println.
+        ('Title:       ', (payload at: 'title' ifAbsent: [''])) println.
+        ('Repo:        ', (payload at: 'repo' ifAbsent: [''])) println.
+        ('Template:    ', (payload at: 'template' ifAbsent: ['story'])) println.
+        ('Wave:        ', (payload at: 'wave' ifAbsent: [1]) printString) println.
+        ('Parent:      ', (payload at: 'parent' ifAbsent: ['(none)']) printString) println.
+        ('Children:    ', (payload at: 'children' ifAbsent: [#()]) size printString) println.
+        ('Depends on:  ', (payload at: 'depends_on' ifAbsent: [#()]) printString) println.
+        ('Labels:      ', (payload at: 'labels' ifAbsent: [#()]) printString) println.
+        '' println.
+        'Description:' println.
+        (payload at: 'description' ifAbsent: ['']) println.
+        '' println.
+        comments := payload at: 'comments' ifAbsent: [#()].
+        comments size > 0 ifTrue: [
+          'Comments:' println.
+          comments do: [:c |
+            ('  [', (c at: 'author' ifAbsent: ['?']), '] ', (c at: 'text' ifAbsent: [''])) println
+          ]
+        ]
+      ]
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
+  ]
+
+  method: flagValue: flag in: args [
+    | idx |
+    idx := args indexOf: flag.
+    (idx >= 0 and: [idx < (args size - 1)])
+      ifTrue: [^args at: idx + 1]
+      ifFalse: [^nil]
+  ]
+
+  method: printUsage [
+    'pp workitem — manage work items (epics, stories)' println.
+    '' println.
+    'Commands:' println.
+    '  create <id> --title T --type epic|story [--repo R] [--status S] [--parent P]' println.
+    '  show <id> [--repo R]                    Show work item detail' println.
+    '  list [--repo R] [--status S] [--type T] [--parent P]  List work items' println.
+    '  children <id> [--repo R]                List children of an epic' println.
+    '  update <id> [--status S] [--title T]    Update fields' println.
+    '  comment <id> "text"                     Add a comment' println.
+    '  ready <id>                              Set status to ready' println.
+    '  done <id>                               Set status to done' println.
+    '  block <id> --reason "..."               Set status to blocked' println.
+    '  run <id>                                Execute via workflow' println.
+    '  plan <id>                               Agentic planning/decomposition' println.
+    '  review <id>                             Agentic review/refinement' println
+  ]
