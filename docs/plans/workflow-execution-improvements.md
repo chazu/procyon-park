@@ -1,5 +1,7 @@
 # Epic: Workflow Execution Improvements
 
+> **Status: 4 of 5 COMPLETED** — Wave dispatch, story-lite, batching, and agent timeout are all in production. **Improvement 4 (wave-level merge)** is the only remaining item — stories still create separate feature branches per wave.
+
 ## Overview
 
 Replace the foreman-driven dispatch model with engine-driven wave execution.

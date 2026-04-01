@@ -1,5 +1,7 @@
 # Spec: First-Class Work Items
 
+> **Status: COMPLETED** — Full work item system implemented: data model, status machine, CRUD API, CLI (`pp workitem` with all subcommands), dispatch-waves reading work item children, workitem-plan and workitem-review templates.
+
 ## Overview
 
 Work items are the primary planning artifact. An epic is a work item with

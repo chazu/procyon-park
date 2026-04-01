@@ -1,5 +1,7 @@
 # Epic: Worktree Scoping Fix + Spawn-Workflow
 
+> **Status: COMPLETED** — All 8 tasks implemented. Params threading, template scoping fallback, scopeForInstance, unique IDs, spawn-workflow, child completion promotion, multi-scout template, and depth limit are all in production.
+
 ## Context
 
 Worktrees are always created in the server's cwd, even when the workflow targets a different repo. This broke a full-pipeline run against the alto repo. Additionally, repo-scoped templates are loaded but can never be matched by the engine.

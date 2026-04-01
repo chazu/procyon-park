@@ -6,6 +6,8 @@ date: 2026-03-15
 
 # Procyon Park MVP: Agent Orchestration System
 
+> **Status: COMPLETED** — All 5 MVP phases implemented: Tuplespace Layer, HTTP API, Dispatcher Loop, PP CLI, and Roles/Priming. System is in active use.
+
 ## Overview
 
 Implement the core Procyon Park agent orchestration system in Maggie. The MVP enables a local user to orchestrate swarms of AI coding agents across a single repository, coordinated through a linear tuplespace with Petri net workflow execution, an HTTP API, and a CLI tool (`pp`) for agent-system communication.
