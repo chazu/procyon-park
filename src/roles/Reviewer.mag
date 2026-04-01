@@ -16,6 +16,12 @@ MUST NOT: Edit source code. Make commits. Skip writing the verdict signal.'.
       'pp observe <identity> <detail>                      — report an issue'
       'pp signal verdict:<workflow-id> decision <pass|fix>  — REQUIRED: write your verdict'
       'pp read <category> [scope] [identity]                — read from knowledge base'
+      'pp workitem show <id>                                — read a work item'
+      'pp workitem children <id>                            — list children'
+      'pp workitem comment <id> "text"                      — add feedback to a work item'
+      'pp workitem update <id> --description "..."          — correct a work item'
+      'pp workitem create <id> --parent P --type story      — decompose into sub-tasks'
+      'pp workitem block <id> --reason "..."                — flag a blocker'
       'pp dismiss                                           — signal completion (AFTER verdict)'
     ).
 

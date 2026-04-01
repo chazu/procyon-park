@@ -119,7 +119,7 @@ WorkItemCLI subclass: Object
 
   method: cmdShow: args [
     "pp workitem show <identity> [--repo R]"
-    | identity repo body |
+    | identity repo response result tuples item payload comments |
     args size < 3 ifTrue: [
       'Usage: pp workitem show <identity>' println.
       ^self
@@ -129,12 +129,45 @@ WorkItemCLI subclass: Object
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
 
-    body := Dictionary new.
-    body at: 'category' put: 'workitem'.
-    body at: 'scope' put: scope.
-    body at: 'identity' put: identity.
+    "Use scan + filter to get latest version (avoids persistent tuple stale reads)"
+    response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"workitem","scope":"', scope, '"}'''.
+    (response isNil or: [response isEmpty]) ifTrue: [
+      'Not found.' println. ^self
+    ].
 
-    self postAndFormat: '/api/rdp' body: body format: 'detail'
+    [
+      result := Json decode: response.
+      tuples := result at: 'tuples' ifAbsent: [#()].
+      item := nil.
+      tuples do: [:t | (t at: 'identity') = identity ifTrue: [item := t]].
+      item isNil ifTrue: ['Not found.' println. ^self].
+
+      payload := item at: 'payload'.
+      ('Identity:    ', identity) println.
+      ('Type:        ', (payload at: 'type' ifAbsent: ['?'])) println.
+      ('Status:      ', (payload at: 'status' ifAbsent: ['?'])) println.
+      ('Title:       ', (payload at: 'title' ifAbsent: [''])) println.
+      ('Repo:        ', (payload at: 'repo' ifAbsent: [''])) println.
+      ('Template:    ', (payload at: 'template' ifAbsent: ['story'])) println.
+      ('Wave:        ', (payload at: 'wave' ifAbsent: [1]) printString) println.
+      ('Parent:      ', (payload at: 'parent' ifAbsent: ['(none)']) printString) println.
+      ('Children:    ', (payload at: 'children' ifAbsent: [#()]) size printString) println.
+      ('Depends on:  ', (payload at: 'depends_on' ifAbsent: [#()]) printString) println.
+      ('Labels:      ', (payload at: 'labels' ifAbsent: [#()]) printString) println.
+      '' println.
+      'Description:' println.
+      (payload at: 'description' ifAbsent: ['']) println.
+      '' println.
+      comments := payload at: 'comments' ifAbsent: [#()].
+      comments size > 0 ifTrue: [
+        'Comments:' println.
+        comments do: [:c |
+          ('  [', (c at: 'author' ifAbsent: ['?']), '] ', (c at: 'text' ifAbsent: [''])) println
+        ]
+      ]
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
   ]
 
   method: cmdList: args [
@@ -195,7 +228,7 @@ WorkItemCLI subclass: Object
 
   method: cmdChildren: args [
     "pp workitem children <identity> [--repo R]"
-    | identity repo |
+    | identity repo listArgs |
     args size < 3 ifTrue: [
       'Usage: pp workitem children <identity>' println.
       ^self
@@ -206,7 +239,14 @@ WorkItemCLI subclass: Object
     repo notNil ifTrue: [scope := repo].
 
     "List items whose parent matches"
-    self cmdList: (Array with: 'workitem' with: 'list' with: '--parent' with: identity with: '--repo' with: scope)
+    listArgs := Array new: 0.
+    listArgs := listArgs copyWith: 'workitem'.
+    listArgs := listArgs copyWith: 'list'.
+    listArgs := listArgs copyWith: '--parent'.
+    listArgs := listArgs copyWith: identity.
+    listArgs := listArgs copyWith: '--repo'.
+    listArgs := listArgs copyWith: scope.
+    self cmdList: listArgs
   ]
 
   method: cmdUpdate: args [

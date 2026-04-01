@@ -478,32 +478,65 @@ WorkflowEngine subclass: Object
   ]
 
   method: actionDispatchWaves: transition instance: instanceId params: params [
-    "Engine-driven wave dispatch. Reads the plan decision from BBS,
-     groups subtasks by wave, dispatches wave 1 immediately.
-     Subsequent waves are dispatched by checkWaveCompletion when
-     the previous wave completes."
+    "Engine-driven wave dispatch. Reads subtasks from either:
+     1. A work item's children (if params['workitem'] is set)
+     2. A plan decision's subtasks array (legacy fallback)
+     Groups by wave, dispatches wave 1 immediately."
 
-    | scope decisions plan subtasks maxWave wavePayload planPayload w |
+    | scope subtasks maxWave wavePayload w epicId epicItem children childItems childItem childPayload decisions plan planPayload st |
 
     scope := self scopeForInstance: instanceId.
+    subtasks := nil.
 
-    "1. Find the plan decision — look for one with 'subtasks' in payload"
-    decisions := bbs scan: 'decision' scope: scope.
-    plan := nil.
-    decisions do: [:d |
-      planPayload := d at: 'payload'.
-      (planPayload at: 'subtasks' ifAbsent: [nil]) notNil ifTrue: [plan := d]
-    ].
-    plan isNil ifTrue: [
-      ('dispatch-waves: no plan decision found in scope ', scope) println.
-      self failWorkflow: instanceId reason: 'dispatch-waves: no plan decision found'.
-      ^self
+    "1a. Try work item path: read children of an epic"
+    epicId := params at: 'workitem' ifAbsent: [nil].
+    epicId notNil ifTrue: [
+      epicItem := (bbs scanAll: 'workitem') detect: [:wi |
+        (wi at: 'identity') = epicId
+      ] ifNone: [nil].
+      epicItem notNil ifTrue: [
+        children := (epicItem at: 'payload') at: 'children' ifAbsent: [#()].
+        children isEmpty ifFalse: [
+          "Build subtasks array from children work items"
+          subtasks := Array new: 0.
+          children do: [:cid |
+            childItem := (bbs scanAll: 'workitem') detect: [:wi |
+              (wi at: 'identity') = cid
+            ] ifNone: [nil].
+            childItem notNil ifTrue: [
+              childPayload := childItem at: 'payload'.
+              st := Dictionary new.
+              st at: 'identity' put: (childItem at: 'identity').
+              st at: 'description' put: (childPayload at: 'description' ifAbsent: [childPayload at: 'title' ifAbsent: ['']]).
+              st at: 'wave' put: (childPayload at: 'wave' ifAbsent: [1]).
+              st at: 'template' put: (childPayload at: 'template' ifAbsent: ['story']).
+              st at: 'repo' put: (childPayload at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]]).
+              st at: 'batch' put: (childPayload at: 'batch' ifAbsent: [nil]).
+              st at: 'role' put: 'implementer'.
+              subtasks := subtasks copyWith: st
+            ]
+          ].
+          ('dispatch-waves: loaded ', subtasks size printString, ' subtasks from work item ', epicId) println
+        ]
+      ]
     ].
 
-    subtasks := (plan at: 'payload') at: 'subtasks'.
-    subtasks isEmpty ifTrue: [
-      ('dispatch-waves: plan has no subtasks') println.
-      self failWorkflow: instanceId reason: 'dispatch-waves: plan has no subtasks'.
+    "1b. Legacy fallback: read plan decision"
+    subtasks isNil ifTrue: [
+      decisions := bbs scan: 'decision' scope: scope.
+      plan := nil.
+      decisions do: [:d |
+        planPayload := d at: 'payload'.
+        (planPayload at: 'subtasks' ifAbsent: [nil]) notNil ifTrue: [plan := d]
+      ].
+      plan notNil ifTrue: [
+        subtasks := (plan at: 'payload') at: 'subtasks'
+      ]
+    ].
+
+    (subtasks isNil or: [subtasks isEmpty]) ifTrue: [
+      ('dispatch-waves: no subtasks found') println.
+      self failWorkflow: instanceId reason: 'dispatch-waves: no subtasks found (no work item children or plan decision)'.
       ^self
     ].
 
