@@ -1,140 +1,135 @@
-Procyon Park orchestration interface. Use this when the user wants to interact with the PP agent orchestration system — dispatching scouts, checking status, reading tuples, managing workflows, or coordinating agents.
+Procyon Park orchestration interface. Use this when the user wants to interact with the PP agent orchestration system — managing work items, dispatching workflows, checking status, or coordinating agents.
 
 ## Setup
 
-First, prime yourself with the current system state:
-
-```bash
-pp prime
-```
-
-Read the output carefully — it contains the current conventions, facts, signals, and notifications from the tuplespace.
-
-If the server isn't running, start it first:
-
-```bash
-pp serve &
-```
-
-## How to use pp
-
-`pp` is the Procyon Park CLI. It talks to the PP server over HTTP (default: localhost:7777).
-
-### Check system status
+Check if the server is running:
 ```bash
 pp status
 ```
 
-### Read from the tuplespace
+If not, start it:
 ```bash
-pp read <category> [scope] [identity]
+pp serve &
 ```
 
-Categories: `fact`, `convention`, `observation`, `decision`, `signal`, `task`, `template`, `workflow`, `token`, `rule`, `event`, `obstacle`, `notification`
-
-Examples:
+Prime yourself with system context:
 ```bash
-pp read convention system              # all conventions
-pp read fact myrepo                    # facts about a repo
-pp read task default                   # pending tasks
-pp read observation default            # current observations
-pp read notification                   # all notifications
+pp prime
 ```
 
-### Write to the tuplespace
+## Work Items
+
+Work items are the primary planning artifact. Epics contain stories. Stories are executed by workflows.
+
 ```bash
-pp observe <identity> <detail> [--tags t1,t2]     # report a finding
-pp decide <identity> <detail> [--rationale ...]    # record a decision
-pp event <identity> [--type T] [--summary S]       # emit an event
-pp notify <message> [--severity info|warn|urgent]   # notify the user
+# Create
+pp workitem create <id> --title "Title" --type epic|story [--repo R] [--status backlog] [--parent P]
+pp workitem create <id> --title "Title" --type story --parent <epic> --repo R --wave N --template story|story-lite
+
+# Read
+pp workitem show <id> [--repo R]
+pp workitem list [--repo R] [--status S] [--type T] [--parent P]
+pp workitem children <id>
+
+# Update
+pp workitem update <id> [--status S] [--title T] [--description D] [--wave N]
+pp workitem comment <id> "feedback text"
+pp workitem ready <id>          # set status=ready (cascades to children)
+pp workitem done <id>           # set status=done
+pp workitem block <id> --reason "why"
+
+# Execute
+pp workitem run <id>            # start workflow for this work item
+pp workitem plan <id>           # agentic planning (scout + planner create children)
+pp workitem review <id>         # agentic review (reviewer edits/refines)
 ```
 
-### Discover and start workflows
+Status: `backlog` → `ready` → `in-progress` → `done` (also: `blocked`, `cancelled`)
 
-List available workflow templates:
+## Workflows
+
+List available templates:
 ```bash
 pp read template system
 ```
 
-This shows all registered workflow templates with their transitions, roles, and parameters. Always run this before starting a workflow so you know what templates exist and what `--param` keys they accept.
+Templates:
+- `full-pipeline` — plan → dispatch-waves → review+test → evaluate → merge
+- `story` — implement → review → fix cycle → merge (has review cap)
+- `story-lite` — implement → merge (no review, for mechanical changes)
+- `scout-mission` — research agent writes findings doc
+- `feature-design` — idea → epic → stories → review → finalize
+- `workitem-plan` — scout researches, planner decomposes into child work items
+- `workitem-review` — reviewer refines work item tree
 
-Start a workflow from a template:
+Start a workflow:
 ```bash
-pp workflow scout --param description="..."    # single scout agent
-pp workflow full-pipeline --param description="..."  # plan→implement→review→test cycle
+pp workflow <template> --param description="..." [--repo R] [--scope S]
+pp workflow story --param description="Add feature X" --repo procyon-park
 ```
 
-Check running workflow status:
+Monitor:
 ```bash
-pp workflow status
-pp workflow status <workflow-id>
+pp workflow status <id>
+pp workflow wait <id> [--timeout 3600]    # blocks until complete
+pp workflow cancel <id>
 ```
 
-### Submit a plan
-Write a JSON file with subtasks, then submit it:
+## Reading the Tuplespace
+
 ```bash
-pp plan plan.json
+pp read <category> [scope] [identity]
 ```
 
-Plan JSON format:
-```json
-{
-  "identity": "plan-name",
-  "subtasks": [
-    {"identity": "subtask-1", "role": "implementer", "description": "..."},
-    {"identity": "subtask-2", "role": "reviewer", "description": "..."}
-  ]
-}
-```
+Categories: `workitem`, `task`, `workflow`, `token`, `template`, `convention`, `fact`, `observation`, `decision`, `signal`, `event`, `notification`
 
-Roles: `scout`, `planner`, `implementer`, `reviewer`, `tester`, `fixer`
-
-### Write arbitrary tuples via the HTTP API
-For operations not covered by the CLI, use curl against the API:
 ```bash
-# Write a template
-curl -s -X POST http://localhost:7777/api/out \
-  -H 'Content-Type: application/json' \
-  -d '{"category":"template","scope":"system","identity":"my-template","pinned":true,"payload":{...}}'
-
-# Consume a tuple
-curl -s -X POST http://localhost:7777/api/inp \
-  -H 'Content-Type: application/json' \
-  -d '{"category":"task","scope":"default","identity":"task-123"}'
+pp read observation default        # agent findings
+pp read workflow default           # running workflows
+pp read signal default             # verdict signals, worktree info
 ```
 
-## Workflow
+## Writing to the Tuplespace
 
-A typical interaction pattern:
+```bash
+pp observe <identity> <detail>     # report a finding
+pp decide <identity> <detail>      # record a decision
+pp notify <message>                # notify the user
+pp signal <id> <key> <value>       # upsert a signal
+```
 
-1. **Start the server** if not running: `pp serve &`
-2. **Prime yourself**: `pp prime`
-3. **Check what's going on**: `pp status`, `pp read notification`, `pp read task default`
-4. **Discover workflows**: `pp read template system` — always do this before starting a workflow
-5. **Start a workflow**: `pp workflow <template> --param description="..."` — PP's harness dispatches agents automatically
-6. **Monitor progress**: `pp workflow status`, `pp read task default`, `pp log`
-7. **Notify the user** when human input is needed: `pp notify <message>`
+## Logs and History
+
+```bash
+pp log --no-follow --since 3600    # notifications from last hour
+pp history --limit 50              # audit trail
+pp dashboard                       # live TUI overview
+```
+
+## Typical Workflow
+
+1. **Create work items**: `pp workitem create epic:my-feature --title "..." --type epic --repo R`
+2. **Add stories**: `pp workitem create story:my-feature:s1 --parent epic:my-feature --type story ...`
+3. **Or have agents plan**: `pp workitem plan epic:my-feature`
+4. **Review**: `pp workitem review epic:my-feature`
+5. **Mark ready**: `pp workitem ready epic:my-feature`
+6. **Execute**: `pp workitem run epic:my-feature`
+7. **Monitor**: `pp workflow status`, `pp log --no-follow --since 300`
 
 ## IMPORTANT: Agent Dispatch
 
-**Do not use Claude subagents (the Agent tool) to execute PP tasks.** When you start a workflow or submit a plan, PP dispatches tasks to its own agent harness — those agents are spawned and managed by PP itself. Your role as the orchestrating Claude instance is to:
+**Do not use Claude subagents to execute PP tasks.** When you start a workflow or run a work item, PP dispatches agents via its own harness. Your role is to:
 
-- Start workflows / submit plans
-- Monitor status via `pp workflow status`, `pp read task default`, `pp log`
-- Write to the tuplespace (observe, decide, notify) as needed
-- Respond to notifications that require human input
+- Create and manage work items
+- Start workflows
+- Monitor status
+- Write observations/decisions as needed
+- Respond when human input is needed
 
-Let PP drive task execution. Do not intercept dispatched tasks and run them yourself.
+Let PP drive agent execution.
 
-## Environment Variables
+## Environment
 
 - `PP_URL` — server URL (default: http://localhost:7777)
 - `PP_SCOPE` — default scope (default: default)
-- `PP_TASK` — current task ID (set automatically by harness)
-
-## Important
-
-- Always start by running `pp prime` to get current system context
-- Use `pp read` liberally — the tuplespace is your shared knowledge base
-- Report observations about anything unexpected
-- The tuplespace is the single source of truth for coordination
+- `PP_PORT` — server port (default: 7777)
