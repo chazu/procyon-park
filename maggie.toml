@@ -10,6 +10,11 @@ alto = { path = "../alto" }
 dirs = ["src"]
 entry = "Main.start"
 
+[[target]]
+name = "pp"
+entry = "Main.start"
+output = "pp"
+
 [go-wrap]
 output = "wrap"
 
