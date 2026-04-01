@@ -19,22 +19,15 @@ transitions: [
 		description: "Create implementation plan for: {{description}}"
 	},
 	{
-		id:          "dispatch_integrate"
-		in:          ["plan_ready"]
-		out:         ["integrated"]
-		role:        "foreman"
-		description: "Dispatch implementers and integrate results for: {{description}}"
+		id:     "dispatch"
+		in:     ["plan_ready"]
+		out:    ["integrated"]
+		action: "dispatch-waves"
 	},
 	{
 		id:  "fork"
 		in:  ["integrated"]
 		out: ["reviewing", "testing"]
-		preconditions: [
-			{
-				category: "event"
-				identity: "task-complete:{{instance}}:task:dispatch_integrate"
-			},
-		]
 	},
 	{
 		id:          "review"

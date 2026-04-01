@@ -210,6 +210,10 @@ WorkflowEngine subclass: Object
           ]
         ]
       ].
+      "Check for wave dispatch completion"
+      evt isNil ifTrue: [
+        evt := self checkWaveCompletion: instanceId scope: scope transitionId: transId
+      ].
       evt notNil ifTrue: [
         "Promote: consume waiting token, produce positive token"
         tokIdentity := tok at: 'identity'.
@@ -261,7 +265,7 @@ WorkflowEngine subclass: Object
     tokenStatus := role notNil ifTrue: ['waiting'] ifFalse: ['positive'].
     action := transition at: 'action' ifAbsent: [nil].
     action notNil ifTrue: [
-      action = 'spawn-workflow' ifTrue: [tokenStatus := 'waiting']
+      (action = 'spawn-workflow' or: [action = 'dispatch-waves']) ifTrue: [tokenStatus := 'waiting']
     ].
     outPlaces do: [:place |
       | tokenPayload |
@@ -317,6 +321,7 @@ WorkflowEngine subclass: Object
     action = 'create-worktree' ifTrue: [^self actionCreateWorktree: transition instance: instanceId params: params].
     action = 'merge-worktree' ifTrue: [^self actionMergeWorktree: transition instance: instanceId params: params].
     action = 'spawn-workflow' ifTrue: [^self actionSpawnWorkflow: transition instance: instanceId params: params].
+    action = 'dispatch-waves' ifTrue: [^self actionDispatchWaves: transition instance: instanceId params: params].
     action = 'notify-head' ifTrue: [^self actionNotifyHead: transition instance: instanceId].
 
     "Unknown action — observe and continue"
@@ -470,6 +475,162 @@ WorkflowEngine subclass: Object
     bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
 
     ('merge-worktree: complete — merged ', implBranch, ' into ', featureBranch) println
+  ]
+
+  method: actionDispatchWaves: transition instance: instanceId params: params [
+    "Engine-driven wave dispatch. Reads the plan decision from BBS,
+     groups subtasks by wave, dispatches wave 1 immediately.
+     Subsequent waves are dispatched by promoteWaitingTokens when
+     the previous wave completes."
+
+    | scope decisions plan subtasks waves maxWave waveSignal wavePayload |
+
+    scope := self scopeForInstance: instanceId.
+
+    "1. Find the plan decision — look for one with 'subtasks' in payload"
+    decisions := bbs scan: 'decision' scope: scope.
+    plan := nil.
+    decisions do: [:d |
+      | p |
+      p := d at: 'payload'.
+      (p at: 'subtasks' ifAbsent: [nil]) notNil ifTrue: [plan := d]
+    ].
+    plan isNil ifTrue: [
+      ('dispatch-waves: no plan decision found in scope ', scope) println.
+      self failWorkflow: instanceId reason: 'dispatch-waves: no plan decision found'.
+      ^self
+    ].
+
+    subtasks := (plan at: 'payload') at: 'subtasks'.
+    subtasks isEmpty ifTrue: [
+      ('dispatch-waves: plan has no subtasks') println.
+      self failWorkflow: instanceId reason: 'dispatch-waves: plan has no subtasks'.
+      ^self
+    ].
+
+    "2. Group subtasks by wave"
+    maxWave := 1.
+    subtasks do: [:st |
+      | w |
+      w := st at: 'wave' ifAbsent: [1].
+      w > maxWave ifTrue: [maxWave := w]
+    ].
+
+    "3. Write wave tracking signal"
+    wavePayload := Dictionary new.
+    wavePayload at: 'current_wave' put: 1.
+    wavePayload at: 'max_wave' put: maxWave.
+    wavePayload at: 'transition_id' put: (transition at: 'id').
+    wavePayload at: 'subtasks' put: subtasks.
+    bbs upsertSignal: instanceId identity: 'wave-dispatch' payload: wavePayload.
+
+    "4. Dispatch wave 1"
+    self dispatchWave: 1 subtasks: subtasks instance: instanceId scope: scope params: params.
+
+    ('  dispatch-waves: ', subtasks size printString, ' subtasks across ', maxWave printString, ' waves. Wave 1 dispatched.') println.
+    bbs notify: ('Wave dispatch started: ', subtasks size printString, ' subtasks, ', maxWave printString, ' waves')
+      scope: scope severity: 'info'
+  ]
+
+  method: dispatchWave: waveNum subtasks: subtasks instance: instanceId scope: scope params: params [
+    "Dispatch all subtasks in the given wave as child workflows."
+    | waveSubtasks childTemplate childParams childId waveChildIds childScope signalPayload statusPayload desc repo identity |
+    waveSubtasks := subtasks select: [:st | (st at: 'wave' ifAbsent: [1]) = waveNum].
+    waveChildIds := Array new: 0.
+
+    ('  Dispatching wave ', waveNum printString, ': ', waveSubtasks size printString, ' tasks') println.
+
+    waveSubtasks do: [:st |
+      desc := st at: 'description' ifAbsent: ['No description'].
+      repo := st at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]].
+      identity := st at: 'identity' ifAbsent: ['subtask'].
+      childTemplate := st at: 'template' ifAbsent: ['story'].
+      childScope := scope.
+
+      "Build child params"
+      childParams := Dictionary new.
+      childParams at: 'description' put: desc.
+      repo notNil ifTrue: [childParams at: 'repo' put: repo].
+
+      "Instantiate child workflow"
+      childId := self instantiate: childTemplate scope: childScope params: childParams.
+
+      "Track child for wave completion"
+      waveChildIds := waveChildIds copyWith: childId.
+
+      "Write child-spawn signal"
+      signalPayload := Dictionary new.
+      signalPayload at: 'child_instance' put: childId.
+      signalPayload at: 'child_scope' put: childScope.
+      signalPayload at: 'wave' put: waveNum.
+      signalPayload at: 'subtask_identity' put: identity.
+      bbs upsertSignal: instanceId identity: 'wave-child:', waveNum printString, ':', childId payload: signalPayload.
+
+      ('    Dispatched: ', identity, ' → ', childId) println
+    ].
+
+    "Write wave status signal"
+    statusPayload := Dictionary new.
+    statusPayload at: 'wave' put: waveNum.
+    statusPayload at: 'total' put: waveSubtasks size.
+    statusPayload at: 'child_ids' put: waveChildIds.
+    bbs upsertSignal: instanceId identity: 'wave-status:', waveNum printString payload: statusPayload
+  ]
+
+  method: checkWaveCompletion: instanceId scope: scope transitionId: transId [
+    "Check if all waves dispatched by dispatch-waves are complete.
+     If the current wave is done, dispatch the next wave.
+     If the final wave is done, return a synthetic event to trigger promotion.
+     Returns an event (truthy) if all waves complete, nil otherwise."
+
+    | waveDispatch wdPayload currentWave maxWave subtasks waveStatus wsPayload childIds allDone childWf childStatus nextWave |
+
+    "Read the wave-dispatch signal"
+    waveDispatch := bbs rdp: 'signal' scope: instanceId identity: 'wave-dispatch'.
+    waveDispatch isNil ifTrue: [^nil].
+    wdPayload := waveDispatch at: 'payload'.
+    (wdPayload at: 'transition_id') = transId ifFalse: [^nil].
+
+    currentWave := wdPayload at: 'current_wave'.
+    maxWave := wdPayload at: 'max_wave'.
+    subtasks := wdPayload at: 'subtasks'.
+
+    "Check if current wave's children are all complete"
+    waveStatus := bbs rdp: 'signal' scope: instanceId identity: 'wave-status:', currentWave printString.
+    waveStatus isNil ifTrue: [^nil].
+    wsPayload := waveStatus at: 'payload'.
+    childIds := wsPayload at: 'child_ids' ifAbsent: [#()].
+
+    allDone := true.
+    childIds do: [:cid |
+      childWf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = cid] ifNone: [nil].
+      childWf isNil ifTrue: [allDone := false].
+      childWf notNil ifTrue: [
+        childStatus := (childWf at: 'payload') at: 'status' ifAbsent: ['running'].
+        (childStatus = 'completed' or: [childStatus = 'failed']) ifFalse: [allDone := false]
+      ]
+    ].
+
+    allDone ifFalse: [^nil].
+
+    ('  Wave ', currentWave printString, ' complete (', childIds size printString, ' workflows)') println.
+    bbs notify: ('Wave ', currentWave printString, ' of ', maxWave printString, ' complete') scope: scope severity: 'info'.
+
+    "If there are more waves, dispatch the next one"
+    currentWave < maxWave ifTrue: [
+      nextWave := currentWave + 1.
+      "Update the wave-dispatch signal to track current wave"
+      wdPayload at: 'current_wave' put: nextWave.
+      bbs upsertSignal: instanceId identity: 'wave-dispatch' payload: wdPayload.
+      "Dispatch next wave"
+      self dispatchWave: nextWave subtasks: subtasks instance: instanceId scope: scope params: (Dictionary new).
+      ^nil  "Not done yet — more waves to go"
+    ].
+
+    "All waves complete — return truthy to trigger token promotion"
+    ('  All ', maxWave printString, ' waves complete for ', instanceId) println.
+    bbs notify: ('All waves complete for ', instanceId) scope: scope severity: 'info'.
+    ^waveDispatch  "Return the signal as a truthy value"
   ]
 
   method: actionNotifyHead: transition instance: instanceId [

@@ -1,4 +1,5 @@
-"Foreman role — orchestrates dispatch and evaluates review results."
+"Foreman role — evaluates review+test results and writes verdict signal.
+ Dispatch is handled by the engine's dispatch-waves action, not the foreman."
 
 Foreman subclass: Role
 
@@ -6,94 +7,65 @@ Foreman subclass: Role
     | r hard soft constraints h |
     r := super new.
     r name: 'foreman'.
-    r description: 'You are a foreman — a long-running orchestrator. You have two modes:
-
-**MODE 1: Dispatch & Integrate** (task says "Dispatch implementers")
+    r description: 'You evaluate review and test results and decide whether the work passes.
 
 MUST do, in order:
-1. Read the plan: pp read decision <scope>
-2. Group subtasks into waves (wave 1 = no deps, wave 2 = depends on wave 1, etc.)
-3. For EACH wave, dispatch ALL tasks as parallel workflows:
-   pp workflow story --param description="<desc>" --repo <repo> --scope <scope>
-4. Wait for each: pp workflow wait <id>
-5. After all waves complete: pp dismiss
-
-MUST NOT: Use pp task for dispatching (use pp workflow story instead).
-MUST NOT: Manually manage git branches or worktrees (workflows handle this).
-CAN: Use different --repo flags for cross-repo work.
-
-Example:
-  w1=$(pp workflow story --param description="Add feature X" --repo alto | python3 -c "import sys,json; print(json.load(sys.stdin)[''workflow_id''])")
-  w2=$(pp workflow story --param description="Fix bug Y" --repo pp | python3 -c "import sys,json; print(json.load(sys.stdin)[''workflow_id''])")
-  pp workflow wait $w1
-  pp workflow wait $w2
-  pp dismiss
-
-**MODE 2: Evaluate** (task says "Evaluate review and test")
-
-MUST do, in order:
-1. Read observations: pp read observation <scope>
-2. Read cycle count: pp read signal <scope> review_cycle:$PP_WORKFLOW
-3. Decide verdict: "pass" (clean), "fix" (issues, cycle < 3), "exhausted" (cycle >= 3)
-4. Write cycle: pp signal review_cycle:$PP_WORKFLOW count <N+1>
+1. Read observations from reviewers and testers: pp read observation <scope>
+2. Read the review cycle count: pp read signal <scope> review_cycle:$PP_WORKFLOW
+   (If not found, this is cycle 1.)
+3. Decide verdict:
+   - "pass" — no failures, review is clean
+   - "fix" — issues found and cycle < 3
+   - "exhausted" — cycle >= 3, accept as-is
+4. Write cycle count: pp signal review_cycle:$PP_WORKFLOW count <N+1>
 5. Write verdict: pp signal verdict:$PP_WORKFLOW decision <pass|fix|exhausted>
 6. pp dismiss
 
-MUST NOT: Skip writing the verdict signal (stalls the workflow).'.
+MUST NOT: Skip writing the verdict signal (stalls the workflow).
+MUST NOT: Dispatch tasks or workflows (the engine handles dispatch).
+CAN: Read any tuples for context. Write observations about findings.'.
 
     r ppCommands: #(
-      'pp workflow story --param description="<desc>" --repo <name>  — dispatch a sub-workflow'
-      'pp workflow wait <id> [--timeout <secs>]                      — block until workflow completes'
-      'pp workflow status <id>                                       — check workflow state'
-      'pp read <category> [scope] [identity]                         — read from knowledge base'
-      'pp observe <identity> <detail>                                — report a finding'
-      'pp signal <id> <key> <value>                                  — write a signal (verdict, cycle)'
-      'pp notify <message>                                           — flag something for the user'
-      'pp dismiss                                                    — signal completion'
+      'pp read <category> [scope] [identity]  — read from knowledge base'
+      'pp observe <identity> <detail>          — report a finding'
+      'pp signal <id> <key> <value>            — write verdict/cycle signal'
+      'pp notify <message>                     — flag something for the user'
+      'pp dismiss                              — signal completion'
     ).
 
     hard := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'decision'.
+    h := Dictionary new. h at: 'category' put: 'observation'.
     hard := hard copyWith: h.
-    h := Dictionary new. h at: 'category' put: 'task'.
+    h := Dictionary new. h at: 'category' put: 'decision'.
     hard := hard copyWith: h.
     h := Dictionary new. h at: 'category' put: 'event'.
     hard := hard copyWith: h.
 
     soft := Array new: 0.
-    h := Dictionary new. h at: 'category' put: 'observation'.
-    soft := soft copyWith: h.
     h := Dictionary new. h at: 'category' put: 'convention'.
     soft := soft copyWith: h.
     h := Dictionary new. h at: 'category' put: 'fact'.
+    soft := soft copyWith: h.
+    h := Dictionary new. h at: 'category' put: 'signal'.
     soft := soft copyWith: h.
 
     constraints := Dictionary new.
     constraints at: 'hard' put: hard.
     constraints at: 'soft' put: soft.
-    constraints at: 'budget' put: 80.
+    constraints at: 'budget' put: 60.
     r contextConstraints: constraints.
 
     ^r
   ]
 
   method: completionInstructions [
-    ^'Depends on your mode:
-
-**Dispatch & Integrate:**
-1. pp read decision <scope>
-2. Group subtasks into waves.
-3. For each wave: pp workflow story --param description="..." --repo <repo>
-4. pp workflow wait <id> for each.
-5. pp notify "Foreman: all implementations integrated"
-6. pp dismiss
-
-**Evaluate:**
-1. pp read observation <scope>
-2. pp read signal <scope> review_cycle:$PP_WORKFLOW
-3. Decide: pass / fix / exhausted
+    ^'1. Read observations: pp read observation <scope>
+2. Read cycle: pp read signal <scope> review_cycle:$PP_WORKFLOW
+3. Decide: pass / fix / exhausted (cycle >= 3)
 4. pp signal review_cycle:$PP_WORKFLOW count <N+1>
 5. pp signal verdict:$PP_WORKFLOW decision <verdict>
 6. pp notify "Foreman: verdict is <verdict> (cycle <N>)"
-7. pp dismiss'
+7. pp dismiss
+
+WARNING: If you skip step 5, the workflow will stall.'
   ]
