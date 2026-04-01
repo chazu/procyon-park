@@ -615,9 +615,8 @@ ApiServer subclass: Object
     payload := body at: 'payload' ifAbsent: [Dictionary new].
     pinned := body at: 'pinned' ifAbsent: [true].
 
-    pinned
-      ifTrue: [id := bbs outPinned: 'workitem' scope: scope identity: identity payload: payload]
-      ifFalse: [id := bbs out: 'workitem' scope: scope identity: identity payload: payload].
+    "Use upsertPinned to avoid duplicates if called twice with same identity"
+    id := bbs upsertPinned: 'workitem' scope: scope identity: identity payload: payload.
 
     ^self okResponse: (self okWithId: id)
   ]
@@ -636,7 +635,7 @@ ApiServer subclass: Object
     cascade := body at: 'cascade' ifAbsent: [false].
 
     "Read existing item"
-    item := bbs rdp: 'workitem' scope: scope identity: identity.
+    item := bbs findInIndex: 'workitem' scope: scope identity: identity.
     item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
 
     "Merge fields into existing payload"
@@ -645,24 +644,22 @@ ApiServer subclass: Object
     payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
     fields keysAndValuesDo: [:k :v | newPayload at: k put: v].
 
-    "Consume and rewrite"
-    bbs inp: 'workitem' scope: scope identity: identity.
-    bbs outPinned: 'workitem' scope: scope identity: identity payload: newPayload.
+    "Atomically replace"
+    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload.
 
     "Cascade status to children if requested"
     (cascade and: [fields includesKey: 'status']) ifTrue: [
       | children childItem childPayload newChildPayload |
       children := newPayload at: 'children' ifAbsent: [#()].
       children do: [:childId |
-        childItem := bbs rdp: 'workitem' scope: scope identity: childId.
+        childItem := bbs findInIndex: 'workitem' scope: scope identity: childId.
         childItem notNil ifTrue: [
           childPayload := childItem at: 'payload'.
           newChildPayload := Dictionary new.
           childPayload keysAndValuesDo: [:k :v | newChildPayload at: k put: v].
           newChildPayload at: 'status' put: (fields at: 'status').
           newChildPayload at: 'updated_at' put: DateTime now epochSeconds.
-          bbs inp: 'workitem' scope: scope identity: childId.
-          bbs outPinned: 'workitem' scope: scope identity: childId payload: newChildPayload
+          bbs upsertPinned: 'workitem' scope: scope identity: childId payload: newChildPayload
         ]
       ]
     ].
@@ -682,7 +679,7 @@ ApiServer subclass: Object
     author := body at: 'author' ifAbsent: ['unknown'].
     text := body at: 'text' ifAbsent: [''].
 
-    item := bbs rdp: 'workitem' scope: scope identity: identity.
+    item := bbs findInIndex: 'workitem' scope: scope identity: identity.
     item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
 
     payload := item at: 'payload'.
@@ -700,8 +697,7 @@ ApiServer subclass: Object
     newPayload at: 'comments' put: comments.
     newPayload at: 'updated_at' put: DateTime now epochSeconds.
 
-    bbs inp: 'workitem' scope: scope identity: identity.
-    bbs outPinned: 'workitem' scope: scope identity: identity payload: newPayload.
+    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload.
 
     ^self okResponse: (self okWithCount: 'comments' count: comments size)
   ]
@@ -718,7 +714,7 @@ ApiServer subclass: Object
     child := body at: 'child' ifAbsent: [nil].
     child isNil ifTrue: [^self errorResponse: 400 message: 'child required'].
 
-    item := bbs rdp: 'workitem' scope: scope identity: identity.
+    item := bbs findInIndex: 'workitem' scope: scope identity: identity.
     item isNil ifTrue: [^self errorResponse: 404 message: 'parent work item not found'].
 
     payload := item at: 'payload'.
@@ -730,8 +726,7 @@ ApiServer subclass: Object
     newPayload at: 'children' put: children.
     newPayload at: 'updated_at' put: DateTime now epochSeconds.
 
-    bbs inp: 'workitem' scope: scope identity: identity.
-    bbs outPinned: 'workitem' scope: scope identity: identity payload: newPayload.
+    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload.
 
     ^self okResponse: (self okWithCount: 'children' count: children size)
   ]
@@ -748,7 +743,7 @@ ApiServer subclass: Object
     identity isNil ifTrue: [^self errorResponse: 400 message: 'identity required'].
     scope := body at: 'scope' ifAbsent: ['default'].
 
-    item := bbs rdp: 'workitem' scope: scope identity: identity.
+    item := bbs findInIndex: 'workitem' scope: scope identity: identity.
     item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
 
     payload := item at: 'payload'.
@@ -780,15 +775,14 @@ ApiServer subclass: Object
   method: updateWorkitemStatus: identity scope: scope status: newStatus [
     "Helper: update a work item's status."
     | item payload newPayload |
-    item := bbs rdp: 'workitem' scope: scope identity: identity.
+    item := bbs findInIndex: 'workitem' scope: scope identity: identity.
     item isNil ifTrue: [^self].
     payload := item at: 'payload'.
     newPayload := Dictionary new.
     payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
     newPayload at: 'status' put: newStatus.
     newPayload at: 'updated_at' put: DateTime now epochSeconds.
-    bbs inp: 'workitem' scope: scope identity: identity.
-    bbs outPinned: 'workitem' scope: scope identity: identity payload: newPayload
+    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload
   ]
 
   "--- History ---"

@@ -195,6 +195,18 @@ BBS subclass: Object
     (self isDurableCategory: cat) ifTrue: [self persistAfterChange]
   ]
 
+  method: findInIndex: category scope: scope identity: identity [
+    "Look up a tuple from the index (not TupleSpace). Returns the tuple or nil.
+     Use this when you need the latest version of a pinned/upserted tuple."
+    ^mutex critical: [
+      index detect: [:t |
+        (t at: 'category') = category and:
+          [(t at: 'scope') = scope and:
+            [(t at: 'identity') = identity]]
+      ] ifNone: [nil]
+    ]
+  ]
+
   "--- Signal Operations ---"
 
   method: upsertSignal: scope identity: identity payload: payload [
@@ -202,6 +214,33 @@ BBS subclass: Object
      Uses linear (not pinned) tuples so inp: can consume them properly."
     self inp: 'signal' scope: scope identity: identity.
     ^self out: 'signal' scope: scope identity: identity payload: payload
+  ]
+
+  method: upsertPinned: category scope: scope identity: identity payload: payload [
+    "Atomically replace a pinned tuple. Removes ALL existing tuples matching
+     category/scope/identity from the index, then writes a new pinned tuple.
+     The index is authoritative for scan/list operations."
+    | d |
+    Categories validate: category.
+
+    "Remove all matching from index"
+    mutex critical: [
+      index := index reject: [:t |
+        (t at: 'category') = category and:
+          [(t at: 'scope') = scope and:
+            [(t at: 'identity') = identity]]
+      ]
+    ].
+
+    "Write new pinned tuple"
+    d := self buildTuple: category scope: scope identity: identity payload: payload.
+    d at: 'pinned' put: true.
+    d at: 'modality' put: 'persistent'.
+    space outPersistent: d.
+    mutex critical: [index := index copyWith: d].
+    self appendHistory: 'upsert-pinned' tuple: d.
+    self persistAfterChange.
+    ^d at: 'id'
   ]
 
   "--- Convenience Operations ---"
