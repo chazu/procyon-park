@@ -1,10 +1,10 @@
-"Tests for PPDashboardModel — Story 1: data model with background polling.
+"Tests for PPDashboardModel — thread-safe polling with fetchDataSnapshot/applySnapshot.
  Verifies:
    - Initial state (empty arrays, connected=false)
-   - fetchData populates model fields from mock HTTP
-   - changed: #data is sent after fetchData
-   - Exception handling sets connected := false
-   - Recovery after error sets connected := true
+   - fetchDataSnapshot returns a snapshot Dictionary
+   - applySnapshot populates model fields and sends fine-grained aspects
+   - Exception handling in fetchDataSnapshot sets connected=false
+   - Recovery after error
 
  All temp vars at method top. Uses [block] fork not Process fork:."
 
@@ -44,7 +44,7 @@ MockDashboardHttpClient subclass: Object
 
 "--- Mock Dependent (to verify changed: notifications) ---"
 MockDashboardDependent subclass: Object
-  instanceVars: lastAspect updateCount
+  instanceVars: aspects updateCount
 
   classMethod: new [
     | instance |
@@ -54,28 +54,28 @@ MockDashboardDependent subclass: Object
   ]
 
   method: init [
-    lastAspect := nil.
+    aspects := Array new: 0.
     updateCount := 0
   ]
 
   method: update: aspect [
-    lastAspect := aspect.
+    aspects := aspects copyWith: aspect.
     updateCount := updateCount + 1
   ]
 
-  method: lastAspect [
-    ^lastAspect
-  ]
+  method: aspects [ ^aspects ]
+  method: updateCount [ ^updateCount ]
 
-  method: updateCount [
-    ^updateCount
+  method: hasAspect: anAspect [
+    aspects do: [:a | a = anAspect ifTrue: [^true]].
+    ^false
   ]
 
 "--- Test Suite ---"
 TestDashboardModel subclass: Object
 
   classMethod: run: t [
-    | model mockClient mockDep dashJson healthJson |
+    | model mockClient mockDep dashJson snapshot |
 
     "--- DM1: Initial state ---"
     model := PPDashboardModel new.
@@ -84,67 +84,60 @@ TestDashboardModel subclass: Object
     t assert: model tasks size = 0 message: 'DM1c: tasks initially empty'.
     t assert: model tokens size = 0 message: 'DM1d: tokens initially empty'.
     t assert: model notifications size = 0 message: 'DM1e: notifications initially empty'.
-    t assert: model health size = 0 message: 'DM1f: health initially empty'.
-    t assert: model baseUrl = 'http://localhost:7777' message: 'DM1g: baseUrl default'.
+    t assert: model baseUrl = 'http://localhost:7777' message: 'DM1f: baseUrl default'.
 
-    "--- DM2: fetchData populates model from mock HTTP ---"
+    "--- DM2: fetchDataSnapshot returns a snapshot without mutating model ---"
     model := PPDashboardModel new.
     mockClient := MockDashboardHttpClient new.
     model client: mockClient.
 
-    dashJson := '{"workflows":[{"identity":"wf-1"}],"tasks":[{"identity":"t-1"},{"identity":"t-2"}],"tokens":[{"identity":"tok-1"}],"notifications":[{"identity":"n-1"}]}'.
-    healthJson := '{"tuples":42,"uptime":"10s"}'.
+    dashJson := '{"workflows":[{"identity":"wf-1"}],"tasks":[{"identity":"t-1"},{"identity":"t-2"}],"tokens":[{"identity":"tok-1"}],"notifications":[{"identity":"n-1"}],"health":{"tuples":42,"uptime":10}}'.
     mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
-    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
 
-    model fetchData.
+    snapshot := model fetchDataSnapshot.
 
-    t assert: model connected = true message: 'DM2a: connected true after fetch'.
-    t assert: model workflows size = 1 message: 'DM2b: workflows populated'.
-    t assert: model tasks size = 2 message: 'DM2c: tasks populated'.
-    t assert: model tokens size = 1 message: 'DM2d: tokens populated'.
-    t assert: model notifications size = 1 message: 'DM2e: notifications populated'.
-    t assertEqual: (model health at: 'tuples') to: 42 message: 'DM2f: health tuples'.
-    t assertEqual: (model health at: 'uptime') to: '10s' message: 'DM2g: health uptime'.
+    "Model should NOT be mutated by fetchDataSnapshot"
+    t assert: model workflows size = 0 message: 'DM2a: model workflows still empty after snapshot'.
+    t assert: (snapshot at: 'connected' ifAbsent: [false]) = true message: 'DM2b: snapshot connected true'.
+    t assert: (snapshot at: 'workflows' ifAbsent: [#()]) size = 1 message: 'DM2c: snapshot has workflows'.
+    t assert: (snapshot at: 'tasks' ifAbsent: [#()]) size = 2 message: 'DM2d: snapshot has tasks'.
 
-    "--- DM3: changed: #data sent after fetchData ---"
+    "--- DM3: applySnapshot populates model and sends fine-grained aspects ---"
     model := PPDashboardModel new.
-    mockClient := MockDashboardHttpClient new.
-    model client: mockClient.
     mockDep := MockDashboardDependent new.
     model addDependent: mockDep.
 
-    dashJson := '{"workflows":[],"tasks":[],"tokens":[],"notifications":[]}'.
-    healthJson := '{"tuples":0,"uptime":"0s"}'.
-    mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
-    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
+    model applySnapshot: snapshot.
 
-    model fetchData.
+    t assert: model connected = true message: 'DM3a: connected true after apply'.
+    t assert: model workflows size = 1 message: 'DM3b: workflows populated'.
+    t assert: model tasks size = 2 message: 'DM3c: tasks populated'.
+    t assert: model tokens size = 1 message: 'DM3d: tokens populated'.
+    t assert: model notifications size = 1 message: 'DM3e: notifications populated'.
+    t assert: (mockDep hasAspect: #workflows) message: 'DM3f: #workflows aspect sent'.
+    t assert: (mockDep hasAspect: #tasks) message: 'DM3g: #tasks aspect sent'.
+    t assert: (mockDep hasAspect: #notifications) message: 'DM3h: #notifications aspect sent'.
+    t assert: (mockDep hasAspect: #health) message: 'DM3i: #health aspect sent'.
 
-    t assertEqual: mockDep lastAspect to: #data message: 'DM3a: changed: #data sent'.
-    t assert: mockDep updateCount > 0 message: 'DM3b: dependent was notified'.
-
-    "--- DM4: Exception sets connected := false ---"
+    "--- DM4: Exception in fetchDataSnapshot sets connected=false ---"
     model := PPDashboardModel new.
     mockClient := MockDashboardHttpClient new.
     model client: mockClient.
-    mockDep := MockDashboardDependent new.
-    model addDependent: mockDep.
-
     mockClient shouldFail: true.
-    model fetchData.
 
-    t assert: model connected = false message: 'DM4a: connected false on error'.
-    t assertEqual: mockDep lastAspect to: #data message: 'DM4b: changed: #data sent on error'.
+    snapshot := model fetchDataSnapshot.
+    t assert: (snapshot at: 'connected' ifAbsent: [true]) = false message: 'DM4a: snapshot connected false on error'.
+
+    model applySnapshot: snapshot.
+    t assert: model connected = false message: 'DM4b: connected false after apply'.
 
     "--- DM5: Recovery after error ---"
     mockClient shouldFail: false.
-    dashJson := '{"workflows":[{"identity":"wf-r"}],"tasks":[],"tokens":[],"notifications":[]}'.
-    healthJson := '{"tuples":1,"uptime":"1s"}'.
+    dashJson := '{"workflows":[{"identity":"wf-r"}],"tasks":[],"tokens":[],"notifications":[],"health":{"tuples":1,"uptime":1}}'.
     mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
-    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
 
-    model fetchData.
+    snapshot := model fetchDataSnapshot.
+    model applySnapshot: snapshot.
 
     t assert: model connected = true message: 'DM5a: connected true after recovery'.
     t assert: model workflows size = 1 message: 'DM5b: workflows populated after recovery'

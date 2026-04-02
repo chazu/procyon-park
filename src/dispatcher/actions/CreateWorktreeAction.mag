@@ -10,7 +10,7 @@ CreateWorktreeAction subclass: WorkflowAction
      4. Write worktree signal for downstream transitions.
      5. Checkout main in original repo."
 
-    | repo repoPath repoName repoConfig home featureBranch worktreeDir implBranch payload scope |
+    | repo repoPath repoName repoConfig home featureBranch worktreeDir implBranch payload scope parentBranch |
 
     "1. Determine repo path — priority: params['repo'] → signal → env → cwd"
     repoName := params at: 'repo' ifAbsent: [nil].
@@ -38,33 +38,52 @@ CreateWorktreeAction subclass: WorkflowAction
       home := '/tmp'
     ].
 
-    featureBranch := 'feature/', instanceId.
     implBranch := 'impl/', instanceId.
     worktreeDir := home, '/.pp/worktrees/', instanceId, '/impl'.
 
     "Find scope for error reporting"
     scope := engine scopeForInstance: instanceId.
 
-    "2. Create feature branch from main"
-    [
-      GitOps createFeatureBranch: featureBranch in: repoPath.
-      ('  Created feature branch: ', featureBranch) println
-    ] on: Exception do: [:e |
-      ('  ERROR: failed to create feature branch: ', e messageText) println.
-      bbs notify: ('create-worktree failed: could not create branch ', featureBranch, ' — ', e messageText)
-        scope: scope severity: 'urgent'.
-      ^self
-    ].
+    "Check for parent_branch (wave-level merge: shared branch already exists)"
+    parentBranch := params at: 'parent_branch' ifAbsent: [nil].
 
-    "3. Create worktree for implementation"
-    [
-      GitOps createWorktree: worktreeDir branch: implBranch in: repoPath.
-      ('  Created worktree: ', worktreeDir) println
-    ] on: Exception do: [:e |
-      ('  ERROR: failed to create worktree: ', e messageText) println.
-      bbs notify: ('create-worktree failed: could not create worktree for ', instanceId, ' — ', e messageText)
-        scope: scope severity: 'urgent'.
-      ^self
+    parentBranch notNil ifTrue: [
+      "Wave child: use the shared branch as feature branch, worktree branches from it"
+      featureBranch := parentBranch.
+      [
+        GitOps createWorktree: worktreeDir branch: implBranch from: parentBranch in: repoPath.
+        ('  Created worktree from shared branch: ', worktreeDir, ' (parent: ', parentBranch, ')') println
+      ] on: Exception do: [:e |
+        ('  ERROR: failed to create worktree from parent branch: ', e messageText) println.
+        bbs notify: ('create-worktree failed: could not create worktree for ', instanceId, ' — ', e messageText)
+          scope: scope severity: 'urgent'.
+        ^self
+      ]
+    ] ifFalse: [
+      "Standalone: create new feature branch from main"
+      featureBranch := 'feature/', instanceId.
+
+      "2. Create feature branch from main"
+      [
+        GitOps createFeatureBranch: featureBranch in: repoPath.
+        ('  Created feature branch: ', featureBranch) println
+      ] on: Exception do: [:e |
+        ('  ERROR: failed to create feature branch: ', e messageText) println.
+        bbs notify: ('create-worktree failed: could not create branch ', featureBranch, ' — ', e messageText)
+          scope: scope severity: 'urgent'.
+        ^self
+      ].
+
+      "3. Create worktree for implementation"
+      [
+        GitOps createWorktree: worktreeDir branch: implBranch in: repoPath.
+        ('  Created worktree: ', worktreeDir) println
+      ] on: Exception do: [:e |
+        ('  ERROR: failed to create worktree: ', e messageText) println.
+        bbs notify: ('create-worktree failed: could not create worktree for ', instanceId, ' — ', e messageText)
+          scope: scope severity: 'urgent'.
+        ^self
+      ]
     ].
 
     "4. Write worktree signal for downstream transitions"

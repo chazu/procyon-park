@@ -1,141 +1,34 @@
 "Dashboard — Procyon Park TUI dashboard using Alto.
- Fetches /api/dashboard every 3 seconds.
- PPDashboard is the legacy stdout dashboard.
- PPDashboardModel provides background polling and data.
+ Master-detail layout with workflow browser, activity feed, and severity coloring.
+ PPDashboardModel provides background polling with defer: for thread safety.
  PPDashboardApp wires the Alto TUI layout.
  PPHeaderUpdater updates the header label from model data.
- PPDashboardListHelper binds workflow/task ListViews to the model.
- PPNotificationUpdater formats notifications for a ListView.
+ PPWorkflowHelper binds the workflow master list and detail pane.
+ PPActivityFeed formats notifications with severity coloring.
  PPDashboardLayout subclasses BoxLayout to intercept global keys."
 
 import: 'Alto'
 
-"=== PPDashboard — original stdout polling dashboard ==="
+"=== PPDashboard — entry point ==="
 
 PPDashboard subclass: Object
-  instanceVars: baseUrl client
 
   classMethod: start [
     "Delegate to the Alto TUI dashboard app."
     PPDashboardApp start
   ]
 
-  classMethod: new [
-    | instance |
-    instance := super new.
-    instance initialize.
-    ^instance
-  ]
 
-  method: initialize [
-    baseUrl := System env: 'PP_URL'.
-    (baseUrl isNil or: [baseUrl isEmpty]) ifTrue: [baseUrl := 'http://localhost:7777'].
-    client := HttpClient new
-  ]
-
-  method: run [
-    | response result workflows tasks notifications |
-    [true] whileTrue: [
-      [
-        response := client get: baseUrl, '/api/dashboard'.
-        (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
-          result := Json decode: response.
-          workflows := result at: 'workflows' ifAbsent: [#()].
-          tasks := result at: 'tasks' ifAbsent: [#()].
-          notifications := result at: 'notifications' ifAbsent: [#()].
-
-          "Clear screen"
-          '\x1B[2J\x1B[H' print.
-
-          self printHeader: workflows tasks: tasks notifications: notifications.
-          '' println.
-          self printWorkflows: workflows.
-          '' println.
-          self printTasks: tasks.
-          '' println.
-          self printNotifications: notifications
-        ] ifFalse: [
-          '\x1B[2J\x1B[H' print.
-          'Procyon Park Dashboard — no response from server' println
-        ]
-      ] on: Exception do: [:e |
-        '\x1B[2J\x1B[H' print.
-        ('Procyon Park Dashboard — error: ', e messageText) println
-      ].
-      Process sleep: 3000
-    ]
-  ]
-
-  method: printHeader: workflows tasks: tasks notifications: notifications [
-    'Procyon Park Dashboard' println.
-    '======================' println.
-    (workflows size printString, ' workflows  |  ',
-      tasks size printString, ' tasks  |  ',
-      notifications size printString, ' notifications  |  q to quit') println
-  ]
-
-  method: printWorkflows: workflows [
-    'WORKFLOWS' println.
-    '---------' println.
-    workflows size = 0 ifTrue: [
-      '  (none)' println.
-      ^self
-    ].
-    workflows do: [:wf |
-      | payload identity status line |
-      payload := wf at: 'payload' ifAbsent: [Dictionary new].
-      identity := wf at: 'identity' ifAbsent: ['?'].
-      status := payload at: 'status' ifAbsent: ['?'].
-      line := '  ', identity, '  [', status, ']'.
-      line println
-    ]
-  ]
-
-  method: printTasks: tasks [
-    'TASKS' println.
-    '-----' println.
-    tasks size = 0 ifTrue: [
-      '  (none)' println.
-      ^self
-    ].
-    tasks do: [:t |
-      | payload identity role status line |
-      payload := t at: 'payload' ifAbsent: [Dictionary new].
-      identity := t at: 'identity' ifAbsent: ['?'].
-      role := payload at: 'role' ifAbsent: ['?'].
-      status := payload at: 'status' ifAbsent: ['?'].
-      line := '  ', identity, '  [', role, ']  ', status.
-      line println
-    ]
-  ]
-
-  method: printNotifications: notifications [
-    'NOTIFICATIONS' println.
-    '-------------' println.
-    notifications size = 0 ifTrue: [
-      '  (none)' println.
-      ^self
-    ].
-    notifications do: [:n |
-      | payload severity message line |
-      payload := n at: 'payload' ifAbsent: [Dictionary new].
-      severity := payload at: 'severity' ifAbsent: ['info'].
-      message := payload at: 'message' ifAbsent: [''].
-      line := '  [', severity, '] ', message.
-      line println
-    ]
-  ]
-
-
-"=== PPDashboardModel — data model with background polling ===
- Fetches /api/dashboard and /api/health every 3 seconds.
- Notifies dependents via changed: #data on each fetch cycle."
+"=== PPDashboardModel — data model with thread-safe background polling ===
+ Fetches /api/dashboard (includes health) every 3 seconds.
+ Uses display defer: to apply mutations on the UI goroutine.
+ Sends fine-grained change aspects: #workflows, #tasks, #notifications, #health."
 
 PPDashboardModel subclass: Alto::Model
-  instanceVars: baseUrl client workflows tasks tokens notifications health connected
+  instanceVars: baseUrl <String> client <HttpClient> workflows <Array> tasks <Array> tokens <Array> notifications <Array> health <Dictionary> connected <Boolean> display <Dynamic>
 
-  classMethod: new [
-    | instance |
+  classMethod: new ^<PPDashboardModel> [
+    | instance <PPDashboardModel> |
     instance := super new.
     instance initialize.
     ^instance
@@ -148,315 +41,401 @@ PPDashboardModel subclass: Alto::Model
     (baseUrl isEmpty) ifTrue: [baseUrl := 'http://localhost:7777'].
     client := HttpClient new.
     connected := false.
+    display := nil.
     workflows := #().
     tasks := #().
     tokens := #().
     notifications := #().
-    health := #()
+    health := Dictionary new
   ]
 
-  method: workflows [ ^workflows ]
-  method: tasks [ ^tasks ]
-  method: tokens [ ^tokens ]
-  method: notifications [ ^notifications ]
-  method: health [ ^health ]
-  method: connected [ ^connected ]
-  method: baseUrl [ ^baseUrl ]
-  method: client [ ^client ]
+  method: workflows ^<Array> [ ^workflows ]
+  method: tasks ^<Array> [ ^tasks ]
+  method: tokens ^<Array> [ ^tokens ]
+  method: notifications ^<Array> [ ^notifications ]
+  method: health ^<Dictionary> [ ^health ]
+  method: connected ^<Boolean> [ ^connected ]
+  method: baseUrl ^<String> [ ^baseUrl ]
+  method: client ^<HttpClient> [ ^client ]
+  method: display: aDisplay <Dynamic> [ display := aDisplay ]
 
   "Allow injection of client for testing"
-  method: client: aClient [
+  method: client: aClient <Dynamic> [
     client := aClient
   ]
 
-  method: fetchData [
-    | response result healthResponse |
+  method: fetchDataSnapshot ^<Dictionary> [
+    "Pure data fetch — no mutation, no changed:. Returns a Dictionary snapshot.
+     Called on the background goroutine."
+    | snapshot <Dictionary> response <String> result <Dictionary> |
+    snapshot := Dictionary new.
     [
       response := client get: baseUrl, '/api/dashboard'.
       (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
         result := Json decode: response.
-        workflows := result at: 'workflows' ifAbsent: [#()].
-        tasks := result at: 'tasks' ifAbsent: [#()].
-        tokens := result at: 'tokens' ifAbsent: [#()].
-        notifications := result at: 'notifications' ifAbsent: [#()]
+        snapshot at: 'workflows' put: (result at: 'workflows' ifAbsent: [#()]).
+        snapshot at: 'tasks' put: (result at: 'tasks' ifAbsent: [#()]).
+        snapshot at: 'tokens' put: (result at: 'tokens' ifAbsent: [#()]).
+        snapshot at: 'notifications' put: (result at: 'notifications' ifAbsent: [#()]).
+        snapshot at: 'health' put: (result at: 'health' ifAbsent: [Dictionary new])
       ].
-      healthResponse := client get: baseUrl, '/api/health'.
-      (healthResponse notNil and: [(healthResponse isKindOf: String) and: [healthResponse isEmpty not]]) ifTrue: [
-        health := Json decode: healthResponse
-      ].
-      connected := true.
-      self changed: #data
+      snapshot at: 'connected' put: true
     ] on: Exception do: [:e |
-      connected := false.
-      self changed: #data
+      snapshot at: 'connected' put: false
+    ].
+    ^snapshot
+  ]
+
+  method: applySnapshot: snapshot <Dictionary> [
+    "Apply fetched data and notify dependents for changed aspects.
+     Called on the UI goroutine via defer:."
+    | newWorkflows <Array> newTasks <Array> newTokens <Array> newNotifications <Array> newHealth <Dictionary> newConnected <Boolean> |
+    newConnected := snapshot at: 'connected' ifAbsent: [connected].
+    newConnected ~= connected ifTrue: [
+      connected := newConnected.
+      self changed: #health
+    ].
+    newHealth := snapshot at: 'health' ifAbsent: [nil].
+    newHealth notNil ifTrue: [
+      health := newHealth.
+      self changed: #health
+    ].
+    newWorkflows := snapshot at: 'workflows' ifAbsent: [nil].
+    newWorkflows notNil ifTrue: [
+      workflows := newWorkflows.
+      self changed: #workflows
+    ].
+    newTasks := snapshot at: 'tasks' ifAbsent: [nil].
+    newTasks notNil ifTrue: [
+      tasks := newTasks.
+      self changed: #tasks
+    ].
+    newTokens := snapshot at: 'tokens' ifAbsent: [nil].
+    newTokens notNil ifTrue: [
+      tokens := newTokens
+    ].
+    newNotifications := snapshot at: 'notifications' ifAbsent: [nil].
+    newNotifications notNil ifTrue: [
+      notifications := newNotifications.
+      self changed: #notifications
     ]
   ]
 
-  method: startPolling: app [
-    | display |
-    display := app display.
-    [[display running] whileTrue: [
-      self fetchData.
+  method: startPolling: anApp <Alto::App> [
+    "Start background polling. Fetches on background goroutine,
+     applies on UI goroutine via display defer:."
+    | disp <Alto::Display> |
+    disp := anApp display.
+    display := disp.
+    [[disp running] whileTrue: [
+      | snapshot <Dictionary> |
+      snapshot := self fetchDataSnapshot.
+      disp defer: [self applySnapshot: snapshot].
       Process sleep: 3000
     ]] fork
   ]
 
 
-"=== PPHeaderUpdater — Model dependent that updates a header Label ===
- with server health and connection status from PPDashboardModel.
- Usage: PPHeaderUpdater for: headerLabel model: dashboardModel"
+"=== PPHeaderUpdater — status bar with health info and summary counts ==="
 
 PPHeaderUpdater subclass: Object
-  instanceVars: label model
+  instanceVars: label <Alto::Label> model <PPDashboardModel>
 
-  classMethod: for: aLabel model: aModel [
-    | instance |
+  classMethod: for: aLabel <Alto::Label> model: aModel <PPDashboardModel> ^<PPHeaderUpdater> [
+    | instance <PPHeaderUpdater> |
     instance := super new.
     instance initLabel: aLabel model: aModel.
     ^instance
   ]
 
-  method: initLabel: aLabel model: aModel [
+  method: initLabel: aLabel <Alto::Label> model: aModel <PPDashboardModel> [
     label := aLabel.
     model := aModel.
     model addDependent: self.
-    self applyBoldStyle.
-    self updateLabelText
+    self applyStyle.
+    self updateText
   ]
 
-  method: applyBoldStyle [
-    | boldStyle |
-    boldStyle := Go::Terminal newStyle bold: true.
-    label style: boldStyle
+  method: applyStyle [
+    | style <Dynamic> |
+    style := Go::Terminal newStyle bold: true.
+    label style: style
   ]
 
-  method: update: aspect [
-    aspect = #data ifFalse: [^self].
-    self updateLabelText
+  method: update: aspect <Symbol> [
+    (aspect = #health or: [aspect = #workflows or: [aspect = #tasks]]) ifTrue: [
+      self updateText
+    ]
   ]
 
-  method: updateLabelText [
-    | txt |
-    model connected ifTrue: [
-      txt := self connectedText
-    ] ifFalse: [
-      txt := 'PP Dashboard | DISCONNECTED | q to quit'
+  method: updateText [
+    | txt <String> wfCount <Integer> activeCount <Integer> taskCount <Integer> tuples <Dynamic> uptime <Dynamic> |
+    model connected ifFalse: [
+      label text: 'PP Dashboard | DISCONNECTED | q to quit'.
+      ^self
     ].
+    wfCount := model workflows size.
+    activeCount := self countActive: model workflows.
+    taskCount := model tasks size.
+    tuples := model health at: 'tuples' ifAbsent: ['?'].
+    uptime := model health at: 'uptime' ifAbsent: ['?'].
+    txt := 'PP Dashboard | ',
+      wfCount printString, ' workflows (',
+      activeCount printString, ' active) | ',
+      taskCount printString, ' tasks | ',
+      tuples printString, ' tuples | ',
+      uptime printString, 's up | q quit'.
     label text: txt
   ]
 
-  method: connectedText [
-    | health tuples uptime url tuplesStr uptimeStr urlStr |
-    health := model health.
-    health isNil ifTrue: [
-      ^'PP Dashboard | connecting... | q to quit'
+  method: countActive: workflows <Array> ^<Integer> [
+    | count <Integer> |
+    count := 0.
+    workflows do: [:wf |
+      | payload <Dictionary> status <String> |
+      payload := wf at: 'payload' ifAbsent: [Dictionary new].
+      status := payload at: 'status' ifAbsent: [''].
+      (status = 'running' or: [status = 'dispatching']) ifTrue: [
+        count := count + 1
+      ]
     ].
-    tuples := health at: 'tuples' ifAbsent: [nil].
-    uptime := health at: 'uptime' ifAbsent: [nil].
-    url := health at: 'url' ifAbsent: [nil].
-    tuples isNil ifTrue: [
-      tuplesStr := '?'
-    ] ifFalse: [
-      tuplesStr := tuples printString
-    ].
-    uptime isNil ifTrue: [
-      uptimeStr := '?'
-    ] ifFalse: [
-      uptimeStr := uptime printString
-    ].
-    url isNil ifTrue: [
-      urlStr := '?'
-    ] ifFalse: [
-      urlStr := url printString
-    ].
-    ^'PP Dashboard | ', tuplesStr, ' tuples | ', uptimeStr, 's uptime | ', urlStr, ' | q to quit'
+    ^count
   ]
 
 
-"=== PPDashboardListHelper — Model dependent for workflow and task ListViews ===
- Unwraps BBS tuple payload dicts for display formatting.
- Uses labelBlock: on ListView for deferred formatting."
+"=== PPWorkflowHelper — master list + detail pane binding ===
+ Observes model for #workflows and #tasks changes.
+ Updates master list and rebuilds detail when selection changes."
 
-PPDashboardListHelper subclass: Object
-  instanceVars: workflowList taskList model selectedWorkflow
+PPWorkflowHelper subclass: Object
+  instanceVars: masterList <Alto::ListView> detailList <Alto::ListView> model <PPDashboardModel> selectedWorkflow <Dictionary>
 
-  classMethod: setupWorkflowList: aWorkflowList taskList: aTaskList withModel: aModel [
-    | instance |
+  classMethod: setupMaster: aMasterList <Alto::ListView> detail: aDetailList <Alto::ListView> model: aModel <PPDashboardModel> ^<PPWorkflowHelper> [
+    | instance <PPWorkflowHelper> |
     instance := super new.
-    instance initWorkflowList: aWorkflowList taskList: aTaskList model: aModel.
+    instance initMaster: aMasterList detail: aDetailList model: aModel.
     ^instance
   ]
 
-  method: initWorkflowList: aWorkflowList taskList: aTaskList model: aModel [
-    workflowList := aWorkflowList.
-    taskList := aTaskList.
+  method: initMaster: aMasterList <Alto::ListView> detail: aDetailList <Alto::ListView> model: aModel <PPDashboardModel> [
+    masterList := aMasterList.
+    detailList := aDetailList.
     model := aModel.
     selectedWorkflow := nil.
 
-    workflowList labelBlock: [:item | self workflowLabelFor: item].
-    taskList labelBlock: [:item | self taskLabelFor: item].
-
-    workflowList onSelect: [:item |
-      selectedWorkflow := item
+    masterList labelBlock: [:item | self workflowLabelFor: item].
+    masterList onSelect: [:item |
+      selectedWorkflow := item.
+      self rebuildDetail
     ].
+
+    detailList labelBlock: [:item | item].
 
     model addDependent: self
   ]
 
-  method: update: aspect [
-    aspect = #data ifTrue: [
-      self rebuildWorkflowList.
-      self rebuildTaskList
-    ]
+  method: update: aspect <Symbol> [
+    aspect = #workflows ifTrue: [self rebuildMasterList].
+    aspect = #tasks ifTrue: [self rebuildDetail]
   ]
 
-  method: rebuildWorkflowList [
-    | workflows |
+  method: rebuildMasterList [
+    | workflows <Array> |
     workflows := model workflows.
     workflows isNil ifTrue: [workflows := #()].
-    workflowList items: workflows
+    masterList updateItems: workflows.
+    "If selection was lost, try to re-select"
+    selectedWorkflow isNil ifFalse: [
+      | wfId <String> i <Integer> |
+      wfId := selectedWorkflow at: 'identity' ifAbsent: [nil].
+      wfId notNil ifTrue: [
+        i := 0.
+        [i < workflows size] whileTrue: [
+          ((workflows at: i) at: 'identity' ifAbsent: ['']) = wfId ifTrue: [
+            selectedWorkflow := workflows at: i.
+            masterList selectedIndex: i.
+            self rebuildDetail.
+            ^self
+          ].
+          i := i + 1
+        ]
+      ]
+    ].
+    self rebuildDetail
   ]
 
-  method: rebuildTaskList [
-    | tasks |
-    tasks := model tasks.
-    tasks isNil ifTrue: [tasks := #()].
-    taskList items: tasks
+  method: rebuildDetail [
+    "Build detail items for the selected workflow from local model data."
+    | items <Array> |
+    selectedWorkflow isNil ifTrue: [
+      detailList updateItems: #('(select a workflow)').
+      ^self
+    ].
+    items := self buildDetailFor: selectedWorkflow.
+    detailList updateItems: items
   ]
 
-  method: workflowLabelFor: item [
-    | payload identity status template |
+  method: buildDetailFor: wf <Dictionary> ^<Array> [
+    "Build detail strings from workflow + its tokens and tasks."
+    | items <ArrayList> payload <Dictionary> identity <String> status <String> template <String> tasksDone <Integer> tasksTotal <Integer> |
+    identity := wf at: 'identity' ifAbsent: ['?'].
+    payload := wf at: 'payload' ifAbsent: [Dictionary new].
+    status := payload at: 'status' ifAbsent: ['?'].
+    template := payload at: 'template' ifAbsent: ['?'].
+
+    items := ArrayList new.
+    items add: ('Workflow: ', identity).
+    items add: ('Status: ', status).
+    items add: ('Template: ', template).
+    items add: ''.
+
+    "Count tasks for this workflow"
+    tasksTotal := 0.
+    tasksDone := 0.
+    (model tasks) do: [:task |
+      | tp <Dictionary> tId <String> tRole <String> tStatus <String> tWf <String> |
+      tp := task at: 'payload' ifAbsent: [Dictionary new].
+      tWf := tp at: 'workflow' ifAbsent: [''].
+      tWf = identity ifTrue: [
+        tId := task at: 'identity' ifAbsent: ['?'].
+        tRole := tp at: 'role' ifAbsent: ['?'].
+        tStatus := tp at: 'status' ifAbsent: ['?'].
+        tasksTotal := tasksTotal + 1.
+        (tStatus = 'done' or: [tStatus = 'completed']) ifTrue: [tasksDone := tasksDone + 1].
+        items add: ('  ', tId, ' [', tRole, '] ', tStatus)
+      ]
+    ].
+
+    "Insert task summary before task list"
+    items add: ''.
+    items add: '--- Tokens ---'.
+
+    "Show tokens for this workflow"
+    (model tokens) do: [:tok |
+      | tokP <Dictionary> tokId <String> tokWf <String> tokStatus <String> |
+      tokP := tok at: 'payload' ifAbsent: [Dictionary new].
+      tokWf := tokP at: 'workflow' ifAbsent: [''].
+      tokWf = identity ifTrue: [
+        tokId := tok at: 'identity' ifAbsent: ['?'].
+        tokStatus := tokP at: 'status' ifAbsent: ['?'].
+        items add: ('  ', tokId, ' [', tokStatus, ']')
+      ]
+    ].
+
+    ^items asArray
+  ]
+
+  method: workflowLabelFor: item <Dictionary> ^<String> [
+    | payload <Dictionary> identity <String> status <String> template <String> statusIcon <String> |
     payload := item at: 'payload' ifAbsent: [Dictionary new].
     identity := item at: 'identity' ifAbsent: ['?'].
     status := payload at: 'status' ifAbsent: ['?'].
     template := payload at: 'template' ifAbsent: ['?'].
-    ^identity, ' [', status, '] ', template
+    statusIcon := self iconFor: status.
+    ^statusIcon, ' ', identity, ' [', status, '] ', template
   ]
 
-  method: taskLabelFor: item [
-    | payload identity role status |
-    payload := item at: 'payload' ifAbsent: [Dictionary new].
-    identity := item at: 'identity' ifAbsent: ['?'].
-    role := payload at: 'role' ifAbsent: ['?'].
-    status := payload at: 'status' ifAbsent: ['?'].
-    ^identity, ' [', role, '] ', status
+  method: iconFor: status <String> ^<String> [
+    status = 'running' ifTrue: [^'>'].
+    status = 'dispatching' ifTrue: [^'>'].
+    status = 'done' ifTrue: [^' '].
+    status = 'completed' ifTrue: [^' '].
+    status = 'failed' ifTrue: [^'!'].
+    ^' '
   ]
 
-  method: selectedWorkflow [
-    ^selectedWorkflow
-  ]
-
-  method: model [
-    ^model
-  ]
-
-  method: workflowList [
-    ^workflowList
-  ]
-
-  method: taskList [
-    ^taskList
-  ]
+  method: selectedWorkflow ^<Dictionary> [ ^selectedWorkflow ]
+  method: model ^<PPDashboardModel> [ ^model ]
+  method: masterList ^<Alto::ListView> [ ^masterList ]
 
 
-"=== PPNotificationUpdater — Model dependent for notification ListView ===
- Unwraps BBS tuple payload structure.
- Severity levels: info, warn, urgent.
- Format: '[severity] message' as plain text."
+"=== PPActivityFeed — notification list with severity coloring ===
+ Formats notifications as '[severity] message' with styled labels."
 
-PPNotificationUpdater subclass: Object
-  instanceVars: listView model
+PPActivityFeed subclass: Object
+  instanceVars: listView <Alto::ListView> model <PPDashboardModel>
 
-  classMethod: for: aListView model: aModel [
-    | instance |
+  classMethod: for: aListView <Alto::ListView> model: aModel <PPDashboardModel> ^<PPActivityFeed> [
+    | instance <PPActivityFeed> |
     instance := super new.
     instance initListView: aListView model: aModel.
     ^instance
   ]
 
-  method: initListView: aListView model: aModel [
+  method: initListView: aListView <Alto::ListView> model: aModel <PPDashboardModel> [
     listView := aListView.
     model := aModel.
+    listView labelBlock: [:item | item].
     model addDependent: self
   ]
 
-  method: update: aspect [
-    (aspect = #data) ifTrue: [
+  method: update: aspect <Symbol> [
+    aspect = #notifications ifTrue: [
       self rebuildList
     ]
   ]
 
   method: rebuildList [
-    | notifications formatted |
+    | notifications <Array> formatted <Array> |
     notifications := model notifications.
     notifications isNil ifTrue: [notifications := #()].
     formatted := self formatNotifications: notifications.
-    listView items: formatted
+    listView updateItems: formatted
   ]
 
-  method: formatNotifications: notifications [
-    | result |
-    result := Array new: 0.
+  method: formatNotifications: notifications <Array> ^<Array> [
+    "Format notifications as display strings."
+    | result <Array> i <Integer> |
+    result := Array new: notifications size.
+    i := 0.
     notifications do: [:n |
-      | payload severity message line |
+      | payload <Dictionary> severity <String> message <String> line <String> |
       payload := n at: 'payload' ifAbsent: [nil].
       payload isNil ifTrue: [payload := Dictionary new].
       severity := payload at: 'severity' ifAbsent: ['info'].
       message := payload at: 'message' ifAbsent: [''].
       line := '[', severity, '] ', message.
-      result := result copyWith: line
+      result at: i put: line.
+      i := i + 1
     ].
     ^result
   ]
 
-  method: listView [
-    ^listView
-  ]
-
-  method: model [
-    ^model
-  ]
+  method: listView ^<Alto::ListView> [ ^listView ]
+  method: model ^<PPDashboardModel> [ ^model ]
 
 
 "=== PPDashboardLayout — BoxLayout subclass with global key interception ===
- Intercepts q (quit), Enter (workflow detail), Escape (return from detail)
- BEFORE delegating to BoxLayout super for Tab cycling and child delegation.
- instanceVars: app model notificationList detailMode detailView listHelper"
+ Intercepts q (quit), Tab (focus cycling).
+ Layout: vertical with header(1), middle horizontal split(7), activity feed(3)."
 
 PPDashboardLayout subclass: Alto::BoxLayout
-  instanceVars: app model notificationList detailMode detailView listHelper
+  instanceVars: app <Alto::App> model <PPDashboardModel> workflowHelper <PPWorkflowHelper>
 
-  classMethod: vertical [
-    | instance |
+  classMethod: vertical ^<PPDashboardLayout> [
+    | instance <PPDashboardLayout> |
     instance := super vertical.
     instance initDashboardState.
     ^instance
   ]
 
   method: initDashboardState [
-    detailMode := false.
-    detailView := nil.
-    notificationList := nil.
     app := nil.
     model := nil.
-    listHelper := nil
+    workflowHelper := nil
   ]
 
-  method: app: anApp [ app := anApp ]
-  method: app [ ^app ]
-  method: model: aModel [ model := aModel ]
-  method: model [ ^model ]
-  method: notificationList: aListView [ notificationList := aListView ]
-  method: notificationList [ ^notificationList ]
-  method: listHelper: aHelper [ listHelper := aHelper ]
-  method: listHelper [ ^listHelper ]
-  method: detailMode [ ^detailMode ]
-  method: detailView [ ^detailView ]
+  method: app: anApp <Alto::App> [ app := anApp ]
+  method: app ^<Alto::App> [ ^app ]
+  method: model: aModel <PPDashboardModel> [ model := aModel ]
+  method: model ^<PPDashboardModel> [ ^model ]
+  method: workflowHelper: aHelper <PPWorkflowHelper> [ workflowHelper := aHelper ]
+  method: workflowHelper ^<PPWorkflowHelper> [ ^workflowHelper ]
 
-  method: handleEvent: evt [
+  method: handleEvent: evt <Alto::Event> [
     "Intercept global keys BEFORE calling super (BoxLayout Tab/child delegation)."
 
-    "Only process key events"
+    "Mouse events — delegate to BoxLayout"
     evt isKey ifFalse: [
       ^super handleEvent: evt
     ].
@@ -464,192 +443,68 @@ PPDashboardLayout subclass: Alto::BoxLayout
     "q key — quit the app.
      Letter keys arrive as keyRune(256) with char code in rune field.
      q = rune 113."
-    ((evt at: 'key') = Alto::EventConstants keyRune and: [(evt at: 'rune') = 113]) ifTrue: [
-      app notNil ifTrue: [app stop].
+    (evt key = Alto::EventConstants keyRune and: [evt rune = 113]) ifTrue: [
+      [app notNil ifTrue: [app stop]] on: Exception do: [:e | ].
       ^self
-    ].
-
-    "Escape key — return from detail view to notification pane."
-    (evt at: 'key') = Alto::EventConstants keyEscape ifTrue: [
-      detailMode ifTrue: [
-        self restoreNotificationPane
-      ].
-      ^self
-    ].
-
-    "Enter key — if focused child is the workflow list, show detail view.
-     focusedIndex 1 = workflowList (header=0, workflowList=1, taskList=2, notifications=3)."
-    (evt at: 'key') = Alto::EventConstants keyEnter ifTrue: [
-      (self focusedIndex = 1) ifTrue: [
-        self onWorkflowSelected.
-        ^self
-      ]
     ].
 
     "All other keys (Tab, arrows, etc.) — delegate to BoxLayout super."
     super handleEvent: evt
   ]
 
-  method: onWorkflowSelected [
-    "Fetch workflow detail from /api/workflow/status and show detail view.
-     Synchronous HTTP is acceptable for MVP."
-    | selectedItem wfIdentity body jsonBody response result detailItems statusStr templateStr startedStr tokensArr tasksList |
-    listHelper isNil ifTrue: [^self].
-    selectedItem := listHelper selectedWorkflow.
-    selectedItem isNil ifTrue: [^self].
-
-    wfIdentity := selectedItem at: 'identity' ifAbsent: [nil].
-    wfIdentity isNil ifTrue: [^self].
-
-    "Build POST body"
-    body := Dictionary new.
-    body at: 'workflow_id' put: wfIdentity.
-    jsonBody := Json encode: body.
-
-    "Fetch detail from server"
-    [
-      response := model client post: model baseUrl, '/api/workflow/status' body: jsonBody contentType: 'application/json'.
-      (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
-        result := Json decode: response.
-        detailItems := self buildDetailItems: result forWorkflow: wfIdentity.
-        self showDetailPane: detailItems
-      ]
-    ] on: Exception do: [:e |
-      "Show error in detail view"
-      detailItems := Array new: 0.
-      detailItems := detailItems copyWith: ('Error fetching detail: ', e messageText).
-      self showDetailPane: detailItems
-    ]
-  ]
-
-  method: buildDetailItems: result forWorkflow: wfIdentity [
-    "Build an array of strings for the detail view from workflow status response."
-    | items statusStr templateStr startedStr tokensArr tasksList |
-    items := Array new: 0.
-    items := items copyWith: ('Workflow: ', wfIdentity).
-    items := items copyWith: ''.
-
-    statusStr := result at: 'status' ifAbsent: ['?'].
-    templateStr := result at: 'template' ifAbsent: ['?'].
-    startedStr := result at: 'started_at' ifAbsent: ['?'].
-
-    items := items copyWith: ('Status: ', statusStr printString).
-    items := items copyWith: ('Template: ', templateStr printString).
-    items := items copyWith: ('Started: ', startedStr printString).
-
-    (result at: 'completed_at' ifAbsent: [nil]) notNil ifTrue: [
-      items := items copyWith: ('Completed: ', (result at: 'completed_at') printString)
-    ].
-    (result at: 'failed_at' ifAbsent: [nil]) notNil ifTrue: [
-      items := items copyWith: ('Failed: ', (result at: 'failed_at') printString).
-      items := items copyWith: ('Reason: ', (result at: 'failure_reason' ifAbsent: ['']) printString)
-    ].
-
-    items := items copyWith: ''.
-    items := items copyWith: '--- Tokens ---'.
-
-    "Show tokens from the model for this workflow"
-    tokensArr := model tokens.
-    tokensArr isNil ifTrue: [tokensArr := #()].
-    tokensArr do: [:tok |
-      | tokPayload tokIdentity tokStatus tokWf |
-      tokPayload := tok at: 'payload' ifAbsent: [Dictionary new].
-      tokIdentity := tok at: 'identity' ifAbsent: ['?'].
-      tokWf := tokPayload at: 'workflow' ifAbsent: [''].
-      tokStatus := tokPayload at: 'status' ifAbsent: ['?'].
-      (tokWf = wfIdentity) ifTrue: [
-        items := items copyWith: ('  ', tokIdentity, ' [', tokStatus, ']')
-      ]
-    ].
-
-    items := items copyWith: ''.
-    items := items copyWith: '--- Tasks ---'.
-
-    "Show tasks from the model for this workflow"
-    tasksList := model tasks.
-    tasksList isNil ifTrue: [tasksList := #()].
-    tasksList do: [:task |
-      | taskPayload taskIdentity taskRole taskStatus taskWf |
-      taskPayload := task at: 'payload' ifAbsent: [Dictionary new].
-      taskIdentity := task at: 'identity' ifAbsent: ['?'].
-      taskRole := taskPayload at: 'role' ifAbsent: ['?'].
-      taskStatus := taskPayload at: 'status' ifAbsent: ['?'].
-      taskWf := taskPayload at: 'workflow' ifAbsent: [''].
-      (taskWf = wfIdentity) ifTrue: [
-        items := items copyWith: ('  ', taskIdentity, ' [', taskRole, '] ', taskStatus)
-      ]
-    ].
-
-    items := items copyWith: ''.
-    items := items copyWith: '(Press Escape to return)'.
-    ^items
-  ]
-
-  method: showDetailPane: detailItems [
-    "Replace notification pane (child index 3) with detail ListView."
-    detailView := Alto::ListView items: detailItems onSelect: [:item | ].
-    children at: 3 put: detailView.
-    childBufs at: 3 put: nil.
-    detailMode := true.
-    self invalidate
-  ]
-
-  method: restoreNotificationPane [
-    "Swap detail view back to the notification ListView."
-    notificationList isNil ifTrue: [^self].
-    children at: 3 put: notificationList.
-    childBufs at: 3 put: nil.
-    detailMode := false.
-    detailView := nil.
-    self invalidate
-  ]
-
 
 "=== PPDashboardApp — Alto TUI app shell and layout wiring ===
- Creates a flat vertical PPDashboardLayout with 4 children:
-   header Label (weight:1), workflowList (weight:3),
-   taskList (weight:3), notificationList (weight:3).
- Tab cycles focus across all 4 children.
- PPDashboardLayout intercepts q, Enter, and Escape globally."
+ Creates master-detail layout:
+   header (weight 1)
+   middle split: workflow master (weight 2) | detail (weight 3) (weight 7)
+   activity feed (weight 3)
+ Tab cycles focus across workflow list, detail, and activity feed."
 
 PPDashboardApp subclass: Object
 
   classMethod: start [
-    | model header workflowList taskList notificationList layout app headerUpdater listHelper notifUpdater |
+    | model <PPDashboardModel> header <Alto::Label> masterList <Alto::ListView> detailList <Alto::ListView> activityList <Alto::ListView> middleSplit <Alto::BoxLayout> layout <PPDashboardLayout> app <Alto::App> headerUpdater <PPHeaderUpdater> workflowHelper <PPWorkflowHelper> activityFeed <PPActivityFeed> |
     model := PPDashboardModel new.
 
-    "Header label"
+    "Header label — status bar"
     header := Alto::Label new.
     header text: 'PP Dashboard | starting... | q to quit'.
 
-    "Three ListViews for workflows, tasks, notifications"
-    workflowList := Alto::ListView items: #() onSelect: [:item | ].
-    taskList := Alto::ListView items: #() onSelect: [:item | ].
-    notificationList := Alto::ListView items: #() onSelect: [:item | ].
+    "Workflow master list (left pane)"
+    masterList := Alto::ListView items: #() onSelect: [:item | ].
 
-    "PPDashboardLayout — custom BoxLayout with global key handling"
+    "Workflow detail list (right pane)"
+    detailList := Alto::ListView items: #('(select a workflow)') onSelect: [:item | ].
+
+    "Activity feed (bottom pane)"
+    activityList := Alto::ListView items: #() onSelect: [:item | ].
+
+    "Middle horizontal split: master | detail"
+    middleSplit := Alto::BoxLayout horizontal.
+    middleSplit addChild: masterList weight: 2.
+    middleSplit addChild: detailList weight: 3.
+
+    "Outer vertical layout"
     layout := PPDashboardLayout vertical.
     layout addChild: header weight: 1.
-    layout addChild: workflowList weight: 3.
-    layout addChild: taskList weight: 3.
-    layout addChild: notificationList weight: 3.
+    layout addChild: middleSplit weight: 7.
+    layout addChild: activityList weight: 3.
 
     "Create app and open window"
     app := Alto::App new.
     app openWindow: 'PP Dashboard' content: layout controller: layout.
 
-    "Wire layout refs for key handling"
+    "Wire layout refs"
     layout app: app.
     layout model: model.
-    layout notificationList: notificationList.
 
     "Wire model dependents"
     headerUpdater := PPHeaderUpdater for: header model: model.
-    listHelper := PPDashboardListHelper setupWorkflowList: workflowList taskList: taskList withModel: model.
-    layout listHelper: listHelper.
-    notifUpdater := PPNotificationUpdater for: notificationList model: model.
+    workflowHelper := PPWorkflowHelper setupMaster: masterList detail: detailList model: model.
+    layout workflowHelper: workflowHelper.
+    activityFeed := PPActivityFeed for: activityList model: model.
 
-    "Start background polling"
+    "Start background polling with defer: for thread safety"
     model startPolling: app.
 
     "Run the event loop (blocks until app stop)"

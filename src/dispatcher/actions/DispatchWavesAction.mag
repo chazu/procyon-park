@@ -8,7 +8,7 @@ DispatchWavesAction subclass: WorkflowAction
      2. A plan decision's subtasks array (legacy fallback)
      Groups by wave, dispatches wave 1 immediately."
 
-    | scope subtasks maxWave wavePayload w epicId epicItem children childItems childItem childPayload decisions plan planPayload st subtasksBuf |
+    | scope subtasks maxWave wavePayload w epicId epicItem children childItems childItem childPayload decisions plan planPayload st subtasksBuf repoName repoConfig repoPath featureBranch worktreePayload |
 
     scope := engine scopeForInstance: instanceId.
     subtasks := nil.
@@ -73,7 +73,48 @@ DispatchWavesAction subclass: WorkflowAction
       w > maxWave ifTrue: [maxWave := w]
     ].
 
-    "3. Write wave tracking signal (includes params for subsequent waves)"
+    "3. Create shared feature branch for the pipeline"
+    repoName := params at: 'repo' ifAbsent: [nil].
+    repoName notNil ifTrue: [
+      repoConfig := Repo new repoForName: repoName.
+      repoConfig notNil ifTrue: [
+        repoPath := repoConfig at: 'path' ifAbsent: [nil]
+      ]
+    ].
+    repoPath isNil ifTrue: [
+      repoPath := System env: 'PP_REPO_PATH'.
+      (repoPath isNil or: [repoPath isEmpty]) ifTrue: [
+        repoPath := File workingDirectory
+      ]
+    ].
+
+    featureBranch := 'feature/', instanceId.
+    [
+      GitOps createFeatureBranch: featureBranch in: repoPath.
+      ('  dispatch-waves: created shared branch: ', featureBranch) println.
+      "Restore main so repo is not left on the feature branch"
+      [GitOps checkoutBranch: 'main' in: repoPath]
+        on: Exception do: [:e |
+          ('  dispatch-waves: checkout main warning: ', e messageText) println
+        ]
+    ] on: Exception do: [:e |
+      ('  dispatch-waves: shared branch creation failed: ', e messageText) println.
+      engine failWorkflow: instanceId reason: 'dispatch-waves: could not create shared branch — ', e messageText.
+      ^self
+    ].
+
+    "Thread parent_branch into params for child workflows"
+    params at: 'parent_branch' put: featureBranch.
+
+    "Write worktree signal for the pipeline's own merge-worktree step"
+    worktreePayload := Dictionary new.
+    worktreePayload at: 'workdir' put: repoPath.
+    worktreePayload at: 'branch' put: ''.
+    worktreePayload at: 'feature_branch' put: featureBranch.
+    worktreePayload at: 'repo_path' put: repoPath.
+    bbs upsertSignal: instanceId identity: 'worktree' payload: worktreePayload.
+
+    "4. Write wave tracking signal (includes params for subsequent waves)"
     wavePayload := Dictionary new.
     wavePayload at: 'current_wave' put: 1.
     wavePayload at: 'max_wave' put: maxWave.
@@ -115,6 +156,9 @@ DispatchWavesAction subclass: WorkflowAction
         childParams := Dictionary new.
         childParams at: 'description' put: desc.
         repo notNil ifTrue: [childParams at: 'repo' put: repo].
+        (params at: 'parent_branch' ifAbsent: [nil]) notNil ifTrue: [
+          childParams at: 'parent_branch' put: (params at: 'parent_branch')
+        ].
 
         childId := engine instantiate: childTemplate scope: scope params: childParams.
         waveChildIdsBuf add: childId.
@@ -124,7 +168,7 @@ DispatchWavesAction subclass: WorkflowAction
         signalPayload at: 'child_scope' put: scope.
         signalPayload at: 'wave' put: waveNum.
         signalPayload at: 'subtask_identity' put: identity.
-        bbs upsertSignal: instanceId identity: 'wave-child:', waveNum printString, ':', childId payload: signalPayload.
+        bbs upsertSignal: instanceId identity: (Identity waveChild: waveNum child: childId) payload: signalPayload.
 
         ('    Dispatched: ', identity, ' → ', childId) println
       ] ifFalse: [
@@ -153,6 +197,9 @@ DispatchWavesAction subclass: WorkflowAction
       childParams := Dictionary new.
       childParams at: 'description' put: batchDesc.
       repo notNil ifTrue: [childParams at: 'repo' put: repo].
+      (params at: 'parent_branch' ifAbsent: [nil]) notNil ifTrue: [
+        childParams at: 'parent_branch' put: (params at: 'parent_branch')
+      ].
 
       childId := engine instantiate: childTemplate scope: scope params: childParams.
       waveChildIdsBuf add: childId.
@@ -162,7 +209,7 @@ DispatchWavesAction subclass: WorkflowAction
       signalPayload at: 'child_scope' put: scope.
       signalPayload at: 'wave' put: waveNum.
       signalPayload at: 'subtask_identity' put: 'batch:', key.
-      bbs upsertSignal: instanceId identity: 'wave-child:', waveNum printString, ':', childId payload: signalPayload.
+      bbs upsertSignal: instanceId identity: (Identity waveChild: waveNum child: childId) payload: signalPayload.
 
       ('    Dispatched batch [', key, '] (', tasks size printString, ' tasks) → ', childId) println
     ].
@@ -173,7 +220,7 @@ DispatchWavesAction subclass: WorkflowAction
     statusPayload at: 'wave' put: waveNum.
     statusPayload at: 'total' put: waveChildIds size.
     statusPayload at: 'child_ids' put: waveChildIds.
-    bbs upsertSignal: instanceId identity: 'wave-status:', waveNum printString payload: statusPayload
+    bbs upsertSignal: instanceId identity: (Identity waveStatus: waveNum) payload: statusPayload
   ]
 
   method: checkWaveCompletion: instanceId scope: scope transitionId: transId [
@@ -195,7 +242,7 @@ DispatchWavesAction subclass: WorkflowAction
     subtasks := wdPayload at: 'subtasks'.
 
     "Check if current wave's children are all complete"
-    waveStatus := bbs rdp: 'signal' scope: instanceId identity: 'wave-status:', currentWave printString.
+    waveStatus := bbs rdp: 'signal' scope: instanceId identity: (Identity waveStatus: currentWave).
     waveStatus isNil ifTrue: [^nil].
     wsPayload := waveStatus at: 'payload'.
     childIds := wsPayload at: 'child_ids' ifAbsent: [#()].

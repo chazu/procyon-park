@@ -40,6 +40,7 @@ Dispatcher subclass: Object
 
   method: stop [
     running := false.
+    bbs flushIfDirty.
     'Dispatcher stopped.' println
   ]
 
@@ -64,6 +65,7 @@ Dispatcher subclass: Object
     workflowEngine advance.
     ruleEngine evaluate.
     scheduler dispatch.
+    bbs flushIfDirty.
 
     "Every 6th tick (~60s): reconciliation"
     (tick \\ 6) = 0 ifTrue: [

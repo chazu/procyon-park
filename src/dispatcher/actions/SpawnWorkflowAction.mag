@@ -43,7 +43,7 @@ SpawnWorkflowAction subclass: WorkflowAction
     signalPayload at: 'child_template' put: childTemplate.
     signalPayload at: 'child_scope' put: childScope.
     signalPayload at: 'parent_transition' put: (transition at: 'id').
-    bbs upsertSignal: instanceId identity: 'child-spawn:', (transition at: 'id'), ':', childInstanceId payload: signalPayload.
+    bbs upsertSignal: instanceId identity: (Identity childSpawn: (transition at: 'id') child: childInstanceId) payload: signalPayload.
 
     ('  Spawned child workflow: ', childInstanceId, ' from ', (transition at: 'id')) println.
     bbs notify: ('Spawned child workflow: ', childInstanceId) scope: childScope severity: 'info'

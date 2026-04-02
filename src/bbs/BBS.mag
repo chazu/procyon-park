@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex cueCtx startedAt index dataDir historyPath
+  instanceVars: space nextId mutex cueCtx startedAt index dataDir historyPath dirty
 
   classMethod: new [
     ^super new initialize
@@ -41,6 +41,7 @@ BBS subclass: Object
       ].
 
     historyPath := dataDir, '/history.jsonl'.
+    dirty := false.
 
     "Ensure data directory exists"
     self ensureDataDir.
@@ -401,8 +402,16 @@ BBS subclass: Object
   ]
 
   method: persistAfterChange [
-    "Schedule a save to disk. Called after every index mutation."
-    self saveToDisk
+    "Mark state as dirty. Actual write happens on flushIfDirty (dispatcher tick)."
+    dirty := true
+  ]
+
+  method: flushIfDirty [
+    "Write state to disk if any durable mutations occurred since last flush."
+    dirty ifTrue: [
+      self saveToDisk.
+      dirty := false
+    ]
   ]
 
   "--- Audit History ---"
@@ -437,10 +446,26 @@ BBS subclass: Object
     ]
   ]
 
+  method: historyTail: count [
+    "Fast path: read last N lines via tail without loading the entire file."
+    | output lines |
+    (File exists: historyPath) ifFalse: [^Array new: 0].
+    output := Shell capture: 'tail -n ', count printString, ' "', historyPath, '"'.
+    output isEmpty ifTrue: [^Array new: 0].
+    lines := output split: Character lf asString.
+    ^(lines reject: [:l | l isEmpty]) collect: [:l | Json decode: l]
+  ]
+
   method: history: filters [
     "Query the JSONL audit history with optional filters.
      filters may contain: 'op', 'category', 'scope', 'identity', 'since', 'limit'."
     | contents lines entries line entry matches op category scope identity since limit |
+
+    limit := filters at: 'limit' ifAbsent: [nil].
+
+    "Fast path: limit-only query skips full file load"
+    (filters size = 1 and: [limit notNil]) ifTrue: [^self historyTail: limit].
+
     (File exists: historyPath) ifFalse: [^Array new: 0].
     contents := File readFileContents: historyPath.
     (contents isNil or: [contents isEmpty]) ifTrue: [^Array new: 0].

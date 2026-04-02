@@ -93,10 +93,10 @@ GrowableArray subclass: Object
   method: isEmpty [ ^count = 0 ]
 
   method: asArray [
-    "Return a plain Array containing only the live elements."
+    "Return a plain 0-based Array containing only the live elements."
     | result |
     result := Array new: count.
-    1 to: count do: [:i | result at: i put: (storage at: i)].
+    0 to: count - 1 do: [:i | result at: i put: (storage at: i + 1)].
     ^result
   ]
 

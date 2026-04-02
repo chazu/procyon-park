@@ -22,6 +22,36 @@ MergeWorktreeAction subclass: WorkflowAction
     implBranch := payload at: 'branch'.
     worktreeDir := payload at: 'workdir'.
 
+    "Pipeline-level merge: no impl branch, merge shared feature branch directly to main"
+    implBranch isEmpty ifTrue: [
+      ('merge-worktree: pipeline merge — merging ', featureBranch, ' into main in ', repoPath) println.
+      [
+        GitOps checkoutBranch: 'main' in: repoPath
+      ] on: Exception do: [:e |
+        ('merge-worktree: checkout main failed: ', e messageText) println.
+        engine failWorkflow: instanceId reason: 'Pipeline merge failed: could not checkout main — ', e messageText.
+        ^self
+      ].
+      [
+        GitOps mergeBranch: featureBranch in: repoPath
+      ] on: Exception do: [:e |
+        ('merge-worktree: pipeline merge failed: ', e messageText) println.
+        obsPayload := Dictionary new.
+        obsPayload at: 'detail' put: ('Pipeline merge conflict: ', featureBranch, ' into main — ', e messageText).
+        bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
+        engine failWorkflow: instanceId reason: 'Pipeline merge conflict: ', featureBranch, ' into main — human intervention required'.
+        ^self
+      ].
+      GitOps deleteBranch: featureBranch in: repoPath.
+      obsPayload := Dictionary new.
+      obsPayload at: 'detail' put: ('Pipeline merged ', featureBranch, ' into main').
+      obsPayload at: 'repoPath' put: repoPath.
+      obsPayload at: 'featureBranch' put: featureBranch.
+      bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
+      ('merge-worktree: pipeline merge complete — ', featureBranch, ' merged into main') println.
+      ^self
+    ].
+
     ('merge-worktree: merging ', implBranch, ' into ', featureBranch, ' in ', repoPath) println.
 
     "2. Checkout the feature branch"

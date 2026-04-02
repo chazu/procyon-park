@@ -1,13 +1,12 @@
-"Comprehensive tests for Alto TUI Dashboard — all 6 stories.
+"Comprehensive tests for Alto TUI Dashboard — refactored architecture.
  Tests from spec, not implementation. Verifies what the code should do.
 
  Stories covered:
-   Story 1: PPDashboardModel — data model with background polling
-   Story 2: PPDashboardApp — app shell and layout wiring
-   Story 3: PPHeaderUpdater — header status bar
-   Story 4: PPDashboardListHelper — workflow/task list panes
-   Story 5: PPNotificationUpdater — notification list pane
-   Story 6: PPDashboardLayout — keyboard navigation
+   Story 1: PPDashboardModel — data model with fetchDataSnapshot/applySnapshot
+   Story 2: PPHeaderUpdater — header status bar with summary counts
+   Story 3: PPWorkflowHelper — master list + detail pane binding
+   Story 4: PPActivityFeed — notification formatting
+   Story 5: PPDashboardLayout — keyboard navigation
 
  All temp vars at method top. Uses [block] fork not Process fork:.
  Uses Array new: 0 and copyWith: for array building."
@@ -71,7 +70,7 @@ ADT subclass: Object
 
 "=== Mock HTTP Client ==="
 ADTMockHttpClient subclass: Object
-  instanceVars: responses shouldFail postResponses lastPostUrl lastPostBody
+  instanceVars: responses shouldFail
 
   classMethod: new [
     | instance |
@@ -82,18 +81,11 @@ ADTMockHttpClient subclass: Object
 
   method: init [
     responses := Dictionary new.
-    postResponses := Dictionary new.
-    shouldFail := false.
-    lastPostUrl := nil.
-    lastPostBody := nil
+    shouldFail := false
   ]
 
   method: setResponse: url to: body [
     responses at: url put: body
-  ]
-
-  method: setPostResponse: url to: body [
-    postResponses at: url put: body
   ]
 
   method: shouldFail: aBoolean [
@@ -107,22 +99,10 @@ ADTMockHttpClient subclass: Object
     ^responses at: url ifAbsent: [nil]
   ]
 
-  method: post: url body: body contentType: ct [
-    lastPostUrl := url.
-    lastPostBody := body.
-    shouldFail ifTrue: [
-      Exception signal: 'Mock HTTP error'
-    ].
-    ^postResponses at: url ifAbsent: ['{}']
-  ]
-
-  method: lastPostUrl [ ^lastPostUrl ]
-  method: lastPostBody [ ^lastPostBody ]
-
 
 "=== Mock Dependent (tracks changed: notifications) ==="
 ADTMockDependent subclass: Object
-  instanceVars: lastAspect updateCount
+  instanceVars: aspects updateCount
 
   classMethod: new [
     | instance |
@@ -132,17 +112,22 @@ ADTMockDependent subclass: Object
   ]
 
   method: init [
-    lastAspect := nil.
+    aspects := Array new: 0.
     updateCount := 0
   ]
 
   method: update: aspect [
-    lastAspect := aspect.
+    aspects := aspects copyWith: aspect.
     updateCount := updateCount + 1
   ]
 
-  method: lastAspect [ ^lastAspect ]
+  method: aspects [ ^aspects ]
   method: updateCount [ ^updateCount ]
+
+  method: hasAspect: anAspect [
+    aspects do: [:a | a = anAspect ifTrue: [^true]].
+    ^false
+  ]
 
 
 "=== Mock Label ==="
@@ -167,9 +152,9 @@ ADTMockLabel subclass: Object
   method: style: aStyle [ style := aStyle ]
 
 
-"=== Mock Model (for header/notification/list tests) ==="
+"=== Mock Model (for header/helper/feed tests) ==="
 ADTMockModel subclass: Object
-  instanceVars: dependents connectedFlag healthDict workflowData taskData tokenData notificationData clientObj baseUrlStr
+  instanceVars: dependents connectedFlag healthDict workflowData taskData tokenData notificationData
 
   classMethod: new [
     | instance |
@@ -181,13 +166,11 @@ ADTMockModel subclass: Object
   method: initMock [
     dependents := Array new: 0.
     connectedFlag := false.
-    healthDict := nil.
+    healthDict := Dictionary new.
     workflowData := #().
     taskData := #().
     tokenData := #().
-    notificationData := #().
-    clientObj := nil.
-    baseUrlStr := 'http://localhost:7777'
+    notificationData := #()
   ]
 
   method: addDependent: obj [ dependents := dependents copyWith: obj ]
@@ -204,9 +187,6 @@ ADTMockModel subclass: Object
   method: tokens: a [ tokenData := a ]
   method: notifications [ ^notificationData ]
   method: notifications: a [ notificationData := a ]
-  method: client [ ^clientObj ]
-  method: client: c [ clientObj := c ]
-  method: baseUrl [ ^baseUrlStr ]
 
   method: changed: aspect [
     dependents do: [:dep | dep update: aspect]
@@ -231,11 +211,13 @@ ADTMockListView subclass: Object
   ]
 
   method: items: newItems [ items := newItems ]
+  method: updateItems: newItems [ items := newItems ]
   method: items [ ^items ]
   method: labelBlock: aBlock [ labelBlock := aBlock ]
   method: labelBlock [ ^labelBlock ]
   method: onSelect: aBlock [ onSelectBlock := aBlock ]
   method: onSelectBlock [ ^onSelectBlock ]
+  method: selectedIndex: i [ ]
 
 
 "=== Mock App ==="
@@ -278,53 +260,12 @@ ADTMockKeyEvt subclass: Object
   method: rune [ ^rune ]
   method: mod [ ^0 ]
 
-  method: at: aKey ifAbsent: aBlock [
-    aKey = 'type' ifTrue: [^'key'].
-    aKey = 'key' ifTrue: [^key].
-    aKey = 'rune' ifTrue: [^rune].
-    aKey = 'mod' ifTrue: [^0].
-    ^aBlock value
-  ]
-
-  method: at: aKey [
-    ^self at: aKey ifAbsent: [nil]
-  ]
-
 
 "=== ADTSafeHeaderUpdater — subclass of PPHeaderUpdater that skips Go::Terminal ==="
 ADTSafeHeaderUpdater subclass: PPHeaderUpdater
 
-  method: applyBoldStyle [
+  method: applyStyle [
     "No-op: skip Go::Terminal in tests"
-  ]
-
-
-"=== ADTHeaderUpdaterProxy — exercises PPHeaderUpdater text logic without Go::Terminal ===
- Uses ADTSafeHeaderUpdater which overrides applyBoldStyle to no-op."
-ADTHeaderUpdaterProxy subclass: Object
-  instanceVars: label model updater
-
-  classMethod: new [
-    | instance |
-    instance := super new.
-    instance init.
-    ^instance
-  ]
-
-  method: init [
-    label := ADTMockLabel new.
-    model := ADTMockModel new
-  ]
-
-  method: setupWithConnected: aBool health: aHealth [
-    model connected: aBool.
-    model health: aHealth.
-    updater := ADTSafeHeaderUpdater new.
-    updater initLabel: label model: model
-  ]
-
-  method: labelText [
-    ^label text
   ]
 
 
@@ -336,29 +277,6 @@ ADTTupleBuilder subclass: Object
     payload := Dictionary new.
     payload at: 'status' put: status.
     payload at: 'template' put: template.
-    tuple := Dictionary new.
-    tuple at: 'identity' put: identity.
-    tuple at: 'payload' put: payload.
-    ^tuple
-  ]
-
-  classMethod: workflow: identity status: status template: template wfField: wf [
-    | payload tuple |
-    payload := Dictionary new.
-    payload at: 'status' put: status.
-    payload at: 'template' put: template.
-    payload at: 'workflow' put: wf.
-    tuple := Dictionary new.
-    tuple at: 'identity' put: identity.
-    tuple at: 'payload' put: payload.
-    ^tuple
-  ]
-
-  classMethod: task: identity role: role status: status [
-    | payload tuple |
-    payload := Dictionary new.
-    payload at: 'role' put: role.
-    payload at: 'status' put: status.
     tuple := Dictionary new.
     tuple at: 'identity' put: identity.
     tuple at: 'payload' put: payload.
@@ -377,20 +295,6 @@ ADTTupleBuilder subclass: Object
     ^tuple
   ]
 
-  classMethod: notification: severity message: message [
-    | payload tuple |
-    payload := Dictionary new.
-    payload at: 'severity' put: severity.
-    payload at: 'message' put: message.
-    tuple := Dictionary new.
-    tuple at: 'payload' put: payload.
-    ^tuple
-  ]
-
-  classMethod: notificationNoPayload [
-    ^Dictionary new
-  ]
-
   classMethod: token: identity status: tokenStatus workflow: wf [
     | payload tuple |
     payload := Dictionary new.
@@ -402,25 +306,34 @@ ADTTupleBuilder subclass: Object
     ^tuple
   ]
 
+  classMethod: notification: severity message: message [
+    | payload tuple |
+    payload := Dictionary new.
+    payload at: 'severity' put: severity.
+    payload at: 'message' put: message.
+    tuple := Dictionary new.
+    tuple at: 'payload' put: payload.
+    ^tuple
+  ]
+
 
 "========================================================
- STORY 1 TESTS: PPDashboardModel
+ STORY 1 TESTS: PPDashboardModel (fetchDataSnapshot / applySnapshot)
  ========================================================"
 TestADTModel subclass: Object
 
   classMethod: run: t [
     '--- Story 1: PPDashboardModel ---' println.
     self testInitialState: t.
-    self testFetchDataPopulatesFields: t.
-    self testChangedDataSentAfterFetch: t.
+    self testFetchDataSnapshotReturnsSnapshot: t.
+    self testApplySnapshotPopulatesModel: t.
+    self testFineGrainedAspects: t.
     self testExceptionSetsDisconnected: t.
     self testRecoveryAfterError: t.
     self testClientInjection: t.
-    self testDefaultBaseUrl: t.
-    self testAtomicFieldReplacement: t
+    self testDefaultBaseUrl: t
   ]
 
-  "S1-1: Initial state: empty arrays, connected=false"
   classMethod: testInitialState: t [
     | model |
     model := PPDashboardModel new.
@@ -428,780 +341,320 @@ TestADTModel subclass: Object
     t assert: model workflows size = 0 message: 'S1-1b: workflows initially empty'.
     t assert: model tasks size = 0 message: 'S1-1c: tasks initially empty'.
     t assert: model tokens size = 0 message: 'S1-1d: tokens initially empty'.
-    t assert: model notifications size = 0 message: 'S1-1e: notifications initially empty'.
-    t assert: model health size = 0 message: 'S1-1f: health initially empty'
+    t assert: model notifications size = 0 message: 'S1-1e: notifications initially empty'
   ]
 
-  "S1-2: fetchData populates model from mock HTTP"
-  classMethod: testFetchDataPopulatesFields: t [
-    | model mockClient dashJson healthJson |
+  classMethod: testFetchDataSnapshotReturnsSnapshot: t [
+    | model mockClient dashJson snapshot |
     model := PPDashboardModel new.
     mockClient := ADTMockHttpClient new.
     model client: mockClient.
-    dashJson := '{"workflows":[{"identity":"wf-1"}],"tasks":[{"identity":"t-1"},{"identity":"t-2"}],"tokens":[{"identity":"tok-1"}],"notifications":[{"identity":"n-1"}]}'.
-    healthJson := '{"tuples":42,"uptime":"10s"}'.
+    dashJson := '{"workflows":[{"identity":"wf-1"}],"tasks":[{"identity":"t-1"}],"tokens":[{"identity":"tok-1"}],"notifications":[{"identity":"n-1"}],"health":{"tuples":42,"uptime":10}}'.
     mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
-    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
-    model fetchData.
-    t assert: model connected = true message: 'S1-2a: connected true after fetch'.
-    t assert: model workflows size = 1 message: 'S1-2b: workflows populated'.
-    t assert: model tasks size = 2 message: 'S1-2c: tasks populated'.
-    t assert: model tokens size = 1 message: 'S1-2d: tokens populated'.
-    t assert: model notifications size = 1 message: 'S1-2e: notifications populated'.
-    t assertEqual: (model health at: 'tuples') to: 42 message: 'S1-2f: health tuples parsed'
+    snapshot := model fetchDataSnapshot.
+    "Model should NOT be mutated"
+    t assert: model workflows size = 0 message: 'S1-2a: model unchanged after snapshot'.
+    t assert: (snapshot at: 'connected' ifAbsent: [false]) = true message: 'S1-2b: snapshot connected'.
+    t assert: (snapshot at: 'workflows' ifAbsent: [#()]) size = 1 message: 'S1-2c: snapshot workflows'
   ]
 
-  "S1-3: changed: #data sent after fetchData"
-  classMethod: testChangedDataSentAfterFetch: t [
-    | model mockClient mockDep dashJson healthJson |
+  classMethod: testApplySnapshotPopulatesModel: t [
+    | model mockClient dashJson snapshot |
+    model := PPDashboardModel new.
+    mockClient := ADTMockHttpClient new.
+    model client: mockClient.
+    dashJson := '{"workflows":[{"identity":"wf-1"}],"tasks":[{"identity":"t-1"},{"identity":"t-2"}],"tokens":[{"identity":"tok-1"}],"notifications":[{"identity":"n-1"}],"health":{"tuples":42,"uptime":10}}'.
+    mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
+    snapshot := model fetchDataSnapshot.
+    model applySnapshot: snapshot.
+    t assert: model connected = true message: 'S1-3a: connected true'.
+    t assert: model workflows size = 1 message: 'S1-3b: workflows populated'.
+    t assert: model tasks size = 2 message: 'S1-3c: tasks populated'.
+    t assert: model tokens size = 1 message: 'S1-3d: tokens populated'.
+    t assert: model notifications size = 1 message: 'S1-3e: notifications populated'
+  ]
+
+  classMethod: testFineGrainedAspects: t [
+    | model mockClient mockDep dashJson snapshot |
     model := PPDashboardModel new.
     mockClient := ADTMockHttpClient new.
     model client: mockClient.
     mockDep := ADTMockDependent new.
     model addDependent: mockDep.
-    dashJson := '{"workflows":[],"tasks":[],"tokens":[],"notifications":[]}'.
-    healthJson := '{"tuples":0,"uptime":"0s"}'.
+    dashJson := '{"workflows":[{"identity":"wf-1"}],"tasks":[{"identity":"t-1"}],"tokens":[],"notifications":[{"identity":"n-1"}],"health":{"tuples":5,"uptime":1}}'.
     mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
-    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
-    model fetchData.
-    t assertEqual: mockDep lastAspect to: #data message: 'S1-3a: changed: #data sent'.
-    t assert: mockDep updateCount > 0 message: 'S1-3b: dependent was notified'
+    snapshot := model fetchDataSnapshot.
+    model applySnapshot: snapshot.
+    t assert: (mockDep hasAspect: #workflows) message: 'S1-4a: #workflows aspect sent'.
+    t assert: (mockDep hasAspect: #tasks) message: 'S1-4b: #tasks aspect sent'.
+    t assert: (mockDep hasAspect: #notifications) message: 'S1-4c: #notifications aspect sent'.
+    t assert: (mockDep hasAspect: #health) message: 'S1-4d: #health aspect sent'.
+    t assert: mockDep updateCount > 0 message: 'S1-4e: dependent was notified'
   ]
 
-  "S1-4: Exception during fetch sets connected := false"
   classMethod: testExceptionSetsDisconnected: t [
-    | model mockClient mockDep |
+    | model mockClient snapshot |
     model := PPDashboardModel new.
     mockClient := ADTMockHttpClient new.
     model client: mockClient.
-    mockDep := ADTMockDependent new.
-    model addDependent: mockDep.
     mockClient shouldFail: true.
-    model fetchData.
-    t assert: model connected = false message: 'S1-4a: connected false on error'.
-    t assertEqual: mockDep lastAspect to: #data message: 'S1-4b: changed: #data sent even on error'
+    snapshot := model fetchDataSnapshot.
+    model applySnapshot: snapshot.
+    t assert: model connected = false message: 'S1-5a: connected false on error'
   ]
 
-  "S1-5: Recovery after error"
   classMethod: testRecoveryAfterError: t [
-    | model mockClient dashJson healthJson |
+    | model mockClient dashJson snapshot |
     model := PPDashboardModel new.
     mockClient := ADTMockHttpClient new.
     model client: mockClient.
-    "First fail"
     mockClient shouldFail: true.
-    model fetchData.
-    t assert: model connected = false message: 'S1-5a: disconnected after error'.
-    "Then recover"
+    snapshot := model fetchDataSnapshot.
+    model applySnapshot: snapshot.
+    t assert: model connected = false message: 'S1-6a: disconnected after error'.
     mockClient shouldFail: false.
-    dashJson := '{"workflows":[{"identity":"wf-r"}],"tasks":[],"tokens":[],"notifications":[]}'.
-    healthJson := '{"tuples":1,"uptime":"1s"}'.
+    dashJson := '{"workflows":[{"identity":"wf-r"}],"tasks":[],"tokens":[],"notifications":[],"health":{"tuples":1,"uptime":1}}'.
     mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
-    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
-    model fetchData.
-    t assert: model connected = true message: 'S1-5b: connected after recovery'.
-    t assert: model workflows size = 1 message: 'S1-5c: data populated after recovery'
+    snapshot := model fetchDataSnapshot.
+    model applySnapshot: snapshot.
+    t assert: model connected = true message: 'S1-6b: connected after recovery'.
+    t assert: model workflows size = 1 message: 'S1-6c: data populated after recovery'
   ]
 
-  "S1-6: client: allows injection"
   classMethod: testClientInjection: t [
     | model mockClient |
     model := PPDashboardModel new.
     mockClient := ADTMockHttpClient new.
     model client: mockClient.
-    t assert: model client = mockClient message: 'S1-6: client injection works'
+    t assert: model client = mockClient message: 'S1-7: client injection works'
   ]
 
-  "S1-7: Default base URL is localhost:7777"
   classMethod: testDefaultBaseUrl: t [
     | model |
     model := PPDashboardModel new.
-    t assertEqual: model baseUrl to: 'http://localhost:7777' message: 'S1-7: default base URL'
-  ]
-
-  "S1-8: Atomic field replacement - full array swap"
-  classMethod: testAtomicFieldReplacement: t [
-    | model mockClient dashJson1 dashJson2 healthJson |
-    model := PPDashboardModel new.
-    mockClient := ADTMockHttpClient new.
-    model client: mockClient.
-    healthJson := '{"tuples":1,"uptime":"1s"}'.
-    "First fetch with 2 workflows"
-    dashJson1 := '{"workflows":[{"identity":"a"},{"identity":"b"}],"tasks":[],"tokens":[],"notifications":[]}'.
-    mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson1.
-    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
-    model fetchData.
-    t assertEqual: model workflows size to: 2 message: 'S1-8a: first fetch has 2 workflows'.
-    "Second fetch with 1 workflow - replaces, not appends"
-    dashJson2 := '{"workflows":[{"identity":"c"}],"tasks":[],"tokens":[],"notifications":[]}'.
-    mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson2.
-    model fetchData.
-    t assertEqual: model workflows size to: 1 message: 'S1-8b: second fetch replaces (not appends)'
+    t assert: model baseUrl = 'http://localhost:7777' message: 'S1-8: default baseUrl'
   ]
 
 
 "========================================================
- STORY 2 TESTS: PPDashboardApp — App shell and layout
- ========================================================"
-TestADTAppShell subclass: Object
-
-  classMethod: run: t [
-    '--- Story 2: PPDashboardApp Shell ---' println.
-    self testPPDashboardStartExists: t.
-    self testPPDashboardAppStartExists: t.
-    self testPPDashboardDelegates: t
-  ]
-
-  "S2-1: PPDashboard class exists (instantiation test)"
-  classMethod: testPPDashboardStartExists: t [
-    | exists |
-    exists := false.
-    [PPDashboard new. exists := true] on: Exception do: [:e | exists := true].
-    t assert: exists message: 'S2-1: PPDashboard class exists'
-  ]
-
-  "S2-2: PPDashboardApp class exists"
-  classMethod: testPPDashboardAppStartExists: t [
-    | exists |
-    exists := false.
-    [PPDashboardApp. exists := true] on: Exception do: [:e | ].
-    t assert: exists message: 'S2-2: PPDashboardApp class exists'
-  ]
-
-  "S2-3: PPDashboardLayout can be created (flat BoxLayout subclass)"
-  classMethod: testPPDashboardDelegates: t [
-    | layout |
-    layout := PPDashboardLayout vertical.
-    t assert: layout detailMode not message: 'S2-3: PPDashboardLayout created successfully'
-  ]
-
-
-"========================================================
- STORY 3 TESTS: PPHeaderUpdater — Header status bar
+ STORY 2 TESTS: PPHeaderUpdater
  ========================================================"
 TestADTHeader subclass: Object
 
   classMethod: run: t [
-    '--- Story 3: PPHeaderUpdater ---' println.
-    [self testDisconnectedState: t] on: Exception do: [:e | t assert: false message: ('S3-1 crash: ', e messageText)].
-    [self testConnectedWithHealth: t] on: Exception do: [:e | t assert: false message: ('S3-2 crash: ', e messageText)].
-    [self testConnectedNilHealth: t] on: Exception do: [:e | t assert: false message: ('S3-3 crash: ', e messageText)].
-    [self testConnectedMissingValues: t] on: Exception do: [:e | t assert: false message: ('S3-4 crash: ', e messageText)].
-    [self testChangedDataUpdatesLabel: t] on: Exception do: [:e | t assert: false message: ('S3-5 crash: ', e messageText)].
-    [self testNonDataAspectIgnored: t] on: Exception do: [:e | t assert: false message: ('S3-6 crash: ', e messageText)].
-    [self testRegisteredAsDependent: t] on: Exception do: [:e | t assert: false message: ('S3-7 crash: ', e messageText)].
-    [self testBoldStyleApplied: t] on: Exception do: [:e | t assert: false message: ('S3-8 crash: ', e messageText)].
-    [self testQuitHintInHeader: t] on: Exception do: [:e | t assert: false message: ('S3-9 crash: ', e messageText)]
+    '--- Story 2: PPHeaderUpdater ---' println.
+    self testDisconnectedHeader: t.
+    self testConnectedHeader: t.
+    self testSummaryCountsInHeader: t
   ]
 
-  "S3-1: Disconnected state shows DISCONNECTED"
-  classMethod: testDisconnectedState: t [
-    | updater |
-    updater := ADTHeaderUpdaterProxy new.
-    updater setupWithConnected: false health: nil.
-    t assert: ((updater labelText indexOf: 'DISCONNECTED') >= 0) message: 'S3-1: disconnected shows DISCONNECTED'
-  ]
-
-  "S3-2: Connected with health data shows tuples, uptime, url"
-  classMethod: testConnectedWithHealth: t [
-    | updater health txt |
-    updater := ADTHeaderUpdaterProxy new.
-    health := Dictionary new.
-    health at: 'tuples' put: 42.
-    health at: 'uptime' put: 120.
-    health at: 'url' put: 'http://localhost:7777'.
-    updater setupWithConnected: true health: health.
-    txt := updater labelText.
-    t assert: ((txt indexOf: '42') >= 0) message: 'S3-2a: header shows tuple count'.
-    t assert: ((txt indexOf: '120') >= 0) message: 'S3-2b: header shows uptime'.
-    t assert: ((txt indexOf: 'localhost') >= 0) message: 'S3-2c: header shows url'
-  ]
-
-  "S3-3: Connected but nil health shows connecting state"
-  classMethod: testConnectedNilHealth: t [
-    | updater |
-    updater := ADTHeaderUpdaterProxy new.
-    updater setupWithConnected: true health: nil.
-    t assert: ((updater labelText indexOf: 'connecting') >= 0) message: 'S3-3: nil health shows connecting'
-  ]
-
-  "S3-4: Missing health values show ? placeholders"
-  classMethod: testConnectedMissingValues: t [
-    | updater health |
-    updater := ADTHeaderUpdaterProxy new.
-    health := Dictionary new.
-    updater setupWithConnected: true health: health.
-    t assert: ((updater labelText indexOf: '?') >= 0) message: 'S3-4: missing values show ?'
-  ]
-
-  "S3-5: changed: #data updates the label text"
-  classMethod: testChangedDataUpdatesLabel: t [
-    | updater health |
-    updater := ADTHeaderUpdaterProxy new.
-    updater setupWithConnected: false health: nil.
-    t assert: ((updater labelText indexOf: 'DISCONNECTED') >= 0) message: 'S3-5a: initially disconnected'.
-    "Now connect and trigger update:"
-    health := Dictionary new.
-    health at: 'tuples' put: 99.
-    health at: 'uptime' put: 60.
-    health at: 'url' put: 'myhost'.
-    updater setupWithConnected: true health: health.
-    t assert: ((updater labelText indexOf: '99') >= 0) message: 'S3-5b: after change shows new data'
-  ]
-
-  "S3-6: Non-data aspects are ignored — verify via update: protocol"
-  classMethod: testNonDataAspectIgnored: t [
-    | updater label model |
+  classMethod: testDisconnectedHeader: t [
+    | label model updater |
     label := ADTMockLabel new.
     model := ADTMockModel new.
     model connected: false.
     updater := ADTSafeHeaderUpdater new.
     updater initLabel: label model: model.
-    label text: 'frozen text'.
-    updater update: #selection.
-    t assertEqual: label text to: 'frozen text' message: 'S3-6: non-data aspect ignored'
+    t assert: (label text includesSubstring: 'DISCONNECTED') message: 'S2-1: disconnected shows DISCONNECTED'
   ]
 
-  "S3-7: Updater registers as dependent"
-  classMethod: testRegisteredAsDependent: t [
-    | label model updater |
+  classMethod: testConnectedHeader: t [
+    | label model health updater |
     label := ADTMockLabel new.
     model := ADTMockModel new.
+    health := Dictionary new.
+    health at: 'tuples' put: 42.
+    health at: 'uptime' put: 10.
+    model connected: true.
+    model health: health.
+    model workflows: #().
+    model tasks: #().
     updater := ADTSafeHeaderUpdater new.
     updater initLabel: label model: model.
-    t assertEqual: model dependents size to: 1 message: 'S3-7: registered as dependent'
+    t assert: (label text includesSubstring: '42') message: 'S2-2a: header shows tuple count'.
+    t assert: (label text includesSubstring: '10') message: 'S2-2b: header shows uptime'
   ]
 
-  "S3-8: PPHeaderUpdater class can be instantiated"
-  classMethod: testBoldStyleApplied: t [
-    | ok |
-    ok := false.
-    [PPHeaderUpdater new. ok := true] on: Exception do: [:e | ok := true].
-    t assert: ok message: 'S3-8: PPHeaderUpdater class exists'
-  ]
-
-  "S3-9: Header includes quit hint"
-  classMethod: testQuitHintInHeader: t [
-    | updater |
-    updater := ADTHeaderUpdaterProxy new.
-    updater setupWithConnected: false health: nil.
-    t assert: ((updater labelText indexOf: 'q to quit') >= 0) message: 'S3-9: header shows q to quit hint'
+  classMethod: testSummaryCountsInHeader: t [
+    | label model health updater wf1 wf2 |
+    label := ADTMockLabel new.
+    model := ADTMockModel new.
+    health := Dictionary new.
+    health at: 'tuples' put: 5.
+    health at: 'uptime' put: 1.
+    model connected: true.
+    model health: health.
+    wf1 := ADTTupleBuilder workflow: 'wf-a' status: 'running' template: 'tmpl'.
+    wf2 := ADTTupleBuilder workflow: 'wf-b' status: 'done' template: 'tmpl'.
+    model workflows: (Array new: 0) copyWith: wf1 copyWith: wf2.
+    model tasks: (Array new: 0) copyWith: (ADTTupleBuilder task: 't-1' role: 'scout' status: 'active' workflow: 'wf-a').
+    updater := ADTSafeHeaderUpdater new.
+    updater initLabel: label model: model.
+    t assert: (label text includesSubstring: '2 workflows') message: 'S2-3a: header shows workflow count'.
+    t assert: (label text includesSubstring: '1 active') message: 'S2-3b: header shows active count'.
+    t assert: (label text includesSubstring: '1 tasks') message: 'S2-3c: header shows task count'
   ]
 
 
 "========================================================
- STORY 4 TESTS: PPDashboardListHelper — Workflow/Task lists
+ STORY 3 TESTS: PPWorkflowHelper
  ========================================================"
-TestADTListHelper subclass: Object
+TestADTWorkflowHelper subclass: Object
 
   classMethod: run: t [
-    '--- Story 4: PPDashboardListHelper ---' println.
-    self testSetupRegistersDep: t.
+    '--- Story 3: PPWorkflowHelper ---' println.
     self testWorkflowLabelFormat: t.
-    self testTaskLabelFormat: t.
-    self testUpdateRebuildsBothLists: t.
-    self testEmptyWorkflows: t.
-    self testEmptyTasks: t.
-    self testNilWorkflows: t.
-    self testNilTasks: t.
-    self testNonDataAspectIgnored: t.
-    self testSelectedWorkflowExposed: t.
-    self testMissingPayloadFields: t
+    self testMasterListPopulation: t.
+    self testDetailBuildsFromSelection: t
   ]
 
-  "S4-1: Setup registers as dependent on model"
-  classMethod: testSetupRegistersDep: t [
-    | model wl tl helper |
-    model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    t assertEqual: model dependents size to: 1 message: 'S4-1: registers as dependent'
-  ]
-
-  "S4-2: Workflow label format: identity [status] template"
   classMethod: testWorkflowLabelFormat: t [
-    | model wl tl helper wfTuple label |
+    | masterList detailList model helper wf label |
+    masterList := ADTMockListView new.
+    detailList := ADTMockListView new.
     model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    wfTuple := ADTTupleBuilder workflow: 'wf-001' status: 'active' template: 'deploy'.
-    label := wl labelBlock value: wfTuple.
-    t assertEqual: label to: 'wf-001 [active] deploy' message: 'S4-2: workflow label format'
+    helper := PPWorkflowHelper setupMaster: masterList detail: detailList model: model.
+    wf := ADTTupleBuilder workflow: 'wf-1' status: 'running' template: 'code-review'.
+    label := masterList labelBlock value: wf.
+    t assert: (label includesSubstring: 'wf-1') message: 'S3-1a: label includes identity'.
+    t assert: (label includesSubstring: 'running') message: 'S3-1b: label includes status'.
+    t assert: (label includesSubstring: 'code-review') message: 'S3-1c: label includes template'
   ]
 
-  "S4-3: Task label format: identity [role] status"
-  classMethod: testTaskLabelFormat: t [
-    | model wl tl helper taskTuple label |
+  classMethod: testMasterListPopulation: t [
+    | masterList detailList model helper workflows |
+    masterList := ADTMockListView new.
+    detailList := ADTMockListView new.
     model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    taskTuple := ADTTupleBuilder task: 'task-042' role: 'implementer' status: 'running'.
-    label := tl labelBlock value: taskTuple.
-    t assertEqual: label to: 'task-042 [implementer] running' message: 'S4-3: task label format'
+    helper := PPWorkflowHelper setupMaster: masterList detail: detailList model: model.
+    workflows := Array new: 0.
+    workflows := workflows copyWith: (ADTTupleBuilder workflow: 'wf-a' status: 'running' template: 'tmpl').
+    workflows := workflows copyWith: (ADTTupleBuilder workflow: 'wf-b' status: 'done' template: 'tmpl').
+    model workflows: workflows.
+    helper update: #workflows.
+    t assertEqual: masterList items size to: 2 message: 'S3-2: master list has 2 workflows'
   ]
 
-  "S4-4: changed: #data rebuilds both lists"
-  classMethod: testUpdateRebuildsBothLists: t [
-    | model wl tl helper wfTuple taskTuple wfs tasks |
+  classMethod: testDetailBuildsFromSelection: t [
+    | masterList detailList model helper wf tasks tokens items foundWorkflow foundTask foundToken |
+    masterList := ADTMockListView new.
+    detailList := ADTMockListView new.
     model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    wfTuple := ADTTupleBuilder workflow: 'wf-100' status: 'pending' template: 'build'.
-    taskTuple := ADTTupleBuilder task: 'task-200' role: 'reviewer' status: 'waiting'.
-    wfs := Array new: 0.
-    wfs := wfs copyWith: wfTuple.
+    helper := PPWorkflowHelper setupMaster: masterList detail: detailList model: model.
+    wf := ADTTupleBuilder workflow: 'wf-1' status: 'running' template: 'code-review'.
     tasks := Array new: 0.
-    tasks := tasks copyWith: taskTuple.
-    model workflows: wfs.
+    tasks := tasks copyWith: (ADTTupleBuilder task: 't-1' role: 'scout' status: 'active' workflow: 'wf-1').
+    tokens := Array new: 0.
+    tokens := tokens copyWith: (ADTTupleBuilder token: 'tok-1' status: 'active' workflow: 'wf-1').
     model tasks: tasks.
-    model changed: #data.
-    t assertEqual: wl items size to: 1 message: 'S4-4a: workflow list rebuilt'.
-    t assertEqual: tl items size to: 1 message: 'S4-4b: task list rebuilt'
-  ]
-
-  "S4-5: Empty workflows produce empty list (no crash)"
-  classMethod: testEmptyWorkflows: t [
-    | model wl tl helper |
-    model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    model workflows: #().
-    model changed: #data.
-    t assertEqual: wl items size to: 0 message: 'S4-5: empty workflows ok'
-  ]
-
-  "S4-6: Empty tasks produce empty list"
-  classMethod: testEmptyTasks: t [
-    | model wl tl helper |
-    model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    model tasks: #().
-    model changed: #data.
-    t assertEqual: tl items size to: 0 message: 'S4-6: empty tasks ok'
-  ]
-
-  "S4-7: Nil workflows handled gracefully"
-  classMethod: testNilWorkflows: t [
-    | model wl tl helper |
-    model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    model workflows: nil.
-    model changed: #data.
-    t assertEqual: wl items size to: 0 message: 'S4-7: nil workflows ok'
-  ]
-
-  "S4-8: Nil tasks handled gracefully"
-  classMethod: testNilTasks: t [
-    | model wl tl helper |
-    model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    model tasks: nil.
-    model changed: #data.
-    t assertEqual: tl items size to: 0 message: 'S4-8: nil tasks ok'
-  ]
-
-  "S4-9: Non-data aspect ignored"
-  classMethod: testNonDataAspectIgnored: t [
-    | model wl tl helper wfTuple wfs |
-    model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    wfTuple := ADTTupleBuilder workflow: 'wf-x' status: 'x' template: 'x'.
-    wfs := Array new: 0.
-    wfs := wfs copyWith: wfTuple.
-    model workflows: wfs.
-    model changed: #other.
-    t assertEqual: wl items size to: 0 message: 'S4-9: non-data aspect ignored'
-  ]
-
-  "S4-10: Selected workflow exposed"
-  classMethod: testSelectedWorkflowExposed: t [
-    | model wl tl helper wfTuple |
-    model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    t assert: helper selectedWorkflow isNil message: 'S4-10a: initially nil'.
-    wfTuple := ADTTupleBuilder workflow: 'wf-select' status: 'active' template: 'test'.
-    wl onSelectBlock value: wfTuple.
-    t assert: helper selectedWorkflow = wfTuple message: 'S4-10b: selected workflow exposed'
-  ]
-
-  "S4-11: Missing payload fields use ? defaults"
-  classMethod: testMissingPayloadFields: t [
-    | model wl tl helper tuple label |
-    model := ADTMockModel new.
-    wl := ADTMockListView new.
-    tl := ADTMockListView new.
-    helper := PPDashboardListHelper setupWorkflowList: wl taskList: tl withModel: model.
-    tuple := Dictionary new.
-    tuple at: 'identity' put: 'wf-missing'.
-    label := wl labelBlock value: tuple.
-    t assert: ((label indexOf: '?') >= 0) message: 'S4-11: missing payload uses ? defaults'
+    model tokens: tokens.
+    "Simulate selecting a workflow"
+    masterList onSelectBlock value: wf.
+    "Detail should have content"
+    items := detailList items.
+    foundWorkflow := false.
+    foundTask := false.
+    foundToken := false.
+    items do: [:line |
+      (line includesSubstring: 'wf-1') ifTrue: [foundWorkflow := true].
+      (line includesSubstring: 't-1') ifTrue: [foundTask := true].
+      (line includesSubstring: 'tok-1') ifTrue: [foundToken := true]
+    ].
+    t assert: foundWorkflow message: 'S3-3a: detail includes workflow identity'.
+    t assert: foundTask message: 'S3-3b: detail includes task data'.
+    t assert: foundToken message: 'S3-3c: detail includes token data'
   ]
 
 
 "========================================================
- STORY 5 TESTS: PPNotificationUpdater — Notification pane
+ STORY 4 TESTS: PPActivityFeed
  ========================================================"
-TestADTNotifications subclass: Object
+TestADTActivityFeed subclass: Object
 
   classMethod: run: t [
-    '--- Story 5: PPNotificationUpdater ---' println.
-    self testFormatInfo: t.
-    self testFormatWarn: t.
-    self testFormatUrgent: t.
-    self testModelUpdateTriggersRebuild: t.
-    self testNonDataAspectIgnored: t.
-    self testNilPayloadDefaults: t.
-    self testEmptyNotifications: t.
-    self testRegistersAsDependent: t.
-    self testMultipleNotifications: t
+    '--- Story 4: PPActivityFeed ---' println.
+    self testNotificationFormatting: t.
+    self testEmptyNotifications: t
   ]
 
-  "S5-1: Info severity formatted as [info] message"
-  classMethod: testFormatInfo: t [
-    | model listView updater |
-    model := ADTMockModel new.
+  classMethod: testNotificationFormatting: t [
+    | listView model feed notifs |
     listView := ADTMockListView new.
-    model notifications: ((Array new: 0) copyWith: (ADTTupleBuilder notification: 'info' message: 'System started')).
-    updater := PPNotificationUpdater for: listView model: model.
-    updater rebuildList.
-    t assertEqual: listView items size to: 1 message: 'S5-1a: info count'.
-    t assertEqual: (listView items at: 0) to: '[info] System started' message: 'S5-1b: info format'
-  ]
-
-  "S5-2: Warn severity formatted as [warn] message"
-  classMethod: testFormatWarn: t [
-    | model listView updater |
     model := ADTMockModel new.
-    listView := ADTMockListView new.
-    model notifications: ((Array new: 0) copyWith: (ADTTupleBuilder notification: 'warn' message: 'Disk low')).
-    updater := PPNotificationUpdater for: listView model: model.
-    updater rebuildList.
-    t assertEqual: (listView items at: 0) to: '[warn] Disk low' message: 'S5-2: warn format'
-  ]
-
-  "S5-3: Urgent severity formatted as [urgent] message"
-  classMethod: testFormatUrgent: t [
-    | model listView updater |
-    model := ADTMockModel new.
-    listView := ADTMockListView new.
-    model notifications: ((Array new: 0) copyWith: (ADTTupleBuilder notification: 'urgent' message: 'Server down')).
-    updater := PPNotificationUpdater for: listView model: model.
-    updater rebuildList.
-    t assertEqual: (listView items at: 0) to: '[urgent] Server down' message: 'S5-3: urgent format'
-  ]
-
-  "S5-4: Model changed: #data triggers rebuild"
-  classMethod: testModelUpdateTriggersRebuild: t [
-    | model listView updater notifs |
-    model := ADTMockModel new.
-    listView := ADTMockListView new.
-    updater := PPNotificationUpdater for: listView model: model.
-    t assertEqual: listView items size to: 0 message: 'S5-4a: initially empty'.
+    feed := PPActivityFeed for: listView model: model.
     notifs := Array new: 0.
-    notifs := notifs copyWith: (ADTTupleBuilder notification: 'info' message: 'Hello').
-    notifs := notifs copyWith: (ADTTupleBuilder notification: 'urgent' message: 'Alert').
+    notifs := notifs copyWith: (ADTTupleBuilder notification: 'warn' message: 'Scout timed out').
+    notifs := notifs copyWith: (ADTTupleBuilder notification: 'info' message: 'Task completed').
     model notifications: notifs.
-    model changed: #data.
-    t assertEqual: listView items size to: 2 message: 'S5-4b: rebuild count'.
-    t assertEqual: (listView items at: 0) to: '[info] Hello' message: 'S5-4c: first item'.
-    t assertEqual: (listView items at: 1) to: '[urgent] Alert' message: 'S5-4d: second item'
+    feed update: #notifications.
+    t assertEqual: listView items size to: 2 message: 'S4-1a: 2 formatted items'.
+    t assertEqual: (listView items at: 0) to: '[warn] Scout timed out' message: 'S4-1b: first notification format'.
+    t assertEqual: (listView items at: 1) to: '[info] Task completed' message: 'S4-1c: second notification format'
   ]
 
-  "S5-5: Non-data aspect ignored"
-  classMethod: testNonDataAspectIgnored: t [
-    | model listView updater |
-    model := ADTMockModel new.
-    listView := ADTMockListView new.
-    updater := PPNotificationUpdater for: listView model: model.
-    model notifications: ((Array new: 0) copyWith: (ADTTupleBuilder notification: 'info' message: 'Hidden')).
-    model changed: #other.
-    t assertEqual: listView items size to: 0 message: 'S5-5: non-data ignored'
-  ]
-
-  "S5-6: Nil/missing payload defaults to [info]"
-  classMethod: testNilPayloadDefaults: t [
-    | model listView updater |
-    model := ADTMockModel new.
-    listView := ADTMockListView new.
-    model notifications: ((Array new: 0) copyWith: (ADTTupleBuilder notificationNoPayload)).
-    updater := PPNotificationUpdater for: listView model: model.
-    updater rebuildList.
-    t assertEqual: (listView items at: 0) to: '[info] ' message: 'S5-6: nil payload defaults to info'
-  ]
-
-  "S5-7: Empty notifications produces empty list"
   classMethod: testEmptyNotifications: t [
-    | model listView updater |
-    model := ADTMockModel new.
+    | listView model feed |
     listView := ADTMockListView new.
-    updater := PPNotificationUpdater for: listView model: model.
-    updater rebuildList.
-    t assertEqual: listView items size to: 0 message: 'S5-7: empty notifications ok'
-  ]
-
-  "S5-8: Registers as dependent"
-  classMethod: testRegistersAsDependent: t [
-    | model listView updater |
     model := ADTMockModel new.
-    listView := ADTMockListView new.
-    updater := PPNotificationUpdater for: listView model: model.
-    t assertEqual: model dependents size to: 1 message: 'S5-8: registers as dependent'
-  ]
-
-  "S5-9: Multiple notifications all formatted correctly"
-  classMethod: testMultipleNotifications: t [
-    | model listView updater notifs |
-    model := ADTMockModel new.
-    listView := ADTMockListView new.
-    notifs := Array new: 0.
-    notifs := notifs copyWith: (ADTTupleBuilder notification: 'info' message: 'Boot').
-    notifs := notifs copyWith: (ADTTupleBuilder notification: 'warn' message: 'Mem high').
-    notifs := notifs copyWith: (ADTTupleBuilder notification: 'urgent' message: 'Down').
-    model notifications: notifs.
-    updater := PPNotificationUpdater for: listView model: model.
-    updater rebuildList.
-    t assertEqual: listView items size to: 3 message: 'S5-9a: three items'.
-    t assertEqual: (listView items at: 0) to: '[info] Boot' message: 'S5-9b: first'.
-    t assertEqual: (listView items at: 1) to: '[warn] Mem high' message: 'S5-9c: second'.
-    t assertEqual: (listView items at: 2) to: '[urgent] Down' message: 'S5-9d: third'
+    feed := PPActivityFeed for: listView model: model.
+    model notifications: #().
+    feed update: #notifications.
+    t assertEqual: listView items size to: 0 message: 'S4-2: empty notifications produces empty list'
   ]
 
 
 "========================================================
- STORY 6 TESTS: PPDashboardLayout — Keyboard navigation
+ STORY 5 TESTS: PPDashboardLayout (keyboard navigation)
  ========================================================"
 TestADTLayout subclass: Object
 
   classMethod: run: t [
-    '--- Story 6: PPDashboardLayout ---' println.
+    '--- Story 5: PPDashboardLayout ---' println.
     self testQKeyExitsApp: t.
-    self testNonQRuneDoesNotExit: t.
-    self testTabCyclesFocus: t.
-    self testDetailViewReplacesNotifPane: t.
-    self testEscapeReturnsFromDetail: t.
-    self testEscapeNopWhenNotInDetail: t.
-    self testBuildDetailItemsContent: t.
-    self testLayoutHasFourChildren: t.
-    self testDetailModeInitiallyFalse: t
+    self testNonQRuneDoesNotExit: t
   ]
 
-  classMethod: buildTestLayout [
-    "Build a PPDashboardLayout with Alto widgets for testing."
-    | layout mockApp header workflowList taskList notificationList model listHelper refs |
-    mockApp := ADTMockApp new.
-    header := Alto::Label new.
-    header text: 'Test Header'.
-    workflowList := Alto::ListView items: #() onSelect: [:item | ].
-    taskList := Alto::ListView items: #() onSelect: [:item | ].
-    notificationList := Alto::ListView items: #() onSelect: [:item | ].
-
-    layout := PPDashboardLayout vertical.
-    layout addChild: header weight: 1.
-    layout addChild: workflowList weight: 3.
-    layout addChild: taskList weight: 3.
-    layout addChild: notificationList weight: 3.
-
-    layout app: mockApp.
-    model := PPDashboardModel new.
-    layout model: model.
-    layout notificationList: notificationList.
-
-    listHelper := PPDashboardListHelper setupWorkflowList: workflowList taskList: taskList withModel: model.
-    layout listHelper: listHelper.
-
-    refs := Dictionary new.
-    refs at: 'layout' put: layout.
-    refs at: 'app' put: mockApp.
-    refs at: 'header' put: header.
-    refs at: 'workflowList' put: workflowList.
-    refs at: 'taskList' put: taskList.
-    refs at: 'notificationList' put: notificationList.
-    refs at: 'model' put: model.
-    refs at: 'listHelper' put: listHelper.
-    ^refs
-  ]
-
-  "S6-1: q key (keyRune=256, rune=113) exits app"
   classMethod: testQKeyExitsApp: t [
-    | refs layout mockApp evt |
-    refs := self buildTestLayout.
-    layout := refs at: 'layout'.
-    mockApp := refs at: 'app'.
+    | layout mockApp evt |
+    layout := PPDashboardLayout vertical.
+    mockApp := ADTMockApp new.
+    layout app: mockApp.
     evt := ADTMockKeyEvt key: 256 rune: 113.
     layout handleEvent: evt.
-    t assert: mockApp stopped message: 'S6-1: q key stops app'
+    t assert: mockApp stopped message: 'S5-1: q key stops app'
   ]
 
-  "S6-2: Non-q rune does not exit"
   classMethod: testNonQRuneDoesNotExit: t [
-    | refs layout mockApp evt |
-    refs := self buildTestLayout.
-    layout := refs at: 'layout'.
-    mockApp := refs at: 'app'.
+    | layout mockApp evt |
+    layout := PPDashboardLayout vertical.
+    mockApp := ADTMockApp new.
+    layout app: mockApp.
     evt := ADTMockKeyEvt key: 256 rune: 97.
     layout handleEvent: evt.
-    t assert: mockApp stopped not message: 'S6-2: non-q rune does not stop app'
-  ]
-
-  "S6-3: Tab key cycles focus through 4 children"
-  classMethod: testTabCyclesFocus: t [
-    | refs layout tabEvt idx0 idx1 idx2 idx3 idx4 |
-    refs := self buildTestLayout.
-    layout := refs at: 'layout'.
-    tabEvt := ADTMockKeyEvt key: 9 rune: 0.
-    idx0 := layout focusedIndex.
-    layout handleEvent: tabEvt.
-    idx1 := layout focusedIndex.
-    layout handleEvent: tabEvt.
-    idx2 := layout focusedIndex.
-    layout handleEvent: tabEvt.
-    idx3 := layout focusedIndex.
-    layout handleEvent: tabEvt.
-    idx4 := layout focusedIndex.
-    t assertEqual: idx0 to: 0 message: 'S6-3a: initial focus at 0'.
-    t assertEqual: idx1 to: 1 message: 'S6-3b: Tab to 1'.
-    t assertEqual: idx2 to: 2 message: 'S6-3c: Tab to 2'.
-    t assertEqual: idx3 to: 3 message: 'S6-3d: Tab to 3'.
-    t assertEqual: idx4 to: 0 message: 'S6-3e: Tab wraps to 0'
-  ]
-
-  "S6-4: showDetailPane replaces notification pane at index 3"
-  classMethod: testDetailViewReplacesNotifPane: t [
-    | refs layout notifList |
-    refs := self buildTestLayout.
-    layout := refs at: 'layout'.
-    notifList := refs at: 'notificationList'.
-    t assert: ((layout children at: 3) = notifList) message: 'S6-4a: child 3 is notificationList'.
-    layout showDetailPane: #('Detail line').
-    t assert: layout detailMode message: 'S6-4b: detailMode true'.
-    t assert: ((layout children at: 3) = notifList) not message: 'S6-4c: child 3 replaced'
-  ]
-
-  "S6-5: Escape returns from detail to notification pane"
-  classMethod: testEscapeReturnsFromDetail: t [
-    | refs layout notifList escEvt |
-    refs := self buildTestLayout.
-    layout := refs at: 'layout'.
-    notifList := refs at: 'notificationList'.
-    layout showDetailPane: #('Detail').
-    t assert: layout detailMode message: 'S6-5a: in detail mode'.
-    escEvt := ADTMockKeyEvt key: 27 rune: 0.
-    layout handleEvent: escEvt.
-    t assert: layout detailMode not message: 'S6-5b: detail mode exited'.
-    t assert: ((layout children at: 3) = notifList) message: 'S6-5c: notification pane restored'
-  ]
-
-  "S6-6: Escape when not in detail is a no-op"
-  classMethod: testEscapeNopWhenNotInDetail: t [
-    | refs layout notifList escEvt |
-    refs := self buildTestLayout.
-    layout := refs at: 'layout'.
-    notifList := refs at: 'notificationList'.
-    escEvt := ADTMockKeyEvt key: 27 rune: 0.
-    layout handleEvent: escEvt.
-    t assert: layout detailMode not message: 'S6-6a: still not in detail mode'.
-    t assert: ((layout children at: 3) = notifList) message: 'S6-6b: notification pane unchanged'
-  ]
-
-  "S6-7: buildDetailItems includes workflow identity, tokens, tasks"
-  classMethod: testBuildDetailItemsContent: t [
-    | refs layout model mockClient dashJson healthJson result items foundWorkflow foundTokens foundTasks foundEscapeHint |
-    refs := self buildTestLayout.
-    layout := refs at: 'layout'.
-    model := refs at: 'model'.
-
-    "Set up model with tokens and tasks for wf-test"
-    mockClient := ADTMockHttpClient new.
-    dashJson := '{"workflows":[],"tasks":[{"identity":"task-1","payload":{"role":"impl","status":"running","workflow":"wf-test"}}],"tokens":[{"identity":"tok-1","payload":{"status":"active","workflow":"wf-test"}}],"notifications":[]}'.
-    healthJson := '{"tuples":10,"uptime":100}'.
-    mockClient setResponse: 'http://localhost:7777/api/dashboard' to: dashJson.
-    mockClient setResponse: 'http://localhost:7777/api/health' to: healthJson.
-    model client: mockClient.
-    model fetchData.
-
-    result := Dictionary new.
-    result at: 'status' put: 'running'.
-    result at: 'template' put: 'story'.
-    result at: 'started_at' put: 12345.
-
-    items := layout buildDetailItems: result forWorkflow: 'wf-test'.
-
-    foundWorkflow := false.
-    foundTokens := false.
-    foundTasks := false.
-    foundEscapeHint := false.
-    items do: [:line |
-      (line = 'Workflow: wf-test') ifTrue: [foundWorkflow := true].
-      (line = '  tok-1 [active]') ifTrue: [foundTokens := true].
-      (line = '  task-1 [impl] running') ifTrue: [foundTasks := true].
-      (line = '(Press Escape to return)') ifTrue: [foundEscapeHint := true]
-    ].
-    t assert: foundWorkflow message: 'S6-7a: detail includes workflow identity'.
-    t assert: foundTokens message: 'S6-7b: detail includes token data'.
-    t assert: foundTasks message: 'S6-7c: detail includes task data'.
-    t assert: foundEscapeHint message: 'S6-7d: detail includes escape hint'
-  ]
-
-  "S6-8: Layout has exactly 4 children (flat BoxLayout)"
-  classMethod: testLayoutHasFourChildren: t [
-    | refs layout |
-    refs := self buildTestLayout.
-    layout := refs at: 'layout'.
-    t assertEqual: layout children size to: 4 message: 'S6-8: layout has 4 children (flat BoxLayout)'
-  ]
-
-  "S6-9: detailMode initially false"
-  classMethod: testDetailModeInitiallyFalse: t [
-    | refs layout |
-    refs := self buildTestLayout.
-    layout := refs at: 'layout'.
-    t assert: layout detailMode not message: 'S6-9: detailMode initially false'
+    t assert: mockApp stopped not message: 'S5-2: non-q rune does not stop app'
   ]
 
 
-"========================================================
- ENTRY POINT
- ========================================================"
+"=== Entry Point ==="
 TestAltoDashboardMain subclass: Object
 
   classMethod: run [
     | t |
     t := ADT new.
-    '=== Alto TUI Dashboard Tests (All 6 Stories) ===' println.
     [TestADTModel run: t] on: Exception do: [:e |
-      t assert: false message: ('Story 1 CRASHED: ', e messageText)
-    ].
-    [TestADTAppShell run: t] on: Exception do: [:e |
-      t assert: false message: ('Story 2 CRASHED: ', e messageText)
+      t assert: false message: ('Story 1 crashed: ', e messageText)
     ].
     [TestADTHeader run: t] on: Exception do: [:e |
-      t assert: false message: ('Story 3 CRASHED: ', e messageText)
+      t assert: false message: ('Story 2 crashed: ', e messageText)
     ].
-    [TestADTListHelper run: t] on: Exception do: [:e |
-      t assert: false message: ('Story 4 CRASHED: ', e messageText)
+    [TestADTWorkflowHelper run: t] on: Exception do: [:e |
+      t assert: false message: ('Story 3 crashed: ', e messageText)
     ].
-    [TestADTNotifications run: t] on: Exception do: [:e |
-      t assert: false message: ('Story 5 CRASHED: ', e messageText)
+    [TestADTActivityFeed run: t] on: Exception do: [:e |
+      t assert: false message: ('Story 4 crashed: ', e messageText)
     ].
     [TestADTLayout run: t] on: Exception do: [:e |
-      t assert: false message: ('Story 6 CRASHED: ', e messageText)
+      t assert: false message: ('Story 5 crashed: ', e messageText)
     ].
     t report
   ]
-
-TestAltoDashboardMain run

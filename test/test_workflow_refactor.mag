@@ -947,8 +947,8 @@ TestNotifyHead subclass: Object
     t assert: (nhSource includes: 'workflow payload at:') not message: 'WR48: notify-head must NOT use workflow payload (message send) — use (workflow at: ''payload'')'.
 
     "WR49: Spec says notification includes the instance ID"
-    "Verify the notification identity includes the instance ID pattern"
-    t assert: (nhSource includes: 'workflow-complete:') message: 'WR49: notification identity must include workflow-complete: prefix'.
+    "Verify the notification identity uses Identity workflowComplete:"
+    t assert: (nhSource includes: 'Identity workflowComplete:') message: 'WR49: notification identity must use Identity workflowComplete:'.
 
     "WR50: Spec says notification severity is info"
     t assert: (nhSource includes: 'severity'' put: ''info') message: 'WR50: notification severity must be info'

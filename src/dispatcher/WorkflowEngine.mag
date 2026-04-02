@@ -82,7 +82,7 @@ WorkflowEngine subclass: Object
       tokenPayload at: 'status' put: 'positive'.
       tokenPayload at: 'transition_id' put: ''.
       tokenPayload at: 'modality' put: 'linear'.
-      bbs out: 'token' scope: scope identity: instanceId, ':token:', place payload: tokenPayload
+      bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
     ].
 
     ('Workflow instantiated: ', instanceId) println.
@@ -162,19 +162,19 @@ WorkflowEngine subclass: Object
      override any 'fix' verdict with 'exhausted' so the workflow exits the loop"
     maxCycles := templatePayload at: 'max_review_cycles' ifAbsent: [nil].
     maxCycles notNil ifTrue: [
-      cycleSignal := bbs rdp: 'signal' scope: scope identity: 'review_cycle:', instanceId.
+      cycleSignal := bbs rdp: 'signal' scope: scope identity: (Identity reviewCycle: instanceId).
       cycleSignal notNil ifTrue: [
         cycleCount := (cycleSignal at: 'payload') at: 'count' ifAbsent: [0].
         cycleCount >= maxCycles ifTrue: [
           "Check if there is a 'fix' verdict — override to 'exhausted'"
-          cycleSignal := bbs rdp: 'signal' scope: scope identity: 'verdict:', instanceId.
+          cycleSignal := bbs rdp: 'signal' scope: scope identity: (Identity verdict: instanceId).
           cycleSignal notNil ifTrue: [
             (((cycleSignal at: 'payload') at: 'decision' ifAbsent: ['']) = 'fix') ifTrue: [
               ('  Review cycle cap reached (', maxCycles printString, ') — overriding verdict to exhausted') println.
               verdictPayload := Dictionary new.
               verdictPayload at: 'decision' put: 'exhausted'.
               verdictPayload at: 'reason' put: 'Review cycle cap exceeded'.
-              bbs upsertSignal: scope identity: 'verdict:', instanceId payload: verdictPayload.
+              bbs upsertSignal: scope identity: (Identity verdict: instanceId) payload: verdictPayload.
               bbs notify: ('Review cycle cap reached for ', instanceId, ' — forcing exhausted') scope: scope severity: 'warn'
             ]
           ]
@@ -208,7 +208,7 @@ WorkflowEngine subclass: Object
     waitingTokens do: [:tok |
       | transId taskCompleteId evt tokIdentity newPayload sigId sigPay chId chScope chEvt |
       transId := (tok at: 'payload') at: 'transition_id' ifAbsent: [''].
-      taskCompleteId := 'task-complete:', instanceId, ':task:', transId.
+      taskCompleteId := Identity taskComplete: instanceId task: transId.
       evt := bbs rdp: 'event' scope: scope identity: taskCompleteId.
       evt isNil ifTrue: [
         "Check for child workflow completion via child-spawn signals"
@@ -218,7 +218,7 @@ WorkflowEngine subclass: Object
             sigPay := sig at: 'payload'.
             chId := sigPay at: 'child_instance'.
             chScope := sigPay at: 'child_scope'.
-            chEvt := bbs rdp: 'event' scope: chScope identity: 'workflow-complete:', chId.
+            chEvt := bbs rdp: 'event' scope: chScope identity: (Identity workflowComplete: chId).
             chEvt notNil ifTrue: [evt := chEvt]
           ]
         ]
@@ -266,7 +266,7 @@ WorkflowEngine subclass: Object
 
     "Consume input tokens and track them"
     inPlaces do: [:place |
-      bbs inp: 'token' scope: scope identity: instanceId, ':token:', place.
+      bbs inp: 'token' scope: scope identity: (Identity token: instanceId place: place).
       consumedTokens := consumedTokens copyWith: place
     ].
 
@@ -287,7 +287,7 @@ WorkflowEngine subclass: Object
       tokenPayload at: 'status' put: tokenStatus.
       tokenPayload at: 'transition_id' put: (transition at: 'id').
       tokenPayload at: 'modality' put: 'linear'.
-      bbs out: 'token' scope: scope identity: instanceId, ':token:', place payload: tokenPayload
+      bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
     ].
 
     "Check for built-in action dispatch (no agent spawned)"
@@ -413,7 +413,7 @@ WorkflowEngine subclass: Object
     ].
 
     "Emit failure event"
-    bbs emitEvent: scope identity: 'workflow-failed:', instanceId type: 'workflow-failed' summary: reason.
+    bbs emitEvent: scope identity: (Identity workflowFailed: instanceId) type: 'workflow-failed' summary: reason.
 
     "Notify user"
     bbs notify: ('Workflow failed: ', instanceId, ' — ', reason) scope: scope severity: 'urgent'.
@@ -437,7 +437,7 @@ WorkflowEngine subclass: Object
     ].
 
     "Emit completion event"
-    bbs emitEvent: scope identity: 'workflow-complete:', instanceId type: 'workflow-complete' summary: 'Workflow completed: ', instanceId.
+    bbs emitEvent: scope identity: (Identity workflowComplete: instanceId) type: 'workflow-complete' summary: 'Workflow completed: ', instanceId.
 
     "Notify user"
     bbs notify: ('Workflow completed: ', instanceId) scope: scope severity: 'info'.

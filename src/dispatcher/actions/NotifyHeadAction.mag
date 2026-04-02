@@ -24,5 +24,5 @@ NotifyHeadAction subclass: WorkflowAction
     payload at: 'message' put: msg.
     payload at: 'severity' put: 'info'.
     payload at: 'workflow' put: instanceId.
-    bbs out: 'notification' scope: 'system' identity: 'workflow-complete:', instanceId payload: payload
+    bbs out: 'notification' scope: 'system' identity: (Identity workflowComplete: instanceId) payload: payload
   ]

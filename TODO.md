@@ -11,14 +11,7 @@
 
 ## Open Issues
 
-### Persistence bottleneck
-`persistAfterChange` writes full state on every durable mutation. Could become a bottleneck. The JSONL history already exists — a write-ahead log with periodic compaction would be better than full JSON serialization per change.
-
-### Scheduler dispatch race
-Between scanning pending tasks and consuming them, another tick could find the same task. The 10-second interval makes it unlikely but architecturally unsound.
-
-### String-based identity conventions
-Identity strings like `'task-complete:', instanceId, ':task:', transId` are fragile — a typo silently produces unmatched tuples. An `Identity` class or named constructors would help.
+(None — all items from the assessment have been addressed.)
 
 ## Architectural Growth Risks
 
@@ -29,14 +22,8 @@ Identity strings like `'task-complete:', instanceId, ':task:', transId` are frag
 
 ## Not Yet Implemented
 
-### Wave-level merge
-Stories in a wave create separate feature branches. A shared feature branch per wave would simplify integration — all stories merge into one branch, then the pipeline merges that branch to main. Specced in `docs/plans/workflow-execution-improvements.md` (Improvement 4).
-
 ### Agent session capture
 The `--output-file` flag doesn't exist in the Claude CLI. Need a different approach (e.g., piping stdout to tee, or capturing via the harness).
-
-### History log pagination
-The `pp history` command loads the entire JSONL file into memory. For long-running servers, this could be slow. Add server-side pagination or streaming.
 
 ## Completed
 
@@ -74,3 +61,8 @@ The `pp history` command loads the entire JSONL file into memory. For long-runni
 - Declarative Role configuration (class-side protocol overrides)
 - GrowableArray (`src/collections/`) replacing O(n^2) copyWith: loops
 - BBS `update:do:` atomic primitive for tuple state transitions
+- Scheduler dispatch race fix (compare-and-swap guard in `dispatchTask:`)
+- Wave-level merge (shared feature branch per pipeline, parent_branch threading)
+- Identity class (`src/bbs/Identity.mag`) — named constructors for tuplespace identity strings
+- History log pagination (`historyTail:` fast path via `tail` for limit-only queries)
+- Persistence optimization (dirty-flag with periodic flush on dispatcher tick)

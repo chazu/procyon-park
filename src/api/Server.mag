@@ -125,9 +125,13 @@ ApiServer subclass: Object
       dispatcher isNil ifTrue: [
         self errorResponse: 500 message: 'No dispatcher configured'
       ] ifFalse: [
-        instanceId := dispatcher instantiateWorkflow: (body at: 'template') scope: (body at: 'scope') params: (body at: 'params' ifAbsent: [Dictionary new]).
-        d := Dictionary new. d at: 'status' put: 'ok'. d at: 'workflow_id' put: instanceId.
-        self okResponse: d
+        [
+          instanceId := dispatcher instantiateWorkflow: (body at: 'template') scope: (body at: 'scope') params: (body at: 'params' ifAbsent: [Dictionary new]).
+          d := Dictionary new. d at: 'status' put: 'ok'. d at: 'workflow_id' put: instanceId.
+          self okResponse: d
+        ] on: Exception do: [:e |
+          self errorResponse: 400 message: e messageText
+        ]
       ]
     ].
     httpServer route: '/api/workflow/status' method: 'POST' handler: [:req | self handleWorkflowStatus: req].
@@ -459,7 +463,7 @@ ApiServer subclass: Object
     ].
 
     "Emit event and notify"
-    bbs emitEvent: scope identity: 'workflow-cancelled:', wfId type: 'workflow-cancelled' summary: 'Workflow ', wfId, ' cancelled'.
+    bbs emitEvent: scope identity: (Identity workflowCancelled: wfId) type: 'workflow-cancelled' summary: 'Workflow ', wfId, ' cancelled'.
     bbs notify: ('Workflow ', wfId, ' has been cancelled') scope: scope severity: 'info'.
 
     d := Dictionary new.
@@ -683,19 +687,23 @@ ApiServer subclass: Object
   "--- Dashboard ---"
 
   method: handleDashboard: req [
-    "GET /api/dashboard — return workflows, tasks, tokens, and recent notifications."
-    | workflows tasks tokens notifications recent d |
+    "GET /api/dashboard — return workflows, tasks, tokens, recent notifications, and health."
+    | workflows tasks tokens notifications recent d health |
     workflows := bbs scanAll: 'workflow'.
     tasks := bbs scanAll: 'task'.
     tokens := bbs scanAll: 'token'.
     notifications := bbs scanAll: 'notification'.
-    recent := notifications size > 5
-      ifTrue: [notifications copyFrom: (notifications size - 5)]
+    recent := notifications size > 20
+      ifTrue: [notifications copyFrom: (notifications size - 20)]
       ifFalse: [notifications].
+    health := Dictionary new.
+    health at: 'tuples' put: bbs size.
+    health at: 'uptime' put: bbs uptime.
     d := Dictionary new.
     d at: 'workflows' put: workflows.
     d at: 'tasks' put: tasks.
     d at: 'tokens' put: tokens.
     d at: 'notifications' put: recent.
+    d at: 'health' put: health.
     ^self okResponse: d
   ]

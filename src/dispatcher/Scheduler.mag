@@ -53,17 +53,20 @@ Scheduler subclass: Object
 
   method: dispatchTask: task [
     "Claim a task and spawn a harness process for it."
-    | taskId scope payload role harness workdir repoField repoConfig repoPath |
+    | taskId scope payload role harness workdir repoField repoConfig repoPath claimed |
     taskId := task at: 'identity'.
     scope := task at: 'scope'.
     payload := task at: 'payload'.
     role := payload at: 'role'.
 
-    "Claim: atomically update status to dispatched"
-    bbs update: 'task' scope: scope identity: taskId do: [:p |
-      p at: 'status' put: 'dispatched'.
-      p at: 'dispatched_at' put: DateTime now epochSeconds
+    "Atomic claim: returns nil if task was already consumed by another tick"
+    claimed := bbs update: 'task' scope: scope identity: taskId do: [:p |
+      (p at: 'status') = 'pending' ifTrue: [
+        p at: 'status' put: 'dispatched'.
+        p at: 'dispatched_at' put: DateTime now epochSeconds
+      ]
     ].
+    claimed isNil ifTrue: [^self].  "Lost the race"
 
     ('Dispatching task: ', taskId, ' (role: ', role, ')') println.
     bbs notify: ('Task dispatched: ', taskId, ' (role: ', role, ')') scope: scope severity: 'info'.
@@ -103,7 +106,7 @@ Scheduler subclass: Object
         ('Task failed: ', taskId, ' - ', e messageText) println.
         bbs notify: ('Task failed: ', taskId, ' - ', e messageText) scope: scope severity: 'warn'.
         bbs emitEvent: scope
-            identity: 'task-failed:', taskId
+            identity: (Identity taskFailed: taskId)
             type: 'task-failed'
             summary: e messageText
       ].
@@ -187,7 +190,7 @@ Scheduler subclass: Object
 
       "Emit a scope-violation event"
       bbs emitEvent: aScope
-          identity: 'scope-violation:', aTaskId
+          identity: (Identity scopeViolation: aTaskId)
           type: 'scope-violation'
           summary: violations size printString, ' file(s) modified outside workdir'.
 

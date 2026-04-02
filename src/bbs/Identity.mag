@@ -1,0 +1,53 @@
+"Identity — named constructors for tuplespace identity strings.
+ Returns plain strings (BBS stores strings, not value objects).
+ Centralizes the format so typos become method-not-found errors."
+
+Identity subclass: Object
+
+  classMethod: taskComplete: instanceId task: transId [
+    ^'task-complete:', instanceId, ':task:', transId
+  ]
+
+  classMethod: workflowComplete: instanceId [
+    ^'workflow-complete:', instanceId
+  ]
+
+  classMethod: workflowFailed: instanceId [
+    ^'workflow-failed:', instanceId
+  ]
+
+  classMethod: workflowCancelled: instanceId [
+    ^'workflow-cancelled:', instanceId
+  ]
+
+  classMethod: token: instanceId place: place [
+    ^instanceId, ':token:', place
+  ]
+
+  classMethod: childSpawn: transitionId child: childId [
+    ^'child-spawn:', transitionId, ':', childId
+  ]
+
+  classMethod: waveChild: waveNum child: childId [
+    ^'wave-child:', waveNum printString, ':', childId
+  ]
+
+  classMethod: waveStatus: waveNum [
+    ^'wave-status:', waveNum printString
+  ]
+
+  classMethod: scopeViolation: taskId [
+    ^'scope-violation:', taskId
+  ]
+
+  classMethod: taskFailed: taskId [
+    ^'task-failed:', taskId
+  ]
+
+  classMethod: reviewCycle: instanceId [
+    ^'review_cycle:', instanceId
+  ]
+
+  classMethod: verdict: instanceId [
+    ^'verdict:', instanceId
+  ]

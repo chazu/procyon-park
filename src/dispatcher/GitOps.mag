@@ -9,6 +9,16 @@ GitOps subclass: Object
     Shell runChecked: 'git -C "', repoPath, '" checkout -b "', branchName, '"'
   ]
 
+  classMethod: createFeatureBranch: branchName from: startPoint in: repoPath [
+    "git checkout -b <branchName> <startPoint> in repoPath. Signals Error on failure."
+    Shell runChecked: 'git -C "', repoPath, '" checkout -b "', branchName, '" "', startPoint, '"'
+  ]
+
+  classMethod: createWorktree: worktreeDir branch: implBranch from: startPoint in: repoPath [
+    "Create parent dir and git worktree add from a specific start point. Signals Error on failure."
+    Shell runChecked: 'mkdir -p "$(dirname "', worktreeDir, '")" && git -C "', repoPath, '" worktree add "', worktreeDir, '" -b "', implBranch, '" "', startPoint, '"'
+  ]
+
   classMethod: createWorktree: worktreeDir branch: implBranch in: repoPath [
     "Create parent dir and git worktree add. Signals Error on failure."
     Shell runChecked: 'mkdir -p "$(dirname "', worktreeDir, '")" && git -C "', repoPath, '" worktree add "', worktreeDir, '" -b "', implBranch, '"'
