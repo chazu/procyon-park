@@ -4,7 +4,7 @@ namespace = "ProcyonPark"
 version = "0.1.0"
 
 [dependencies]
-alto = { path = "../alto" }
+alto = { git = "https://github.com/chazu/alto", branch = "main" }
 
 [source]
 dirs = ["src"]
@@ -15,22 +15,6 @@ name = "pp"
 entry = "Main.start"
 output = "pp"
 
-[go-wrap]
-output = "wrap"
-
-[[go-wrap.packages]]
-import = "github.com/gdamore/tcell/v2"
-include = [
-  "NewEventKey", "NewEventMouse", "NewEventResize",
-  "NewRGBColor", "NewHexColor", "PaletteColor", "GetColor",
-  "ColorBlack", "ColorWhite", "ColorRed", "ColorGreen", "ColorBlue",
-  "ColorYellow", "ColorMagenta", "ColorCyan",
-  "Style", "EventKey", "EventMouse", "EventResize",
-  "CellBuffer",
-]
-
-[[go-wrap.packages]]
-import = "alto/go/terminal"
 
 [test]
 dirs = ["src", "src/bbs", "src/api", "src/cli", "src/collections", "src/dispatcher", "src/dispatcher/actions", "src/harness", "src/roles", "test"]
