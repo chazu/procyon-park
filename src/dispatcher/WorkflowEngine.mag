@@ -505,12 +505,12 @@ WorkflowEngine subclass: Object
       ]
     ].
 
-    "Cascade: find wave-child signals scoped to this workflow instance
+    "Cascade: find wave-child and child-spawn signals scoped to this workflow instance
      and recursively cancel each child workflow."
     signals := bbs scan: 'signal' scope: instanceId.
     signals do: [:sig |
       sigId := sig at: 'identity'.
-      (sigId startsWith: 'wave-child:') ifTrue: [
+      ((sigId startsWith: 'wave-child:') or: [sigId startsWith: 'child-spawn:']) ifTrue: [
         sigPayload := sig at: 'payload'.
         childInstance := sigPayload at: 'child_instance' ifAbsent: [nil].
         childScope := sigPayload at: 'child_scope' ifAbsent: [scope].
