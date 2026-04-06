@@ -24,7 +24,14 @@ ApiServer subclass: Object
   method: bbs [ ^bbs ]
 
   method: start [
+    | staticDir |
     ('Procyon Park API starting on port ', port printString) println.
+    "Register SSE and static routes here (outside registerRoutes chain to avoid bytecode limits)"
+    staticDir := File workingDirectory, '/static'.
+    httpServer serveStatic: '/dashboard/' from: staticDir.
+    httpServer sseRoute: '/api/sse/dashboard' handler: [:conn :req |
+      self handleSSEDashboard: conn request: req
+    ].
     self startSSETick.
     httpServer start
   ]
@@ -110,6 +117,11 @@ ApiServer subclass: Object
     ].
     self get: '/api/notifications' do: [:req | self handleNotifications: req].
     self get: '/api/notifications/stream' do: [:req | self handleNotificationStream: req].
+    self registerWorkflowRoutes
+  ]
+
+  method: registerWorkflowRoutes [
+    "Workflow, task, and work item routes (split from registerRoutes to avoid method-size limit)."
     self post: '/api/plan' fields: #('scope' 'identity' 'subtasks') do: [:body |
       | scope identity subtasks planPayload d |
       scope := body at: 'scope'. identity := body at: 'identity'. subtasks := body at: 'subtasks'.
@@ -138,53 +150,63 @@ ApiServer subclass: Object
     ].
     httpServer route: '/api/workflow/status' method: 'POST' handler: [:req | self handleWorkflowStatus: req].
     httpServer route: '/api/workflow/cancel' method: 'POST' handler: [:req | self handleWorkflowCancel: req].
+    self registerTaskRoutes
+  ]
+
+  method: registerTaskRoutes [
+    "Task, signal, and work item routes."
     self post: '/api/task/create' fields: #('scope' 'identity' 'role' 'description') do: [:body |
-      | taskPayload id |
-      taskPayload := Dictionary new.
-      taskPayload at: 'role' put: (body at: 'role').
-      taskPayload at: 'status' put: 'pending'.
-      taskPayload at: 'description' put: (body at: 'description').
-      (body includesKey: 'workdir') ifTrue: [taskPayload at: 'workdir' put: (body at: 'workdir')].
-      (body includesKey: 'workflow_instance') ifTrue: [taskPayload at: 'workflow_instance' put: (body at: 'workflow_instance')].
-      (body includesKey: 'repo') ifTrue: [taskPayload at: 'repo' put: (body at: 'repo')].
-      id := bbs out: 'task' scope: (body at: 'scope') identity: (body at: 'identity') payload: taskPayload.
-      "If spawned by another task (workflow_instance contains :task:), record parent-child link"
-      (body includesKey: 'workflow_instance') ifTrue: [
-        | wfInst instanceId transId childSignalPayload parts |
-        wfInst := body at: 'workflow_instance'.
-        (wfInst includesSubstring: ':task:') ifTrue: [
-          "Parse instanceId:task:transId from workflow_instance"
-          parts := wfInst split: ':task:'.
-          instanceId := parts at: 0.
-          transId := parts at: 1.
-          childSignalPayload := Dictionary new.
-          childSignalPayload at: 'child_task_id' put: (body at: 'identity').
-          childSignalPayload at: 'child_scope' put: (body at: 'scope').
-          bbs upsertSignal: instanceId identity: (Identity childTask: transId child: (body at: 'identity')) payload: childSignalPayload
-        ]
-      ].
-      self okResponse: (self okWithId: id)
+      self handleTaskCreate: body
     ].
     self post: '/api/signal' fields: #('scope' 'identity' 'payload') do: [:body |
       | id |
       id := bbs upsertSignal: (body at: 'scope') identity: (body at: 'identity') payload: (body at: 'payload').
       self okResponse: (self okWithId: id)
     ].
+    self registerDashboardRoutes
+  ]
+
+  method: registerDashboardRoutes [
+    "Work item routes."
     httpServer route: '/api/workitem/create' method: 'POST' handler: [:req | self handleWorkitemCreate: req].
     httpServer route: '/api/workitem/update' method: 'POST' handler: [:req | self handleWorkitemUpdate: req].
     httpServer route: '/api/workitem/comment' method: 'POST' handler: [:req | self handleWorkitemComment: req].
+    self registerDashboardRoutes2
+  ]
+
+  method: registerDashboardRoutes2 [
+    "More work item routes + dashboard."
     httpServer route: '/api/workitem/add-child' method: 'POST' handler: [:req | self handleWorkitemAddChild: req].
     httpServer route: '/api/workitem/run' method: 'POST' handler: [:req | self handleWorkitemRun: req].
     self get: '/api/dashboard' do: [:req | self handleDashboard: req].
-    self get: '/api/history' do: [:req | self handleHistory: req].
+    self get: '/api/history' do: [:req | self handleHistory: req]
+  ]
 
-    "Serve the static web dashboard"
-    httpServer serveStatic: '/dashboard/' from: (File workingDirectory, '/static').
-
-    "SSE dashboard stream"
-    httpServer sseRoute: '/api/sse/dashboard' handler: [:conn :req |
-      self handleSSEDashboard: conn request: req
-    ]
+  method: handleTaskCreate: body [
+    "Handle /api/task/create — extracted to avoid method-size limit in route registration."
+    | taskPayload id wfInst instanceId transId childSignalPayload parts |
+    taskPayload := Dictionary new.
+    taskPayload at: 'role' put: (body at: 'role').
+    taskPayload at: 'status' put: 'pending'.
+    taskPayload at: 'description' put: (body at: 'description').
+    (body includesKey: 'workdir') ifTrue: [taskPayload at: 'workdir' put: (body at: 'workdir')].
+    (body includesKey: 'workflow_instance') ifTrue: [taskPayload at: 'workflow_instance' put: (body at: 'workflow_instance')].
+    (body includesKey: 'repo') ifTrue: [taskPayload at: 'repo' put: (body at: 'repo')].
+    id := bbs out: 'task' scope: (body at: 'scope') identity: (body at: 'identity') payload: taskPayload.
+    "If spawned by another task (workflow_instance contains :task:), record parent-child link"
+    (body includesKey: 'workflow_instance') ifTrue: [
+      wfInst := body at: 'workflow_instance'.
+      (wfInst includesSubstring: ':task:') ifTrue: [
+        parts := wfInst split: ':task:'.
+        instanceId := parts at: 0.
+        transId := parts at: 1.
+        childSignalPayload := Dictionary new.
+        childSignalPayload at: 'child_task_id' put: (body at: 'identity').
+        childSignalPayload at: 'child_scope' put: (body at: 'scope').
+        bbs upsertSignal: instanceId identity: (Identity childTask: transId child: (body at: 'identity')) payload: childSignalPayload
+      ]
+    ].
+    self okResponse: (self okWithId: id)
   ]
 
   "--- Helpers ---"
