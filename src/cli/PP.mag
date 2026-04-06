@@ -483,13 +483,21 @@ Dashboard:     ', baseUrl, '/dashboard/
     ].
 
     workflows do: [:wf |
-      | wfPayload wfId wfStatus template wfScopeLabel |
+      | wfPayload wfId wfStatus template wfScopeLabel desc params truncDesc |
       wfId := wf at: 'identity' ifAbsent: ['?'].
       wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
       wfStatus := wfPayload at: 'status' ifAbsent: ['?'].
       template := wfPayload at: 'template' ifAbsent: ['?'].
       wfScopeLabel := wf at: 'scope' ifAbsent: ['?'].
-      (wfId, '  [', wfStatus, ']  template:', template, '  scope:', wfScopeLabel) println
+      params := wfPayload at: 'params' ifAbsent: [nil].
+      desc := params notNil ifTrue: [params at: 'description' ifAbsent: ['']] ifFalse: [''].
+      truncDesc := desc size > 60
+        ifTrue: [(desc copyFrom: 0 to: 57), '...']
+        ifFalse: [desc].
+      (wfId, '  [', wfStatus, ']  ', template, '  scope:', wfScopeLabel) println.
+      truncDesc isEmpty ifFalse: [
+        ('  ', truncDesc) println
+      ]
     ]
   ]
 
@@ -571,7 +579,7 @@ Dashboard:     ', baseUrl, '/dashboard/
 
   method: showWorkflowDetail: wfId scope: wfScope [
     "Show detailed status for a single workflow."
-    | body response result wf wfPayload tokens tasks allTokens allTasks cycleSignal |
+    | body response result wf wfPayload tokens tasks allTokens allTasks cycleSignal activeTasks doneTasks |
 
     "Read workflow"
     body := Dictionary new.
@@ -599,13 +607,18 @@ Dashboard:     ', baseUrl, '/dashboard/
     ('  Template: ', (wfPayload at: 'template' ifAbsent: ['?'])) println.
     ('  Status:   ', (wfPayload at: 'status' ifAbsent: ['?'])) println.
     (wfPayload includesKey: 'params') ifTrue: [
-      | repo |
-      repo := (wfPayload at: 'params') at: 'repo' ifAbsent: [nil].
-      repo notNil ifTrue: [('  Repo:     ', repo) println]
+      | params repo desc |
+      params := wfPayload at: 'params'.
+      repo := params at: 'repo' ifAbsent: [nil].
+      repo notNil ifTrue: [('  Repo:     ', repo) println].
+      desc := params at: 'description' ifAbsent: [nil].
+      desc notNil ifTrue: [
+        desc isEmpty ifFalse: [('  Desc:     ', desc) println]
+      ]
     ].
     '' println.
 
-    "Read tokens"
+    "Read tokens — show places inline"
     '  Tokens:' println.
     allTokens := self safeScan: 'token' scope: wfScope.
     tokens := allTokens select: [:t |
@@ -617,16 +630,19 @@ Dashboard:     ', baseUrl, '/dashboard/
       ifTrue: ['    (none)' println]
       ifFalse: [
         tokens do: [:t |
-          | tp place status |
+          | tp place tStatus color |
           tp := t at: 'payload' ifAbsent: [Dictionary new].
           place := tp at: 'place' ifAbsent: ['?'].
-          status := tp at: 'status' ifAbsent: ['?'].
-          ('    ', place, ' [', status, ']') println
+          tStatus := tp at: 'status' ifAbsent: ['?'].
+          color := tp at: 'color' ifAbsent: [nil].
+          color notNil
+            ifTrue: [('    ', place, ' [', tStatus, '] color:', color) println]
+            ifFalse: [('    ', place, ' [', tStatus, ']') println]
         ]
       ].
     '' println.
 
-    "Read tasks"
+    "Read tasks — show role and status"
     '  Tasks:' println.
     allTasks := self safeScan: 'task' scope: wfScope.
     tasks := allTasks select: [:t |
@@ -637,13 +653,33 @@ Dashboard:     ', baseUrl, '/dashboard/
     tasks size = 0
       ifTrue: ['    (none)' println]
       ifFalse: [
-        tasks do: [:t |
-          | tp role status transId |
+        activeTasks := tasks select: [:t |
+          | tp ts |
           tp := t at: 'payload' ifAbsent: [Dictionary new].
-          role := tp at: 'role' ifAbsent: ['?'].
-          status := tp at: 'status' ifAbsent: ['?'].
-          transId := tp at: 'transition_id' ifAbsent: ['?'].
-          ('    ', transId, ' (', role, ') [', status, ']') println
+          ts := tp at: 'status' ifAbsent: [''].
+          (ts = 'active') | (ts = 'pending')
+        ].
+        activeTasks size > 0 ifTrue: [
+          ('    Active/Pending: ', activeTasks size asString) println.
+          activeTasks do: [:t |
+            | tp role tStatus transId taskId |
+            tp := t at: 'payload' ifAbsent: [Dictionary new].
+            role := tp at: 'role' ifAbsent: ['?'].
+            tStatus := tp at: 'status' ifAbsent: ['?'].
+            transId := tp at: 'transition_id' ifAbsent: ['?'].
+            taskId := t at: 'identity' ifAbsent: ['?'].
+            ('      ', role, ' [', tStatus, '] ', transId, ' id:', taskId) println
+          ]
+        ].
+        "Show completed/dismissed count"
+        doneTasks := tasks select: [:t |
+          | tp ts |
+          tp := t at: 'payload' ifAbsent: [Dictionary new].
+          ts := tp at: 'status' ifAbsent: [''].
+          (ts = 'dismissed') | (ts = 'completed') | (ts = 'failed')
+        ].
+        doneTasks size > 0 ifTrue: [
+          ('    Done/Failed: ', doneTasks size asString) println
         ]
       ].
     '' println.
