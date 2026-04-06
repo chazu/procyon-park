@@ -106,12 +106,15 @@ Dispatcher subclass: Object
     now := DateTime now epochSeconds.
 
     workflows do: [:wf |
-      | payload completedAt |
+      | payload status terminalAt |
       payload := wf at: 'payload'.
-      (payload at: 'status' ifAbsent: ['']) = 'completed' ifTrue: [
-        completedAt := payload at: 'completed_at' ifAbsent: [now].
+      status := payload at: 'status' ifAbsent: [''].
+      (status = 'completed' or: [status = 'cancelled']) ifTrue: [
+        terminalAt := status = 'completed'
+          ifTrue: [payload at: 'completed_at' ifAbsent: [now]]
+          ifFalse: [payload at: 'cancelled_at' ifAbsent: [now]].
         "Clean up after 1 hour"
-        (now - completedAt) > 3600 ifTrue: [
+        (now - terminalAt) > 3600 ifTrue: [
           bbs inp: 'workflow' scope: (wf at: 'scope') identity: (wf at: 'identity')
         ]
       ]

@@ -533,6 +533,9 @@ WorkflowEngine subclass: Object
     bbs emitEvent: scope identity: (Identity workflowCancelled: instanceId) type: 'workflow-cancelled' summary: 'Workflow ', instanceId, ' cancelled'.
     bbs notify: ('Workflow ', instanceId, ' has been cancelled') scope: scope severity: 'info'.
 
+    "Clean up worktree directory"
+    self cleanupWorktree: instanceId.
+
     ('Workflow cancelled: ', instanceId, ' (', cancelledCount printString, ' tasks cancelled)') println.
     ^cancelledCount
   ]
