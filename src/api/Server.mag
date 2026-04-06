@@ -684,17 +684,29 @@ ApiServer subclass: Object
       wfParams at: 'repo' put: (payload at: 'repo')
     ].
 
+    dispatcher isNil ifTrue: [
+      ^self errorResponse: 500 message: 'No dispatcher configured'
+    ].
+
     type = 'epic' ifTrue: [
       "Dispatch children through execute-epic"
       template := 'full-pipeline'.
-      instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams.
-      ^self okResponse: (self okWithWorkflow: instanceId type: 'epic')
+      [
+        instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams.
+        ^self okResponse: (self okWithWorkflow: instanceId type: 'epic')
+      ] on: Exception do: [:e |
+        ^self errorResponse: 400 message: e messageText
+      ]
     ].
 
     "Story — use the template specified on the work item"
     template := payload at: 'template' ifAbsent: ['story'].
-    instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams.
-    ^self okResponse: (self okWithWorkflow: instanceId type: 'story')
+    [
+      instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams.
+      ^self okResponse: (self okWithWorkflow: instanceId type: 'story')
+    ] on: Exception do: [:e |
+      ^self errorResponse: 400 message: e messageText
+    ]
   ]
 
   method: updateWorkitemStatus: identity scope: scope status: newStatus [
