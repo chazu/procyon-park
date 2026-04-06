@@ -803,11 +803,17 @@ ApiServer subclass: Object
   ]
 
   method: sendFragment: conn selector: sel html: html [
-    "Send a Datastar merge-fragments event with selector metadata."
-    | lf data |
+    "Send a Datastar patch-elements event. Prefixes each HTML line with 'elements '."
+    | lf lines data |
     lf := Character lf asString.
-    data := 'selector ', sel, lf, html.
-    conn send: data event: 'datastar-merge-fragments'
+    data := 'selector ', sel, lf.
+    lines := html split: lf.
+    lines do: [:line |
+      line isEmpty ifFalse: [
+        data := data, 'elements ', line, lf
+      ]
+    ].
+    conn send: data event: 'datastar-patch-elements'
   ]
 
   method: sendWorkflowFragment: conn [
