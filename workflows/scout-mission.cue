@@ -1,4 +1,5 @@
 // Scout mission: research a topic, write findings document
+// Merges findings into the source branch before cleanup.
 description: "Scout mission: research a topic, write findings document"
 start_places: ["request"]
 terminal_places: ["done"]
@@ -20,12 +21,24 @@ transitions: [
 	{
 		id:  "complete"
 		in:  ["scouting"]
-		out: ["done"]
+		out: ["merging"]
 		preconditions: [
 			{
 				category: "event"
 				identity: "task-complete:{{instance}}:task:scout"
 			},
 		]
+	},
+	{
+		id:     "merge"
+		in:     ["merging"]
+		out:    ["merged"]
+		action: "merge-worktree"
+	},
+	{
+		id:     "notify"
+		in:     ["merged"]
+		out:    ["done"]
+		action: "notify-head"
 	},
 ]
