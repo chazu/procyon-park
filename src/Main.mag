@@ -8,7 +8,7 @@ Main subclass: Object
     "Commands that route to PP (thin HTTP client)."
     ^#('observe' 'decide' 'event' 'plan' 'read' 'notify' 'dismiss'
        'status' 'prime' 'task' 'workflow' 'signal' 'log' 'history' 'dashboard'
-       'workitem')
+       'workitem' 'gc')
   ]
 
   classMethod: start [
@@ -94,6 +94,7 @@ Main subclass: Object
     '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
     '  dashboard                                      Open web dashboard in browser' println.
     '  workitem create|show|list|update|run|plan|review  Manage work items' println.
+    '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
     '' println.
     'Other:' println.
     '  help, --help, -h                               Show this help' println.
