@@ -27,7 +27,7 @@ ClaudeHarness subclass: Object
   method: run [
     "Assemble the system prompt, spawn Claude, wait for completion."
 
-    | contextTuples taskTuple taskDescription taskPayload workflowInstance env args home sessionsDir outputFile timeoutArgs |
+    | contextTuples taskTuple taskDescription taskPayload workflowInstance env home sessionsDir outputFile timeoutArgs shellCmd |
 
     "Read the task description and workflow instance first (needed for context filtering)"
     taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
@@ -55,18 +55,9 @@ ClaudeHarness subclass: Object
     Shell run: 'mkdir -p "', sessionsDir, '"'.
     outputFile := sessionsDir, '/', taskId, '.jsonl'.
 
-    "Build args array (cannot use #() literal — it treats vars as symbols)"
-    args := Array new: 0.
-    args := args copyWith: '--system-prompt'.
-    args := args copyWith: systemPrompt.
-    args := args copyWith: '--allowedTools'.
-    args := args copyWith: 'Bash,Read,Write,Edit,Glob,Grep'.
-    args := args copyWith: '--max-turns'.
-    args := args copyWith: '200'.
-    args := args copyWith: '-p'.
-    args := args copyWith: taskDescription.
-
-    "Environment — agents know their URL, scope, task, repo, and workflow"
+    "Environment — agents know their URL, scope, task, repo, and workflow.
+     PP_SYSTEM_PROMPT and PP_TASK_DESC are used by the sh -c wrapper below
+     to avoid shell-escaping issues with quotes and newlines."
     env := Dictionary new.
     env at: 'PP_URL' put: 'http://localhost:7777'.
     env at: 'PP_SCOPE' put: scope.
@@ -74,18 +65,29 @@ ClaudeHarness subclass: Object
     env at: 'PP_REPO' put: repoName.
     env at: 'PP_REPO_PATH' put: workDir.
     env at: 'PP_WORKFLOW' put: workflowInstance.
+    env at: 'PP_SYSTEM_PROMPT' put: systemPrompt.
+    env at: 'PP_TASK_DESC' put: taskDescription.
+    env at: 'PP_OUTPUT_FILE' put: outputFile.
 
-    "Wrap claude with 30-minute timeout to prevent silent hangs"
+    "Build sh -c command that runs claude with stream-json output redirected to file.
+     We reference env vars instead of inlining the system prompt to avoid quoting hell."
+    shellCmd := 'claude --output-format stream-json --system-prompt "$PP_SYSTEM_PROMPT" --allowedTools Bash,Read,Write,Edit,Glob,Grep --max-turns 200 -p "$PP_TASK_DESC" > "$PP_OUTPUT_FILE" 2>&1'.
+
+    "Wrap with 30-minute timeout to prevent silent hangs"
     timeoutArgs := Array new: 0.
     timeoutArgs := timeoutArgs copyWith: '1800'.
-    timeoutArgs := timeoutArgs copyWith: 'claude'.
-    args do: [:a | timeoutArgs := timeoutArgs copyWith: a].
+    timeoutArgs := timeoutArgs copyWith: 'sh'.
+    timeoutArgs := timeoutArgs copyWith: '-c'.
+    timeoutArgs := timeoutArgs copyWith: shellCmd.
     process := ExternalProcess command: 'timeout'.
     process args: timeoutArgs.
     process env: env.
     process dir: workDir.
 
     process run.
+
+    "Report output file path"
+    ('Session output: ', outputFile) println.
 
     "Check result"
     process isSuccess ifTrue: [
