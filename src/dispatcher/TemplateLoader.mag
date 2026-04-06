@@ -50,23 +50,34 @@ TemplateLoader subclass: Object
   ]
 
   method: syncBuiltinTemplates [
-    "Copy any built-in .cue templates that are missing from ~/.pp/workflows/."
-    | fileList installed count |
+    "Copy built-in .cue templates that are missing or stale in ~/.pp/workflows/."
+    | fileList installed count srcPath dstPath srcMtime dstMtime |
     fileList := Shell capture: 'ls "', builtinDir, '/" 2>/dev/null | grep "\.cue$"'.
     fileList isEmpty ifTrue: [^self].
     count := 0.
 
     (fileList split: (Character lf asString)) do: [:fname |
       (fname isEmpty not and: [fname size > 4]) ifTrue: [
-        installed := Shell capture: 'test -f "', workflowsDir, '/', fname, '" && echo yes || echo no'.
+        srcPath := builtinDir, '/', fname.
+        dstPath := workflowsDir, '/', fname.
+        installed := Shell capture: 'test -f "', dstPath, '" && echo yes || echo no'.
         (installed = 'no') ifTrue: [
-          Shell run: 'cp "', builtinDir, '/', fname, '" "', workflowsDir, '/', fname, '"'.
+          "Missing — install it."
+          Shell run: 'cp "', srcPath, '" "', dstPath, '"'.
           count := count + 1
+        ] ifFalse: [
+          "Exists — overwrite if builtin source is newer."
+          srcMtime := Shell capture: 'stat -f %m "', srcPath, '"'.
+          dstMtime := Shell capture: 'stat -f %m "', dstPath, '"'.
+          (srcMtime asInteger > dstMtime asInteger) ifTrue: [
+            Shell run: 'cp "', srcPath, '" "', dstPath, '"'.
+            count := count + 1
+          ]
         ]
       ]
     ].
     count > 0 ifTrue: [
-      ('Installed ', count printString, ' new workflow template(s) to ~/.pp/workflows/') println
+      ('Synced ', count printString, ' workflow template(s) to ~/.pp/workflows/') println
     ]
   ]
 
