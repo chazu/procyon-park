@@ -51,3 +51,7 @@ Identity subclass: Object
   classMethod: verdict: instanceId [
     ^'verdict:', instanceId
   ]
+
+  classMethod: childTask: parentTaskId child: childTaskId [
+    ^'child-task:', parentTaskId, ':', childTaskId
+  ]
