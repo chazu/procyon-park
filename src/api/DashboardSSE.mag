@@ -1,0 +1,78 @@
+"DashboardSSE — SSE dashboard broadcasting for the web UI.
+ Separated from ApiServer to avoid Maggie compiler bytecode limits."
+
+DashboardSSE subclass: Object
+  instanceVars: bbs sseSubscribers
+
+  classMethod: on: aBBS [
+    ^super new initBBS: aBBS
+  ]
+
+  method: initBBS: aBBS [
+    bbs := aBBS.
+    sseSubscribers := #()
+  ]
+
+  method: onConnect: conn [
+    sseSubscribers := sseSubscribers copyWith: conn.
+    ('SSE dashboard client connected, total: ', sseSubscribers size printString) println
+  ]
+
+  method: tick [
+    | live |
+    sseSubscribers isEmpty ifTrue: [^self].
+    live := sseSubscribers select: [:conn | conn isOpen].
+    sseSubscribers := live.
+    live do: [:conn |
+      [self broadcastTo: conn] on: Exception do: [:e |
+        ('SSE error: ', e messageText) println
+      ]
+    ]
+  ]
+
+  method: broadcastTo: conn [
+    self sendWorkflows: conn.
+    self sendNotifs: conn
+  ]
+
+  method: sendWorkflows: conn [
+    | s workflows |
+    workflows := bbs scanAll: 'workflow'.
+    s := '<div id="dashboard-workflows"><h2>Active Workflows</h2>'.
+    workflows do: [:w |
+      | p status template wfId |
+      p := w at: 'payload' ifAbsent: [Dictionary new].
+      status := p at: 'status' ifAbsent: ['?'].
+      status = 'running' ifTrue: [
+        template := p at: 'template' ifAbsent: ['?'].
+        wfId := w at: 'identity' ifAbsent: ['?'].
+        s := s, '<div class="wf-card"><b>', template, '</b> ', wfId, '</div>'
+      ]
+    ].
+    s := s, '</div>'.
+    conn send: ('elements ', s) event: 'datastar-patch-elements'
+  ]
+
+  method: sendNotifs: conn [
+    | s notifications recent |
+    notifications := bbs scanAll: 'notification'.
+    recent := notifications size > 30
+      ifTrue: [notifications copyFrom: (notifications size - 30)]
+      ifFalse: [notifications].
+    s := '<div id="dashboard-notifications"><h2>Recent Activity</h2>'.
+    recent isEmpty ifTrue: [
+      s := s, '<div class="empty-state">No recent activity</div>'
+    ] ifFalse: [
+      s := s, '<ul>'.
+      recent do: [:n |
+        | p message severity |
+        p := n at: 'payload' ifAbsent: [Dictionary new].
+        message := p at: 'message' ifAbsent: [''].
+        severity := p at: 'severity' ifAbsent: ['info'].
+        s := s, '<li>[', severity, '] ', message, '</li>'
+      ].
+      s := s, '</ul>'
+    ].
+    s := s, '</div>'.
+    conn send: ('elements ', s) event: 'datastar-patch-elements'
+  ]
