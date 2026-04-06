@@ -802,55 +802,51 @@ ApiServer subclass: Object
     self sendNotificationFragment: conn
   ]
 
+  method: sendFragment: conn selector: sel html: html [
+    "Send a Datastar merge-fragments event with selector metadata."
+    | lf data |
+    lf := Character lf asString.
+    data := 'selector ', sel, lf, html.
+    conn send: data event: 'datastar-merge-fragments'
+  ]
+
   method: sendWorkflowFragment: conn [
-    "Send workflow status as a Datastar merge-fragments event."
-    | workflows html |
+    | workflows |
     workflows := bbs scanAll: 'workflow'.
-    html := self renderWorkflowsHTML: workflows.
-    conn send: html event: 'datastar-merge-fragments'
+    self sendFragment: conn selector: '#dashboard-workflows' html: (self renderWorkflowsHTML: workflows)
   ]
 
   method: sendTaskFragment: conn [
-    "Send task status as a Datastar merge-fragments event."
-    | tasks html |
+    | tasks |
     tasks := bbs scanAll: 'task'.
-    html := self renderTasksHTML: tasks.
-    conn send: html event: 'datastar-merge-fragments'
+    self sendFragment: conn selector: '#dashboard-tasks' html: (self renderTasksHTML: tasks)
   ]
 
   method: sendTokenFragment: conn [
-    "Send token status as a Datastar merge-fragments event."
-    | tokens html |
+    | tokens |
     tokens := bbs scanAll: 'token'.
-    html := self renderTokensHTML: tokens.
-    conn send: html event: 'datastar-merge-fragments'
+    self sendFragment: conn selector: '#dashboard-tokens' html: (self renderTokensHTML: tokens)
   ]
 
   method: sendObservationFragment: conn [
-    "Send observations as a Datastar merge-fragments event."
-    | observations html |
+    | observations |
     observations := bbs scanAll: 'observation'.
-    html := self renderObservationsHTML: observations.
-    conn send: html event: 'datastar-merge-fragments'
+    self sendFragment: conn selector: '#dashboard-observations' html: (self renderObservationsHTML: observations)
   ]
 
   method: sendSignalFragment: conn [
-    "Send signals as a Datastar merge-fragments event."
-    | signals html |
+    | signals |
     signals := bbs scanAll: 'signal'.
-    html := self renderSignalsHTML: signals.
-    conn send: html event: 'datastar-merge-fragments'
+    self sendFragment: conn selector: '#dashboard-signals' html: (self renderSignalsHTML: signals)
   ]
 
   method: sendNotificationFragment: conn [
-    "Send recent notifications as a Datastar merge-fragments event."
-    | notifications recent html |
+    | notifications recent |
     notifications := bbs scanAll: 'notification'.
     recent := notifications size > 20
       ifTrue: [notifications copyFrom: (notifications size - 20)]
       ifFalse: [notifications].
-    html := self renderNotificationsHTML: recent.
-    conn send: html event: 'datastar-merge-fragments'
+    self sendFragment: conn selector: '#dashboard-notifications' html: (self renderNotificationsHTML: recent)
   ]
 
   "--- HTML Fragment Renderers ---"
