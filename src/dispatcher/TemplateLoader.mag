@@ -123,6 +123,45 @@ TemplateLoader subclass: Object
     ]
   ]
 
+  method: reloadTemplate: identity into: bbs [
+    "Reload a single template from disk by identity name.
+     Searches system workflows dir first, then repo workflows dirs.
+     Updates the BBS template tuple in-place. Returns the payload or nil."
+    | path payload repos repoWorkflowsDir repoPath repoName |
+
+    "Try system workflows first"
+    path := workflowsDir, '/', identity, '.cue'.
+    (Shell capture: 'test -f "', path, '" && echo yes || echo no') = 'yes' ifTrue: [
+      payload := self loadTemplateFile: path.
+      payload notNil ifTrue: [
+        bbs outPinned: 'template' scope: 'system' identity: identity payload: payload.
+        ('Reloaded template from disk: ', identity) println.
+        ^payload
+      ]
+    ].
+
+    "Try repo workflows"
+    repos := self allRepoConfigs.
+    repos do: [:repo |
+      repoName := repo at: 'name' ifAbsent: [nil].
+      repoPath := repo at: 'path' ifAbsent: [nil].
+      (repoName notNil and: [repoPath notNil]) ifTrue: [
+        repoWorkflowsDir := repoPath, '/.pp/workflows'.
+        path := repoWorkflowsDir, '/', identity, '.cue'.
+        (Shell capture: 'test -f "', path, '" && echo yes || echo no') = 'yes' ifTrue: [
+          payload := self loadTemplateFile: path.
+          payload notNil ifTrue: [
+            bbs outPinned: 'template' scope: repoName identity: identity payload: payload.
+            ('Reloaded template from disk: ', identity, ' (repo: ', repoName, ')') println.
+            ^payload
+          ]
+        ]
+      ]
+    ].
+
+    ^nil
+  ]
+
   method: loadTemplateFile: path [
     "Load a single CUE file, return Dictionary payload or nil on error."
     | cueResult payload |

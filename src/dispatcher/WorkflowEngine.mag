@@ -2,7 +2,7 @@
  Instantiates workflows from templates and advances token positions."
 
 WorkflowEngine subclass: Object
-  instanceVars: bbs cueCtx actions
+  instanceVars: bbs cueCtx actions templateLoader
 
   classMethod: on: aBBS [
     ^super new initBBS: aBBS
@@ -13,6 +13,7 @@ WorkflowEngine subclass: Object
   method: initBBS: aBBS [
     bbs := aBBS.
     cueCtx := CueContext new.
+    templateLoader := TemplateLoader new.
     self registerActions
   ]
 
@@ -35,9 +36,12 @@ WorkflowEngine subclass: Object
      3. Write initial tokens at start places
      Returns the workflow instance ID."
 
-    | template instanceId workflowPayload templatePayload startPlaces repoConfig |
+    | template instanceId workflowPayload templatePayload startPlaces repoConfig reloadedPayload |
 
-    "Read the template"
+    "Reload template from CUE file on disk (hot-reload support)"
+    reloadedPayload := templateLoader reloadTemplate: templateIdentity into: bbs.
+
+    "Read the template from BBS (now freshly reloaded if file exists)"
     template := bbs rdp: 'template' scope: 'system' identity: templateIdentity.
     template isNil ifTrue: [
       template := bbs rdp: 'template' scope: scope identity: templateIdentity
