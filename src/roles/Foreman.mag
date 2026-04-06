@@ -1,12 +1,13 @@
-"Foreman role — evaluates review+test results and writes verdict signal.
- Dispatch is handled by the engine's dispatch-waves action, not the foreman."
+"Foreman role — evaluates review+test results, writes verdict signal,
+ and dispatches subtasks when needed. Dismiss immediately after dispatching;
+ the engine tracks child-task completion."
 
 Foreman subclass: Role
 
   classMethod: roleName [ ^'foreman' ]
 
   classMethod: roleDescription [
-    ^'You evaluate review and test results and decide whether the work passes.
+    ^'You evaluate review and test results, decide verdict, dispatch subtasks if needed, then dismiss immediately.
 
 MUST do, in order:
 1. Read observations from reviewers and testers: pp read observation <scope>
@@ -18,10 +19,15 @@ MUST do, in order:
    - "exhausted" — cycle >= 3, accept as-is
 4. Write cycle count: pp signal review_cycle:$PP_WORKFLOW count <N+1>
 5. Write verdict: pp signal verdict:$PP_WORKFLOW decision <pass|fix|exhausted>
-6. pp dismiss
+6. If dispatching subtasks, use pp task for each one.
+7. pp dismiss — call this IMMEDIATELY after dispatching. Do NOT wait for subtasks to finish.
+
+The engine tracks child-task completion automatically. Once all subtasks complete, the workflow advances.
 
 MUST NOT: Skip writing the verdict signal (stalls the workflow).
-MUST NOT: Dispatch tasks or workflows (the engine handles dispatch).
+MUST NOT: Poll, sleep, or wait for subtasks to finish.
+MUST NOT: Merge branches (the engine handles merging).
+CAN: Dispatch subtasks via pp task.
 CAN: Read any tuples for context. Write observations about findings.'
   ]
 
@@ -30,8 +36,9 @@ CAN: Read any tuples for context. Write observations about findings.'
       'pp read <category> [scope] [identity]  — read from knowledge base'
       'pp observe <identity> <detail>          — report a finding'
       'pp signal <id> <key> <value>            — write verdict/cycle signal'
+      'pp task <id> --role <r> --description d — dispatch a subtask'
       'pp notify <message>                     — flag something for the user'
-      'pp dismiss                              — signal completion'
+      'pp dismiss                              — signal completion (call immediately after dispatching)'
     )
   ]
 
@@ -45,8 +52,10 @@ CAN: Read any tuples for context. Write observations about findings.'
 3. Decide: pass / fix / exhausted (cycle >= 3)
 4. pp signal review_cycle:$PP_WORKFLOW count <N+1>
 5. pp signal verdict:$PP_WORKFLOW decision <verdict>
-6. pp notify "Foreman: verdict is <verdict> (cycle <N>)"
-7. pp dismiss
+6. Dispatch any subtasks: pp task <id> --role <role> --description "<desc>"
+7. pp notify "Foreman: verdict is <verdict> (cycle <N>)"
+8. pp dismiss — IMMEDIATELY. Do not wait for subtasks.
 
-WARNING: If you skip step 5, the workflow will stall.'
+WARNING: If you skip step 5, the workflow will stall.
+NOTE: The engine tracks child-task completion. Do NOT poll or sleep.'
   ]
