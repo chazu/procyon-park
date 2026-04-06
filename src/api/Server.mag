@@ -2,7 +2,7 @@
  Exposes the BBS tuplespace over HTTP as JSON endpoints."
 
 ApiServer subclass: Object
-  instanceVars: httpServer bbs port dispatcher
+  instanceVars: httpServer bbs port dispatcher sseSubscribers
 
   classMethod: on: portNumber bbs: aBBS [
     ^super new initPort: portNumber bbs: aBBS dispatcher: nil
@@ -16,6 +16,7 @@ ApiServer subclass: Object
     port := portNumber.
     bbs := aBBS.
     dispatcher := aDispatcher.
+    sseSubscribers := #().
     httpServer := HttpServer new: port.
     self registerRoutes
   ]
@@ -24,6 +25,7 @@ ApiServer subclass: Object
 
   method: start [
     ('Procyon Park API starting on port ', port printString) println.
+    self startSSETick.
     httpServer start
   ]
 
@@ -172,7 +174,12 @@ ApiServer subclass: Object
     httpServer route: '/api/workitem/add-child' method: 'POST' handler: [:req | self handleWorkitemAddChild: req].
     httpServer route: '/api/workitem/run' method: 'POST' handler: [:req | self handleWorkitemRun: req].
     self get: '/api/dashboard' do: [:req | self handleDashboard: req].
-    self get: '/api/history' do: [:req | self handleHistory: req]
+    self get: '/api/history' do: [:req | self handleHistory: req].
+
+    "SSE dashboard stream"
+    httpServer sseRoute: '/api/sse/dashboard' handler: [:conn :req |
+      self handleSSEDashboard: conn request: req
+    ]
   ]
 
   "--- Helpers ---"
@@ -722,4 +729,218 @@ ApiServer subclass: Object
     d at: 'notifications' put: recent.
     d at: 'health' put: health.
     ^self okResponse: d
+  ]
+
+  "--- SSE Dashboard Stream ---"
+
+  method: handleSSEDashboard: conn request: req [
+    "Register an SSE subscriber for the dashboard stream.
+     The periodic tick loop broadcasts state to all connected clients."
+    sseSubscribers := sseSubscribers copyWith: conn.
+    ('SSE dashboard client connected, total: ', sseSubscribers size printString) println.
+    "Send an initial snapshot immediately"
+    self broadcastDashboardTo: conn
+  ]
+
+  method: startSSETick [
+    "Start a background goroutine that broadcasts BBS state to all SSE subscribers every 2 seconds."
+    [
+      [true] whileTrue: [
+        Process sleep: 2000.
+        self tickSSEBroadcast
+      ]
+    ] fork
+  ]
+
+  method: tickSSEBroadcast [
+    "Prune disconnected subscribers, then broadcast current state to all."
+    | live |
+    sseSubscribers isEmpty ifTrue: [^self].
+    live := sseSubscribers select: [:conn | conn isOpen].
+    sseSubscribers := live.
+    live do: [:conn |
+      [self broadcastDashboardTo: conn] on: Exception do: [:e |
+        ('SSE broadcast error: ', e messageText) println
+      ]
+    ]
+  ]
+
+  method: broadcastDashboardTo: conn [
+    "Send all dashboard fragments as Datastar-compatible SSE events to a single connection."
+    self sendWorkflowFragment: conn.
+    self sendTaskFragment: conn.
+    self sendTokenFragment: conn.
+    self sendObservationFragment: conn.
+    self sendSignalFragment: conn.
+    self sendNotificationFragment: conn
+  ]
+
+  method: sendWorkflowFragment: conn [
+    "Send workflow status as a Datastar merge-fragments event."
+    | workflows html |
+    workflows := bbs scanAll: 'workflow'.
+    html := self renderWorkflowsHTML: workflows.
+    conn send: html event: 'datastar-merge-fragments'
+  ]
+
+  method: sendTaskFragment: conn [
+    "Send task status as a Datastar merge-fragments event."
+    | tasks html |
+    tasks := bbs scanAll: 'task'.
+    html := self renderTasksHTML: tasks.
+    conn send: html event: 'datastar-merge-fragments'
+  ]
+
+  method: sendTokenFragment: conn [
+    "Send token status as a Datastar merge-fragments event."
+    | tokens html |
+    tokens := bbs scanAll: 'token'.
+    html := self renderTokensHTML: tokens.
+    conn send: html event: 'datastar-merge-fragments'
+  ]
+
+  method: sendObservationFragment: conn [
+    "Send observations as a Datastar merge-fragments event."
+    | observations html |
+    observations := bbs scanAll: 'observation'.
+    html := self renderObservationsHTML: observations.
+    conn send: html event: 'datastar-merge-fragments'
+  ]
+
+  method: sendSignalFragment: conn [
+    "Send signals as a Datastar merge-fragments event."
+    | signals html |
+    signals := bbs scanAll: 'signal'.
+    html := self renderSignalsHTML: signals.
+    conn send: html event: 'datastar-merge-fragments'
+  ]
+
+  method: sendNotificationFragment: conn [
+    "Send recent notifications as a Datastar merge-fragments event."
+    | notifications recent html |
+    notifications := bbs scanAll: 'notification'.
+    recent := notifications size > 20
+      ifTrue: [notifications copyFrom: (notifications size - 20)]
+      ifFalse: [notifications].
+    html := self renderNotificationsHTML: recent.
+    conn send: html event: 'datastar-merge-fragments'
+  ]
+
+  "--- HTML Fragment Renderers ---"
+
+  method: renderWorkflowsHTML: workflows [
+    | s lf |
+    lf := Character lf asString.
+    s := '<div id="dashboard-workflows">'.
+    s := s, lf, '<h2>Workflows (', workflows size printString, ')</h2>'.
+    s := s, lf, '<ul>'.
+    workflows do: [:w |
+      | p status template wfId |
+      p := w at: 'payload' ifAbsent: [Dictionary new].
+      status := p at: 'status' ifAbsent: ['unknown'].
+      template := p at: 'template' ifAbsent: ['?'].
+      wfId := w at: 'identity' ifAbsent: [''].
+      s := s, lf, '<li data-status="', status, '">'.
+      s := s, '<strong>', wfId, '</strong> [', template, '] — ', status.
+      s := s, '</li>'
+    ].
+    s := s, lf, '</ul>', lf, '</div>'.
+    ^s
+  ]
+
+  method: renderTasksHTML: tasks [
+    | s lf |
+    lf := Character lf asString.
+    s := '<div id="dashboard-tasks">'.
+    s := s, lf, '<h2>Tasks (', tasks size printString, ')</h2>'.
+    s := s, lf, '<ul>'.
+    tasks do: [:t |
+      | p status role identity |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      status := p at: 'status' ifAbsent: ['unknown'].
+      role := p at: 'role' ifAbsent: ['?'].
+      identity := t at: 'identity' ifAbsent: [''].
+      s := s, lf, '<li data-status="', status, '" data-role="', role, '">'.
+      s := s, '<strong>', identity, '</strong> [', role, '] — ', status.
+      s := s, '</li>'
+    ].
+    s := s, lf, '</ul>', lf, '</div>'.
+    ^s
+  ]
+
+  method: renderTokensHTML: tokens [
+    | s lf |
+    lf := Character lf asString.
+    s := '<div id="dashboard-tokens">'.
+    s := s, lf, '<h2>Tokens (', tokens size printString, ')</h2>'.
+    s := s, lf, '<ul>'.
+    tokens do: [:tok |
+      | p identity |
+      p := tok at: 'payload' ifAbsent: [Dictionary new].
+      identity := tok at: 'identity' ifAbsent: [''].
+      s := s, lf, '<li>'.
+      s := s, '<strong>', identity, '</strong>'.
+      s := s, '</li>'
+    ].
+    s := s, lf, '</ul>', lf, '</div>'.
+    ^s
+  ]
+
+  method: renderObservationsHTML: observations [
+    | s lf |
+    lf := Character lf asString.
+    s := '<div id="dashboard-observations">'.
+    s := s, lf, '<h2>Observations (', observations size printString, ')</h2>'.
+    s := s, lf, '<ul>'.
+    observations do: [:o |
+      | p detail identity scope |
+      p := o at: 'payload' ifAbsent: [Dictionary new].
+      detail := p at: 'detail' ifAbsent: [''].
+      identity := o at: 'identity' ifAbsent: [''].
+      scope := o at: 'scope' ifAbsent: [''].
+      s := s, lf, '<li>'.
+      s := s, '<strong>', identity, '</strong> (', scope, ') — ', detail.
+      s := s, '</li>'
+    ].
+    s := s, lf, '</ul>', lf, '</div>'.
+    ^s
+  ]
+
+  method: renderSignalsHTML: signals [
+    | s lf |
+    lf := Character lf asString.
+    s := '<div id="dashboard-signals">'.
+    s := s, lf, '<h2>Signals (', signals size printString, ')</h2>'.
+    s := s, lf, '<ul>'.
+    signals do: [:sig |
+      | identity scope |
+      identity := sig at: 'identity' ifAbsent: [''].
+      scope := sig at: 'scope' ifAbsent: [''].
+      s := s, lf, '<li>'.
+      s := s, '<strong>', identity, '</strong> (', scope, ')'.
+      s := s, '</li>'
+    ].
+    s := s, lf, '</ul>', lf, '</div>'.
+    ^s
+  ]
+
+  method: renderNotificationsHTML: notifications [
+    | s lf |
+    lf := Character lf asString.
+    s := '<div id="dashboard-notifications">'.
+    s := s, lf, '<h2>Notifications (', notifications size printString, ')</h2>'.
+    s := s, lf, '<ul>'.
+    notifications do: [:n |
+      | p message severity scope |
+      p := n at: 'payload' ifAbsent: [Dictionary new].
+      message := p at: 'message' ifAbsent: [''].
+      severity := p at: 'severity' ifAbsent: ['info'].
+      scope := n at: 'scope' ifAbsent: ['system'].
+      s := s, lf, '<li data-severity="', severity, '">'.
+      s := s, '<span class="severity-', severity, '">[', severity, ']</span> '.
+      s := s, message, ' <small>(', scope, ')</small>'.
+      s := s, '</li>'
+    ].
+    s := s, lf, '</ul>', lf, '</div>'.
+    ^s
   ]
