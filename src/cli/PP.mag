@@ -52,6 +52,7 @@ PP subclass: Object
     cmd = 'history'   ifTrue: [^self cmdHistory: args].
     cmd = 'dashboard' ifTrue: [^self cmdDashboard: args].
     cmd = 'workitem'  ifTrue: [^WorkItemCLI new runWith: args].
+    cmd = 'gc'        ifTrue: [^self cmdGc: args].
     cmd = 'repo'      ifTrue: [^Repo new runWith: args].
     cmd = 'worktree'  ifTrue: [
       wtArgs := Array new: 0.
@@ -863,6 +864,117 @@ Dashboard:     ', baseUrl, '/dashboard/
     Shell run: 'open ', url
   ]
 
+  "--- Garbage Collection ---"
+
+  method: cmdGc: args [
+    "pp gc [--dry-run] — remove finished workflows, their tokens/signals, and merged branches."
+    | dryRun workflows terminal removedWorkflows removedTokens removedSignals removedBranches allTokens allSignals wfId wfScope branchOutput lines |
+
+    dryRun := (args indexOf: '--dry-run') >= 0.
+    removedWorkflows := 0.
+    removedTokens := 0.
+    removedSignals := 0.
+    removedBranches := 0.
+
+    'Procyon Park GC' println.
+    dryRun ifTrue: ['(dry-run mode — no changes will be made)' println].
+    '---' println.
+
+    "1. Find terminal workflows (completed, cancelled, failed)"
+    workflows := self safeScan: 'workflow' scope: nil.
+    terminal := workflows select: [:wf |
+      | p status |
+      p := wf at: 'payload' ifAbsent: [Dictionary new].
+      status := p at: 'status' ifAbsent: [''].
+      status = 'completed' or: [status = 'cancelled' or: [status = 'failed']]
+    ].
+
+    terminal do: [:wf |
+      | p |
+      wfId := wf at: 'identity' ifAbsent: [''].
+      wfScope := wf at: 'scope' ifAbsent: ['default'].
+      p := wf at: 'payload' ifAbsent: [Dictionary new].
+      ('  workflow: ', wfId, ' [', (p at: 'status' ifAbsent: ['?']), '] scope:', wfScope) println.
+
+      "Remove associated tokens"
+      allTokens := self safeScan: 'token' scope: wfScope.
+      allTokens do: [:t |
+        | tp |
+        tp := t at: 'payload' ifAbsent: [Dictionary new].
+        (tp at: 'workflow_instance' ifAbsent: ['']) = wfId ifTrue: [
+          dryRun ifFalse: [
+            self silentInp: 'token' scope: wfScope identity: (t at: 'identity' ifAbsent: [''])
+          ].
+          removedTokens := removedTokens + 1
+        ]
+      ].
+
+      "Remove associated signals (e.g. review_cycle:<wfId>)"
+      allSignals := self safeScan: 'signal' scope: wfScope.
+      allSignals do: [:s |
+        | sid |
+        sid := s at: 'identity' ifAbsent: [''].
+        (sid includesSubstring: wfId) ifTrue: [
+          dryRun ifFalse: [
+            self silentInp: 'signal' scope: wfScope identity: sid
+          ].
+          removedSignals := removedSignals + 1
+        ]
+      ].
+
+      "Remove the workflow tuple itself"
+      dryRun ifFalse: [
+        self silentInp: 'workflow' scope: wfScope identity: wfId
+      ].
+      removedWorkflows := removedWorkflows + 1
+    ].
+
+    "2. Clean up merged feature branches"
+    '' println.
+    'Checking merged branches...' println.
+    [
+      branchOutput := Shell capture: 'git branch --merged main 2>/dev/null'.
+      branchOutput notNil ifTrue: [
+        lines := branchOutput split: (Character lf asString).
+        lines do: [:line |
+          | trimmed |
+          trimmed := line trim.
+          ((trimmed includesSubstring: 'feature/story-') or:
+           [trimmed includesSubstring: 'feature/full-pipeline-']) ifTrue: [
+            ('  branch: ', trimmed) println.
+            dryRun ifFalse: [
+              Shell run: 'git branch -d ', trimmed, ' 2>/dev/null'
+            ].
+            removedBranches := removedBranches + 1
+          ]
+        ]
+      ]
+    ] on: Exception do: [:e |
+      ('  (branch cleanup skipped: ', e messageText, ')') println
+    ].
+
+    "3. Print summary"
+    '' println.
+    'GC Summary:' println.
+    ('  Workflows removed: ', removedWorkflows printString) println.
+    ('  Tokens removed:    ', removedTokens printString) println.
+    ('  Signals removed:   ', removedSignals printString) println.
+    ('  Branches removed:  ', removedBranches printString) println.
+    dryRun ifTrue: ['(dry-run — nothing was actually removed)' println]
+  ]
+
+  method: silentInp: category scope: aScope identity: anIdentity [
+    "Remove a tuple from the BBS silently (no output)."
+    | body |
+    body := Dictionary new.
+    body at: 'category' put: category.
+    body at: 'scope' put: aScope.
+    body at: 'identity' put: anIdentity.
+    [
+      client post: baseUrl, '/api/inp' body: (Json encode: body) contentType: 'application/json'
+    ] on: Exception do: [:e | "ignore" ]
+  ]
+
   "--- Helpers ---"
 
   method: post: path body: dict [
@@ -941,6 +1053,7 @@ Dashboard:     ', baseUrl, '/dashboard/
     '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
     '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
     '  dashboard                                        Open web dashboard in browser' println.
+    '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
     '  help                                             Show this help' println.
     '' println.
     'Environment:' println.
