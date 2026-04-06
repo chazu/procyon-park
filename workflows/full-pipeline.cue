@@ -1,5 +1,6 @@
-// Full pipeline: plan, implement, review+test, fix cycle
-description: "Full pipeline: plan, implement, review+test, fix cycle"
+// Full pipeline: dispatch waves, review+test, fix cycle
+// Planning is decoupled — work items must already have children before running.
+description: "Full pipeline: dispatch waves, review+test, fix cycle"
 start_places: ["request"]
 terminal_places: ["done"]
 max_review_cycles: 3
@@ -8,19 +9,12 @@ transitions: [
 	{
 		id:     "setup"
 		in:     ["request"]
-		out:    ["planning"]
+		out:    ["dispatching"]
 		action: "create-worktree"
 	},
 	{
-		id:          "plan"
-		in:          ["planning"]
-		out:         ["plan_ready"]
-		role:        "planner"
-		description: "Create implementation plan for: {{description}}\n\nWork item: {{workitem}} — if this work item already has children (pp workitem children {{workitem}}), use them as your plan. Do NOT create duplicate stories or a legacy plan decision. If no children exist, create stories as children of {{workitem}}."
-	},
-	{
 		id:     "dispatch"
-		in:     ["plan_ready"]
+		in:     ["dispatching"]
 		out:    ["integrated"]
 		action: "dispatch-waves"
 	},
