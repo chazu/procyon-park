@@ -1,0 +1,402 @@
+"SystemCommands — system-level CLI commands extracted from PP.
+ Handles status, prime, task, log, history, dashboard, and gc."
+
+SystemCommands subclass: CLIBase
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: runCommand: cmd args: args [
+    "Dispatch a system command by name."
+    cmd = 'status'    ifTrue: [^self cmdStatus: args].
+    cmd = 'prime'     ifTrue: [^self cmdPrime: args].
+    cmd = 'task'      ifTrue: [^self cmdTask: args].
+    cmd = 'log'       ifTrue: [^self cmdLog: args].
+    cmd = 'history'   ifTrue: [^self cmdHistory: args].
+    cmd = 'dashboard' ifTrue: [^self cmdDashboard: args].
+    cmd = 'gc'        ifTrue: [^self cmdGc: args].
+    ('SystemCommands: unknown command: ', cmd) println
+  ]
+
+  "--- Status & Context ---"
+
+  method: cmdStatus: args [
+    "pp status — show health + current task context"
+    | response health |
+    [
+      response := client get: baseUrl, '/api/health'.
+      response isNil ifTrue: [
+        ('Error: no response from server at ', baseUrl) println.
+        ^self
+      ].
+      (response isKindOf: String) ifFalse: [
+        ('Error: server returned non-String response') println.
+        ^self
+      ].
+      response isEmpty ifTrue: [
+        ('Error: empty response from server') println.
+        ^self
+      ].
+      health := Json decode: response.
+      'Procyon Park Status:' println.
+      ('  Tuples:  ', (health at: 'tuples' ifAbsent: ['?']) printString) println.
+      ('  Uptime:  ', (health at: 'uptime' ifAbsent: ['?']) printString, 's') println.
+
+      taskId isEmpty ifFalse: [
+        ('  Task:    ', taskId) println.
+        ('  Scope:   ', scope) println
+      ]
+    ] on: Exception do: [:e |
+      ('Error connecting to Procyon Park at ', baseUrl, ': ', e messageText) println
+    ]
+  ]
+
+  method: cmdPrime: args [
+    "pp prime [--role <role>] — output priming context for an agent."
+    | roleName conventions facts signals notifications out |
+
+    roleName := self flagValue: '--role' in: args.
+    roleName isNil ifTrue: [roleName := 'agent'].
+
+    out := '# Procyon Park Agent Context
+
+You are connected to the Procyon Park orchestration system.
+Communicate with it using the `pp` command-line tool.
+
+## Available Commands
+
+  pp observe <identity> <detail> [--tags t1,t2]     Report an observation
+  pp decide <identity> <detail> [--rationale ..]     Record a decision
+  pp event <identity> [--type T] [--summary S]       Emit an event
+  pp plan <file.json>                                Submit a structured plan
+  pp read <category> [scope] [identity]              Read tuples
+  pp notify <message> [--severity info|warn|urgent]  Notify the user
+  pp dismiss                                         Signal task completion
+  pp status                                          Show system status
+  pp task <id> --role <r> --description <d> [--workdir <p>]  Create a task
+  pp workflow <template> [--param key=val ...]        Start a workflow
+  pp signal <id> <key> <value>                       Upsert a signal
+  pp log [--follow] [--no-follow] [--since <secs>]   Tail notification stream
+
+Worktree base: ~/.pp/worktrees/
+Dashboard:     ', baseUrl, '/dashboard/
+
+## Rules
+
+- All coordination flows through `pp`. Do not coordinate with other agents directly.
+- Report anything unexpected with `pp observe`.
+- When done, run `pp dismiss`.
+
+## Environment
+
+  PP_URL   = ', baseUrl, '
+  PP_SCOPE = ', scope, '
+'.
+
+    taskId isEmpty ifFalse: [
+      out := out, '  PP_TASK  = ', taskId, '
+'
+    ].
+
+    "Conventions"
+    conventions := self safeScan: 'convention' scope: nil.
+    conventions isEmpty ifFalse: [
+      out := out, '
+## Conventions
+
+'.
+      conventions do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- **', (t at: 'identity' ifAbsent: ['?']), '**: ', (payload at: 'detail' ifAbsent: ['']), '
+'
+      ]
+    ].
+
+    "Facts in scope"
+    facts := self safeScan: 'fact' scope: scope.
+    facts isEmpty ifFalse: [
+      out := out, '
+## Known Facts (scope: ', scope, ')
+
+'.
+      facts do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- **', (t at: 'identity' ifAbsent: ['?']), '**: ', (payload at: 'detail' ifAbsent: ['']), '
+'
+      ]
+    ].
+
+    "Signals in scope"
+    signals := self safeScan: 'signal' scope: scope.
+    signals isEmpty ifFalse: [
+      out := out, '
+## Signals (scope: ', scope, ')
+
+'.
+      signals do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- **', (t at: 'identity' ifAbsent: ['?']), '**: ', (Json encode: payload), '
+'
+      ]
+    ].
+
+    "Pending notifications"
+    notifications := self safeGetNotifications.
+    notifications isEmpty ifFalse: [
+      out := out, '
+## Pending Notifications
+
+'.
+      notifications do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- [', (payload at: 'severity' ifAbsent: ['info']), '] ', (payload at: 'message' ifAbsent: ['']), '
+'
+      ]
+    ].
+
+    out println
+  ]
+
+  "--- Task ---"
+
+  method: cmdTask: args [
+    "pp task <identity> --role <role> --description <desc> [--workdir <path>] [--repo <name>]"
+    | body identity role desc workdir repo |
+    args size < 2 ifTrue: [
+      'Usage: pp task <identity> --role <role> --description <desc> [--workdir <path>] [--repo <name>]' println.
+      ^self
+    ].
+
+    identity := args at: 1.
+    role := self flagValue: '--role' in: args.
+    desc := self flagValue: '--description' in: args.
+
+    role isNil ifTrue: [
+      'Error: --role is required' println.
+      ^self
+    ].
+
+    desc isNil ifTrue: [desc := ''].
+
+    body := Dictionary new.
+    body at: 'scope' put: scope.
+    body at: 'identity' put: identity.
+    body at: 'role' put: role.
+    body at: 'description' put: desc.
+
+    workdir := self flagValue: '--workdir' in: args.
+    workdir notNil ifTrue: [body at: 'workdir' put: workdir].
+
+    "Repo: from --repo flag, PP_REPO env, or omit"
+    repo := self flagValue: '--repo' in: args.
+    repo isNil ifTrue: [
+      repo := System env: 'PP_REPO'.
+      (repo isNil or: [repo isEmpty]) ifTrue: [repo := nil]
+    ].
+    repo notNil ifTrue: [body at: 'repo' put: repo].
+
+    taskId isEmpty ifFalse: [
+      body at: 'workflow_instance' put: taskId
+    ].
+
+    self post: '/api/task/create' body: body
+  ]
+
+  "--- Log & History ---"
+
+  method: cmdLog: args [
+    "pp log [--follow] [--no-follow] [--since <seconds>] — poll notifications stream"
+    | follow sinceOffset since sinceStr url response result notifications payload createdAt severity message ts maxCreatedAt dt waitParam |
+    follow := true.
+    sinceOffset := 0.
+
+    "Parse flags — follow is default; --no-follow disables, --follow is explicit"
+    (args indexOf: '--no-follow') >= 0 ifTrue: [follow := false].
+    (args indexOf: '--follow') >= 0 ifTrue: [follow := true].
+    sinceStr := self flagValue: '--since' in: args.
+    sinceStr notNil ifTrue: [sinceOffset := sinceStr asInteger].
+
+    "Compute initial since epoch"
+    since := DateTime now epochSeconds - sinceOffset.
+
+    "Non-following mode: single fetch via curl (avoids HttpClient blocking bug)"
+    follow ifFalse: [
+      sinceStr := since printString.
+      url := baseUrl, '/api/notifications/stream?since=', sinceStr, '&wait=0'.
+      response := Shell capture: 'curl -s "', url, '"'.
+      (response notNil and: [response isEmpty not]) ifTrue: [
+        [
+          result := Json decode: response.
+          notifications := result at: 'notifications' ifAbsent: [#()].
+          notifications do: [:notif |
+            payload := notif.
+            createdAt := payload at: 'created_at' ifAbsent: [0].
+            severity := payload at: 'severity' ifAbsent: ['info'].
+            message := payload at: 'message' ifAbsent: [''].
+            dt := DateTime fromEpoch: createdAt.
+            ts := dt printString.
+            (ts, ' [', severity, '] ', message) println
+          ]
+        ] on: Exception do: [:e |
+          ('Error: ', e messageText) println
+        ]
+      ].
+      ^self
+    ].
+
+    "Following mode: long-poll loop via HttpClient"
+    [true] whileTrue: [
+      sinceStr := since printString.
+      url := baseUrl, '/api/notifications/stream?since=', sinceStr, '&wait=1'.
+      [
+        response := client get: url.
+        (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
+          result := Json decode: response.
+          notifications := result at: 'notifications' ifAbsent: [#()].
+          maxCreatedAt := since.
+          notifications do: [:notif |
+            payload := notif.
+            createdAt := payload at: 'created_at' ifAbsent: [0].
+            severity := payload at: 'severity' ifAbsent: ['info'].
+            message := payload at: 'message' ifAbsent: [''].
+            dt := DateTime fromEpoch: createdAt.
+            ts := dt printString.
+            (ts, ' [', severity, '] ', message) println.
+            createdAt > maxCreatedAt ifTrue: [maxCreatedAt := createdAt]
+          ].
+          notifications size > 0 ifTrue: [since := maxCreatedAt + 1]
+        ]
+      ] on: Exception do: [:e |
+        ('Error polling notifications: ', e messageText) println
+      ].
+      Process sleep: 2000
+    ]
+  ]
+
+  method: cmdHistory: args [
+    "pp history [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I]"
+    | sinceStr limitStr op category histScope identity url sep response result entries entry ts entryOp entryCat entryScope entryIdentity |
+    sinceStr := self flagValue: '--since' in: args.
+    limitStr := self flagValue: '--limit' in: args.
+    op := self flagValue: '--op' in: args.
+    category := self flagValue: '--category' in: args.
+    histScope := self flagValue: '--scope' in: args.
+    identity := self flagValue: '--identity' in: args.
+
+    url := '/api/history?limit='.
+    limitStr notNil
+      ifTrue: [url := url, limitStr]
+      ifFalse: [url := url, '50'].
+    sinceStr notNil ifTrue: [url := url, '&since=', sinceStr].
+    op notNil ifTrue: [url := url, '&op=', op].
+    category notNil ifTrue: [url := url, '&category=', category].
+    histScope notNil ifTrue: [url := url, '&scope=', histScope].
+    identity notNil ifTrue: [url := url, '&identity=', identity].
+
+    [
+      response := client get: baseUrl, url.
+      response isNil ifTrue: [
+        'Error: no response from server' println.
+        ^self
+      ].
+      (response isKindOf: String) ifFalse: [
+        'Error: server returned non-String response' println.
+        ^self
+      ].
+      response isEmpty ifTrue: [
+        'Error: empty response from server' println.
+        ^self
+      ].
+      result := Json decode: response.
+      entries := result at: 'entries' ifAbsent: [#()].
+      entries size = 0 ifTrue: [
+        'No history entries.' println.
+        ^self
+      ].
+      entries do: [:e |
+        ts := e at: 'ts' ifAbsent: ['?'].
+        entryOp := e at: 'op' ifAbsent: ['?'].
+        entryCat := e at: 'category' ifAbsent: [''].
+        entryScope := e at: 'scope' ifAbsent: [''].
+        entryIdentity := e at: 'identity' ifAbsent: [''].
+        (ts printString, ' ', entryOp, ' ', entryCat, '/', entryScope, '/', entryIdentity) println
+      ]
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
+  ]
+
+  "--- Dashboard ---"
+
+  method: cmdDashboard: args [
+    "Open the web dashboard in the default browser."
+    | url |
+    url := baseUrl, '/dashboard/'.
+    ('Opening dashboard: ', url) println.
+    Shell run: 'open ', url
+  ]
+
+  "--- Garbage Collection ---"
+
+  method: cmdGc: args [
+    "pp gc — clean up finished workflows and merged branches."
+    | dryRun count |
+    dryRun := (args indexOf: '--dry-run') >= 0.
+    'Procyon Park GC' println.
+    dryRun ifTrue: ['(dry-run)' println].
+    count := self gcWorkflows: dryRun.
+    self gcBranches: dryRun.
+    ('Done. Removed ', count printString, ' workflows.') println
+  ]
+
+  method: gcWorkflows: dryRun [
+    | body response result workflows count |
+    body := Dictionary new.
+    body at: 'category' put: 'workflow'.
+    count := 0.
+    [
+      response := client post: baseUrl, '/api/scan' body: (Json encode: body) contentType: 'application/json'.
+      result := Json decode: response.
+      workflows := result at: 'tuples' ifAbsent: [#()].
+      workflows do: [:wf |
+        | p status wfId wfScope |
+        p := wf at: 'payload' ifAbsent: [Dictionary new].
+        status := p at: 'status' ifAbsent: [''].
+        wfId := wf at: 'identity' ifAbsent: [''].
+        wfScope := wf at: 'scope' ifAbsent: ['default'].
+        (status = 'completed' or: [status = 'cancelled' or: [status = 'failed']]) ifTrue: [
+          ('  ', wfId, ' [', status, ']') println.
+          dryRun ifFalse: [
+            self silentInp: 'workflow' scope: wfScope identity: wfId
+          ].
+          count := count + 1
+        ]
+      ]
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ].
+    ^count
+  ]
+
+  method: gcBranches: dryRun [
+    | output lines |
+    [
+      output := Shell capture: 'git branch --merged main 2>/dev/null | grep feature/ | sed "s/^[* ]*//"'.
+      output isEmpty ifFalse: [
+        lines := output split: (Character lf asString).
+        lines do: [:line |
+          line isEmpty ifFalse: [
+            ('  branch: ', line) println.
+            dryRun ifFalse: [
+              Shell run: 'git branch -D ', line, ' 2>/dev/null'
+            ]
+          ]
+        ]
+      ]
+    ] on: Exception do: [:e | ]
+  ]
