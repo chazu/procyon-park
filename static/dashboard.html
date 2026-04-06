@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Procyon Park Dashboard</title>
-  <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.7/bundles/datastar.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -30,7 +29,6 @@
       padding: 14px;
     }
 
-    /* Workflow cards */
     .wf-card {
       background: #0d1117;
       border: 1px solid #30363d;
@@ -39,60 +37,14 @@
       padding: 10px 12px;
       margin-bottom: 10px;
     }
-    .wf-header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 4px;
-    }
-    .wf-template {
+    .wf-card b {
       background: #1f6feb33;
       color: #58a6ff;
       padding: 1px 8px;
       border-radius: 10px;
-      font-size: 0.8em;
-      font-weight: 600;
-    }
-    .wf-id {
-      color: #484f58;
-      font-size: 0.75em;
-      font-family: monospace;
-    }
-    .wf-desc {
-      color: #8b949e;
       font-size: 0.85em;
-      margin: 4px 0;
     }
-    .wf-tokens {
-      margin: 6px 0 2px;
-    }
-    .token {
-      display: inline-block;
-      padding: 1px 8px;
-      border-radius: 10px;
-      font-size: 0.75em;
-      font-weight: 500;
-      margin-right: 4px;
-    }
-    .token-positive { background: #3fb95033; color: #3fb950; }
-    .token-waiting  { background: #d2992233; color: #d29922; }
-    .wf-tasks {
-      margin-top: 6px;
-    }
-    .task-badge {
-      display: inline-block;
-      padding: 1px 8px;
-      border-radius: 10px;
-      font-size: 0.75em;
-      font-weight: 500;
-      margin-right: 4px;
-    }
-    .task-pending    { background: #8b949e33; color: #8b949e; }
-    .task-dispatched { background: #1f6feb33; color: #58a6ff; }
-    .task-completed  { background: #3fb95033; color: #3fb950; }
-    .task-cancelled  { background: #8b949e33; color: #8b949e; opacity: 0.5; }
 
-    /* Notification feed */
     .feed { max-height: 80vh; overflow-y: auto; }
     ul { list-style: none; }
     li {
@@ -101,12 +53,6 @@
       font-size: 0.82em;
     }
     li:last-child { border-bottom: none; }
-    li[data-severity="info"]   { border-left: 2px solid #58a6ff; padding-left: 8px; }
-    li[data-severity="warn"]   { border-left: 2px solid #d29922; padding-left: 8px; }
-    li[data-severity="urgent"] { border-left: 2px solid #f85149; padding-left: 8px; }
-    .severity-info   { color: #58a6ff; font-size: 0.8em; }
-    .severity-warn   { color: #d29922; font-size: 0.8em; }
-    .severity-urgent { color: #f85149; font-size: 0.8em; }
 
     .empty-state {
       color: #484f58;
@@ -115,6 +61,15 @@
       padding: 20px;
     }
 
+    .status-dot {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #3fb950;
+      margin-right: 6px;
+    }
+    .status-dot.disconnected { background: #f85149; }
+
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: #161b22; }
     ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
@@ -122,11 +77,9 @@
 </head>
 <body>
 
-  <h1>Procyon Park</h1>
+  <h1><span class="status-dot" id="conn-dot"></span>Procyon Park</h1>
 
-  <div class="layout" data-init="@get('/api/sse/dashboard')">
-
-    <!-- Left: Active workflows with grouped tasks/tokens -->
+  <div class="layout">
     <div class="panel">
       <div id="dashboard-workflows">
         <h2>Active Workflows</h2>
@@ -134,15 +87,45 @@
       </div>
     </div>
 
-    <!-- Right: Notification feed -->
     <div class="panel feed">
       <div id="dashboard-notifications">
         <h2>Recent Activity</h2>
         <div class="empty-state">Connecting...</div>
       </div>
     </div>
-
   </div>
+
+  <script>
+    const es = new EventSource('/api/sse/dashboard');
+    const dot = document.getElementById('conn-dot');
+
+    es.addEventListener('datastar-patch-elements', (e) => {
+      // Parse the "elements " prefix from data lines
+      const lines = e.data.split('\n');
+      let html = '';
+      for (const line of lines) {
+        if (line.startsWith('elements ')) {
+          html += line.substring(9);
+        } else {
+          html += line;
+        }
+      }
+
+      // Find target element by ID in the fragment
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      const root = tmp.firstElementChild;
+      if (root && root.id) {
+        const target = document.getElementById(root.id);
+        if (target) {
+          target.outerHTML = root.outerHTML;
+        }
+      }
+    });
+
+    es.onopen = () => { dot.classList.remove('disconnected'); };
+    es.onerror = () => { dot.classList.add('disconnected'); };
+  </script>
 
 </body>
 </html>
