@@ -764,9 +764,7 @@ ApiServer subclass: Object
     "Register an SSE subscriber for the dashboard stream.
      The periodic tick loop broadcasts state to all connected clients."
     sseSubscribers := sseSubscribers copyWith: conn.
-    ('SSE dashboard client connected, total: ', sseSubscribers size printString) println.
-    "Send an initial snapshot immediately"
-    self broadcastDashboardTo: conn
+    ('SSE dashboard client connected, total: ', sseSubscribers size printString) println
   ]
 
   method: startSSETick [
@@ -779,8 +777,20 @@ ApiServer subclass: Object
     ] fork
   ]
 
+  method: sendWorkflows: conn [
+    | wfHtml |
+    wfHtml := self buildWorkflowsHTML: (bbs scanAll: 'workflow').
+    conn send: ('elements ', wfHtml) event: 'datastar-patch-elements'
+  ]
+
+  method: sendNotifs: conn [
+    | html |
+    html := self buildNotificationsHTML.
+    conn send: ('elements ', html) event: 'datastar-patch-elements'
+  ]
+
   method: tickSSEBroadcast [
-    "Prune disconnected subscribers, then broadcast current state to all."
+    "Prune disconnected subscribers, then broadcast."
     | live |
     sseSubscribers isEmpty ifTrue: [^self].
     live := sseSubscribers select: [:conn | conn isOpen].
@@ -793,183 +803,146 @@ ApiServer subclass: Object
   ]
 
   method: broadcastDashboardTo: conn [
-    "Send all dashboard fragments as Datastar-compatible SSE events to a single connection."
-    self sendWorkflowFragment: conn.
-    self sendTaskFragment: conn.
-    self sendTokenFragment: conn.
-    self sendObservationFragment: conn.
-    self sendSignalFragment: conn.
-    self sendNotificationFragment: conn
+    "Send workflow-centric dashboard view + notification feed."
+    self sendWorkflows: conn.
+    self sendNotifs: conn
   ]
 
   method: sendFragment: conn html: html [
-    "Send a Datastar patch-elements event. Prefixes each HTML line with 'elements '."
-    | lf lines data |
-    lf := Character lf asString.
-    data := ''.
-    lines := html split: lf.
-    lines do: [:line |
-      line isEmpty ifFalse: [
-        data := data, 'elements ', line, lf
-      ]
-    ].
-    conn send: data event: 'datastar-patch-elements'
+    "Send a Datastar patch-elements event."
+    conn send: ('elements ', html) event: 'datastar-patch-elements'
   ]
 
-  method: sendWorkflowFragment: conn [
-    | workflows |
+  method: sendWorkflowsView: conn [
+    "Build workflow-centric view."
+    | workflows s |
     workflows := bbs scanAll: 'workflow'.
-    self sendFragment: conn html: (self renderWorkflowsHTML: workflows)
+    s := self buildWorkflowsHTML: workflows.
+    self sendFragment: conn html: s
   ]
 
-  method: sendTaskFragment: conn [
-    | tasks |
-    tasks := bbs scanAll: 'task'.
-    self sendFragment: conn html: (self renderTasksHTML: tasks)
-  ]
-
-  method: sendTokenFragment: conn [
-    | tokens |
-    tokens := bbs scanAll: 'token'.
-    self sendFragment: conn html: (self renderTokensHTML: tokens)
-  ]
-
-  method: sendObservationFragment: conn [
-    | observations |
-    observations := bbs scanAll: 'observation'.
-    self sendFragment: conn html: (self renderObservationsHTML: observations)
-  ]
-
-  method: sendSignalFragment: conn [
-    | signals |
-    signals := bbs scanAll: 'signal'.
-    self sendFragment: conn html: (self renderSignalsHTML: signals)
-  ]
-
-  method: sendNotificationFragment: conn [
-    | notifications recent |
-    notifications := bbs scanAll: 'notification'.
-    recent := notifications size > 20
-      ifTrue: [notifications copyFrom: (notifications size - 20)]
-      ifFalse: [notifications].
-    self sendFragment: conn html: (self renderNotificationsHTML: recent)
-  ]
-
-  "--- HTML Fragment Renderers ---"
-
-  method: renderWorkflowsHTML: workflows [
+  method: buildWorkflowsHTML: workflows [
     | s lf |
     lf := Character lf asString.
     s := '<div id="dashboard-workflows">'.
-    s := s, lf, '<h2>Workflows (', workflows size printString, ')</h2>'.
-    s := s, lf, '<ul>'.
+    s := s, lf, '<h2>Active Workflows</h2>'.
     workflows do: [:w |
-      | p status template wfId |
+      | p status |
       p := w at: 'payload' ifAbsent: [Dictionary new].
-      status := p at: 'status' ifAbsent: ['unknown'].
-      template := p at: 'template' ifAbsent: ['?'].
-      wfId := w at: 'identity' ifAbsent: [''].
-      s := s, lf, '<li data-status="', status, '">'.
-      s := s, '<strong>', wfId, '</strong> [', template, '] — ', status.
-      s := s, '</li>'
+      status := p at: 'status' ifAbsent: [''].
+      status = 'running' ifTrue: [s := s, (self renderCard: w)]
     ].
-    s := s, lf, '</ul>', lf, '</div>'.
-    ^s
+    ^s, lf, '</div>'
   ]
 
-  method: renderTasksHTML: tasks [
-    | s lf |
+  method: renderCard: w [
+    "Render a single workflow card with description, tokens, and tasks."
+    | s lf p wfId template desc params |
     lf := Character lf asString.
-    s := '<div id="dashboard-tasks">'.
-    s := s, lf, '<h2>Tasks (', tasks size printString, ')</h2>'.
-    s := s, lf, '<ul>'.
-    tasks do: [:t |
-      | p status role identity |
-      p := t at: 'payload' ifAbsent: [Dictionary new].
-      status := p at: 'status' ifAbsent: ['unknown'].
-      role := p at: 'role' ifAbsent: ['?'].
-      identity := t at: 'identity' ifAbsent: [''].
-      s := s, lf, '<li data-status="', status, '" data-role="', role, '">'.
-      s := s, '<strong>', identity, '</strong> [', role, '] — ', status.
-      s := s, '</li>'
+    p := w at: 'payload' ifAbsent: [Dictionary new].
+    wfId := w at: 'identity' ifAbsent: ['?'].
+    template := p at: 'template' ifAbsent: ['?'].
+    params := p at: 'params' ifAbsent: [Dictionary new].
+    desc := params at: 'description' ifAbsent: [''].
+    desc size > 120 ifTrue: [desc := (desc copyFrom: 0 to: 120), '...'].
+    s := lf, '<div class="wf-card">'.
+    s := s, lf, '<div class="wf-header">'.
+    s := s, '<span class="wf-template">', template, '</span>'.
+    s := s, ' <span class="wf-id">', wfId, '</span></div>'.
+    desc isEmpty ifFalse: [
+      s := s, lf, '<div class="wf-desc">', desc, '</div>'
     ].
-    s := s, lf, '</ul>', lf, '</div>'.
-    ^s
+    s := s, (self renderCardTokens: wfId).
+    s := s, (self renderCardTasks: wfId).
+    ^s, lf, '</div>'
   ]
 
-  method: renderTokensHTML: tokens [
-    | s lf |
+  method: renderCardTokens: wfId [
+    "Render token badges for a workflow."
+    | tokens wfTokens s lf |
     lf := Character lf asString.
-    s := '<div id="dashboard-tokens">'.
-    s := s, lf, '<h2>Tokens (', tokens size printString, ')</h2>'.
-    s := s, lf, '<ul>'.
-    tokens do: [:tok |
-      | p identity |
-      p := tok at: 'payload' ifAbsent: [Dictionary new].
-      identity := tok at: 'identity' ifAbsent: [''].
-      s := s, lf, '<li>'.
-      s := s, '<strong>', identity, '</strong>'.
-      s := s, '</li>'
+    tokens := bbs scanAll: 'token'.
+    wfTokens := tokens select: [:t |
+      ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'workflow_instance' ifAbsent: ['']) = wfId
     ].
-    s := s, lf, '</ul>', lf, '</div>'.
-    ^s
+    wfTokens isEmpty ifTrue: [^''].
+    s := lf, '<div class="wf-tokens">'.
+    wfTokens do: [:t |
+      | tp place tokStatus |
+      tp := t at: 'payload' ifAbsent: [Dictionary new].
+      place := tp at: 'place' ifAbsent: ['?'].
+      tokStatus := tp at: 'status' ifAbsent: ['?'].
+      s := s, '<span class="token token-', tokStatus, '">', place, '</span> '
+    ].
+    ^s, '</div>'
   ]
 
-  method: renderObservationsHTML: observations [
-    | s lf |
+  method: renderCardTasks: wfId [
+    "Render task badges for a workflow."
+    | tasks wfTasks s lf |
     lf := Character lf asString.
-    s := '<div id="dashboard-observations">'.
-    s := s, lf, '<h2>Observations (', observations size printString, ')</h2>'.
-    s := s, lf, '<ul>'.
-    observations do: [:o |
-      | p detail identity scope |
-      p := o at: 'payload' ifAbsent: [Dictionary new].
-      detail := p at: 'detail' ifAbsent: [''].
-      identity := o at: 'identity' ifAbsent: [''].
-      scope := o at: 'scope' ifAbsent: [''].
-      s := s, lf, '<li>'.
-      s := s, '<strong>', identity, '</strong> (', scope, ') — ', detail.
-      s := s, '</li>'
+    tasks := bbs scanAll: 'task'.
+    wfTasks := tasks select: [:t |
+      ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'workflow_instance' ifAbsent: ['']) = wfId
     ].
-    s := s, lf, '</ul>', lf, '</div>'.
-    ^s
+    wfTasks isEmpty ifTrue: [^''].
+    s := lf, '<div class="wf-tasks">'.
+    wfTasks do: [:t |
+      | tp role tStatus |
+      tp := t at: 'payload' ifAbsent: [Dictionary new].
+      role := tp at: 'role' ifAbsent: ['?'].
+      tStatus := tp at: 'status' ifAbsent: ['?'].
+      s := s, '<span class="task-badge task-', tStatus, '">', role, '</span> '
+    ].
+    ^s, '</div>'
   ]
 
-  method: renderSignalsHTML: signals [
-    | s lf |
+  method: buildNotificationsHTML [
+    | notifications recent s lf |
     lf := Character lf asString.
-    s := '<div id="dashboard-signals">'.
-    s := s, lf, '<h2>Signals (', signals size printString, ')</h2>'.
-    s := s, lf, '<ul>'.
-    signals do: [:sig |
-      | identity scope |
-      identity := sig at: 'identity' ifAbsent: [''].
-      scope := sig at: 'scope' ifAbsent: [''].
-      s := s, lf, '<li>'.
-      s := s, '<strong>', identity, '</strong> (', scope, ')'.
-      s := s, '</li>'
+    notifications := bbs scanAll: 'notification'.
+    recent := notifications size > 30
+      ifTrue: [notifications copyFrom: (notifications size - 30)]
+      ifFalse: [notifications].
+    s := '<div id="dashboard-notifications"><h2>Recent Activity</h2>'.
+    recent isEmpty ifTrue: [
+      ^s, '<div class="empty-state">No recent activity</div></div>'
     ].
-    s := s, lf, '</ul>', lf, '</div>'.
-    ^s
-  ]
-
-  method: renderNotificationsHTML: notifications [
-    | s lf |
-    lf := Character lf asString.
-    s := '<div id="dashboard-notifications">'.
-    s := s, lf, '<h2>Notifications (', notifications size printString, ')</h2>'.
-    s := s, lf, '<ul>'.
-    notifications do: [:n |
-      | p message severity scope |
+    s := s, '<ul>'.
+    recent do: [:n |
+      | p message severity |
       p := n at: 'payload' ifAbsent: [Dictionary new].
       message := p at: 'message' ifAbsent: [''].
       severity := p at: 'severity' ifAbsent: ['info'].
-      scope := n at: 'scope' ifAbsent: ['system'].
-      s := s, lf, '<li data-severity="', severity, '">'.
-      s := s, '<span class="severity-', severity, '">[', severity, ']</span> '.
-      s := s, message, ' <small>(', scope, ')</small>'.
-      s := s, '</li>'
+      s := s, lf, '<li data-severity="', severity, '">[', severity, '] ', message, '</li>'
     ].
-    s := s, lf, '</ul>', lf, '</div>'.
-    ^s
+    ^s, '</ul></div>'
+  ]
+
+  method: sendNotificationFeed: conn [
+    | notifications recent s lf |
+    lf := Character lf asString.
+    notifications := bbs scanAll: 'notification'.
+    recent := notifications size > 30
+      ifTrue: [notifications copyFrom: (notifications size - 30)]
+      ifFalse: [notifications].
+    s := '<div id="dashboard-notifications">'.
+    s := s, lf, '<h2>Recent Activity</h2>'.
+    recent isEmpty ifTrue: [
+      s := s, lf, '<div class="empty-state">No recent notifications</div>'
+    ] ifFalse: [
+      s := s, lf, '<ul>'.
+      recent reverseDo: [:n |
+        | p message severity |
+        p := n at: 'payload' ifAbsent: [Dictionary new].
+        message := p at: 'message' ifAbsent: [''].
+        severity := p at: 'severity' ifAbsent: ['info'].
+        s := s, lf, '<li data-severity="', severity, '">'.
+        s := s, '<span class="severity-', severity, '">[', severity, ']</span> ', message.
+        s := s, '</li>'
+      ].
+      s := s, lf, '</ul>'
+    ].
+    s := s, lf, '</div>'.
+    self sendFragment: conn html: s
   ]

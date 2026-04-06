@@ -14,15 +14,14 @@
       padding: 16px;
       line-height: 1.5;
     }
-    h1 { color: #58a6ff; font-size: 1.4em; margin-bottom: 12px; }
-    h2 { color: #8b949e; font-size: 1em; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+    h1 { color: #58a6ff; font-size: 1.4em; margin-bottom: 16px; }
+    h2 { color: #8b949e; font-size: 1em; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
 
-    .grid {
+    .layout {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 2fr 1fr;
       gap: 16px;
     }
-    .full-width { grid-column: 1 / -1; }
 
     .panel {
       background: #161b22;
@@ -31,31 +30,83 @@
       padding: 14px;
     }
 
+    /* Workflow cards */
+    .wf-card {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-left: 3px solid #58a6ff;
+      border-radius: 4px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    .wf-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .wf-template {
+      background: #1f6feb33;
+      color: #58a6ff;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 0.8em;
+      font-weight: 600;
+    }
+    .wf-id {
+      color: #484f58;
+      font-size: 0.75em;
+      font-family: monospace;
+    }
+    .wf-desc {
+      color: #8b949e;
+      font-size: 0.85em;
+      margin: 4px 0;
+    }
+    .wf-tokens {
+      margin: 6px 0 2px;
+    }
+    .token {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 0.75em;
+      font-weight: 500;
+      margin-right: 4px;
+    }
+    .token-positive { background: #3fb95033; color: #3fb950; }
+    .token-waiting  { background: #d2992233; color: #d29922; }
+    .wf-tasks {
+      margin-top: 6px;
+    }
+    .task-badge {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 0.75em;
+      font-weight: 500;
+      margin-right: 4px;
+    }
+    .task-pending    { background: #8b949e33; color: #8b949e; }
+    .task-dispatched { background: #1f6feb33; color: #58a6ff; }
+    .task-completed  { background: #3fb95033; color: #3fb950; }
+    .task-cancelled  { background: #8b949e33; color: #8b949e; opacity: 0.5; }
+
+    /* Notification feed */
+    .feed { max-height: 80vh; overflow-y: auto; }
     ul { list-style: none; }
     li {
-      padding: 4px 0;
+      padding: 5px 0;
       border-bottom: 1px solid #21262d;
-      font-size: 0.85em;
+      font-size: 0.82em;
     }
     li:last-child { border-bottom: none; }
-    li strong { color: #c9d1d9; }
-
-    li[data-status="running"]   { border-left: 3px solid #58a6ff; padding-left: 8px; }
-    li[data-status="dispatched"] { border-left: 3px solid #58a6ff; padding-left: 8px; }
-    li[data-status="pending"]   { border-left: 3px solid #8b949e; padding-left: 8px; }
-    li[data-status="completed"] { border-left: 3px solid #3fb950; padding-left: 8px; }
-    li[data-status="failed"]    { border-left: 3px solid #f85149; padding-left: 8px; }
-    li[data-status="cancelled"] { border-left: 3px solid #8b949e; padding-left: 8px; opacity: 0.5; }
-
-    li[data-severity="info"]    { border-left: 3px solid #58a6ff; padding-left: 8px; }
-    li[data-severity="warn"]    { border-left: 3px solid #d29922; padding-left: 8px; }
-    li[data-severity="urgent"]  { border-left: 3px solid #f85149; padding-left: 8px; }
-
-    .feed { max-height: 300px; overflow-y: auto; }
-    small { color: #8b949e; }
-    .severity-info { color: #58a6ff; }
-    .severity-warn { color: #d29922; }
-    .severity-urgent { color: #f85149; }
+    li[data-severity="info"]   { border-left: 2px solid #58a6ff; padding-left: 8px; }
+    li[data-severity="warn"]   { border-left: 2px solid #d29922; padding-left: 8px; }
+    li[data-severity="urgent"] { border-left: 2px solid #f85149; padding-left: 8px; }
+    .severity-info   { color: #58a6ff; font-size: 0.8em; }
+    .severity-warn   { color: #d29922; font-size: 0.8em; }
+    .severity-urgent { color: #f85149; font-size: 0.8em; }
 
     .empty-state {
       color: #484f58;
@@ -73,52 +124,20 @@
 
   <h1>Procyon Park</h1>
 
-  <div class="grid" data-init="@get('/api/sse/dashboard')">
+  <div class="layout" data-init="@get('/api/sse/dashboard')">
 
-    <!-- Workflows — replaced by SSE fragments -->
+    <!-- Left: Active workflows with grouped tasks/tokens -->
     <div class="panel">
       <div id="dashboard-workflows">
-        <h2>Workflows</h2>
+        <h2>Active Workflows</h2>
         <div class="empty-state">Connecting...</div>
       </div>
     </div>
 
-    <!-- Tasks — replaced by SSE fragments -->
-    <div class="panel">
-      <div id="dashboard-tasks">
-        <h2>Tasks</h2>
-        <div class="empty-state">Connecting...</div>
-      </div>
-    </div>
-
-    <!-- Tokens — replaced by SSE fragments -->
-    <div class="panel">
-      <div id="dashboard-tokens">
-        <h2>Tokens</h2>
-        <div class="empty-state">Connecting...</div>
-      </div>
-    </div>
-
-    <!-- Observations — replaced by SSE fragments -->
-    <div class="panel">
-      <div id="dashboard-observations">
-        <h2>Observations</h2>
-        <div class="empty-state">Connecting...</div>
-      </div>
-    </div>
-
-    <!-- Signals — replaced by SSE fragments -->
-    <div class="panel">
-      <div id="dashboard-signals">
-        <h2>Signals</h2>
-        <div class="empty-state">Connecting...</div>
-      </div>
-    </div>
-
-    <!-- Notifications — replaced by SSE fragments -->
-    <div class="panel full-width">
-      <div class="feed" id="dashboard-notifications">
-        <h2>Notifications</h2>
+    <!-- Right: Notification feed -->
+    <div class="panel feed">
+      <div id="dashboard-notifications">
+        <h2>Recent Activity</h2>
         <div class="empty-state">Connecting...</div>
       </div>
     </div>
