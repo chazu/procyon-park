@@ -71,7 +71,7 @@ ClaudeHarness subclass: Object
 
     "Build sh -c command that runs claude with stream-json output redirected to file.
      We reference env vars instead of inlining the system prompt to avoid quoting hell."
-    shellCmd := 'claude --output-format stream-json --system-prompt "$PP_SYSTEM_PROMPT" --allowedTools Bash,Read,Write,Edit,Glob,Grep --max-turns 200 -p "$PP_TASK_DESC" > "$PP_OUTPUT_FILE" 2>&1'.
+    shellCmd := 'claude --output-format stream-json --verbose --system-prompt "$PP_SYSTEM_PROMPT" --allowedTools Bash,Read,Write,Edit,Glob,Grep --max-turns 200 -p "$PP_TASK_DESC" > "$PP_OUTPUT_FILE" 2>&1'.
 
     "Wrap with 30-minute timeout to prevent silent hangs"
     timeoutArgs := Array new: 0.
