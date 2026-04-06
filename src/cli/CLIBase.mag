@@ -1,0 +1,109 @@
+"CLIBase — shared infrastructure for all PP CLI command classes.
+ Provides HTTP client, env-var config, and common tuple-space helpers."
+
+CLIBase subclass: Object
+  instanceVars: baseUrl client scope taskId
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: initialize [
+    baseUrl := System env: 'PP_URL'.
+    (baseUrl isNil or: [baseUrl isEmpty]) ifTrue: [baseUrl := 'http://localhost:7777'].
+    scope := System env: 'PP_SCOPE'.
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default'].
+    taskId := System env: 'PP_TASK'.
+    taskId isNil ifTrue: [taskId := ''].
+    client := HttpClient new
+  ]
+
+  "--- HTTP Helpers ---"
+
+  method: post: path body: dict [
+    "POST JSON to the API and print the response."
+    | url jsonBody response result |
+    url := baseUrl, path.
+    jsonBody := Json encode: dict.
+
+    [
+      response := client post: url body: jsonBody contentType: 'application/json'.
+      response isNil ifTrue: [
+        ('Error: no response from server') println.
+        ^self
+      ].
+      (response isKindOf: String) ifFalse: [
+        ('Error: server returned non-String response') println.
+        ^self
+      ].
+      response isEmpty ifTrue: [
+        ('Error: empty response from server') println.
+        ^self
+      ].
+      result := Json decode: response.
+      (Json encodePretty: result) println
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
+  ]
+
+  "--- Tuple-Space Helpers ---"
+
+  method: safeScan: category scope: aScope [
+    "Scan the server for tuples, returning an Array. Returns empty array on error."
+    | body response result |
+    body := Dictionary new.
+    body at: 'category' put: category.
+    aScope notNil ifTrue: [body at: 'scope' put: aScope].
+    [
+      response := client post: baseUrl, '/api/scan' body: (Json encode: body) contentType: 'application/json'.
+      response isNil ifTrue: [^#()].
+      result := Json decode: response.
+      ^result at: 'tuples' ifAbsent: [#()]
+    ] on: Exception do: [:e | ^#()]
+  ]
+
+  method: safeRdp: category scope: aScope identity: anIdentity [
+    "Read a specific tuple from the server. Returns the tuple dict or nil."
+    | body response result |
+    body := Dictionary new.
+    body at: 'category' put: category.
+    body at: 'scope' put: aScope.
+    body at: 'identity' put: anIdentity.
+    [
+      response := client post: baseUrl, '/api/rdp' body: (Json encode: body) contentType: 'application/json'.
+      response isNil ifTrue: [^nil].
+      (response isKindOf: String) ifFalse: [^nil].
+      response isEmpty ifTrue: [^nil].
+      result := Json decode: response.
+      ^result at: 'tuple' ifAbsent: [nil]
+    ] on: Exception do: [:e | ^nil]
+  ]
+
+  method: safeGetNotifications [
+    "Fetch notifications from the server. Returns empty array on error."
+    ^self safeScan: 'notification' scope: nil
+  ]
+
+  method: silentInp: category scope: aScope identity: anIdentity [
+    "Remove a tuple from the BBS silently (no output)."
+    | body |
+    body := Dictionary new.
+    body at: 'category' put: category.
+    body at: 'scope' put: aScope.
+    body at: 'identity' put: anIdentity.
+    [
+      client post: baseUrl, '/api/inp' body: (Json encode: body) contentType: 'application/json'
+    ] on: Exception do: [:e | "ignore" ]
+  ]
+
+  "--- Argument Parsing ---"
+
+  method: flagValue: flag in: args [
+    "Extract the value after a --flag in args. Returns nil if not found."
+    | idx |
+    idx := args indexOf: flag.
+    (idx >= 0 and: [idx < (args size - 1)])
+      ifTrue: [^args at: idx + 1]
+      ifFalse: [^nil]
+  ]
