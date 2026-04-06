@@ -97,68 +97,13 @@ ApiServer subclass: Object
       self okResponse: (self okWithId: id)
     ].
     self post: '/api/dismiss' fields: #('task_id' 'scope') do: [:body |
-      | d taskId scope instanceId transId signals childSignals allChildrenComplete childPayload childTaskId childScope completeEvent |
-      taskId := body at: 'task_id'.
-      scope := body at: 'scope'.
-
-      "Parse instanceId and transId from task_id (format: instanceId:task:transId)"
-      instanceId := nil. transId := nil.
-      (taskId includesSubstring: ':task:') ifTrue: [
-        | parts |
-        parts := taskId split: ':task:'.
-        instanceId := parts at: 0.
-        transId := parts at: 1.
-      ].
-
-      "Scan for child-task signals scoped to the workflow instance"
-      childSignals := #().
-      instanceId notNil ifTrue: [
-        signals := bbs scan: 'signal' scope: instanceId.
-        childSignals := signals select: [:s |
-          | ident |
-          ident := s at: 'identity' ifAbsent: [''].
-          ident startsWith: ('child-task:', transId, ':')
-        ]
-      ].
-
-      childSignals isEmpty ifTrue: [
-        "No children — emit task-complete immediately"
-        bbs emitEvent: scope
-            identity: 'task-complete:', taskId
-            type: 'task-complete'
-            summary: 'Agent dismissed'.
-      ] ifFalse: [
-        "Check if all children are complete"
-        allChildrenComplete := true.
-        childSignals do: [:cs |
-          childPayload := cs at: 'payload' ifAbsent: [Dictionary new].
-          childTaskId := childPayload at: 'child_task_id' ifAbsent: [''].
-          childScope := childPayload at: 'child_scope' ifAbsent: [scope].
-          childTaskId isEmpty ifFalse: [
-            completeEvent := bbs rdp: 'event' scope: childScope identity: 'task-complete:', childTaskId.
-            completeEvent isNil ifTrue: [allChildrenComplete := false]
-          ]
-        ].
-        allChildrenComplete ifTrue: [
-          "All children done — emit task-complete"
-          bbs emitEvent: scope
-              identity: 'task-complete:', taskId
-              type: 'task-complete'
-              summary: 'Agent dismissed (all children complete)'.
-        ] ifFalse: [
-          "Children still pending — write children-pending signal, defer task-complete"
-          | pendingPayload |
-          pendingPayload := Dictionary new.
-          pendingPayload at: 'task_id' put: taskId.
-          pendingPayload at: 'pending_children' put: (childSignals collect: [:cs |
-            (cs at: 'payload' ifAbsent: [Dictionary new]) at: 'child_task_id' ifAbsent: ['']
-          ]).
-          bbs upsertSignal: instanceId identity: 'children-pending:', taskId payload: pendingPayload.
-        ]
-      ].
-
-      bbs notify: ('Agent completed task: ', taskId)
-          scope: scope
+      | d |
+      bbs emitEvent: (body at: 'scope')
+          identity: 'task-complete:', (body at: 'task_id')
+          type: 'task-complete'
+          summary: 'Agent dismissed'.
+      bbs notify: ('Agent completed task: ', (body at: 'task_id'))
+          scope: (body at: 'scope')
           severity: 'info'.
       d := Dictionary new. d at: 'status' put: 'dismissed'.
       self okResponse: d
@@ -233,13 +178,13 @@ ApiServer subclass: Object
     self get: '/api/dashboard' do: [:req | self handleDashboard: req].
     self get: '/api/history' do: [:req | self handleHistory: req].
 
+    "Serve the static web dashboard"
+    httpServer serveStatic: '/dashboard/' from: (File workingDirectory, '/static').
+
     "SSE dashboard stream"
     httpServer sseRoute: '/api/sse/dashboard' handler: [:conn :req |
       self handleSSEDashboard: conn request: req
-    ].
-
-    "Serve the static web dashboard"
-    httpServer serveStatic: '/dashboard/' from: 'static'
+    ]
   ]
 
   "--- Helpers ---"
