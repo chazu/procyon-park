@@ -114,6 +114,8 @@ Scheduler subclass: Object
       workdir notNil ifTrue: [
         self validateScope: workdir taskId: taskId scope: scope
       ].
+      "Safety net: if harness exited without emitting task-complete, auto-emit it"
+      self ensureTaskComplete: taskId scope: scope.
       "Clean up slot"
       mutex critical: [activeSlots removeKey: taskId ifAbsent: [nil]]
     ] fork.
@@ -199,6 +201,25 @@ Scheduler subclass: Object
           scope: aScope
           severity: 'warn'
     ]
+  ]
+
+  method: ensureTaskComplete: taskId scope: scope [
+    "Safety net: after a harness process exits, verify a task-complete event
+     exists. If not, auto-emit one so no agent can permanently block a workflow
+     by forgetting to dismiss."
+    | evt |
+    evt := bbs rdp: 'event' scope: scope identity: 'task-complete:', taskId.
+    evt notNil ifTrue: [^self].
+
+    "No task-complete found — auto-emit with warning"
+    ('WARNING: task ', taskId, ' exited without task-complete event; auto-emitting') println.
+    bbs emitEvent: scope
+        identity: 'task-complete:', taskId
+        type: 'task-complete'
+        summary: 'Auto-completed: harness exited without dismiss'.
+    bbs notify: ('Task ', taskId, ' auto-completed: agent exited without dismissing')
+        scope: scope
+        severity: 'warn'
   ]
 
   method: checkCompleted [
