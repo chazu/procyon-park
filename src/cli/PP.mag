@@ -449,45 +449,63 @@ Dashboard:     ', baseUrl, '/dashboard/
   ]
 
   method: cmdWorkflowStatus: args [
-    "pp workflow status [<id>] — show workflow state"
-    | wfScope body response result workflows |
+    "pp workflow status [<id>] [--scope <scope>] — show workflow state"
+    | wfScope scopeExplicit body response result workflows |
     wfScope := self flagValue: '--scope' in: args.
+    scopeExplicit := wfScope notNil.
     wfScope isNil ifTrue: [wfScope := scope].
 
     args size > 2 ifTrue: [
-      "Specific workflow"
-      self showWorkflowDetail: (args at: 2) scope: wfScope.
+      | wfId |
+      wfId := args at: 2.
+      "Skip flag values that come after --scope"
+      (wfId copyFrom: 0 to: 2) = '--' ifTrue: [
+        "No actual ID given, fall through to listing"
+      ] ifFalse: [
+        "Specific workflow — if --scope given, use it directly; otherwise search all scopes"
+        scopeExplicit ifTrue: [
+          self showWorkflowDetail: wfId scope: wfScope
+        ] ifFalse: [
+          self showWorkflowDetailSearching: wfId
+        ].
+        ^self
+      ]
+    ].
+
+    "List all workflows across all scopes (unless --scope explicitly given)"
+    workflows := scopeExplicit
+      ifTrue: [self safeScan: 'workflow' scope: wfScope]
+      ifFalse: [self safeScan: 'workflow' scope: nil].
+
+    workflows size = 0 ifTrue: [
+      'No workflows.' println.
       ^self
     ].
 
-    "List all running workflows"
-    body := Dictionary new.
-    body at: 'category' put: 'workflow'.
-    body at: 'scope' put: wfScope.
-    [
-      response := client post: baseUrl, '/api/scan' body: (Json encode: body) contentType: 'application/json'.
-      response isNil ifTrue: [^self].
-      (response isKindOf: String) ifFalse: [^self].
-      response isEmpty ifTrue: [^self].
-      result := Json decode: response.
-      workflows := result at: 'tuples' ifAbsent: [#()].
-
-      workflows size = 0 ifTrue: [
-        'No workflows.' println.
-        ^self
-      ].
-
-      workflows do: [:wf |
-        | wfPayload wfId wfStatus template |
-        wfId := wf at: 'identity' ifAbsent: ['?'].
-        wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
-        wfStatus := wfPayload at: 'status' ifAbsent: ['?'].
-        template := wfPayload at: 'template' ifAbsent: ['?'].
-        (wfId, '  [', wfStatus, ']  template:', template) println
-      ]
-    ] on: Exception do: [:e |
-      ('Error: ', e messageText) println
+    workflows do: [:wf |
+      | wfPayload wfId wfStatus template wfScopeLabel |
+      wfId := wf at: 'identity' ifAbsent: ['?'].
+      wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
+      wfStatus := wfPayload at: 'status' ifAbsent: ['?'].
+      template := wfPayload at: 'template' ifAbsent: ['?'].
+      wfScopeLabel := wf at: 'scope' ifAbsent: ['?'].
+      (wfId, '  [', wfStatus, ']  template:', template, '  scope:', wfScopeLabel) println
     ]
+  ]
+
+  method: showWorkflowDetailSearching: wfId [
+    "Find a workflow by ID across all scopes, then show its detail."
+    | allWorkflows found foundScope |
+    allWorkflows := self safeScan: 'workflow' scope: nil.
+    found := allWorkflows detect: [:wf |
+      (wf at: 'identity' ifAbsent: ['']) = wfId
+    ] ifNone: [nil].
+    found isNil ifTrue: [
+      ('Workflow not found: ', wfId) println.
+      ^self
+    ].
+    foundScope := found at: 'scope' ifAbsent: [scope].
+    self showWorkflowDetail: wfId scope: foundScope
   ]
 
   method: cmdWorkflowCancel: args [
