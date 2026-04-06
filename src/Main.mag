@@ -22,6 +22,9 @@ Main subclass: Object
 
     cmd := args at: 0.
 
+    "GC (before server to stay within bytecode limit)"
+    cmd = 'gc' ifTrue: [^PP new runWith: args].
+
     "Server"
     cmd = 'serve' ifTrue: [^self startServer: (args copyFrom: 1)].
 

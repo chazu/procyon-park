@@ -38,21 +38,12 @@ PP subclass: Object
     cmd = 'status'    ifTrue: [^self cmdStatus: args].
     cmd = 'prime'     ifTrue: [^self cmdPrime: args].
     cmd = 'task'      ifTrue: [^self cmdTask: args].
-    cmd = 'workflow'  ifTrue: [
-      (args size > 1 and: [(args at: 1) = 'status'])
-        ifTrue: [^self cmdWorkflowStatus: args].
-      (args size > 1 and: [(args at: 1) = 'cancel'])
-        ifTrue: [^self cmdWorkflowCancel: args].
-      (args size > 1 and: [(args at: 1) = 'wait'])
-        ifTrue: [^self cmdWorkflowWait: args].
-      ^self cmdWorkflow: args
-    ].
+    cmd = 'workflow'  ifTrue: [^self cmdWorkflowDispatch: args].
     cmd = 'signal'    ifTrue: [^self cmdSignal: args].
     cmd = 'log'       ifTrue: [^self cmdLog: args].
     cmd = 'history'   ifTrue: [^self cmdHistory: args].
     cmd = 'dashboard' ifTrue: [^self cmdDashboard: args].
     cmd = 'workitem'  ifTrue: [^WorkItemCLI new runWith: args].
-    cmd = 'gc'        ifTrue: [^self cmdGc: args].
     cmd = 'repo'      ifTrue: [^Repo new runWith: args].
     cmd = 'worktree'  ifTrue: [
       wtArgs := Array new: 0.
@@ -394,6 +385,17 @@ Dashboard:     ', baseUrl, '/dashboard/
     ].
 
     self post: '/api/task/create' body: body
+  ]
+
+  method: cmdWorkflowDispatch: args [
+    "Route workflow subcommands."
+    (args size > 1 and: [(args at: 1) = 'status'])
+      ifTrue: [^self cmdWorkflowStatus: args].
+    (args size > 1 and: [(args at: 1) = 'cancel'])
+      ifTrue: [^self cmdWorkflowCancel: args].
+    (args size > 1 and: [(args at: 1) = 'wait'])
+      ifTrue: [^self cmdWorkflowWait: args].
+    ^self cmdWorkflow: args
   ]
 
   method: cmdWorkflow: args [
