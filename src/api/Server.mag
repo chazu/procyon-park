@@ -674,6 +674,10 @@ ApiServer subclass: Object
     payload := item at: 'payload'.
     type := payload at: 'type' ifAbsent: ['story'].
 
+    dispatcher isNil ifTrue: [
+      ^self errorResponse: 500 message: 'No dispatcher configured'
+    ].
+
     "Update status to in-progress"
     self updateWorkitemStatus: identity scope: scope status: 'in-progress'.
 
@@ -682,10 +686,6 @@ ApiServer subclass: Object
     wfParams at: 'description' put: (payload at: 'description' ifAbsent: [payload at: 'title' ifAbsent: [identity]]).
     (payload at: 'repo' ifAbsent: [nil]) notNil ifTrue: [
       wfParams at: 'repo' put: (payload at: 'repo')
-    ].
-
-    dispatcher isNil ifTrue: [
-      ^self errorResponse: 500 message: 'No dispatcher configured'
     ].
 
     type = 'epic' ifTrue: [
