@@ -116,6 +116,11 @@ Scheduler subclass: Object
       ].
       "Safety net: if harness exited without emitting task-complete, auto-emit it"
       self ensureTaskComplete: taskId scope: scope.
+      "Mark task as completed in BBS"
+      bbs update: 'task' scope: scope identity: taskId do: [:p |
+        p at: 'status' put: 'completed'.
+        p at: 'completed_at' put: DateTime now epochSeconds
+      ].
       "Clean up slot"
       mutex critical: [activeSlots removeKey: taskId ifAbsent: [nil]]
     ] fork.
