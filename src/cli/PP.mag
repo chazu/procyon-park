@@ -397,7 +397,7 @@ Dashboard:     ', baseUrl, '/dashboard/
 
   method: cmdWorkflow: args [
     "pp workflow <template> [--scope <scope>] [--repo <name>] [--param key=value ...]"
-    | body templateId wfScope params i arg eqIdx key val repo |
+    | body templateId wfScope params i arg eqIdx key val repo scopeExplicit |
     args size < 2 ifTrue: [
       'Usage: pp workflow <template> [--scope <scope>] [--param key=value ...]' println.
       ^self
@@ -405,6 +405,7 @@ Dashboard:     ', baseUrl, '/dashboard/
 
     templateId := args at: 1.
     wfScope := self flagValue: '--scope' in: args.
+    scopeExplicit := wfScope notNil.
     wfScope isNil ifTrue: [wfScope := scope].
 
     "Parse --param key=value pairs"
@@ -433,7 +434,11 @@ Dashboard:     ', baseUrl, '/dashboard/
       repo := System env: 'PP_REPO'.
       (repo isNil or: [repo isEmpty]) ifTrue: [repo := nil]
     ].
-    repo notNil ifTrue: [params at: 'repo' put: repo].
+    repo notNil ifTrue: [
+      params at: 'repo' put: repo.
+      "Default scope to repo name when --scope not explicitly given"
+      scopeExplicit ifFalse: [wfScope := repo]
+    ].
 
     body := Dictionary new.
     body at: 'template' put: templateId.
