@@ -172,7 +172,10 @@ ApiServer subclass: Object
     httpServer route: '/api/workitem/add-child' method: 'POST' handler: [:req | self handleWorkitemAddChild: req].
     httpServer route: '/api/workitem/run' method: 'POST' handler: [:req | self handleWorkitemRun: req].
     self get: '/api/dashboard' do: [:req | self handleDashboard: req].
-    self get: '/api/history' do: [:req | self handleHistory: req]
+    self get: '/api/history' do: [:req | self handleHistory: req].
+
+    "Serve the static web dashboard"
+    httpServer serveStatic: '/dashboard/' from: 'static'
   ]
 
   "--- Helpers ---"
