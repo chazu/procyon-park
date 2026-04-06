@@ -912,14 +912,14 @@ Dashboard:     ', baseUrl, '/dashboard/
   method: gcBranches: dryRun [
     | output lines |
     [
-      output := Shell capture: 'git branch --merged main 2>/dev/null'.
+      output := Shell capture: 'git branch --merged main 2>/dev/null | grep feature/ | sed "s/^[* ]*//"'.
       output isEmpty ifFalse: [
         lines := output split: (Character lf asString).
         lines do: [:line |
-          (line includes: 'feature/') ifTrue: [
+          line isEmpty ifFalse: [
             ('  branch: ', line) println.
             dryRun ifFalse: [
-              Shell run: 'git branch -d "', line, '" 2>/dev/null'
+              Shell run: 'git branch -D ', line, ' 2>/dev/null'
             ]
           ]
         ]
