@@ -802,11 +802,11 @@ ApiServer subclass: Object
     self sendNotificationFragment: conn
   ]
 
-  method: sendFragment: conn selector: sel html: html [
+  method: sendFragment: conn html: html [
     "Send a Datastar patch-elements event. Prefixes each HTML line with 'elements '."
     | lf lines data |
     lf := Character lf asString.
-    data := 'selector ', sel, lf.
+    data := ''.
     lines := html split: lf.
     lines do: [:line |
       line isEmpty ifFalse: [
@@ -819,31 +819,31 @@ ApiServer subclass: Object
   method: sendWorkflowFragment: conn [
     | workflows |
     workflows := bbs scanAll: 'workflow'.
-    self sendFragment: conn selector: '#dashboard-workflows' html: (self renderWorkflowsHTML: workflows)
+    self sendFragment: conn html: (self renderWorkflowsHTML: workflows)
   ]
 
   method: sendTaskFragment: conn [
     | tasks |
     tasks := bbs scanAll: 'task'.
-    self sendFragment: conn selector: '#dashboard-tasks' html: (self renderTasksHTML: tasks)
+    self sendFragment: conn html: (self renderTasksHTML: tasks)
   ]
 
   method: sendTokenFragment: conn [
     | tokens |
     tokens := bbs scanAll: 'token'.
-    self sendFragment: conn selector: '#dashboard-tokens' html: (self renderTokensHTML: tokens)
+    self sendFragment: conn html: (self renderTokensHTML: tokens)
   ]
 
   method: sendObservationFragment: conn [
     | observations |
     observations := bbs scanAll: 'observation'.
-    self sendFragment: conn selector: '#dashboard-observations' html: (self renderObservationsHTML: observations)
+    self sendFragment: conn html: (self renderObservationsHTML: observations)
   ]
 
   method: sendSignalFragment: conn [
     | signals |
     signals := bbs scanAll: 'signal'.
-    self sendFragment: conn selector: '#dashboard-signals' html: (self renderSignalsHTML: signals)
+    self sendFragment: conn html: (self renderSignalsHTML: signals)
   ]
 
   method: sendNotificationFragment: conn [
@@ -852,7 +852,7 @@ ApiServer subclass: Object
     recent := notifications size > 20
       ifTrue: [notifications copyFrom: (notifications size - 20)]
       ifFalse: [notifications].
-    self sendFragment: conn selector: '#dashboard-notifications' html: (self renderNotificationsHTML: recent)
+    self sendFragment: conn html: (self renderNotificationsHTML: recent)
   ]
 
   "--- HTML Fragment Renderers ---"
