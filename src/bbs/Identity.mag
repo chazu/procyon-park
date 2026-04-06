@@ -28,6 +28,10 @@ Identity subclass: Object
     ^'child-spawn:', transitionId, ':', childId
   ]
 
+  classMethod: childTask: parentTransId child: childTaskId [
+    ^'child-task:', parentTransId, ':', childTaskId
+  ]
+
   classMethod: waveChild: waveNum child: childId [
     ^'wave-child:', waveNum printString, ':', childId
   ]

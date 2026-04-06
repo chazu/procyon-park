@@ -227,6 +227,26 @@ WorkflowEngine subclass: Object
       evt isNil ifTrue: [
         evt := self checkWaveCompletion: instanceId scope: scope transitionId: transId
       ].
+      "Gate on child-task completion: if the parent task spawned child tasks,
+       only promote when ALL children have task-complete events."
+      evt notNil ifTrue: [
+        | childSignals allChildrenDone childPrefix |
+        childPrefix := 'child-task:', transId, ':'.
+        childSignals := (bbs scan: 'signal' scope: instanceId) select: [:sig |
+          (sig at: 'identity') startsWith: childPrefix
+        ].
+        childSignals size > 0 ifTrue: [
+          allChildrenDone := true.
+          childSignals do: [:csig |
+            | childId childScope childEvt |
+            childId := (csig at: 'payload') at: 'child_task_id'.
+            childScope := (csig at: 'payload') at: 'child_scope' ifAbsent: [scope].
+            childEvt := bbs rdp: 'event' scope: childScope identity: ('task-complete:', childId).
+            childEvt isNil ifTrue: [allChildrenDone := false]
+          ].
+          allChildrenDone ifFalse: [evt := nil]
+        ]
+      ].
       evt notNil ifTrue: [
         "Promote: atomically update waiting token to positive"
         tokIdentity := tok at: 'identity'.
