@@ -236,7 +236,10 @@ ApiServer subclass: Object
     "SSE dashboard stream"
     httpServer sseRoute: '/api/sse/dashboard' handler: [:conn :req |
       self handleSSEDashboard: conn request: req
-    ]
+    ].
+
+    "Serve the static web dashboard"
+    httpServer serveStatic: '/dashboard/' from: 'static'
   ]
 
   "--- Helpers ---"

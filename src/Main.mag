@@ -7,7 +7,7 @@ Main subclass: Object
   classMethod: ppCommands [
     "Commands that route to PP (thin HTTP client)."
     ^#('observe' 'decide' 'event' 'plan' 'read' 'notify' 'dismiss'
-       'status' 'prime' 'task' 'workflow' 'signal' 'log' 'history'
+       'status' 'prime' 'task' 'workflow' 'signal' 'log' 'history' 'dashboard'
        'workitem')
   ]
 
@@ -92,6 +92,7 @@ Main subclass: Object
     '  clean-branches [--dry-run] [--all]             Remove stale branches' println.
     '  log      [--since <secs>] [--no-follow]        Tail notification stream' println.
     '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
+    '  dashboard                                      Open web dashboard in browser' println.
     '  workitem create|show|list|update|run|plan|review  Manage work items' println.
     '' println.
     'Other:' println.
