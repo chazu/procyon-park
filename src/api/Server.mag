@@ -146,6 +146,19 @@ ApiServer subclass: Object
       (body includesKey: 'workflow_instance') ifTrue: [taskPayload at: 'workflow_instance' put: (body at: 'workflow_instance')].
       (body includesKey: 'repo') ifTrue: [taskPayload at: 'repo' put: (body at: 'repo')].
       id := bbs out: 'task' scope: (body at: 'scope') identity: (body at: 'identity') payload: taskPayload.
+      "If spawned by another task (workflow_instance contains :task:), record parent-child link"
+      (body includesKey: 'workflow_instance') ifTrue: [
+        | wfInst |
+        wfInst := body at: 'workflow_instance'.
+        (wfInst includesSubstring: ':task:') ifTrue: [
+          | childSignalPayload |
+          childSignalPayload := Dictionary new.
+          childSignalPayload at: 'parent' put: wfInst.
+          childSignalPayload at: 'child' put: (body at: 'identity').
+          childSignalPayload at: 'status' put: 'active'.
+          bbs upsertSignal: (body at: 'scope') identity: (Identity childTask: wfInst child: (body at: 'identity')) payload: childSignalPayload
+        ]
+      ].
       self okResponse: (self okWithId: id)
     ].
     self post: '/api/signal' fields: #('scope' 'identity' 'payload') do: [:body |
