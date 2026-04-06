@@ -466,6 +466,77 @@ WorkflowEngine subclass: Object
     self cleanupWorktree: instanceId
   ]
 
+  "--- Workflow Cancellation ---"
+
+  method: cancelWorkflow: instanceId scope: scope [
+    "Cancel a workflow and recursively cancel all child workflows
+     spawned by dispatch-waves. Returns the total number of tasks cancelled."
+
+    | wf payload status cancelledCount tasks taskPayload taskIdentity taskStatus signals sigId sigPayload childInstance childScope childWf childPayload childStatus |
+
+    "Look up the workflow"
+    wf := bbs rdp: 'workflow' scope: scope identity: instanceId.
+    wf isNil ifTrue: [^0].
+
+    "Skip if already terminal"
+    payload := wf at: 'payload'.
+    status := payload at: 'status' ifAbsent: ['unknown'].
+    (status = 'completed' or: [status = 'cancelled' or: [status = 'failed']]) ifTrue: [^0].
+
+    "Atomically update workflow to cancelled"
+    bbs update: 'workflow' scope: scope identity: instanceId do: [:p |
+      p at: 'status' put: 'cancelled'.
+      p at: 'cancelled_at' put: DateTime now epochSeconds
+    ].
+
+    "Cancel pending/dispatched tasks belonging to this workflow"
+    cancelledCount := 0.
+    tasks := bbs scan: 'task' scope: scope.
+    tasks do: [:t |
+      taskPayload := t at: 'payload'.
+      taskIdentity := t at: 'identity'.
+      taskStatus := taskPayload at: 'status' ifAbsent: [''].
+      ((taskPayload at: 'workflow_instance' ifAbsent: ['']) = instanceId
+        and: [taskStatus = 'pending' or: [taskStatus = 'dispatched']]) ifTrue: [
+        bbs update: 'task' scope: scope identity: taskIdentity do: [:p |
+          p at: 'status' put: 'cancelled'
+        ].
+        cancelledCount := cancelledCount + 1
+      ]
+    ].
+
+    "Cascade: find wave-child signals scoped to this workflow instance
+     and recursively cancel each child workflow."
+    signals := bbs scan: 'signal' scope: instanceId.
+    signals do: [:sig |
+      sigId := sig at: 'identity'.
+      (sigId startsWith: 'wave-child:') ifTrue: [
+        sigPayload := sig at: 'payload'.
+        childInstance := sigPayload at: 'child_instance' ifAbsent: [nil].
+        childScope := sigPayload at: 'child_scope' ifAbsent: [scope].
+        childInstance notNil ifTrue: [
+          "Check child is still running before recursing"
+          childWf := bbs rdp: 'workflow' scope: childScope identity: childInstance.
+          childWf notNil ifTrue: [
+            childPayload := childWf at: 'payload'.
+            childStatus := childPayload at: 'status' ifAbsent: ['unknown'].
+            (childStatus = 'completed' or: [childStatus = 'cancelled' or: [childStatus = 'failed']]) ifFalse: [
+              ('  Cascading cancel to child: ', childInstance) println.
+              cancelledCount := cancelledCount + (self cancelWorkflow: childInstance scope: childScope)
+            ]
+          ]
+        ]
+      ]
+    ].
+
+    "Emit event and notify"
+    bbs emitEvent: scope identity: (Identity workflowCancelled: instanceId) type: 'workflow-cancelled' summary: 'Workflow ', instanceId, ' cancelled'.
+    bbs notify: ('Workflow ', instanceId, ' has been cancelled') scope: scope severity: 'info'.
+
+    ('Workflow cancelled: ', instanceId, ' (', cancelledCount printString, ' tasks cancelled)') println.
+    ^cancelledCount
+  ]
+
   method: cleanupWorktree: instanceId [
     "Remove the worktree directory for a completed/failed workflow."
     | home worktreeDir |

@@ -466,8 +466,8 @@ ApiServer subclass: Object
   "--- Workflow Cancel ---"
 
   method: handleWorkflowCancel: req [
-    "POST /api/workflow/cancel — cancel a running workflow and its pending tasks."
-    | body wfId scope wf payload tasks cancelledCount taskPayload taskIdentity taskStatus d |
+    "POST /api/workflow/cancel — cancel a running workflow and all child workflows."
+    | body wfId scope wf payload taskStatus cancelledCount d |
     body := self parseBody: req.
     body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
 
@@ -487,31 +487,11 @@ ApiServer subclass: Object
       ^self errorResponse: 409 message: 'workflow already ', taskStatus
     ].
 
-    "Atomically update workflow to cancelled"
-    bbs update: 'workflow' scope: scope identity: wfId do: [:p |
-      p at: 'status' put: 'cancelled'.
-      p at: 'cancelled_at' put: DateTime now epochSeconds
+    "Delegate to WorkflowEngine which handles recursive child cancellation"
+    dispatcher isNil ifTrue: [
+      ^self errorResponse: 500 message: 'No dispatcher configured'
     ].
-
-    "Cancel pending/dispatched tasks"
-    cancelledCount := 0.
-    tasks := bbs scan: 'task' scope: scope.
-    tasks do: [:t |
-      taskPayload := t at: 'payload'.
-      taskIdentity := t at: 'identity'.
-      taskStatus := taskPayload at: 'status' ifAbsent: [''].
-      ((taskPayload at: 'workflow_instance' ifAbsent: ['']) = wfId
-        and: [taskStatus = 'pending' or: [taskStatus = 'dispatched']]) ifTrue: [
-        bbs update: 'task' scope: scope identity: taskIdentity do: [:p |
-          p at: 'status' put: 'cancelled'
-        ].
-        cancelledCount := cancelledCount + 1
-      ]
-    ].
-
-    "Emit event and notify"
-    bbs emitEvent: scope identity: (Identity workflowCancelled: wfId) type: 'workflow-cancelled' summary: 'Workflow ', wfId, ' cancelled'.
-    bbs notify: ('Workflow ', wfId, ' has been cancelled') scope: scope severity: 'info'.
+    cancelledCount := dispatcher workflowEngine cancelWorkflow: wfId scope: scope.
 
     d := Dictionary new.
     d at: 'status' put: 'ok'.
