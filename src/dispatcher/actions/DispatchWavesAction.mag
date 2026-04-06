@@ -8,7 +8,7 @@ DispatchWavesAction subclass: WorkflowAction
      2. A plan decision's subtasks array (legacy fallback)
      Groups by wave, dispatches wave 1 immediately."
 
-    | scope subtasks maxWave wavePayload w epicId epicItem children childItems childItem childPayload decisions plan planPayload st subtasksBuf repoName repoConfig repoPath featureBranch worktreePayload |
+    | scope subtasks maxWave wavePayload w epicId epicItem children childItems childItem childPayload decisions plan planPayload st subtasksBuf repoName repoConfig repoPath featureBranch worktreePayload branchCheck |
 
     scope := engine scopeForInstance: instanceId.
     subtasks := nil.
@@ -16,18 +16,14 @@ DispatchWavesAction subclass: WorkflowAction
     "1a. Try work item path: read children of an epic"
     epicId := params at: 'workitem' ifAbsent: [nil].
     epicId notNil ifTrue: [
-      epicItem := (bbs scanAll: 'workitem') detect: [:wi |
-        (wi at: 'identity') = epicId
-      ] ifNone: [nil].
+      epicItem := bbs findInIndex: 'workitem' scope: scope identity: epicId.
       epicItem notNil ifTrue: [
         children := (epicItem at: 'payload') at: 'children' ifAbsent: [#()].
         children isEmpty ifFalse: [
           "Build subtasks array from children work items"
           subtasksBuf := GrowableArray new.
           children do: [:cid |
-            childItem := (bbs scanAll: 'workitem') detect: [:wi |
-              (wi at: 'identity') = cid
-            ] ifNone: [nil].
+            childItem := bbs findInIndex: 'workitem' scope: scope identity: cid.
             childItem notNil ifTrue: [
               childPayload := childItem at: 'payload'.
               st := Dictionary new.
@@ -89,18 +85,24 @@ DispatchWavesAction subclass: WorkflowAction
     ].
 
     featureBranch := 'feature/', instanceId.
-    [
-      GitOps createFeatureBranch: featureBranch in: repoPath.
-      ('  dispatch-waves: created shared branch: ', featureBranch) println.
-      "Restore main so repo is not left on the feature branch"
-      [GitOps checkoutBranch: 'main' in: repoPath]
-        on: Exception do: [:e |
-          ('  dispatch-waves: checkout main warning: ', e messageText) println
-        ]
-    ] on: Exception do: [:e |
-      ('  dispatch-waves: shared branch creation failed: ', e messageText) println.
-      engine failWorkflow: instanceId reason: 'dispatch-waves: could not create shared branch — ', e messageText.
-      ^self
+    "Create shared branch if it doesn't already exist (create-worktree may have made it)"
+    branchCheck := Shell capture: 'git -C "', repoPath, '" rev-parse --verify "', featureBranch, '" 2>/dev/null && echo exists || echo missing'.
+    (branchCheck = 'missing') ifTrue: [
+      [
+        GitOps createFeatureBranch: featureBranch in: repoPath.
+        ('  dispatch-waves: created shared branch: ', featureBranch) println.
+        "Restore main so repo is not left on the feature branch"
+        [GitOps checkoutBranch: 'main' in: repoPath]
+          on: Exception do: [:e |
+            ('  dispatch-waves: checkout main warning: ', e messageText) println
+          ]
+      ] on: Exception do: [:e |
+        ('  dispatch-waves: shared branch creation failed: ', e messageText) println.
+        engine failWorkflow: instanceId reason: 'dispatch-waves: could not create shared branch — ', e messageText.
+        ^self
+      ]
+    ] ifFalse: [
+      ('  dispatch-waves: reusing existing branch: ', featureBranch) println
     ].
 
     "Thread parent_branch into params for child workflows"
@@ -124,11 +126,17 @@ DispatchWavesAction subclass: WorkflowAction
     bbs upsertSignal: instanceId identity: 'wave-dispatch' payload: wavePayload.
 
     "4. Dispatch wave 1"
-    self dispatchWave: 1 subtasks: subtasks instance: instanceId scope: scope params: params.
+    [
+      self dispatchWave: 1 subtasks: subtasks instance: instanceId scope: scope params: params.
 
-    ('  dispatch-waves: ', subtasks size printString, ' subtasks across ', maxWave printString, ' waves. Wave 1 dispatched.') println.
-    bbs notify: ('Wave dispatch started: ', subtasks size printString, ' subtasks, ', maxWave printString, ' waves')
-      scope: scope severity: 'info'
+      ('  dispatch-waves: ', subtasks size printString, ' subtasks across ', maxWave printString, ' waves. Wave 1 dispatched.') println.
+      bbs notify: ('Wave dispatch started: ', subtasks size printString, ' subtasks, ', maxWave printString, ' waves')
+        scope: scope severity: 'info'
+    ] on: Exception do: [:e |
+      ('  dispatch-waves: FAILED dispatching wave 1: ', e messageText) println.
+      bbs notify: ('dispatch-waves failed: ', e messageText) scope: scope severity: 'urgent'.
+      engine failWorkflow: instanceId reason: 'dispatch-waves: wave 1 failed — ', e messageText
+    ]
   ]
 
   method: dispatchWave: waveNum subtasks: subtasks instance: instanceId scope: scope params: params [

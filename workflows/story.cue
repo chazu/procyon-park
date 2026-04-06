@@ -24,12 +24,6 @@ transitions: [
 		out:         ["reviewed"]
 		role:        "reviewer"
 		description: "Review implementation for: {{description}}. IMPORTANT: When done, write a verdict signal: pp signal verdict:{{instance}} decision pass (or decision fix if changes needed)."
-		preconditions: [
-			{
-				category: "event"
-				identity: "task-complete:{{instance}}:task:implement"
-			},
-		]
 	},
 	{
 		id:  "pass"

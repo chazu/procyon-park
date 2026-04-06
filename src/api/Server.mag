@@ -607,7 +607,10 @@ ApiServer subclass: Object
 
     payload := item at: 'payload'.
     children := payload at: 'children' ifAbsent: [#()].
-    children := children copyWith: child.
+    "Avoid duplicate children"
+    (children includes: child) ifFalse: [
+      children := children copyWith: child
+    ].
 
     newPayload := Dictionary new.
     payload keysAndValuesDo: [:k :v | newPayload at: k put: v].

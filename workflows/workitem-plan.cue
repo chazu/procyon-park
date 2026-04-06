@@ -34,9 +34,7 @@ transitions: [
 			Read the scout's findings from observations.
 
 			For each story, create a child work item:
-			pp workitem create <identity> --title "Title" --type story \
-			  --parent {{workitem}} --repo <repo> --wave N --template story|story-lite \
-			  --description "Detailed implementation instructions..."
+			pp workitem create <identity> --title "Title" --type story --parent {{workitem}} --repo <repo> --wave N --template story|story-lite --description "Detailed implementation instructions..."
 
 			Tag mechanical tasks (renames, config changes) with --template story-lite.
 			Group small related tasks with --batch <name>.

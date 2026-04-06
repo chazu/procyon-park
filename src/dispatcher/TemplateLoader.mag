@@ -4,8 +4,8 @@
    System workflows:  ~/.pp/workflows/*.cue  (scope: 'system')
    Repo workflows:    <repoPath>/.pp/workflows/*.cue  (scope: <repoName>)
 
- On first run, copies built-in templates to ~/.pp/workflows/.
- If the directory already exists, leaves it alone (user-managed).
+ On startup, syncs any missing built-in templates to ~/.pp/workflows/.
+ Existing files are left alone (user-managed).
 
  All temp vars at method top. No ifNil:/ifNotNil: — uses isNil/notNil ifTrue:.
  Uses Array new: 0 and copyWith: for array building."
@@ -40,26 +40,33 @@ TemplateLoader subclass: Object
   ]
 
   method: ensureSystemWorkflows [
-    "Create ~/.pp/workflows/ if missing, copy built-in templates there."
+    "Create ~/.pp/workflows/ if missing, then sync any new built-in templates."
     | check |
     check := Shell capture: 'test -d "', workflowsDir, '" && echo exists || echo missing'.
     (check = 'missing') ifTrue: [
       Shell run: 'mkdir -p "', workflowsDir, '"'.
-      self copyBuiltinTemplates.
-      'System workflow templates installed to ~/.pp/workflows/' println
-    ]
+    ].
+    self syncBuiltinTemplates
   ]
 
-  method: copyBuiltinTemplates [
-    "Copy all .cue files from the built-in workflows/ directory."
-    | fileList |
+  method: syncBuiltinTemplates [
+    "Copy any built-in .cue templates that are missing from ~/.pp/workflows/."
+    | fileList installed count |
     fileList := Shell capture: 'ls "', builtinDir, '/" 2>/dev/null | grep "\.cue$"'.
     fileList isEmpty ifTrue: [^self].
+    count := 0.
 
     (fileList split: (Character lf asString)) do: [:fname |
       (fname isEmpty not and: [fname size > 4]) ifTrue: [
-        Shell run: 'cp "', builtinDir, '/', fname, '" "', workflowsDir, '/', fname, '"'
+        installed := Shell capture: 'test -f "', workflowsDir, '/', fname, '" && echo yes || echo no'.
+        (installed = 'no') ifTrue: [
+          Shell run: 'cp "', builtinDir, '/', fname, '" "', workflowsDir, '/', fname, '"'.
+          count := count + 1
+        ]
       ]
+    ].
+    count > 0 ifTrue: [
+      ('Installed ', count printString, ' new workflow template(s) to ~/.pp/workflows/') println
     ]
   ]
 

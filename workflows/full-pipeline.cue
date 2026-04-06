@@ -16,7 +16,7 @@ transitions: [
 		in:          ["planning"]
 		out:         ["plan_ready"]
 		role:        "planner"
-		description: "Create implementation plan for: {{description}}"
+		description: "Create implementation plan for: {{description}}\n\nWork item: {{workitem}} — if this work item already has children (pp workitem children {{workitem}}), use them as your plan. Do NOT create duplicate stories or a legacy plan decision. If no children exist, create stories as children of {{workitem}}."
 	},
 	{
 		id:     "dispatch"
@@ -97,12 +97,6 @@ transitions: [
 		id:  "re_review"
 		in:  ["fix_done"]
 		out: ["reviewing", "testing"]
-		preconditions: [
-			{
-				category: "event"
-				identity: "task-complete:{{instance}}:task:fix"
-			},
-		]
 	},
 	{
 		id:     "integrate"
