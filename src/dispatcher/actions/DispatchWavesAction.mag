@@ -261,7 +261,7 @@ DispatchWavesAction subclass: WorkflowAction
       childWf isNil ifTrue: [allDone := false].
       childWf notNil ifTrue: [
         childStatus := (childWf at: 'payload') at: 'status' ifAbsent: ['running'].
-        (childStatus = 'completed' or: [childStatus = 'failed']) ifFalse: [allDone := false]
+        (childStatus = 'completed' or: [childStatus = 'failed' or: [childStatus = 'cancelled']]) ifFalse: [allDone := false]
       ]
     ].
 
