@@ -31,82 +31,31 @@
       padding: 14px;
     }
 
-    /* Health bar */
-    .health-bar {
-      display: flex;
-      gap: 24px;
-      align-items: center;
-    }
-    .health-bar .stat {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .health-bar .stat-value {
-      color: #58a6ff;
-      font-weight: 600;
-      font-size: 1.1em;
-    }
-    .health-bar .dot {
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      background: #3fb950;
-      display: inline-block;
-    }
-
-    /* Tables */
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.85em;
-    }
-    th {
-      text-align: left;
-      color: #8b949e;
-      font-weight: 500;
-      padding: 6px 8px;
-      border-bottom: 1px solid #30363d;
-    }
-    td {
-      padding: 5px 8px;
-      border-bottom: 1px solid #21262d;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 200px;
-    }
-    tr:hover { background: #1c2128; }
-
-    /* Status badges */
-    .badge {
-      display: inline-block;
-      padding: 1px 8px;
-      border-radius: 10px;
-      font-size: 0.8em;
-      font-weight: 500;
-    }
-    .badge-running  { background: #1f6feb33; color: #58a6ff; }
-    .badge-pending  { background: #8b949e33; color: #8b949e; }
-    .badge-complete { background: #3fb95033; color: #3fb950; }
-    .badge-failed   { background: #f8514933; color: #f85149; }
-    .badge-active   { background: #1f6feb33; color: #58a6ff; }
-
-    /* Feed */
-    .feed { max-height: 280px; overflow-y: auto; }
-    .feed-item {
-      padding: 6px 0;
+    ul { list-style: none; }
+    li {
+      padding: 4px 0;
       border-bottom: 1px solid #21262d;
       font-size: 0.85em;
     }
-    .feed-item:last-child { border-bottom: none; }
-    .feed-time { color: #8b949e; font-size: 0.8em; margin-right: 8px; }
-    .feed-scope { color: #d2a8ff; font-size: 0.8em; }
-    .feed-type { color: #58a6ff; font-size: 0.8em; font-weight: 500; }
+    li:last-child { border-bottom: none; }
+    li strong { color: #c9d1d9; }
 
-    /* Notifications */
-    .notif-info    { border-left: 3px solid #58a6ff; padding-left: 8px; }
-    .notif-warning { border-left: 3px solid #d29922; padding-left: 8px; }
-    .notif-error   { border-left: 3px solid #f85149; padding-left: 8px; }
+    li[data-status="running"]   { border-left: 3px solid #58a6ff; padding-left: 8px; }
+    li[data-status="dispatched"] { border-left: 3px solid #58a6ff; padding-left: 8px; }
+    li[data-status="pending"]   { border-left: 3px solid #8b949e; padding-left: 8px; }
+    li[data-status="completed"] { border-left: 3px solid #3fb950; padding-left: 8px; }
+    li[data-status="failed"]    { border-left: 3px solid #f85149; padding-left: 8px; }
+    li[data-status="cancelled"] { border-left: 3px solid #8b949e; padding-left: 8px; opacity: 0.5; }
+
+    li[data-severity="info"]    { border-left: 3px solid #58a6ff; padding-left: 8px; }
+    li[data-severity="warn"]    { border-left: 3px solid #d29922; padding-left: 8px; }
+    li[data-severity="urgent"]  { border-left: 3px solid #f85149; padding-left: 8px; }
+
+    .feed { max-height: 300px; overflow-y: auto; }
+    small { color: #8b949e; }
+    .severity-info { color: #58a6ff; }
+    .severity-warn { color: #d29922; }
+    .severity-urgent { color: #f85149; }
 
     .empty-state {
       color: #484f58;
@@ -115,7 +64,6 @@
       padding: 20px;
     }
 
-    /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: #161b22; }
     ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
@@ -127,70 +75,43 @@
 
   <div class="grid" data-on-load="$$get('/api/sse/dashboard')">
 
-    <!-- Section 1: System Health Bar -->
-    <div class="panel full-width" id="health">
-      <h2>System Health</h2>
-      <div class="health-bar">
-        <div class="stat">
-          <span class="dot"></span>
-          <span>Uptime:</span>
-          <span class="stat-value" id="health-uptime">--</span>
-        </div>
-        <div class="stat">
-          <span>Tuples:</span>
-          <span class="stat-value" id="health-tuples">--</span>
-        </div>
+    <!-- Workflows — replaced by SSE fragments -->
+    <div class="panel">
+      <div id="dashboard-workflows">
+        <h2>Workflows</h2>
+        <div class="empty-state">Connecting...</div>
       </div>
     </div>
 
-    <!-- Section 2: Running Workflows -->
-    <div class="panel" id="workflows">
-      <h2>Workflows</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Template</th>
-            <th>Status</th>
-            <th>Tokens</th>
-          </tr>
-        </thead>
-        <tbody id="workflows-body">
-          <tr><td colspan="3" class="empty-state">Waiting for data...</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Section 3: Active Tasks -->
-    <div class="panel" id="tasks">
-      <h2>Active Tasks</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Role</th>
-            <th>Status</th>
-            <th>Transition</th>
-            <th>Workflow</th>
-          </tr>
-        </thead>
-        <tbody id="tasks-body">
-          <tr><td colspan="4" class="empty-state">Waiting for data...</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Section 4: Recent Observations/Decisions -->
-    <div class="panel" id="feed">
-      <h2>Observations &amp; Decisions</h2>
-      <div class="feed" id="feed-list">
-        <div class="empty-state">Waiting for data...</div>
+    <!-- Tasks — replaced by SSE fragments -->
+    <div class="panel">
+      <div id="dashboard-tasks">
+        <h2>Tasks</h2>
+        <div class="empty-state">Connecting...</div>
       </div>
     </div>
 
-    <!-- Section 5: Notification Stream -->
-    <div class="panel" id="notifications">
-      <h2>Notifications</h2>
-      <div class="feed" id="notifications-list">
-        <div class="empty-state">Waiting for data...</div>
+    <!-- Observations — replaced by SSE fragments -->
+    <div class="panel">
+      <div id="dashboard-observations">
+        <h2>Observations</h2>
+        <div class="empty-state">Connecting...</div>
+      </div>
+    </div>
+
+    <!-- Signals — replaced by SSE fragments -->
+    <div class="panel">
+      <div id="dashboard-signals">
+        <h2>Signals</h2>
+        <div class="empty-state">Connecting...</div>
+      </div>
+    </div>
+
+    <!-- Notifications — replaced by SSE fragments -->
+    <div class="panel full-width">
+      <div class="feed" id="dashboard-notifications">
+        <h2>Notifications</h2>
+        <div class="empty-state">Connecting...</div>
       </div>
     </div>
 
