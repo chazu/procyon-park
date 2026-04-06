@@ -31,6 +31,7 @@ PP subclass: CLIBase
     cmd = 'log'       ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'history'   ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'dashboard' ifTrue: [^SystemCommands new runCommand: cmd args: args].
+    cmd = 'session'   ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'workitem'  ifTrue: [^WorkItemCLI new runWith: args].
     cmd = 'repo'      ifTrue: [^Repo new runWith: args].
     cmd = 'worktree'  ifTrue: [
@@ -238,6 +239,7 @@ PP subclass: CLIBase
     '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
     '  dashboard                                        Open web dashboard in browser' println.
     '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
+    '  session  [<taskId>]                              View Claude Code session logs' println.
     '  help                                             Show this help' println.
     '' println.
     'Environment:' println.

@@ -16,6 +16,7 @@ SystemCommands subclass: CLIBase
     cmd = 'history'   ifTrue: [^self cmdHistory: args].
     cmd = 'dashboard' ifTrue: [^self cmdDashboard: args].
     cmd = 'gc'        ifTrue: [^self cmdGc: args].
+    cmd = 'session'   ifTrue: [^self cmdSession: args].
     ('SystemCommands: unknown command: ', cmd) println
   ]
 
@@ -399,4 +400,184 @@ Dashboard:     ', baseUrl, '/dashboard/
         ]
       ]
     ] on: Exception do: [:e | ]
+  ]
+
+  "--- Session Viewer ---"
+
+  method: cmdSession: args [
+    "pp session [<taskId>] — view Claude Code session logs."
+    | homeDir sessionsDir taskArg filePath contents lines lf |
+    homeDir := System env: 'HOME'.
+    sessionsDir := homeDir, '/.pp/sessions'.
+    lf := Character lf asString.
+
+    args size < 2 ifTrue: [
+      "List available session files"
+      | listing fileList |
+      'Available sessions:' println.
+      [
+        listing := Shell capture: 'ls -1 "', sessionsDir, '" 2>/dev/null'.
+        listing isEmpty ifTrue: [
+          '  (none)' println.
+          ^self
+        ].
+        fileList := listing split: lf.
+        fileList do: [:f |
+          f isEmpty ifFalse: [
+            | name |
+            name := f.
+            (name endsWith: '.jsonl') ifTrue: [
+              name := name copyFrom: 0 to: name size - 6
+            ].
+            ('  ', name) println
+          ]
+        ]
+      ] on: Exception do: [:e |
+        ('Error listing sessions: ', e messageText) println
+      ].
+      ^self
+    ].
+
+    taskArg := args at: 1.
+    filePath := sessionsDir, '/', taskArg, '.jsonl'.
+
+    (File exists: filePath) ifFalse: [
+      ('Session file not found: ', filePath) println.
+      ^self
+    ].
+
+    [
+      contents := File readFileContents: filePath.
+      lines := contents split: lf.
+      ('Session: ', taskArg) println.
+      ('Lines: ', lines size printString) println.
+      '---' println.
+
+      lines do: [:line |
+        line isEmpty ifFalse: [
+          | entry entryType |
+          [
+            entry := Json decode: line.
+            entryType := entry at: 'type' ifAbsent: ['unknown'].
+
+            entryType = 'system' ifTrue: [
+              self showSystemEntry: entry
+            ].
+
+            entryType = 'assistant' ifTrue: [
+              self showAssistantEntry: entry
+            ].
+
+            entryType = 'tool_result' ifTrue: [
+              self showToolResultEntry: entry
+            ].
+
+            entryType = 'result' ifTrue: [
+              self showResultEntry: entry
+            ].
+
+            "Show usage if present"
+            (entry at: 'usage' ifAbsent: [nil]) notNil ifTrue: [
+              self showUsage: (entry at: 'usage')
+            ]
+          ] on: Exception do: [:e | ]
+        ]
+      ]
+    ] on: Exception do: [:e |
+      ('Error reading session: ', e messageText) println
+    ]
+  ]
+
+  method: showSystemEntry: entry [
+    | msg model cwd |
+    msg := '  [system] Session init'.
+    model := entry at: 'model' ifAbsent: [nil].
+    model notNil ifTrue: [msg := msg, ' model=', model].
+    cwd := entry at: 'cwd' ifAbsent: [nil].
+    cwd notNil ifTrue: [msg := msg, ' cwd=', cwd].
+    msg println
+  ]
+
+  method: showAssistantEntry: entry [
+    | content |
+    content := entry at: 'content' ifAbsent: [nil].
+    content isNil ifTrue: [
+      | message |
+      message := entry at: 'message' ifAbsent: [nil].
+      message notNil ifTrue: [
+        content := message at: 'content' ifAbsent: [nil]
+      ]
+    ].
+    content isNil ifTrue: [^self].
+
+    (content isKindOf: String) ifTrue: [
+      | truncated |
+      truncated := content size > 120
+        ifTrue: [content copyFrom: 0 to: 120]
+        ifFalse: [content].
+      ('  [assistant] ', truncated) println.
+      ^self
+    ].
+
+    (content isKindOf: Array) ifTrue: [
+      content do: [:block |
+        | blockType |
+        (block isKindOf: Dictionary) ifTrue: [
+          blockType := block at: 'type' ifAbsent: [''].
+          blockType = 'thinking' ifTrue: ["skip thinking blocks"].
+          blockType = 'text' ifTrue: [
+            | text truncated |
+            text := block at: 'text' ifAbsent: [''].
+            truncated := text size > 120
+              ifTrue: [text copyFrom: 0 to: 120]
+              ifFalse: [text].
+            ('  [assistant] ', truncated) println
+          ].
+          blockType = 'tool_use' ifTrue: [
+            | toolName inputStr truncated |
+            toolName := block at: 'name' ifAbsent: ['?'].
+            inputStr := Json encode: (block at: 'input' ifAbsent: [Dictionary new]).
+            truncated := inputStr size > 80
+              ifTrue: [inputStr copyFrom: 0 to: 80]
+              ifFalse: [inputStr].
+            ('  [tool_use] ', toolName, ' ', truncated) println
+          ]
+        ]
+      ]
+    ]
+  ]
+
+  method: showToolResultEntry: entry [
+    | isError content truncated |
+    isError := entry at: 'is_error' ifAbsent: [false].
+    content := entry at: 'content' ifAbsent: [''].
+    (content isKindOf: String) ifTrue: [
+      truncated := content size > 80
+        ifTrue: [content copyFrom: 0 to: 80]
+        ifFalse: [content].
+      isError
+        ifTrue: [('  [tool_result] ERROR: ', truncated) println]
+        ifFalse: [('  [tool_result] ok (', content size printString, ' chars)') println]
+    ] ifFalse: [
+      isError
+        ifTrue: ['  [tool_result] ERROR' println]
+        ifFalse: ['  [tool_result] ok' println]
+    ]
+  ]
+
+  method: showResultEntry: entry [
+    | result subtype |
+    result := entry at: 'result' ifAbsent: [nil].
+    result isNil ifTrue: [^self].
+    subtype := result at: 'subtype' ifAbsent: [''].
+    ('  [result] subtype=', subtype) println
+  ]
+
+  method: showUsage: usage [
+    | input output |
+    input := usage at: 'input_tokens' ifAbsent: [0].
+    output := usage at: 'output_tokens' ifAbsent: [0].
+    (input > 0 or: [output > 0]) ifTrue: [
+      ('    tokens: in=', input printString, ' out=', output printString) println
+    ]
   ]
