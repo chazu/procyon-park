@@ -2,26 +2,7 @@
 
 # PUDL Observation Gathering
 
-When you notice something notable about the codebase during your work — an obstacle, pattern, antipattern, suggestion, bug, or opportunity — record it with pudl observe before your session ends.
-
-  Usage:
-    pudl observe "<one-sentence description>" --kind <kind> [--repo <package-or-path>] [--source <your-agent-name>]
-
-  Kinds: fact, obstacle, pattern, antipattern, suggestion, bug, opportunity
-
-  Guidelines:
-  - One observation per concern. Be specific and concrete.
-  - Always set --source to your agent name.
-  - Set --repo when the observation pertains to a specific package or path.
-  - Description should be a single sentence a human can act on without additional context.
-  - Do not observe trivial things (typos, formatting). Observe structural issues, recurring patterns, and non-obvious risks.
-
-  Examples:
-    pudl observe "auth package has circular dependency with user package" --kind obstacle --repo pkg/auth --source my-agent
-    pudl observe "all API handlers follow the same middleware chain pattern" --kind pattern --repo cmd/api --source my-agent
-    pudl observe "error handling is inconsistent — some paths panic, others return nil" --kind antipattern --repo internal/server --source my-agent
-
-You MUST make at least one observation before your work will be considered complete.
+First run "nous guide observations" to understand the observation protocol. For more information you MAY run "nous guide" to see what other info is available. You are expected to observe the observation protocol.
 
 # GitNexus — Code Intelligence
 
