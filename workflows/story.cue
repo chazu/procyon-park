@@ -62,6 +62,18 @@ transitions: [
 		]
 	},
 	{
+		id:  "exhausted"
+		in:  ["reviewed"]
+		out: ["merging"]
+		preconditions: [
+			{
+				category:   "signal"
+				identity:   "verdict:{{instance}}"
+				constraint: "{decision: \"exhausted\"}"
+			},
+		]
+	},
+	{
 		id:   "fix"
 		in:   ["fixing"]
 		out:  ["implemented"]

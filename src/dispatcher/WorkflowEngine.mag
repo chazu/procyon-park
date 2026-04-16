@@ -162,25 +162,28 @@ WorkflowEngine subclass: Object
     params := wfPayload at: 'params' ifAbsent: [Dictionary new].
     params at: 'instance' put: instanceId.
 
-    "Enforce review cycle cap: if max_review_cycles is set and exceeded,
-     override any 'fix' verdict with 'exhausted' so the workflow exits the loop"
+    "Enforce review cycle cap: count completed review tasks and override any
+     'fix' verdict with 'exhausted' once the cap is reached. Counting from task
+     tuples is authoritative — it does not rely on reviewers writing cycle signals."
     maxCycles := templatePayload at: 'max_review_cycles' ifAbsent: [nil].
     maxCycles notNil ifTrue: [
-      cycleSignal := bbs rdp: 'signal' scope: scope identity: (Identity reviewCycle: instanceId).
-      cycleSignal notNil ifTrue: [
-        cycleCount := (cycleSignal at: 'payload') at: 'count' ifAbsent: [0].
-        cycleCount >= maxCycles ifTrue: [
-          "Check if there is a 'fix' verdict — override to 'exhausted'"
-          cycleSignal := bbs rdp: 'signal' scope: scope identity: (Identity verdict: instanceId).
-          cycleSignal notNil ifTrue: [
-            (((cycleSignal at: 'payload') at: 'decision' ifAbsent: ['']) = 'fix') ifTrue: [
-              ('  Review cycle cap reached (', maxCycles printString, ') — overriding verdict to exhausted') println.
-              verdictPayload := Dictionary new.
-              verdictPayload at: 'decision' put: 'exhausted'.
-              verdictPayload at: 'reason' put: 'Review cycle cap exceeded'.
-              bbs upsertSignal: scope identity: (Identity verdict: instanceId) payload: verdictPayload.
-              bbs notify: ('Review cycle cap reached for ', instanceId, ' — forcing exhausted') scope: scope severity: 'warn'
-            ]
+      | reviewTasks |
+      reviewTasks := (bbs scanAll: 'task') select: [:t |
+        ((t at: 'identity') startsWith: instanceId, ':task:review')
+          and: [((t at: 'payload') at: 'role' ifAbsent: ['']) = 'reviewer']
+      ].
+      cycleCount := reviewTasks size.
+      cycleCount >= maxCycles ifTrue: [
+        "Check if there is a 'fix' verdict — override to 'exhausted'"
+        cycleSignal := bbs rdp: 'signal' scope: scope identity: (Identity verdict: instanceId).
+        cycleSignal notNil ifTrue: [
+          (((cycleSignal at: 'payload') at: 'decision' ifAbsent: ['']) = 'fix') ifTrue: [
+            ('  Review cycle cap reached (', cycleCount printString, '/', maxCycles printString, ') — overriding verdict to exhausted') println.
+            verdictPayload := Dictionary new.
+            verdictPayload at: 'decision' put: 'exhausted'.
+            verdictPayload at: 'reason' put: ('Review cycle cap exceeded (', cycleCount printString, ' reviews >= ', maxCycles printString, ')').
+            bbs upsertSignal: scope identity: (Identity verdict: instanceId) payload: verdictPayload.
+            bbs notify: ('Review cycle cap reached for ', instanceId, ' — forcing exhausted') scope: scope severity: 'warn'
           ]
         ]
       ]
@@ -562,8 +565,9 @@ WorkflowEngine subclass: Object
     "Notify user"
     bbs notify: ('Workflow failed: ', instanceId, ' — ', reason) scope: scope severity: 'urgent'.
 
-    "Clean up worktree directory"
-    self cleanupWorktree: instanceId
+    "Preserve worktree on failure — contents may hold uncommitted work the
+     operator needs to recover. Clean up manually with `pp worktree clean`."
+    ('  Preserving worktree for recovery: ~/.pp/worktrees/', instanceId) println
   ]
 
   method: completeWorkflow: wf [
