@@ -39,6 +39,20 @@ ClaudeHarness subclass: Object
       ifFalse: [Dictionary new].
     workflowInstance := taskPayload at: 'workflow_instance' ifAbsent: [''].
 
+    "Reviewer tasks get an auto-generated git diff summary (files changed,
+     insertions, deletions) so the reviewer does not have to discover
+     what changed by hand. Only runs when there is a workdir to inspect."
+    (role name = 'reviewer' and: [workDir notNil and: [workDir isEmpty not]]) ifTrue: [
+      | diffSummary |
+      diffSummary := self gitDiffSummaryFor: workDir.
+      diffSummary isEmpty ifFalse: [
+        taskDescription := taskDescription, '
+
+## What Changed
+', diffSummary
+      ]
+    ].
+
     "Assemble context filtered to this workflow instance"
     contextTuples := role assembleContext: bbs scope: scope taskId: taskId workflowInstance: workflowInstance.
 
@@ -96,6 +110,36 @@ ClaudeHarness subclass: Object
       ('Harness failed: ', taskId, ' (exit ', process exitCode printString, ')') println.
       ('stderr: ', process stderr) println
     ]
+  ]
+
+  method: gitDiffSummaryFor: aWorkDir [
+    "Produce a git diff summary for a worktree so a reviewer can see what
+     changed without having to discover it. Diffs the current HEAD against
+     main (the standard base for feature worktrees). Stderr is suppressed
+     via a subshell so missing-branch errors do not leak into the prompt.
+     Returns an empty string if nothing changed or git is unavailable."
+    | committed uncommitted commits result |
+    committed := Shell capture: '(git -C "', aWorkDir, '" diff --stat main...HEAD 2>/dev/null)'.
+    uncommitted := Shell capture: '(git -C "', aWorkDir, '" diff --stat HEAD 2>/dev/null)'.
+    commits := Shell capture: '(git -C "', aWorkDir, '" log --oneline main..HEAD 2>/dev/null)'.
+    result := ''.
+    committed isEmpty ifFalse: [
+      result := result, 'Files changed vs main:
+', committed, '
+'
+    ].
+    uncommitted isEmpty ifFalse: [
+      result := result, '
+Uncommitted changes:
+', uncommitted, '
+'
+    ].
+    commits isEmpty ifFalse: [
+      result := result, '
+Commits in this branch:
+', commits
+    ].
+    ^result
   ]
 
   method: printString [
