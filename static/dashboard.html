@@ -45,6 +45,12 @@
       font-size: 0.85em;
     }
 
+    .wf-card.completion-completed { border-left-color: #3fb950; }
+    .wf-card.completion-failed    { border-left-color: #f85149; }
+    .wf-card.completion-cancelled { border-left-color: #8b949e; }
+
+    #dashboard-completions { margin-top: 24px; }
+
     .feed { max-height: 80vh; overflow-y: auto; }
     ul { list-style: none; }
     li {
@@ -83,6 +89,10 @@
     <div class="panel">
       <div id="dashboard-workflows">
         <h2>Active Workflows</h2>
+        <div class="empty-state">Connecting...</div>
+      </div>
+      <div id="dashboard-completions">
+        <h2>Recent Completions</h2>
         <div class="empty-state">Connecting...</div>
       </div>
     </div>
