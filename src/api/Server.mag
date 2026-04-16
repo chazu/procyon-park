@@ -708,22 +708,14 @@ ApiServer subclass: Object
       wfParams at: 'repo' put: (payload at: 'repo')
     ].
 
-    type = 'epic' ifTrue: [
-      "Dispatch children through execute-epic"
-      template := 'full-pipeline'.
-      [
-        instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams.
-        ^self okResponse: (self okWithWorkflow: instanceId type: 'epic')
-      ] on: Exception do: [:e |
-        ^self errorResponse: 400 message: e messageText
-      ]
+    "Determine template — honor work item's template field, with type-based default
+     (full-pipeline for epics, story for individual stories)."
+    template := payload at: 'template' ifAbsent: [
+      type = 'epic' ifTrue: ['full-pipeline'] ifFalse: ['story']
     ].
-
-    "Story — use the template specified on the work item"
-    template := payload at: 'template' ifAbsent: ['story'].
     [
       instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams.
-      ^self okResponse: (self okWithWorkflow: instanceId type: 'story')
+      ^self okResponse: (self okWithWorkflow: instanceId type: type)
     ] on: Exception do: [:e |
       ^self errorResponse: 400 message: e messageText
     ]
