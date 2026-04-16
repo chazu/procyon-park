@@ -372,6 +372,9 @@ Dashboard:     ', baseUrl, '/dashboard/
         wfScope := wf at: 'scope' ifAbsent: ['default'].
         (status = 'completed' or: [status = 'cancelled' or: [status = 'failed']]) ifTrue: [
           ('  ', wfId, ' [', status, ']') println.
+          "Remove all tokens/tasks/events/signals associated with this workflow
+           before removing the workflow tuple itself."
+          self gcWorkflowTuples: wfId dryRun: dryRun.
           dryRun ifFalse: [
             self silentInp: 'workflow' scope: wfScope identity: wfId
           ].
@@ -382,6 +385,59 @@ Dashboard:     ', baseUrl, '/dashboard/
       ('Error: ', e messageText) println
     ].
     ^count
+  ]
+
+  method: gcWorkflowTuples: wfId dryRun: dryRun [
+    "Remove all token/task/event/signal tuples associated with workflow wfId.
+     A tuple is considered associated if any of the following hold:
+       - payload.workflow_instance equals wfId
+       - scope equals wfId (many workflow signals are scoped to the instance id)
+       - identity equals wfId
+       - identity has wfId as a prefix followed by ':' (e.g., <wfId>:token:<place>)
+     Returns the number of tuples removed (or that would be removed in dry-run)."
+    | categories removedCount |
+    categories := #('token' 'task' 'event' 'signal').
+    removedCount := 0.
+    categories do: [:cat |
+      | tuples |
+      tuples := self safeScan: cat scope: nil.
+      tuples do: [:t |
+        (self tuple: t matchesWorkflow: wfId) ifTrue: [
+          | tScope tIdentity |
+          tScope := t at: 'scope' ifAbsent: ['default'].
+          tIdentity := t at: 'identity' ifAbsent: [''].
+          ('    [', cat, '] ', tScope, '/', tIdentity) println.
+          dryRun ifFalse: [
+            self silentInp: cat scope: tScope identity: tIdentity
+          ].
+          removedCount := removedCount + 1
+        ]
+      ]
+    ].
+    removedCount > 0 ifTrue: [
+      ('    -> ', removedCount printString, ' associated tuple(s) ',
+        (dryRun ifTrue: ['would be removed'] ifFalse: ['removed'])) println
+    ].
+    ^removedCount
+  ]
+
+  method: tuple: t matchesWorkflow: wfId [
+    "Return true if tuple t is associated with workflow wfId."
+    | payload identity tScope wfInst |
+    wfId isEmpty ifTrue: [^false].
+    payload := t at: 'payload' ifAbsent: [Dictionary new].
+    identity := t at: 'identity' ifAbsent: [''].
+    tScope := t at: 'scope' ifAbsent: [''].
+    "Payload workflow_instance match"
+    wfInst := payload at: 'workflow_instance' ifAbsent: [''].
+    wfInst = wfId ifTrue: [^true].
+    "Scope equals workflow ID (common for instance-scoped signals)"
+    tScope = wfId ifTrue: [^true].
+    "Identity equals workflow ID"
+    identity = wfId ifTrue: [^true].
+    "Identity has wfId as a prefix followed by ':' (e.g., <wfId>:token:<place>)"
+    (identity startsWith: (wfId, ':')) ifTrue: [^true].
+    ^false
   ]
 
   method: gcBranches: dryRun [
