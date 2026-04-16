@@ -283,7 +283,7 @@ WorkflowCommands subclass: CLIBase
           (ts = 'active') | (ts = 'pending')
         ].
         activeTasks size > 0 ifTrue: [
-          ('    Active/Pending: ', activeTasks size asString) println.
+          ('    Active/Pending: ', activeTasks size printString) println.
           activeTasks do: [:t |
             | tp role tStatus transId taskId |
             tp := t at: 'payload' ifAbsent: [Dictionary new].
@@ -302,7 +302,7 @@ WorkflowCommands subclass: CLIBase
           (ts = 'dismissed') | (ts = 'completed') | (ts = 'failed')
         ].
         doneTasks size > 0 ifTrue: [
-          ('    Done/Failed: ', doneTasks size asString) println
+          ('    Done/Failed: ', doneTasks size printString) println
         ]
       ].
     '' println.

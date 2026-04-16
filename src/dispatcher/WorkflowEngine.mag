@@ -296,29 +296,75 @@ WorkflowEngine subclass: Object
 
     "If transition has a role, write a task tuple"
     role := transition at: 'role' ifAbsent: [nil].
-
-    "Produce output tokens — if role-bearing, status is 'waiting' until task completes"
-    tokenStatus := role notNil ifTrue: ['waiting'] ifFalse: ['positive'].
     action := transition at: 'action' ifAbsent: [nil].
-    action notNil ifTrue: [
-      (action = 'spawn-workflow' or: [action = 'dispatch-waves']) ifTrue: [tokenStatus := 'waiting']
-    ].
-    outPlaces do: [:place |
-      | tokenPayload |
-      tokenPayload := Dictionary new.
-      tokenPayload at: 'workflow_instance' put: instanceId.
-      tokenPayload at: 'place' put: place.
-      tokenPayload at: 'status' put: tokenStatus.
-      tokenPayload at: 'transition_id' put: (transition at: 'id').
-      tokenPayload at: 'modality' put: 'linear'.
-      bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
-    ].
 
-    "Check for built-in action dispatch (no agent spawned)"
-    action := transition at: 'action' ifAbsent: [nil].
+    "Handle built-in action dispatch (no agent spawned)"
     action notNil ifTrue: [
-      self executeAction: action transition: transition instance: instanceId params: params.
+      (action = 'spawn-workflow' or: [action = 'dispatch-waves']) ifTrue: [
+        "Async actions: produce waiting tokens BEFORE execution (child completion promotes them)"
+        outPlaces do: [:place |
+          | tokenPayload |
+          tokenPayload := Dictionary new.
+          tokenPayload at: 'workflow_instance' put: instanceId.
+          tokenPayload at: 'place' put: place.
+          tokenPayload at: 'status' put: 'waiting'.
+          tokenPayload at: 'transition_id' put: (transition at: 'id').
+          tokenPayload at: 'modality' put: 'linear'.
+          bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
+        ].
+        self executeAction: action transition: transition instance: instanceId params: params
+      ] ifFalse: [
+        "Synchronous actions: execute FIRST, produce positive tokens only on success"
+        [
+          self executeAction: action transition: transition instance: instanceId params: params
+        ] on: Exception do: [:e |
+          ('  Action ', action, ' failed: ', e messageText) println.
+          self failWorkflow: instanceId reason: ('Action ', action, ' failed: ', e messageText).
+          ^consumedTokens
+        ].
+        "Check if the action internally called failWorkflow"
+        ((self workflowStatus: instanceId) = 'failed') ifTrue: [
+          ^consumedTokens
+        ].
+        "Action succeeded — produce positive output tokens"
+        outPlaces do: [:place |
+          | tokenPayload |
+          tokenPayload := Dictionary new.
+          tokenPayload at: 'workflow_instance' put: instanceId.
+          tokenPayload at: 'place' put: place.
+          tokenPayload at: 'status' put: 'positive'.
+          tokenPayload at: 'transition_id' put: (transition at: 'id').
+          tokenPayload at: 'modality' put: 'linear'.
+          bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
+        ]
+      ].
       ^consumedTokens
+    ].
+
+    "Role-bearing transitions: produce waiting tokens (promoted on task completion)"
+    role notNil ifTrue: [
+      outPlaces do: [:place |
+        | tokenPayload |
+        tokenPayload := Dictionary new.
+        tokenPayload at: 'workflow_instance' put: instanceId.
+        tokenPayload at: 'place' put: place.
+        tokenPayload at: 'status' put: 'waiting'.
+        tokenPayload at: 'transition_id' put: (transition at: 'id').
+        tokenPayload at: 'modality' put: 'linear'.
+        bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
+      ].
+    ] ifFalse: [
+      "No role, no action — produce positive tokens immediately"
+      outPlaces do: [:place |
+        | tokenPayload |
+        tokenPayload := Dictionary new.
+        tokenPayload at: 'workflow_instance' put: instanceId.
+        tokenPayload at: 'place' put: place.
+        tokenPayload at: 'status' put: 'positive'.
+        tokenPayload at: 'transition_id' put: (transition at: 'id').
+        tokenPayload at: 'modality' put: 'linear'.
+        bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
+      ]
     ].
 
     role notNil ifTrue: [
@@ -419,6 +465,13 @@ WorkflowEngine subclass: Object
     | wf |
     wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
     ^wf notNil ifTrue: [wf at: 'scope'] ifFalse: ['default']
+  ]
+
+  method: workflowStatus: instanceId [
+    "Look up the current status of a workflow instance. Returns 'unknown' if not found."
+    | wf |
+    wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
+    ^wf notNil ifTrue: [(wf at: 'payload') at: 'status' ifAbsent: ['unknown']] ifFalse: ['unknown']
   ]
 
   method: failWorkflow: instanceId reason: reason [
