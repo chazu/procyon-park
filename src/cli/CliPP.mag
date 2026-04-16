@@ -59,15 +59,23 @@ CliPP subclass: Object
 
   classMethod: handles: args [
     "Returns true when this PoC should handle the given args. We claim
-     `pp status`, `pp workflow list`, `pp log`, `pp prime`, and `pp gc`;
-     everything else falls through to the existing dispatcher."
+     `pp status`, `pp workflow list`, `pp log`, `pp prime`, `pp gc`, and
+     the six signal-writer subcommands (observe, decide, event, notify,
+     signal, dismiss); everything else falls through to the existing
+     dispatcher."
     | head |
     args isEmpty ifTrue: [^false].
     head := args at: 0.
-    head = 'status' ifTrue: [^true].
-    head = 'log'    ifTrue: [^true].
-    head = 'prime'  ifTrue: [^true].
-    head = 'gc'     ifTrue: [^true].
+    head = 'status'  ifTrue: [^true].
+    head = 'log'     ifTrue: [^true].
+    head = 'prime'   ifTrue: [^true].
+    head = 'gc'      ifTrue: [^true].
+    head = 'observe' ifTrue: [^true].
+    head = 'decide'  ifTrue: [^true].
+    head = 'event'   ifTrue: [^true].
+    head = 'notify'  ifTrue: [^true].
+    head = 'signal'  ifTrue: [^true].
+    head = 'dismiss' ifTrue: [^true].
     (head = 'workflow' and: [args size > 1 and: [(args at: 1) = 'list']])
       ifTrue: [^true].
     ^false
@@ -83,6 +91,12 @@ CliPP subclass: Object
     head = 'log'      ifTrue: [^self runLog: args].
     head = 'prime'    ifTrue: [^self runPrime: args].
     head = 'gc'       ifTrue: [^self runGc: args].
+    head = 'observe'  ifTrue: [^self runObserve: args].
+    head = 'decide'   ifTrue: [^self runDecide: args].
+    head = 'event'    ifTrue: [^self runEvent: args].
+    head = 'notify'   ifTrue: [^self runNotify: args].
+    head = 'signal'   ifTrue: [^self runSignal: args].
+    head = 'dismiss'  ifTrue: [^self runDismiss: args].
     ^0
   ]
 
@@ -847,4 +861,419 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         ]
       ]
     ] on: Exception do: [:e | ]
+  ]
+
+  "--- Shared POST helper for signal-writer commands ---------------------"
+
+  classMethod: postAndPrint: cfg path: path body: body [
+    "POST a JSON body to the API, pretty-print the decoded response.
+     Shared by the six signal-writer ports (observe, decide, event,
+     notify, signal, dismiss) so they all render output identically to
+     the legacy CLIBase>>post:body: path."
+    | url jsonBody client response result |
+    url := cfg baseUrl, path.
+    jsonBody := Json encode: body.
+    client := HttpClient new.
+    [
+      response := client post: url body: jsonBody contentType: 'application/json'.
+      response isNil ifTrue: [
+        'Error: no response from server' println.
+        ^self
+      ].
+      (response isKindOf: String) ifFalse: [
+        'Error: server returned non-String response' println.
+        ^self
+      ].
+      response isEmpty ifTrue: [
+        'Error: empty response from server' println.
+        ^self
+      ].
+      result := Json decode: response.
+      (Json encodePretty: result) println
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
+  ]
+
+  "--- Subcommand: observe -----------------------------------------------"
+
+  classMethod: runObserve: args [
+    "Build, configure, and dispatch the new `observe` command.
+
+     Exercises:
+       * Cli::Command       — leaf command with required positional args
+       * Cli::EnvBinding    — PP_URL, PP_SCOPE, PP_TASK projected onto
+                              a PPCliConfig instance. PP_TASK becomes a
+                              payload field when present.
+       * Cli::Flag #string  — --tags is a comma-separated list. The Cli
+                              framework doesn't have a list-type flag, so
+                              we take the raw string and split inside
+                              the run block.
+     "
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'observe' doc: 'Report an observation'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_TASK'
+      setter: #taskId:
+      type: #string
+      default: '').
+
+    cmd flag: (Cli::Flag
+      name: 'tags'
+      type: #string
+      default: ''
+      doc: 'Comma-separated tags (e.g. a,b,c)').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | identity detail tagsStr body tagArr exitCode |
+      exitCode := 0.
+      runArgs size < 2 ifTrue: [
+        'Usage: pp observe <identity> <detail> [--tags t1,t2]' println.
+        exitCode := 1
+      ] ifFalse: [
+        cmd applyEnvBindings: cfg.
+        identity := runArgs at: 0.
+        detail := runArgs at: 1.
+        tagsStr := cmd flagValue: 'tags'.
+        body := Dictionary new.
+        body at: 'scope' put: cfg scope.
+        body at: 'identity' put: identity.
+        body at: 'detail' put: detail.
+        cfg taskId isEmpty ifFalse: [body at: 'task' put: cfg taskId].
+        (tagsStr notNil and: [tagsStr isEmpty not]) ifTrue: [
+          tagArr := tagsStr split: ','.
+          body at: 'tags' put: tagArr
+        ].
+        self postAndPrint: cfg path: '/api/observe' body: body
+      ].
+      exitCode
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Subcommand: decide ------------------------------------------------"
+
+  classMethod: runDecide: args [
+    "Build, configure, and dispatch the new `decide` command.
+
+     Exercises:
+       * Cli::Command       — leaf command with required positional args
+       * Cli::EnvBinding    — PP_URL / PP_SCOPE / PP_TASK
+       * Cli::Flag #string  — --rationale is a free-text string flag
+                              that only appears in the payload when set
+                              (legacy behaviour — nil vs. empty matters).
+     "
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'decide' doc: 'Record a decision'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_TASK'
+      setter: #taskId:
+      type: #string
+      default: '').
+
+    cmd flag: (Cli::Flag
+      name: 'rationale'
+      type: #string
+      default: ''
+      doc: 'Rationale for the decision').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | identity detail rationale body exitCode |
+      exitCode := 0.
+      runArgs size < 2 ifTrue: [
+        'Usage: pp decide <identity> <detail> [--rationale ...]' println.
+        exitCode := 1
+      ] ifFalse: [
+        cmd applyEnvBindings: cfg.
+        identity := runArgs at: 0.
+        detail := runArgs at: 1.
+        rationale := cmd flagValue: 'rationale'.
+        body := Dictionary new.
+        body at: 'scope' put: cfg scope.
+        body at: 'identity' put: identity.
+        body at: 'detail' put: detail.
+        cfg taskId isEmpty ifFalse: [body at: 'task' put: cfg taskId].
+        (rationale notNil and: [rationale isEmpty not]) ifTrue: [
+          body at: 'rationale' put: rationale
+        ].
+        self postAndPrint: cfg path: '/api/decide' body: body
+      ].
+      exitCode
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Subcommand: event -------------------------------------------------"
+
+  classMethod: runEvent: args [
+    "Build, configure, and dispatch the new `event` command.
+
+     Exercises:
+       * Cli::Command       — leaf command with required positional args
+       * Cli::EnvBinding    — PP_URL / PP_SCOPE
+       * Cli::Flag #string  — two string flags (--type with a default
+                              value, --summary as optional).
+     "
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'event' doc: 'Emit an event'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+
+    cmd flag: (Cli::Flag
+      name: 'type'
+      type: #string
+      default: 'generic'
+      doc: 'Event type (defaults to generic)').
+    cmd flag: (Cli::Flag
+      name: 'summary'
+      type: #string
+      default: ''
+      doc: 'Optional event summary').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | identity eventType summary body exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp event <identity> [--type T] [--summary S]' println.
+        exitCode := 1
+      ] ifFalse: [
+        cmd applyEnvBindings: cfg.
+        identity := runArgs at: 0.
+        eventType := cmd flagValue: 'type'.
+        summary := cmd flagValue: 'summary'.
+        body := Dictionary new.
+        body at: 'scope' put: cfg scope.
+        body at: 'identity' put: identity.
+        body at: 'type' put: ((eventType notNil and: [eventType isEmpty not])
+          ifTrue: [eventType]
+          ifFalse: ['generic']).
+        (summary notNil and: [summary isEmpty not]) ifTrue: [
+          body at: 'summary' put: summary
+        ].
+        self postAndPrint: cfg path: '/api/event' body: body
+      ].
+      exitCode
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Subcommand: notify ------------------------------------------------"
+
+  classMethod: runNotify: args [
+    "Build, configure, and dispatch the new `notify` command.
+
+     Exercises:
+       * Cli::Command       — leaf command with one required positional
+       * Cli::EnvBinding    — PP_URL / PP_SCOPE
+       * Cli::Flag #string  — --severity is a constrained enum-ish flag.
+                              The Cli framework has no enum type, so the
+                              run block validates the value against the
+                              allowed set {info, warn, urgent} and returns
+                              exit code 1 if the user passes a bogus one.
+     "
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'notify' doc: 'Notify the user'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+
+    cmd flag: (Cli::Flag
+      name: 'severity'
+      type: #string
+      default: 'info'
+      doc: 'Notification severity: one of info|warn|urgent (default info)').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | message severity body allowed exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp notify <message> [--severity info|warn|urgent]' println.
+        exitCode := 1
+      ] ifFalse: [
+        cmd applyEnvBindings: cfg.
+        message := runArgs at: 0.
+        severity := cmd flagValue: 'severity'.
+        (severity isNil or: [severity isEmpty]) ifTrue: [severity := 'info'].
+        allowed := #('info' 'warn' 'urgent').
+        (allowed includes: severity) ifTrue: [
+          body := Dictionary new.
+          body at: 'message' put: message.
+          body at: 'scope' put: cfg scope.
+          body at: 'severity' put: severity.
+          self postAndPrint: cfg path: '/api/notify' body: body
+        ] ifFalse: [
+          ('Error: --severity must be one of info|warn|urgent (got: ',
+            severity, ')') println.
+          exitCode := 1
+        ]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Subcommand: signal ------------------------------------------------"
+
+  classMethod: runSignal: args [
+    "Build, configure, and dispatch the new `signal` command.
+
+     Exercises:
+       * Cli::Command       — leaf command that takes THREE required
+                              positional args (id, key, value). The Cli
+                              framework wrapper doesn't expose cobra's
+                              MinimumNArgs directly, so the run block
+                              validates the count and returns exit code 1
+                              with a usage message when short.
+       * Cli::EnvBinding    — PP_URL / PP_SCOPE
+     "
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'signal' doc: 'Upsert a signal tuple'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | identity key value payload body exitCode |
+      exitCode := 0.
+      runArgs size < 3 ifTrue: [
+        'Usage: pp signal <id> <key> <value>' println.
+        exitCode := 1
+      ] ifFalse: [
+        cmd applyEnvBindings: cfg.
+        identity := runArgs at: 0.
+        key := runArgs at: 1.
+        value := runArgs at: 2.
+        payload := Dictionary new.
+        payload at: key put: value.
+        body := Dictionary new.
+        body at: 'scope' put: cfg scope.
+        body at: 'identity' put: identity.
+        body at: 'payload' put: payload.
+        self postAndPrint: cfg path: '/api/signal' body: body
+      ].
+      exitCode
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Subcommand: dismiss -----------------------------------------------"
+
+  classMethod: runDismiss: args [
+    "Build, configure, and dispatch the new `dismiss` command.
+
+     Exercises:
+       * Cli::Command       — zero-arg leaf command (no flags, no
+                              positional args)
+       * Cli::EnvBinding    — PP_URL / PP_SCOPE / PP_TASK. PP_TASK is
+                              the sole input: dismiss exits 1 if it's
+                              unset, otherwise it POSTs the task-complete
+                              event. This exercises env-binding as the
+                              primary way to receive input.
+     "
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'dismiss' doc: 'Signal task completion'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_TASK'
+      setter: #taskId:
+      type: #string
+      default: '').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | body exitCode |
+      exitCode := 0.
+      cmd applyEnvBindings: cfg.
+      cfg taskId isEmpty ifTrue: [
+        'No task ID set (PP_TASK env var). Cannot dismiss.' println.
+        exitCode := 1
+      ] ifFalse: [
+        body := Dictionary new.
+        body at: 'task_id' put: cfg taskId.
+        body at: 'scope' put: cfg scope.
+        self postAndPrint: cfg path: '/api/dismiss' body: body
+      ].
+      exitCode
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
