@@ -233,6 +233,7 @@ PP subclass: CLIBase
     '  status                                           Show system status' println.
     '  workflow <template> [--param key=val ...]        Start a workflow' println.
     '  workflow status [<id>]                           Show workflow status' println.
+    '  workflow list [--status running|completed|failed] Tabular listing of workflows' println.
     '  workflow cancel <id> [--scope <scope>]           Cancel a running workflow' println.
     '  workflow wait <id> [--timeout <secs>]            Block until workflow completes' println.
     '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.

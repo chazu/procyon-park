@@ -87,6 +87,7 @@ Main subclass: Object
     '  task     <id> --role <r> --description <d>     Create a task' println.
     '  workflow <template> [--param key=val ...]       Start a workflow' println.
     '  workflow status [<id>]                         Show workflow status' println.
+    '  workflow list [--status running|completed|failed] Tabular listing of workflows' println.
     '  workflow cancel <id> [--scope <scope>]         Cancel a running workflow' println.
     '  workflow wait <id> [--timeout <secs>]          Block until workflow completes' println.
     '  signal   <id> <key> <value>                    Upsert a signal' println.
