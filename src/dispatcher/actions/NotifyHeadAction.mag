@@ -9,7 +9,7 @@ NotifyHeadAction subclass: WorkflowAction
     scope := engine scopeForInstance: instanceId.
     desc := instanceId.
     workflow notNil ifTrue: [
-      pd := (workflow at: 'payload') at: 'description' ifAbsent: [nil].
+      pd := ((workflow at: 'payload') at: 'params' ifAbsent: [Dictionary new]) at: 'description' ifAbsent: [nil].
       pd notNil ifTrue: [desc := pd]
     ].
 

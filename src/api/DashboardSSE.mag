@@ -40,15 +40,16 @@ DashboardSSE subclass: Object
     workflows := bbs scanAll: 'workflow'.
     s := '<div id="dashboard-workflows"><h2>Active Workflows</h2>'.
     workflows do: [:w |
-      | p status template wfId desc |
+      | p status template wfId desc label |
       p := w at: 'payload' ifAbsent: [Dictionary new].
       status := p at: 'status' ifAbsent: ['?'].
       status = 'running' ifTrue: [
         template := p at: 'template' ifAbsent: ['?'].
         wfId := w at: 'identity' ifAbsent: ['?'].
-        desc := p at: 'description' ifAbsent: [''].
+        desc := (p at: 'params' ifAbsent: [Dictionary new]) at: 'description' ifAbsent: [''].
         desc size > 100 ifTrue: [desc := (desc copyFrom: 1 to: 100), '...'].
-        s := s, '<div class="wf-card"><b>', template, '</b> ', wfId, '<br><small>', desc, '</small></div>'
+        label := desc isEmpty ifTrue: [wfId] ifFalse: [desc].
+        s := s, '<div class="wf-card"><b>', template, '</b> ', label, '<br><small>', wfId, '</small></div>'
       ]
     ].
     s := s, '</div>'.
