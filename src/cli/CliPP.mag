@@ -80,6 +80,12 @@ CliPP subclass: Object
     head = 'history'  ifTrue: [^true].
     head = 'workflow' ifTrue: [^true].
     head = 'workitem' ifTrue: [^true].
+    head = 'repo'     ifTrue: [^true].
+    head = 'worktree' ifTrue: [^true].
+    head = 'clean-branches' ifTrue: [^true].
+    head = 'task'     ifTrue: [^true].
+    head = 'session'  ifTrue: [^true].
+    head = 'plan'     ifTrue: [^true].
     ^false
   ]
 
@@ -102,6 +108,12 @@ CliPP subclass: Object
     head = 'read'     ifTrue: [^self runRead: args].
     head = 'history'  ifTrue: [^self runHistory: args].
     head = 'workitem' ifTrue: [^self runWorkitem: args].
+    head = 'repo'     ifTrue: [^self runRepo: args].
+    head = 'worktree' ifTrue: [^self runWorktree: args].
+    head = 'clean-branches' ifTrue: [^self runCleanBranches: args].
+    head = 'task'     ifTrue: [^self runTask: args].
+    head = 'session'  ifTrue: [^self runSession: args].
+    head = 'plan'     ifTrue: [^self runPlan: args].
     ^0
   ]
 
@@ -2420,4 +2432,637 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       table: rows
       headers: #('ID' 'TYPE' 'STATUS' 'TITLE' 'CHILDREN')
       keys: #('id' 'type' 'status' 'title' 'children')
+  ]
+
+  "--- ~/.pp directory helpers --------------------------------------------"
+
+  classMethod: ppHome [
+    "Mirror Repo>>initialize: ~/.pp under HOME (fallback /tmp)."
+    | home |
+    home := System env: 'HOME'.
+    (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
+    ^home, '/.pp'
+  ]
+
+  classMethod: reposDir   [ ^self ppHome, '/repos' ]
+  classMethod: worktreesDir [ ^self ppHome, '/worktrees' ]
+
+  classMethod: ensurePpDirs [
+    Shell run: 'mkdir -p "', self reposDir, '" "', self worktreesDir, '"'
+  ]
+
+  classMethod: stripTrailingNewlines: aString [
+    "Trim trailing CR/LF from a Shell capture result."
+    | r last |
+    r := aString.
+    [r size > 0 and: [
+      last := r copyFrom: r size - 1.
+      (last = (Character lf asString)) or: [last = (Character cr asString)]
+    ]] whileTrue: [
+      r := r copyFrom: 0 to: r size - 1
+    ].
+    ^r
+  ]
+
+  "--- Subcommand: repo (parent + children) --------------------------------"
+
+  classMethod: runRepo: args [
+    "Dispatch `pp repo <subcmd> ...` through a Cli subcommand tree.
+     Children: add, list, remove, info — mirroring src/cli/Repo.mag."
+    | cfg root add list remove info rest |
+    cfg := self loadConfig.
+    root := Cli::Command named: 'repo' doc: 'Manage registered repositories'.
+
+    add := Cli::Command named: 'add' doc: 'Register a repository'.
+    add flag: (Cli::Flag name: 'name' type: #string default: '' doc: 'Repo name (defaults to basename of path)').
+    add run: [:runArgs |
+      | rawPath nameFlag exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp repo add <path> [--name <name>]' println.
+        exitCode := 1
+      ] ifFalse: [
+        rawPath := runArgs at: 0.
+        nameFlag := add flagValue: 'name'.
+        self performRepoAdd: rawPath name: nameFlag
+      ].
+      exitCode
+    ].
+
+    list := Cli::Command named: 'list' doc: 'List registered repositories'.
+    list run: [:runArgs |
+      self performRepoList.
+      0
+    ].
+
+    remove := Cli::Command named: 'remove' doc: 'Unregister a repository'.
+    remove run: [:runArgs |
+      | exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp repo remove <name>' println.
+        exitCode := 1
+      ] ifFalse: [
+        self performRepoRemove: (runArgs at: 0)
+      ].
+      exitCode
+    ].
+
+    info := Cli::Command named: 'info' doc: 'Show repository details'.
+    info run: [:runArgs |
+      | exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp repo info <name>' println.
+        exitCode := 1
+      ] ifFalse: [
+        self performRepoInfo: (runArgs at: 0)
+      ].
+      exitCode
+    ].
+
+    root registerSubcommand: add.
+    root registerSubcommand: list.
+    root registerSubcommand: remove.
+    root registerSubcommand: info.
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    root setArgs: rest.
+    ^[root execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: performRepoAdd: rawPath name: nameFlag [
+    "Resolve rawPath to absolute, verify it's a git repo, and write a
+     JSON config under ~/.pp/repos/<name>.json. Mirrors Repo>>cmdAdd:."
+    | absPath repoName configPath config |
+    absPath := self stripTrailingNewlines:
+      (Shell capture: 'cd "', rawPath, '" 2>/dev/null && pwd').
+    absPath isEmpty ifTrue: [
+      ('Error: path does not exist: ', rawPath) println.
+      ^self
+    ].
+    (File exists: absPath, '/.git') ifFalse: [
+      ('Error: not a git repository: ', absPath) println.
+      ^self
+    ].
+
+    (nameFlag notNil and: [nameFlag isEmpty not])
+      ifTrue: [repoName := nameFlag]
+      ifFalse: [
+        repoName := self stripTrailingNewlines:
+          (Shell capture: 'basename "', absPath, '"')
+      ].
+
+    self ensurePpDirs.
+    configPath := self reposDir, '/', repoName, '.json'.
+
+    config := Dictionary new.
+    config at: 'name' put: repoName.
+    config at: 'path' put: absPath.
+    config at: 'registered_at' put: DateTime now epochSeconds.
+
+    Shell run: 'cat > "', configPath, '" << ''PPEOF''
+', (Json encodePretty: config), '
+PPEOF'.
+
+    ('Registered repository: ', repoName) println.
+    ('  Path: ', absPath) println.
+    ('  Config: ', configPath) println
+  ]
+
+  classMethod: performRepoList [
+    "Tabular listing of registered repos via Cli::Output table:headers:keys:.
+     The new STATUS column flags missing on-disk paths the same way the
+     legacy `[MISSING]` annotation did."
+    | listing rows |
+    self ensurePpDirs.
+    listing := Shell capture: 'ls "', self reposDir, '/" 2>/dev/null | grep ".json$"'.
+    listing := self stripTrailingNewlines: listing.
+    listing isEmpty ifTrue: [
+      'No repositories registered.' println.
+      'Use: pp repo add <path>' println.
+      ^self
+    ].
+    rows := Array new: 0.
+    (listing split: (Character lf asString)) do: [:fname |
+      (fname size > 5 and: [(fname copyFrom: fname size - 5) = '.json']) ifTrue: [
+        | configPath contents config row |
+        configPath := self reposDir, '/', fname.
+        [
+          contents := File readFileContents: configPath.
+          config := Json decode: contents.
+          row := Dictionary new.
+          row at: 'name' put: (config at: 'name' ifAbsent: ['?']).
+          row at: 'path' put: (config at: 'path' ifAbsent: ['?']).
+          row at: 'status' put: ((File exists: (config at: 'path' ifAbsent: ['']))
+            ifTrue: ['']
+            ifFalse: ['MISSING']).
+          rows := rows copyWith: row
+        ] on: Exception do: [:e |
+          ('  Error reading ', fname, ': ', e messageText) println
+        ]
+      ]
+    ].
+    rows size = 0 ifTrue: [
+      'No repositories registered.' println.
+      'Use: pp repo add <path>' println.
+      ^self
+    ].
+    Cli::Output
+      table: rows
+      headers: #('NAME' 'PATH' 'STATUS')
+      keys: #('name' 'path' 'status')
+  ]
+
+  classMethod: performRepoRemove: repoName [
+    | configPath |
+    configPath := self reposDir, '/', repoName, '.json'.
+    (File exists: configPath) ifFalse: [
+      ('Error: no repository registered with name: ', repoName) println.
+      ^self
+    ].
+    Shell run: 'rm "', configPath, '"'.
+    ('Removed repository: ', repoName) println
+  ]
+
+  classMethod: performRepoInfo: repoName [
+    "Render one repo's config via Cli::Output dictText:keys: for
+     deterministic field order (name, path, registered_at)."
+    | configPath contents config dict |
+    configPath := self reposDir, '/', repoName, '.json'.
+    (File exists: configPath) ifFalse: [
+      ('Error: no repository registered with name: ', repoName) println.
+      ^self
+    ].
+    contents := File readFileContents: configPath.
+    config := Json decode: contents.
+
+    dict := Dictionary new.
+    dict at: 'name' put: (config at: 'name' ifAbsent: ['?']).
+    dict at: 'path' put: (config at: 'path' ifAbsent: ['?']).
+    dict at: 'registered_at' put: (config at: 'registered_at' ifAbsent: [0]) printString.
+
+    Cli::Output dictText: dict keys: #('name' 'path' 'registered_at')
+  ]
+
+  "--- Subcommand: worktree (parent + children) ----------------------------"
+
+  classMethod: runWorktree: args [
+    "Dispatch `pp worktree <subcmd>`. Children: list, clean."
+    | root list clean rest |
+    root := Cli::Command named: 'worktree' doc: 'Manage worktrees'.
+
+    list := Cli::Command named: 'list' doc: 'List managed worktrees'.
+    list run: [:runArgs |
+      self performWorktreeList.
+      0
+    ].
+
+    clean := Cli::Command named: 'clean' doc: 'Remove worktrees for completed/missing workflows'.
+    clean flag: (Cli::Flag
+      name: 'dry-run'
+      type: #bool
+      default: false
+      doc: 'Preview what would be removed without actually removing it').
+    clean run: [:runArgs |
+      | dryRun |
+      dryRun := clean flagValue: 'dry-run'.
+      self performWorktreeClean: dryRun.
+      0
+    ].
+
+    root registerSubcommand: list.
+    root registerSubcommand: clean.
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    root setArgs: rest.
+    ^[root execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: performWorktreeList [
+    "Tabular listing of worktrees: one row per (task, worktree) pair."
+    | listing rows wtDir lf |
+    self ensurePpDirs.
+    wtDir := self worktreesDir.
+    lf := Character lf asString.
+    listing := self stripTrailingNewlines:
+      (Shell capture: 'ls "', wtDir, '" 2>/dev/null').
+    listing isEmpty ifTrue: [
+      'No worktrees found.' println.
+      ^self
+    ].
+    rows := Array new: 0.
+    (listing split: lf) do: [:taskName |
+      (taskName isEmpty or: [taskName startsWith: '.']) ifFalse: [
+        | subList row |
+        subList := self stripTrailingNewlines:
+          (Shell capture: 'ls "', wtDir, '/', taskName, '" 2>/dev/null').
+        subList isEmpty ifTrue: [
+          row := Dictionary new.
+          row at: 'task' put: taskName.
+          row at: 'worktree' put: ''.
+          rows := rows copyWith: row
+        ] ifFalse: [
+          (subList split: lf) do: [:wtName |
+            (wtName isEmpty or: [wtName startsWith: '.']) ifFalse: [
+              row := Dictionary new.
+              row at: 'task' put: taskName.
+              row at: 'worktree' put: wtName.
+              rows := rows copyWith: row
+            ]
+          ]
+        ]
+      ]
+    ].
+    rows size = 0 ifTrue: ['No worktrees found.' println. ^self].
+    Cli::Output
+      table: rows
+      headers: #('TASK' 'WORKTREE')
+      keys: #('task' 'worktree')
+  ]
+
+  classMethod: performWorktreeClean: dryRun [
+    "Port of Repo>>cmdWorktreeClean:. Probe each task dir against the
+     workflow status endpoint; if completed/missing, drop the worktree."
+    | wtDir listing ppUrl cleaned lf |
+    self ensurePpDirs.
+    wtDir := self worktreesDir.
+    lf := Character lf asString.
+    cleaned := 0.
+    ppUrl := System env: 'PP_URL'.
+    (ppUrl isNil or: [ppUrl isEmpty]) ifTrue: [ppUrl := 'http://localhost:7777'].
+
+    listing := self stripTrailingNewlines:
+      (Shell capture: 'ls "', wtDir, '/" 2>/dev/null').
+    listing isEmpty ifTrue: ['No worktrees to clean.' println. ^self].
+
+    (listing split: lf) do: [:taskName |
+      taskName isEmpty ifFalse: [
+        | taskDir shouldRemove statusResponse statusBody wfStatus subList |
+        taskDir := wtDir, '/', taskName.
+        shouldRemove := false.
+        [
+          statusResponse := Shell capture:
+            'curl -s "', ppUrl, '/api/v1/workflow/status/', taskName, '" 2>/dev/null'.
+          (statusResponse isNil or: [statusResponse isEmpty]) ifTrue: [
+            shouldRemove := true
+          ] ifFalse: [
+            [
+              statusBody := Json decode: statusResponse.
+              wfStatus := statusBody at: 'status' ifAbsent: [''].
+              (wfStatus = 'completed' or: [wfStatus = 'not_found']) ifTrue: [
+                shouldRemove := true
+              ]
+            ] on: Exception do: [:e | shouldRemove := true]
+          ]
+        ] on: Exception do: [:e | shouldRemove := true].
+
+        shouldRemove ifTrue: [
+          dryRun ifTrue: [
+            ('Would remove: ', taskDir) println.
+            cleaned := cleaned + 1
+          ] ifFalse: [
+            subList := self stripTrailingNewlines:
+              (Shell capture: 'ls "', taskDir, '/" 2>/dev/null').
+            subList isEmpty ifFalse: [
+              (subList split: lf) do: [:wtName |
+                wtName isEmpty ifFalse: [
+                  | wtPath |
+                  wtPath := taskDir, '/', wtName.
+                  Shell run:
+                    'git worktree remove "', wtPath,
+                    '" 2>/dev/null || rm -rf "', wtPath, '"'
+                ]
+              ]
+            ].
+            Shell run: 'rm -rf "', taskDir, '"'.
+            ('Removed: ', taskDir) println.
+            cleaned := cleaned + 1
+          ]
+        ]
+      ]
+    ].
+    ('Cleaned ', cleaned printString, ' worktree(s).') println
+  ]
+
+  "--- Subcommand: clean-branches -----------------------------------------"
+
+  classMethod: runCleanBranches: args [
+    "`pp clean-branches [--dry-run] [--all] [--repo <name>]` — port of
+     Repo>>cmdCleanBranches:. Exercises two bool flags + one string flag."
+    | cmd rest |
+    cmd := Cli::Command named: 'clean-branches' doc: 'Remove stale impl/feature branches'.
+    cmd flag: (Cli::Flag
+      name: 'dry-run'
+      type: #bool
+      default: false
+      doc: 'Preview deletions without actually removing branches').
+    cmd flag: (Cli::Flag
+      name: 'all'
+      type: #bool
+      default: false
+      doc: 'Also force-delete unmerged branches').
+    cmd flag: (Cli::Flag
+      name: 'repo'
+      type: #string
+      default: ''
+      doc: 'Operate on a registered repository (by name)').
+
+    cmd run: [:runArgs |
+      | dryRun deleteAll repoFlag |
+      dryRun := cmd flagValue: 'dry-run'.
+      deleteAll := cmd flagValue: 'all'.
+      repoFlag := cmd flagValue: 'repo'.
+      (repoFlag isNil or: [repoFlag isEmpty]) ifTrue: [repoFlag := nil].
+      self performCleanBranches: dryRun all: deleteAll repo: repoFlag.
+      0
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: performCleanBranches: dryRun all: deleteAll repo: repoName [
+    "Mirrors Repo>>cmdCleanBranches: but driven by Cli::Flag values."
+    | repoPath repoConfig branchOutput branchLines mergedOutput mergedLines current
+      deletedMerged deletedForce totalDeleted lf |
+    deletedMerged := 0.
+    deletedForce := 0.
+    lf := Character lf asString.
+
+    repoPath := nil.
+    repoName notNil ifTrue: [
+      | configPath contents |
+      configPath := self reposDir, '/', repoName, '.json'.
+      (File exists: configPath) ifFalse: [
+        ('Error: no repository registered with name: ', repoName) println.
+        ^self
+      ].
+      contents := File readFileContents: configPath.
+      repoConfig := Json decode: contents.
+      repoPath := repoConfig at: 'path' ifAbsent: [nil]
+    ].
+    repoPath isNil ifTrue: [
+      repoPath := self stripTrailingNewlines: (Shell capture: 'pwd')
+    ].
+
+    branchOutput := self stripTrailingNewlines:
+      (Shell capture: 'git -C "', repoPath, '" branch --list "impl/*" "feature/*" 2>/dev/null | sed "s/^[* ]*//"').
+    branchOutput isEmpty ifTrue: [
+      'No impl/* or feature/* branches found.' println.
+      ^self
+    ].
+    branchLines := branchOutput split: lf.
+
+    current := self stripTrailingNewlines:
+      (Shell capture: 'git -C "', repoPath, '" rev-parse --abbrev-ref HEAD 2>/dev/null').
+
+    mergedOutput := self stripTrailingNewlines:
+      (Shell capture: 'git -C "', repoPath, '" branch --merged main 2>/dev/null | sed "s/^[* ]*//"').
+    mergedLines := Array new: 0.
+    mergedOutput isEmpty ifFalse: [
+      (mergedOutput split: lf) do: [:ml |
+        ml isEmpty ifFalse: [mergedLines := mergedLines copyWith: ml]
+      ]
+    ].
+
+    branchLines do: [:line |
+      | branch isMerged |
+      line isEmpty ifFalse: [
+        line = current ifTrue: [
+          ('Skipping current branch: ', line) println
+        ] ifFalse: [
+          branch := line.
+          isMerged := (mergedLines indexOf: branch) >= 0.
+          isMerged ifTrue: [
+            dryRun
+              ifTrue: [('Would delete (merged): ', branch) println]
+              ifFalse: [
+                Shell run: 'git -C "', repoPath, '" branch -d "', branch, '"'.
+                ('Deleted (merged): ', branch) println
+              ].
+            deletedMerged := deletedMerged + 1
+          ] ifFalse: [
+            deleteAll ifTrue: [
+              dryRun
+                ifTrue: [('Would force-delete (unmerged): ', branch) println]
+                ifFalse: [
+                  ('Deleting UNMERGED branch: ', branch) println.
+                  Shell run: 'git -C "', repoPath, '" branch -D "', branch, '"'
+                ].
+              deletedForce := deletedForce + 1
+            ] ifFalse: [
+              ('Skipping unmerged: ', branch, ' (use --all to force-delete)') println
+            ]
+          ]
+        ]
+      ]
+    ].
+
+    totalDeleted := deletedMerged + deletedForce.
+    dryRun
+      ifTrue: [('Dry run: would delete ', totalDeleted printString, ' branches') println]
+      ifFalse: [('Deleted ', totalDeleted printString, ' branches (',
+                 deletedMerged printString, ' merged, ',
+                 deletedForce printString, ' force-deleted)') println]
+  ]
+
+  "--- Subcommand: task ----------------------------------------------------"
+
+  classMethod: runTask: args [
+    "`pp task <id> --role R --description D [--workdir P] [--repo R]`
+     — agent-facing primitive that POSTs /api/task/create. Exercises
+     two required string flags plus two optional ones."
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'task' doc: 'Create a task tuple directly'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_TASK'
+      setter: #taskId:
+      type: #string
+      default: '').
+
+    cmd flag: (Cli::Flag name: 'role' type: #string default: '' doc: 'Agent role (required)').
+    cmd flag: (Cli::Flag name: 'description' type: #string default: '' doc: 'Task description (required)').
+    cmd flag: (Cli::Flag name: 'workdir' type: #string default: '' doc: 'Working directory for the task').
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (defaults to PP_REPO env)').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | identity role desc workdir repo body exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp task <identity> --role <role> --description <desc> [--workdir <path>] [--repo <name>]' println.
+        exitCode := 1
+      ] ifFalse: [
+        cmd applyEnvBindings: cfg.
+        identity := runArgs at: 0.
+        role := cmd flagValue: 'role'.
+        desc := cmd flagValue: 'description'.
+        workdir := cmd flagValue: 'workdir'.
+        repo := cmd flagValue: 'repo'.
+
+        (role isNil or: [role isEmpty]) ifTrue: [
+          'Error: --role is required' println.
+          exitCode := 1
+        ] ifFalse: [
+          (desc isNil or: [desc isEmpty]) ifTrue: [
+            'Error: --description is required' println.
+            exitCode := 1
+          ] ifFalse: [
+            body := Dictionary new.
+            body at: 'scope' put: cfg scope.
+            body at: 'identity' put: identity.
+            body at: 'role' put: role.
+            body at: 'description' put: desc.
+            (workdir notNil and: [workdir isEmpty not]) ifTrue: [
+              body at: 'workdir' put: workdir
+            ].
+            (repo isNil or: [repo isEmpty]) ifTrue: [
+              repo := System env: 'PP_REPO'.
+              (repo isNil or: [repo isEmpty]) ifTrue: [repo := nil]
+            ].
+            repo notNil ifTrue: [body at: 'repo' put: repo].
+            cfg taskId isEmpty ifFalse: [
+              body at: 'workflow_instance' put: cfg taskId
+            ].
+            self postAndPrint: cfg path: '/api/task/create' body: body
+          ]
+        ]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Subcommand: session -------------------------------------------------"
+
+  classMethod: runSession: args [
+    "`pp session [<task-id>]` — view (or list) Claude Code session
+     logs. Display formatting is reused from SystemCommands so the
+     output exactly matches the legacy command."
+    | cmd rest |
+    cmd := Cli::Command named: 'session' doc: 'View Claude session log for a task'.
+    cmd run: [:runArgs |
+      | callArgs sysCmd |
+      callArgs := Array new: 0.
+      callArgs := callArgs copyWith: 'session'.
+      runArgs size >= 1 ifTrue: [
+        callArgs := callArgs copyWith: (runArgs at: 0)
+      ].
+      sysCmd := SystemCommands new.
+      sysCmd cmdSession: callArgs.
+      0
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Subcommand: plan ----------------------------------------------------"
+
+  classMethod: runPlan: args [
+    "`pp plan <file.json>` — read a structured plan from disk and POST
+     it to /api/plan. Single positional file argument, no flags."
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'plan' doc: 'Submit a structured plan from a JSON file'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_TASK'
+      setter: #taskId:
+      type: #string
+      default: '').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | filePath contents body exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp plan <file.json>' println.
+        exitCode := 1
+      ] ifFalse: [
+        cmd applyEnvBindings: cfg.
+        filePath := runArgs at: 0.
+        (File exists: filePath) ifFalse: [
+          ('File not found: ', filePath) println.
+          exitCode := 1
+        ] ifTrue: [
+          contents := File readFileContents: filePath.
+          body := Json decode: contents.
+          body at: 'scope' put: cfg scope.
+          cfg taskId isEmpty ifFalse: [body at: 'task' put: cfg taskId].
+          self postAndPrint: cfg path: '/api/plan' body: body
+        ]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
