@@ -312,7 +312,13 @@ WorkflowEngine subclass: Object
           tokenPayload at: 'modality' put: 'linear'.
           bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
         ].
-        self executeAction: action transition: transition instance: instanceId params: params
+        [
+          self executeAction: action transition: transition instance: instanceId params: params
+        ] on: Exception do: [:e |
+          ('  Async action ', action, ' failed: ', e messageText) println.
+          bbs notify: ('Async action ', action, ' failed: ', e messageText) scope: scope severity: 'urgent'.
+          self failWorkflow: instanceId reason: ('Async action ', action, ' failed: ', e messageText)
+        ]
       ] ifFalse: [
         "Synchronous actions: execute FIRST, produce positive tokens only on success"
         [
