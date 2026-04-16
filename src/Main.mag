@@ -22,15 +22,21 @@ Main subclass: Object
 
     cmd := args at: 0.
 
-    "GC (before server to stay within bytecode limit)"
-    cmd = 'gc' ifTrue: [^PP new runWith: args].
+    "GC (before server to stay within bytecode limit). When PP_USE_CLI
+     is active we route to the new framework first; otherwise fall
+     through to the legacy dispatcher unchanged."
+    cmd = 'gc' ifTrue: [
+      (CliPP enabled and: [CliPP handles: args]) ifTrue: [^CliPP runWith: args].
+      ^PP new runWith: args
+    ].
 
     "Server"
     cmd = 'serve' ifTrue: [^self startServer: (args copyFrom: 1)].
 
-    "PoC: when PP_USE_CLI=1 is set, route the two ported subcommands
-     (status, workflow list) through the new Maggie Cli framework.
-     Everything else falls through to the existing dispatcher unchanged."
+    "PoC: when PP_USE_CLI=1 is set, route the ported subcommands
+     (status, workflow list, log, prime, gc) through the new Maggie
+     Cli framework. Everything else falls through to the existing
+     dispatcher unchanged."
     (CliPP enabled and: [CliPP handles: args]) ifTrue: [
       ^CliPP runWith: args
     ].

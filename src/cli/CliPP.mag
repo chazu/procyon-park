@@ -1,18 +1,21 @@
-"CliPP — proof-of-concept port of two pp subcommands to the new
- Maggie Cli framework (Cli::Command, Cli::Flag, Cli::EnvBinding,
- Cli::Output).
+"CliPP — port of several pp subcommands to the new Maggie Cli framework
+ (Cli::Command, Cli::Flag, Cli::EnvBinding, Cli::Output).
 
  Activated by setting PP_USE_CLI=1 (any truthy value). When unset, the
  original PP/SystemCommands/WorkflowCommands code paths run unchanged.
- The two ported commands are:
+ The ported commands are:
 
    pp status          — exercises Cli::Command + Cli::EnvBinding + Cli::Output
    pp workflow list   — exercises Cli::Command + Cli::Flag + Cli::Output
+   pp log             — exercises Cli::Flag #bool pair + Cli::EnvBinding for
+                        two log-specific env vars
+   pp prime           — no-flags command, exercises text output + env bindings
+   pp gc              — exercises Cli::Flag #bool flags (--dry-run, --all)
 
  See docs/cli-poc-writeup.md for findings."
 
 PPCliConfig subclass: Object
-  instanceVars: baseUrl scope taskId
+  instanceVars: baseUrl scope taskId logFollow logSince
 
   classMethod: new [
     | c |
@@ -24,7 +27,9 @@ PPCliConfig subclass: Object
   method: init [
     baseUrl := 'http://localhost:7777'.
     scope := 'default'.
-    taskId := ''
+    taskId := ''.
+    logFollow := true.
+    logSince := ''
   ]
 
   method: baseUrl [ ^baseUrl ]
@@ -33,6 +38,10 @@ PPCliConfig subclass: Object
   method: scope: aValue [ scope := aValue ]
   method: taskId [ ^taskId ]
   method: taskId: aValue [ taskId := aValue ]
+  method: logFollow [ ^logFollow ]
+  method: logFollow: aValue [ logFollow := aValue ]
+  method: logSince [ ^logSince ]
+  method: logSince: aValue [ logSince := aValue ]
 
 
 CliPP subclass: Object
@@ -50,11 +59,16 @@ CliPP subclass: Object
 
   classMethod: handles: args [
     "Returns true when this PoC should handle the given args. We claim
-     `pp status` and `pp workflow list`; everything else falls through
-     to the existing dispatcher."
+     `pp status`, `pp workflow list`, `pp log`, `pp prime`, and `pp gc`;
+     everything else falls through to the existing dispatcher."
+    | head |
     args isEmpty ifTrue: [^false].
-    (args at: 0) = 'status' ifTrue: [^true].
-    ((args at: 0) = 'workflow' and: [args size > 1 and: [(args at: 1) = 'list']])
+    head := args at: 0.
+    head = 'status' ifTrue: [^true].
+    head = 'log'    ifTrue: [^true].
+    head = 'prime'  ifTrue: [^true].
+    head = 'gc'     ifTrue: [^true].
+    (head = 'workflow' and: [args size > 1 and: [(args at: 1) = 'list']])
       ifTrue: [^true].
     ^false
   ]
@@ -64,8 +78,11 @@ CliPP subclass: Object
     | head |
     args isEmpty ifTrue: [^0].
     head := args at: 0.
-    head = 'status' ifTrue: [^self runStatus: args].
+    head = 'status'   ifTrue: [^self runStatus: args].
     head = 'workflow' ifTrue: [^self runWorkflowList: args].
+    head = 'log'      ifTrue: [^self runLog: args].
+    head = 'prime'    ifTrue: [^self runPrime: args].
+    head = 'gc'       ifTrue: [^self runGc: args].
     ^0
   ]
 
@@ -316,4 +333,518 @@ CliPP subclass: Object
     h > 0 ifTrue: [^h printString, 'h', m printString, 'm'].
     m > 0 ifTrue: [^m printString, 'm', s printString, 's'].
     ^s printString, 's'
+  ]
+
+  "--- Shared scan helper --------------------------------------------------"
+
+  classMethod: safeScan: category cfg: cfg scope: aScope [
+    "Generic scan helper used by runPrime: and runGc:. An empty/nil
+     aScope means scan every scope."
+    | client body response result |
+    client := HttpClient new.
+    body := Dictionary new.
+    body at: 'category' put: category.
+    (aScope notNil and: [aScope isEmpty not]) ifTrue: [
+      body at: 'scope' put: aScope
+    ].
+    [
+      response := client post: cfg baseUrl, '/api/scan'
+                         body: (Json encode: body)
+                  contentType: 'application/json'.
+      response isNil ifTrue: [^Array new: 0].
+      result := Json decode: response.
+      ^result at: 'tuples' ifAbsent: [Array new: 0]
+    ] on: Exception do: [:e | ^Array new: 0]
+  ]
+
+  classMethod: silentInp: category cfg: cfg scope: aScope identity: anIdentity [
+    "Remove a tuple from the BBS silently."
+    | client body |
+    client := HttpClient new.
+    body := Dictionary new.
+    body at: 'category' put: category.
+    body at: 'scope' put: aScope.
+    body at: 'identity' put: anIdentity.
+    [
+      client post: cfg baseUrl, '/api/inp'
+             body: (Json encode: body)
+      contentType: 'application/json'
+    ] on: Exception do: [:e | "ignore"]
+  ]
+
+  "--- Subcommand: log -----------------------------------------------------"
+
+  classMethod: runLog: args [
+    "Build, configure, and dispatch the new `log` command.
+
+     Exercises:
+       * Cli::Command     — leaf command + streaming run block
+       * Cli::Flag #bool  — --follow / --no-follow pair pattern, both are
+                            registered as distinct bool flags so the
+                            user can say either `--follow=false` or
+                            `--no-follow` to disable streaming.
+       * Cli::Flag #string — --since accepts an offset in seconds.
+       * Cli::EnvBinding  — PP_LOG_FOLLOW and PP_LOG_SINCE are applied
+                            to a PPCliConfig instance and the resulting
+                            values become the flag defaults, so env
+                            vars act as user-level defaults that the
+                            per-invocation flag can override.
+     "
+    | cmd cfg rest followBinding sinceBinding |
+    cfg := PPCliConfig new.
+
+    "Apply PP_LOG_FOLLOW / PP_LOG_SINCE up front so the flag defaults
+     reflect the user's environment. Flags then override on a per-call
+     basis."
+    followBinding := Cli::EnvBinding
+      envName: 'PP_LOG_FOLLOW'
+      setter: #logFollow:
+      type: #bool
+      default: true.
+    sinceBinding := Cli::EnvBinding
+      envName: 'PP_LOG_SINCE'
+      setter: #logSince:
+      type: #string
+      default: ''.
+    followBinding applyTo: cfg.
+    sinceBinding applyTo: cfg.
+
+    cmd := Cli::Command named: 'log' doc: 'Stream notifications from the server'.
+
+    "Connection-level env bindings, applied from inside the run block."
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+
+    "Bool flag pair: --follow defaults to the env-derived value so
+     `./pp log` still streams by default; --no-follow is a separate
+     bool that forces follow off when set."
+    cmd flag: (Cli::Flag
+      name: 'follow'
+      type: #bool
+      default: cfg logFollow
+      doc: 'Follow and stream new notifications (default true)').
+    cmd flag: (Cli::Flag
+      name: 'no-follow'
+      type: #bool
+      default: false
+      doc: 'Disable streaming: fetch once and exit').
+    cmd flag: (Cli::Flag
+      name: 'since'
+      type: #string
+      default: cfg logSince
+      doc: 'Offset in seconds from now for the initial cursor').
+
+    cmd run: [:runArgs |
+      | follow sinceStr |
+      cmd applyEnvBindings: cfg.
+      follow := cmd flagValue: 'follow'.
+      (cmd flagValue: 'no-follow') ifTrue: [follow := false].
+      sinceStr := cmd flagValue: 'since'.
+      self performLog: cfg follow: follow since: sinceStr.
+      0
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: performLog: cfg follow: follow since: sinceStr [
+    "Port of SystemCommands>>cmdLog: that uses explicit follow / since
+     values rather than scanning the raw args. Non-following mode does
+     a single fetch via curl (to avoid the HttpClient blocking bug);
+     following mode long-polls via HttpClient in a loop."
+    | sinceOffset since url client response result notifications
+      payload createdAt severity message ts maxCreatedAt dt sinceEpochStr |
+    sinceOffset := 0.
+    (sinceStr notNil and: [sinceStr isEmpty not]) ifTrue: [
+      sinceOffset := sinceStr asInteger.
+      sinceOffset isNil ifTrue: [sinceOffset := 0]
+    ].
+    since := DateTime now epochSeconds - sinceOffset.
+
+    follow ifFalse: [
+      "Single-shot path mirrors SystemCommands>>cmdLog:'s curl branch."
+      sinceEpochStr := since printString.
+      url := cfg baseUrl, '/api/notifications/stream?since=', sinceEpochStr, '&wait=0'.
+      response := Shell capture: 'curl -s "', url, '"'.
+      (response notNil and: [response isEmpty not]) ifTrue: [
+        [
+          result := Json decode: response.
+          notifications := result at: 'notifications' ifAbsent: [#()].
+          notifications do: [:notif |
+            payload := notif.
+            createdAt := payload at: 'created_at' ifAbsent: [0].
+            severity := payload at: 'severity' ifAbsent: ['info'].
+            message := payload at: 'message' ifAbsent: [''].
+            dt := DateTime fromEpoch: createdAt.
+            ts := dt printString.
+            (ts, ' [', severity, '] ', message) println
+          ]
+        ] on: Exception do: [:e |
+          ('Error: ', e messageText) println
+        ]
+      ].
+      ^self
+    ].
+
+    "Following mode: long-poll loop. This runs inside the Cli::Command's
+     run block — cobra does not impose a timeout, so the loop is free to
+     run until the user interrupts."
+    client := HttpClient new.
+    [true] whileTrue: [
+      sinceEpochStr := since printString.
+      url := cfg baseUrl, '/api/notifications/stream?since=', sinceEpochStr, '&wait=1'.
+      [
+        response := client get: url.
+        (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
+          result := Json decode: response.
+          notifications := result at: 'notifications' ifAbsent: [#()].
+          maxCreatedAt := since.
+          notifications do: [:notif |
+            payload := notif.
+            createdAt := payload at: 'created_at' ifAbsent: [0].
+            severity := payload at: 'severity' ifAbsent: ['info'].
+            message := payload at: 'message' ifAbsent: [''].
+            dt := DateTime fromEpoch: createdAt.
+            ts := dt printString.
+            (ts, ' [', severity, '] ', message) println.
+            createdAt > maxCreatedAt ifTrue: [maxCreatedAt := createdAt]
+          ].
+          notifications size > 0 ifTrue: [since := maxCreatedAt + 1]
+        ]
+      ] on: Exception do: [:e |
+        ('Error polling notifications: ', e messageText) println
+      ].
+      Process sleep: 2000
+    ]
+  ]
+
+  "--- Subcommand: prime ---------------------------------------------------"
+
+  classMethod: runPrime: args [
+    "Build, configure, and dispatch the new `prime` command.
+
+     Exercises:
+       * Cli::Command       — leaf command with no flags
+       * Cli::EnvBinding    — PP_URL / PP_SCOPE / PP_TASK applied to cfg
+       * Plain text output  — the priming context is free-form markdown,
+                              so we bypass Cli::Output and just println
+                              the whole string in one shot.
+     "
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'prime' doc: 'Output agent priming context'.
+
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_TASK'
+      setter: #taskId:
+      type: #string
+      default: '').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      cmd applyEnvBindings: cfg.
+      self performPrime: cfg.
+      0
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: performPrime: cfg [
+    "Port of SystemCommands>>cmdPrime:. Builds the priming markdown by
+     concatenating fixed header text with scanned tuples (conventions,
+     facts, signals, pending notifications)."
+    | conventions facts signals notifications out |
+
+    out := '# Procyon Park Agent Context
+
+You are connected to the Procyon Park orchestration system.
+Communicate with it using the `pp` command-line tool.
+
+## Available Commands
+
+  pp observe <identity> <detail> [--tags t1,t2]     Report an observation
+  pp decide <identity> <detail> [--rationale ..]     Record a decision
+  pp event <identity> [--type T] [--summary S]       Emit an event
+  pp plan <file.json>                                Submit a structured plan
+  pp read <category> [scope] [identity]              Read tuples
+  pp notify <message> [--severity info|warn|urgent]  Notify the user
+  pp dismiss                                         Signal task completion
+  pp status                                          Show system status
+  pp task <id> --role <r> --description <d> [--workdir <p>]  Create a task
+  pp workflow <template> [--param key=val ...]        Start a workflow
+  pp signal <id> <key> <value>                       Upsert a signal
+  pp log [--follow] [--no-follow] [--since <secs>]   Tail notification stream
+
+Worktree base: ~/.pp/worktrees/
+Dashboard:     ', cfg baseUrl, '/dashboard/
+
+## Rules
+
+- All coordination flows through `pp`. Do not coordinate with other agents directly.
+- Report anything unexpected with `pp observe`.
+- When done, run `pp dismiss`.
+
+## Environment
+
+  PP_URL   = ', cfg baseUrl, '
+  PP_SCOPE = ', cfg scope, '
+'.
+
+    cfg taskId isEmpty ifFalse: [
+      out := out, '  PP_TASK  = ', cfg taskId, '
+'
+    ].
+
+    "Conventions (scope-independent)"
+    conventions := self safeScan: 'convention' cfg: cfg scope: nil.
+    conventions isEmpty ifFalse: [
+      out := out, '
+## Conventions
+
+'.
+      conventions do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- **', (t at: 'identity' ifAbsent: ['?']), '**: ', (payload at: 'detail' ifAbsent: ['']), '
+'
+      ]
+    ].
+
+    "Facts in scope"
+    facts := self safeScan: 'fact' cfg: cfg scope: cfg scope.
+    facts isEmpty ifFalse: [
+      out := out, '
+## Known Facts (scope: ', cfg scope, ')
+
+'.
+      facts do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- **', (t at: 'identity' ifAbsent: ['?']), '**: ', (payload at: 'detail' ifAbsent: ['']), '
+'
+      ]
+    ].
+
+    "Signals in scope"
+    signals := self safeScan: 'signal' cfg: cfg scope: cfg scope.
+    signals isEmpty ifFalse: [
+      out := out, '
+## Signals (scope: ', cfg scope, ')
+
+'.
+      signals do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- **', (t at: 'identity' ifAbsent: ['?']), '**: ', (Json encode: payload), '
+'
+      ]
+    ].
+
+    "Pending notifications"
+    notifications := self safeScan: 'notification' cfg: cfg scope: nil.
+    notifications isEmpty ifFalse: [
+      out := out, '
+## Pending Notifications
+
+'.
+      notifications do: [:t |
+        | payload |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        out := out, '- [', (payload at: 'severity' ifAbsent: ['info']), '] ', (payload at: 'message' ifAbsent: ['']), '
+'
+      ]
+    ].
+
+    out println
+  ]
+
+  "--- Subcommand: gc ------------------------------------------------------"
+
+  classMethod: runGc: args [
+    "Build, configure, and dispatch the new `gc` command.
+
+     Exercises:
+       * Cli::Command    — leaf command
+       * Cli::Flag #bool — --dry-run and --all, both as value objects
+       * Cli::EnvBinding — PP_URL / PP_SCOPE for connection config
+     "
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'gc' doc: 'Garbage-collect finished workflows & branches'.
+
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+
+    cmd flag: (Cli::Flag
+      name: 'dry-run'
+      type: #bool
+      default: false
+      doc: 'Preview what would be removed without actually removing it').
+    cmd flag: (Cli::Flag
+      name: 'all'
+      type: #bool
+      default: false
+      doc: 'GC every workflow regardless of status (normally only terminal ones)').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | dryRun allFlag |
+      cmd applyEnvBindings: cfg.
+      dryRun := cmd flagValue: 'dry-run'.
+      allFlag := cmd flagValue: 'all'.
+      self performGc: cfg dryRun: dryRun all: allFlag.
+      0
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: performGc: cfg dryRun: dryRun all: allFlag [
+    "Port of SystemCommands>>cmdGc:. The --all flag relaxes the status
+     filter so every workflow (including running ones) is considered
+     for removal — useful in test environments where long-lived
+     workflows need to be wiped."
+    | count |
+    'Procyon Park GC' println.
+    dryRun ifTrue: ['(dry-run)' println].
+    allFlag ifTrue: ['(all workflows — ignoring status filter)' println].
+    count := self gcWorkflows: cfg dryRun: dryRun all: allFlag.
+    self gcBranches: dryRun.
+    ('Done. Removed ', count printString, ' workflows.') println
+  ]
+
+  classMethod: gcWorkflows: cfg dryRun: dryRun all: allFlag [
+    "Scan all workflows; remove the ones in terminal states (or every
+     one when allFlag is set). Returns the number of workflows
+     removed/previewed."
+    | client body response result workflows count |
+    client := HttpClient new.
+    body := Dictionary new.
+    body at: 'category' put: 'workflow'.
+    count := 0.
+    [
+      response := client post: cfg baseUrl, '/api/scan'
+                         body: (Json encode: body)
+                  contentType: 'application/json'.
+      result := Json decode: response.
+      workflows := result at: 'tuples' ifAbsent: [#()].
+      workflows do: [:wf |
+        | p status wfId wfScope shouldGc |
+        p := wf at: 'payload' ifAbsent: [Dictionary new].
+        status := p at: 'status' ifAbsent: [''].
+        wfId := wf at: 'identity' ifAbsent: [''].
+        wfScope := wf at: 'scope' ifAbsent: ['default'].
+        shouldGc := allFlag or: [
+          status = 'completed' or: [status = 'cancelled' or: [status = 'failed']]
+        ].
+        shouldGc ifTrue: [
+          ('  ', wfId, ' [', status, ']') println.
+          self gcWorkflowTuples: wfId cfg: cfg dryRun: dryRun.
+          dryRun ifFalse: [
+            self silentInp: 'workflow' cfg: cfg scope: wfScope identity: wfId
+          ].
+          count := count + 1
+        ]
+      ]
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ].
+    ^count
+  ]
+
+  classMethod: gcWorkflowTuples: wfId cfg: cfg dryRun: dryRun [
+    "Remove all token/task/event/signal tuples associated with workflow
+     wfId. Same matching rules as SystemCommands>>gcWorkflowTuples:dryRun:."
+    | categories removedCount |
+    categories := #('token' 'task' 'event' 'signal').
+    removedCount := 0.
+    categories do: [:cat |
+      | tuples |
+      tuples := self safeScan: cat cfg: cfg scope: nil.
+      tuples do: [:t |
+        (self tuple: t matchesWorkflow: wfId) ifTrue: [
+          | tScope tIdentity |
+          tScope := t at: 'scope' ifAbsent: ['default'].
+          tIdentity := t at: 'identity' ifAbsent: [''].
+          ('    [', cat, '] ', tScope, '/', tIdentity) println.
+          dryRun ifFalse: [
+            self silentInp: cat cfg: cfg scope: tScope identity: tIdentity
+          ].
+          removedCount := removedCount + 1
+        ]
+      ]
+    ].
+    removedCount > 0 ifTrue: [
+      ('    -> ', removedCount printString, ' associated tuple(s) ',
+        (dryRun ifTrue: ['would be removed'] ifFalse: ['removed'])) println
+    ].
+    ^removedCount
+  ]
+
+  classMethod: tuple: t matchesWorkflow: wfId [
+    "True if tuple t is associated with workflow wfId. Mirrors
+     SystemCommands>>tuple:matchesWorkflow:."
+    | payload identity tScope wfInst |
+    wfId isEmpty ifTrue: [^false].
+    payload := t at: 'payload' ifAbsent: [Dictionary new].
+    identity := t at: 'identity' ifAbsent: [''].
+    tScope := t at: 'scope' ifAbsent: [''].
+    wfInst := payload at: 'workflow_instance' ifAbsent: [''].
+    wfInst = wfId ifTrue: [^true].
+    tScope = wfId ifTrue: [^true].
+    identity = wfId ifTrue: [^true].
+    (identity startsWith: (wfId, ':')) ifTrue: [^true].
+    ^false
+  ]
+
+  classMethod: gcBranches: dryRun [
+    "Delete local feature/* branches that are merged into main."
+    | output lines |
+    [
+      output := Shell capture: 'git branch --merged main 2>/dev/null | grep feature/ | sed "s/^[* ]*//"'.
+      output isEmpty ifFalse: [
+        lines := output split: (Character lf asString).
+        lines do: [:line |
+          line isEmpty ifFalse: [
+            ('  branch: ', line) println.
+            dryRun ifFalse: [
+              Shell run: 'git branch -D ', line, ' 2>/dev/null'
+            ]
+          ]
+        ]
+      ]
+    ] on: Exception do: [:e | ]
   ]
