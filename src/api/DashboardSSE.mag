@@ -32,6 +32,7 @@ DashboardSSE subclass: Object
 
   method: broadcastTo: conn [
     self sendWorkflows: conn.
+    self sendCompletions: conn.
     self sendNotifs: conn
   ]
 
@@ -54,6 +55,95 @@ DashboardSSE subclass: Object
     ].
     s := s, '</div>'.
     conn send: ('elements ', s) event: 'datastar-patch-elements'
+  ]
+
+  method: sendCompletions: conn [
+    "Broadcast the most recent completed/failed/cancelled workflows with duration.
+     Running workflows are handled by sendWorkflows: and disappear from the active
+     list on completion, so this section gives operators a short-lived record of
+     terminal workflows so they don't vanish without a trace."
+    | s workflows topN maxCount |
+    maxCount := 10.
+    workflows := bbs scanAll: 'workflow'.
+    topN := Array new: 0.
+    workflows do: [:w |
+      | p status endedAt startedAt entry |
+      p := w at: 'payload' ifAbsent: [Dictionary new].
+      status := p at: 'status' ifAbsent: ['?'].
+      (status = 'completed' or: [status = 'failed' or: [status = 'cancelled']]) ifTrue: [
+        endedAt := p at: 'completed_at' ifAbsent: [
+          p at: 'failed_at' ifAbsent: [
+            p at: 'cancelled_at' ifAbsent: [0]
+          ]
+        ].
+        startedAt := p at: 'started_at' ifAbsent: [0].
+        entry := Dictionary new.
+        entry at: 'wf' put: w.
+        entry at: 'status' put: status.
+        entry at: 'endedAt' put: endedAt.
+        entry at: 'startedAt' put: startedAt.
+        topN := self insertEntry: entry into: topN maxSize: maxCount
+      ]
+    ].
+    s := '<div id="dashboard-completions"><h2>Recent Completions</h2>'.
+    topN isEmpty ifTrue: [
+      s := s, '<div class="empty-state">No recent completions</div>'
+    ] ifFalse: [
+      topN do: [:entry |
+        | wf p template wfId status endedAt startedAt duration durationStr |
+        wf := entry at: 'wf'.
+        p := wf at: 'payload' ifAbsent: [Dictionary new].
+        template := p at: 'template' ifAbsent: ['?'].
+        wfId := wf at: 'identity' ifAbsent: ['?'].
+        status := entry at: 'status'.
+        endedAt := entry at: 'endedAt'.
+        startedAt := entry at: 'startedAt'.
+        duration := (startedAt > 0 and: [endedAt > 0])
+          ifTrue: [endedAt - startedAt]
+          ifFalse: [-1].
+        durationStr := self formatDuration: duration.
+        s := s, '<div class="wf-card completion-', status, '"><b>', template, '</b> ', wfId,
+              '<br><small>[', status, '] ', durationStr, '</small></div>'
+      ]
+    ].
+    s := s, '</div>'.
+    conn send: ('elements ', s) event: 'datastar-patch-elements'
+  ]
+
+  method: insertEntry: entry into: topN maxSize: maxSize [
+    "Insert entry into topN, keeping topN sorted descending by endedAt and
+     trimmed to at most maxSize elements. topN must already be sorted."
+    | entryEnd result inserted |
+    entryEnd := entry at: 'endedAt'.
+    result := Array new: 0.
+    inserted := false.
+    topN do: [:e |
+      (inserted not and: [entryEnd > (e at: 'endedAt')]) ifTrue: [
+        result := result copyWith: entry.
+        inserted := true
+      ].
+      result size < maxSize ifTrue: [
+        result := result copyWith: e
+      ]
+    ].
+    (inserted not and: [result size < maxSize]) ifTrue: [
+      result := result copyWith: entry
+    ].
+    ^result
+  ]
+
+  method: formatDuration: seconds [
+    "Format a duration (seconds, integer) into a short human string like
+     '5s', '2m 30s', '1h 23m', '2d 3h'. A negative duration is rendered as '—'."
+    seconds < 0 ifTrue: [^'—'].
+    seconds < 60 ifTrue: [^seconds printString, 's'].
+    seconds < 3600 ifTrue: [
+      ^(seconds // 60) printString, 'm ', (seconds \\ 60) printString, 's'
+    ].
+    seconds < 86400 ifTrue: [
+      ^(seconds // 3600) printString, 'h ', ((seconds \\ 3600) // 60) printString, 'm'
+    ].
+    ^(seconds // 86400) printString, 'd ', ((seconds \\ 86400) // 3600) printString, 'h'
   ]
 
   method: sendNotifs: conn [
