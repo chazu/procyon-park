@@ -28,6 +28,13 @@ Main subclass: Object
     "Server"
     cmd = 'serve' ifTrue: [^self startServer: (args copyFrom: 1)].
 
+    "PoC: when PP_USE_CLI=1 is set, route the two ported subcommands
+     (status, workflow list) through the new Maggie Cli framework.
+     Everything else falls through to the existing dispatcher unchanged."
+    (CliPP enabled and: [CliPP handles: args]) ifTrue: [
+      ^CliPP runWith: args
+    ].
+
     "Agent communication (thin HTTP client commands)"
     (self ppCommands includes: cmd) ifTrue: [^PP new runWith: args].
 
