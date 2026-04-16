@@ -1,0 +1,319 @@
+"CliPP — proof-of-concept port of two pp subcommands to the new
+ Maggie Cli framework (Cli::Command, Cli::Flag, Cli::EnvBinding,
+ Cli::Output).
+
+ Activated by setting PP_USE_CLI=1 (any truthy value). When unset, the
+ original PP/SystemCommands/WorkflowCommands code paths run unchanged.
+ The two ported commands are:
+
+   pp status          — exercises Cli::Command + Cli::EnvBinding + Cli::Output
+   pp workflow list   — exercises Cli::Command + Cli::Flag + Cli::Output
+
+ See docs/cli-poc-writeup.md for findings."
+
+PPCliConfig subclass: Object
+  instanceVars: baseUrl scope taskId
+
+  classMethod: new [
+    | c |
+    c := super new.
+    c init.
+    ^c
+  ]
+
+  method: init [
+    baseUrl := 'http://localhost:7777'.
+    scope := 'default'.
+    taskId := ''
+  ]
+
+  method: baseUrl [ ^baseUrl ]
+  method: baseUrl: aValue [ baseUrl := aValue ]
+  method: scope [ ^scope ]
+  method: scope: aValue [ scope := aValue ]
+  method: taskId [ ^taskId ]
+  method: taskId: aValue [ taskId := aValue ]
+
+
+CliPP subclass: Object
+
+  "--- Toggle / dispatch ----------------------------------------------------"
+
+  classMethod: enabled [
+    "Returns true when PP_USE_CLI is set to a truthy value."
+    | raw lower |
+    raw := System env: 'PP_USE_CLI'.
+    (raw isNil or: [raw isEmpty]) ifTrue: [^false].
+    lower := raw asLowercase.
+    ^(lower = '1') or: [(lower = 'true') or: [lower = 'yes']]
+  ]
+
+  classMethod: handles: args [
+    "Returns true when this PoC should handle the given args. We claim
+     `pp status` and `pp workflow list`; everything else falls through
+     to the existing dispatcher."
+    args isEmpty ifTrue: [^false].
+    (args at: 0) = 'status' ifTrue: [^true].
+    ((args at: 0) = 'workflow' and: [args size > 1 and: [(args at: 1) = 'list']])
+      ifTrue: [^true].
+    ^false
+  ]
+
+  classMethod: runWith: args [
+    "Dispatch from Main.start. Returns the exit code from cobra."
+    | head |
+    args isEmpty ifTrue: [^0].
+    head := args at: 0.
+    head = 'status' ifTrue: [^self runStatus: args].
+    head = 'workflow' ifTrue: [^self runWorkflowList: args].
+    ^0
+  ]
+
+  "--- Subcommand: status --------------------------------------------------"
+
+  classMethod: runStatus: args [
+    "Build, configure, and dispatch the new `status` command.
+
+     Exercises:
+       * Cli::Command         — leaf command + run block
+       * Cli::EnvBinding      — PP_URL, PP_SCOPE, PP_TASK projected onto
+                                a PPCliConfig instance
+       * Cli::Output          — dictText: for the status fields
+     "
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'status' doc: 'Show system status'.
+
+    "Default values match CLIBase>>initialize so behavior is preserved
+     when the corresponding env var is unset."
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_TASK'
+      setter: #taskId:
+      type: #string
+      default: '').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      cmd applyEnvBindings: cfg.
+      self performStatus: cfg.
+      0
+    ].
+
+    "args[0] is 'status' — strip it before handing control to cobra so
+     the leaf command sees only its own options/positionals."
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    "Catch Cli::CliError (bad flags / unknown subcommand) the same way
+     examples/cli/demo.mag does — cobra prints the error/usage to stderr
+     before raising; we just need to convert the signal into exit 1."
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: performStatus: cfg [
+    "GET /api/health, then render the result via Cli::Output dictText:."
+    | client response health dict |
+    client := HttpClient new.
+    [
+      response := client get: cfg baseUrl, '/api/health'.
+      response isNil ifTrue: [
+        ('Error: no response from server at ', cfg baseUrl) println.
+        ^self
+      ].
+      (response isKindOf: String) ifFalse: [
+        ('Error: server returned non-String response') println.
+        ^self
+      ].
+      response isEmpty ifTrue: [
+        ('Error: empty response from server') println.
+        ^self
+      ].
+      health := Json decode: response.
+
+      'Procyon Park Status:' println.
+
+      "Build a Dictionary so Cli::Output can render aligned key/value lines."
+      dict := Dictionary new.
+      dict at: 'tuples' put: (health at: 'tuples' ifAbsent: ['?']) printString.
+      dict at: 'uptime' put: (health at: 'uptime' ifAbsent: ['?']) printString, 's'.
+      cfg taskId isEmpty ifFalse: [
+        dict at: 'task' put: cfg taskId.
+        dict at: 'scope' put: cfg scope
+      ].
+      Cli::Output dictText: dict
+    ] on: Exception do: [:e |
+      ('Error connecting to Procyon Park at ', cfg baseUrl, ': ', e messageText) println
+    ]
+  ]
+
+  "--- Subcommand: workflow list -------------------------------------------"
+
+  classMethod: runWorkflowList: args [
+    "Build, configure, and dispatch the new `workflow list` command.
+
+     Exercises:
+       * Cli::Command         — parent + child subcommand tree
+       * Cli::Flag            — value-object flag definition
+       * Cli::Output          — table:headers:keys: for the listing
+     "
+    | root list statusFlag scopeFlag rest |
+    root := Cli::Command named: 'workflow' doc: 'Workflow operations'.
+    list := Cli::Command named: 'list' doc: 'Tabular listing of workflows'.
+
+    "Use Cli::Flag value objects to demonstrate the programmatic shape."
+    statusFlag := Cli::Flag
+      name: 'status'
+      type: #string
+      default: ''
+      doc: 'Filter by status (running, completed, failed, cancelled)'.
+    scopeFlag := Cli::Flag
+      name: 'scope'
+      type: #string
+      default: ''
+      doc: 'Restrict to a single scope (otherwise scans all scopes)'.
+    list flag: statusFlag.
+    list flag: scopeFlag.
+
+    list run: [:runArgs |
+      | statusFilter scopeFilter cfg |
+      statusFilter := list flagValue: 'status'.
+      scopeFilter := list flagValue: 'scope'.
+      cfg := self loadConfig.
+      self performWorkflowList: cfg
+           statusFilter: statusFilter
+           scopeFilter: scopeFilter.
+      0
+    ].
+
+    root registerSubcommand: list.
+
+    "args = #('workflow' 'list' ...). Strip the leading 'workflow' so
+     cobra sees `list ...` and dispatches to the child."
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    root setArgs: rest.
+    ^[root execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: loadConfig [
+    "Hand-rolled env load (no Cli::EnvBinding) — workflow list is the
+     Cli::Flag exemplar, status is the Cli::EnvBinding exemplar. Keeping
+     them split makes the writeup compare both shapes side by side."
+    | cfg url s |
+    cfg := PPCliConfig new.
+    url := System env: 'PP_URL'.
+    (url notNil and: [url isEmpty not]) ifTrue: [cfg baseUrl: url].
+    s := System env: 'PP_SCOPE'.
+    (s notNil and: [s isEmpty not]) ifTrue: [cfg scope: s].
+    ^cfg
+  ]
+
+  classMethod: performWorkflowList: cfg statusFilter: statusFilter scopeFilter: scopeFilter [
+    "Replicate WorkflowCommands>>cmdWorkflowList: but render the table
+     via Cli::Output table:headers:keys:."
+    | workflows filtered now rows |
+
+    workflows := self safeScanWorkflows: cfg scope: scopeFilter.
+
+    "Apply --status filter (empty string means no filter)."
+    filtered := workflows.
+    (statusFilter notNil and: [statusFilter isEmpty not]) ifTrue: [
+      filtered := workflows select: [:w |
+        | p s |
+        p := w at: 'payload' ifAbsent: [Dictionary new].
+        s := p at: 'status' ifAbsent: [''].
+        s = statusFilter
+      ]
+    ].
+
+    filtered size = 0 ifTrue: [
+      (statusFilter notNil and: [statusFilter isEmpty not])
+        ifTrue: [('No workflows with status: ', statusFilter) println]
+        ifFalse: ['No workflows.' println].
+      ^self
+    ].
+
+    now := DateTime now epochSeconds.
+
+    "Project every workflow tuple into a Dictionary row keyed by the
+     column names declared below. Cli::Output table: handles widths."
+    rows := Array new: 0.
+    filtered do: [:wf |
+      | row wfId payload template wfStatus params description startedAt completedAt duration durStr truncDesc |
+      wfId := wf at: 'identity' ifAbsent: ['?'].
+      payload := wf at: 'payload' ifAbsent: [Dictionary new].
+      template := payload at: 'template' ifAbsent: ['?'].
+      wfStatus := payload at: 'status' ifAbsent: ['?'].
+      params := payload at: 'params' ifAbsent: [nil].
+      description := params notNil
+        ifTrue: [params at: 'description' ifAbsent: ['']]
+        ifFalse: [''].
+      startedAt := payload at: 'started_at' ifAbsent: [0].
+      completedAt := payload at: 'completed_at' ifAbsent: [nil].
+      duration := 0.
+      startedAt > 0 ifTrue: [
+        completedAt notNil
+          ifTrue: [duration := completedAt - startedAt]
+          ifFalse: [duration := now - startedAt]
+      ].
+      durStr := self formatDuration: duration.
+      truncDesc := description size > 50
+        ifTrue: [(description copyFrom: 0 to: 47), '...']
+        ifFalse: [description].
+
+      row := Dictionary new.
+      row at: 'id' put: wfId.
+      row at: 'template' put: template.
+      row at: 'status' put: wfStatus.
+      row at: 'duration' put: durStr.
+      row at: 'description' put: truncDesc.
+      rows := rows copyWith: row
+    ].
+
+    Cli::Output
+      table: rows
+      headers: #('INSTANCE ID' 'TEMPLATE' 'STATUS' 'DURATION' 'DESCRIPTION')
+      keys: #('id' 'template' 'status' 'duration' 'description')
+  ]
+
+  classMethod: safeScanWorkflows: cfg scope: scopeFilter [
+    "Like CLIBase>>safeScan: but a class-side helper that doesn't need
+     a CLIBase instance. An empty scopeFilter (the Cli::Flag default)
+     means scan all scopes."
+    | client body response result |
+    client := HttpClient new.
+    body := Dictionary new.
+    body at: 'category' put: 'workflow'.
+    (scopeFilter notNil and: [scopeFilter isEmpty not]) ifTrue: [
+      body at: 'scope' put: scopeFilter
+    ].
+    [
+      response := client post: cfg baseUrl, '/api/scan'
+                         body: (Json encode: body)
+                  contentType: 'application/json'.
+      response isNil ifTrue: [^Array new: 0].
+      result := Json decode: response.
+      ^result at: 'tuples' ifAbsent: [Array new: 0]
+    ] on: Exception do: [:e | ^Array new: 0]
+  ]
+
+  classMethod: formatDuration: seconds [
+    "Identical to WorkflowCommands>>formatDuration: so durations render
+     consistently between the old and new implementations."
+    | h m s |
+    seconds <= 0 ifTrue: [^'-'].
+    h := seconds / 3600.
+    m := (seconds - (h * 3600)) / 60.
+    s := seconds - (h * 3600) - (m * 60).
+    h > 0 ifTrue: [^h printString, 'h', m printString, 'm'].
+    m > 0 ifTrue: [^m printString, 'm', s printString, 's'].
+    ^s printString, 's'
+  ]
