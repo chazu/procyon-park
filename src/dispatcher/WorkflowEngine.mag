@@ -269,7 +269,7 @@ WorkflowEngine subclass: Object
     "Try to fire a single transition. Checks input places, preconditions, then fires.
      Returns updated consumedTokens array."
 
-    | inPlaces outPlaces preconditions role action taskPayload workdir resolvedDesc tokenStatus worktreeInfo |
+    | inPlaces outPlaces preconditions role action taskPayload workdir resolvedDesc tokenStatus worktreeInfo descParams fixCtx |
     inPlaces := transition at: 'in'.
     outPlaces := transition at: 'out'.
 
@@ -372,7 +372,17 @@ WorkflowEngine subclass: Object
       taskPayload := Dictionary new.
       taskPayload at: 'role' put: role.
       taskPayload at: 'status' put: 'pending'.
-      resolvedDesc := self resolveParams: (transition at: 'description' ifAbsent: ['']) with: params.
+      "For fixer role, thread verdict rationale and review observations into the task
+       description so the fixer does not need to hunt through the observation log."
+      role = 'fixer' ifTrue: [
+        descParams := Dictionary new.
+        params keysAndValuesDo: [:k :v | descParams at: k put: v].
+        fixCtx := self gatherFixContext: instanceId scope: scope.
+        fixCtx keysAndValuesDo: [:k :v | descParams at: k put: v].
+        resolvedDesc := self resolveParams: (transition at: 'description' ifAbsent: ['']) with: descParams
+      ] ifFalse: [
+        resolvedDesc := self resolveParams: (transition at: 'description' ifAbsent: ['']) with: params
+      ].
       taskPayload at: 'description' put: resolvedDesc.
       taskPayload at: 'workflow_instance' put: instanceId.
       taskPayload at: 'transition_id' put: (transition at: 'id').
@@ -456,6 +466,57 @@ WorkflowEngine subclass: Object
       result := result replaceAll: '{{', k, '}}' with: valStr
     ].
     ^result
+  ]
+
+  method: gatherFixContext: instanceId scope: scope [
+    "Collect the verdict signal's rationale and the observations tied to this workflow
+     instance so fixer tasks can be spawned with direct, inline context instead of
+     being told to search the observation log. Returns a Dictionary suitable for
+     merging into the template interpolation params. All keys are populated with
+     sensible defaults so {{placeholders}} never leak through to agent tasks."
+    | ctx verdictSignal verdictPayload observations filtered taskPrefix formatted lf |
+    ctx := Dictionary new.
+    ctx at: 'verdict_decision' put: 'fix'.
+    ctx at: 'verdict_reason' put: '(no rationale recorded — reviewer/foreman did not attach a reason to the verdict signal)'.
+    ctx at: 'review_observations' put: '(no observations recorded for this workflow instance)'.
+
+    lf := Character lf asString.
+
+    "Read the verdict signal written by the reviewer or foreman."
+    verdictSignal := bbs rdp: 'signal' scope: scope identity: (Identity verdict: instanceId).
+    verdictSignal notNil ifTrue: [
+      verdictPayload := verdictSignal at: 'payload'.
+      (verdictPayload at: 'decision' ifAbsent: [nil]) notNil ifTrue: [
+        ctx at: 'verdict_decision' put: (verdictPayload at: 'decision')
+      ].
+      (verdictPayload at: 'reason' ifAbsent: [nil]) notNil ifTrue: [
+        ctx at: 'verdict_reason' put: (verdictPayload at: 'reason')
+      ]
+    ].
+
+    "Gather observations whose payload.task links back to this workflow instance
+     (task identity format is '<instanceId>:task:<transitionId>')."
+    taskPrefix := instanceId, ':task:'.
+    observations := bbs scanAll: 'observation'.
+    filtered := observations select: [:o |
+      | obsTask |
+      obsTask := (o at: 'payload') at: 'task' ifAbsent: [''].
+      (obsTask isKindOf: String) and: [obsTask startsWith: taskPrefix]
+    ].
+    filtered size > 0 ifTrue: [
+      formatted := ''.
+      filtered do: [:o |
+        | detail obsId line |
+        obsId := o at: 'identity'.
+        detail := (o at: 'payload') at: 'detail' ifAbsent: [''].
+        line := '- [', obsId, '] ', detail.
+        formatted isEmpty
+          ifTrue: [formatted := line]
+          ifFalse: [formatted := formatted, lf, line]
+      ].
+      ctx at: 'review_observations' put: formatted
+    ].
+    ^ctx
   ]
 
   "--- Workflow Completion ---"

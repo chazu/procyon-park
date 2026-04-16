@@ -62,10 +62,21 @@ transitions: [
 		]
 	},
 	{
-		id:          "fix"
-		in:          ["fixing"]
-		out:         ["implemented"]
-		role:        "fixer"
-		description: "Fix issues found in review for: {{description}}"
+		id:   "fix"
+		in:   ["fixing"]
+		out:  ["implemented"]
+		role: "fixer"
+		description: """
+			Fix issues found in review for: {{description}}
+
+			Verdict rationale (from reviewer/foreman): {{verdict_reason}}
+
+			Observations recorded during review (address each one):
+			{{review_observations}}
+
+			Focus on resolving the specific issues above rather than re-searching the
+			observation log. If more context is needed you may still read observations
+			via pp read observation, but the list above is the authoritative work queue.
+			"""
 	},
 ]
