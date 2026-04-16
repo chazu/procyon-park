@@ -11,6 +11,8 @@ WorkflowCommands subclass: CLIBase
     "Dispatch workflow subcommands. args[0] is 'workflow'."
     (args size > 1 and: [(args at: 1) = 'status'])
       ifTrue: [^self cmdWorkflowStatus: args].
+    (args size > 1 and: [(args at: 1) = 'list'])
+      ifTrue: [^self cmdWorkflowList: args].
     (args size > 1 and: [(args at: 1) = 'cancel'])
       ifTrue: [^self cmdWorkflowCancel: args].
     (args size > 1 and: [(args at: 1) = 'wait'])
@@ -137,6 +139,112 @@ WorkflowCommands subclass: CLIBase
     ].
     foundScope := found at: 'scope' ifAbsent: [scope].
     self showWorkflowDetail: wfId scope: foundScope
+  ]
+
+  method: cmdWorkflowList: args [
+    "pp workflow list [--status running|completed|failed] [--scope <scope>]
+     Tabular listing: instance ID, template, status, duration, description."
+    | wfScope scopeExplicit statusFilter workflows filtered now idW tmplW statW durW header |
+    wfScope := self flagValue: '--scope' in: args.
+    scopeExplicit := wfScope notNil.
+    wfScope isNil ifTrue: [wfScope := scope].
+    statusFilter := self flagValue: '--status' in: args.
+
+    workflows := scopeExplicit
+      ifTrue: [self safeScan: 'workflow' scope: wfScope]
+      ifFalse: [self safeScan: 'workflow' scope: nil].
+
+    "Apply --status filter if given"
+    filtered := workflows.
+    statusFilter notNil ifTrue: [
+      filtered := workflows select: [:w |
+        | p s |
+        p := w at: 'payload' ifAbsent: [Dictionary new].
+        s := p at: 'status' ifAbsent: [''].
+        s = statusFilter
+      ]
+    ].
+
+    filtered size = 0 ifTrue: [
+      statusFilter notNil
+        ifTrue: [('No workflows with status: ', statusFilter) println]
+        ifFalse: ['No workflows.' println].
+      ^self
+    ].
+
+    "Fixed column widths. Each column reserves at least one trailing space
+     as the separator, so content longer than (w - 1) is truncated."
+    idW := 30.
+    tmplW := 18.
+    statW := 12.
+    durW := 10.
+
+    header := (self padString: 'INSTANCE ID' toWidth: idW),
+              (self padString: 'TEMPLATE' toWidth: tmplW),
+              (self padString: 'STATUS' toWidth: statW),
+              (self padString: 'DURATION' toWidth: durW),
+              'DESCRIPTION'.
+    header println.
+
+    now := DateTime now epochSeconds.
+    filtered do: [:wf |
+      | wfId payload template wfStatus params description startedAt completedAt duration durStr truncDesc |
+      wfId := wf at: 'identity' ifAbsent: ['?'].
+      payload := wf at: 'payload' ifAbsent: [Dictionary new].
+      template := payload at: 'template' ifAbsent: ['?'].
+      wfStatus := payload at: 'status' ifAbsent: ['?'].
+      params := payload at: 'params' ifAbsent: [nil].
+      description := params notNil
+        ifTrue: [params at: 'description' ifAbsent: ['']]
+        ifFalse: [''].
+      startedAt := payload at: 'started_at' ifAbsent: [0].
+      completedAt := payload at: 'completed_at' ifAbsent: [nil].
+      duration := 0.
+      startedAt > 0 ifTrue: [
+        completedAt notNil
+          ifTrue: [duration := completedAt - startedAt]
+          ifFalse: [duration := now - startedAt]
+      ].
+      durStr := self formatDuration: duration.
+      truncDesc := description size > 50
+        ifTrue: [(description copyFrom: 0 to: 47), '...']
+        ifFalse: [description].
+      ((self padString: wfId toWidth: idW),
+        (self padString: template toWidth: tmplW),
+        (self padString: wfStatus toWidth: statW),
+        (self padString: durStr toWidth: durW),
+        truncDesc) println
+    ]
+  ]
+
+  method: padString: s toWidth: w [
+    "Right-pad s with spaces to width w. Truncate to (w - 1) chars + single
+     space separator when content exceeds w - 1 characters. Guarantees
+     at least one trailing space between columns."
+    | truncated padLen result |
+    truncated := s size >= w
+      ifTrue: [s copyFrom: 0 to: w - 1]
+      ifFalse: [s].
+    padLen := w - truncated size.
+    result := truncated.
+    [padLen > 0] whileTrue: [
+      result := result, ' '.
+      padLen := padLen - 1
+    ].
+    ^result
+  ]
+
+  method: formatDuration: seconds [
+    "Format a non-negative second count as a compact human-readable duration.
+     Examples: 0 -> '-', 45 -> '45s', 150 -> '2m30s', 7200 -> '2h0m'."
+    | h m s |
+    seconds <= 0 ifTrue: [^'-'].
+    h := seconds / 3600.
+    m := (seconds - (h * 3600)) / 60.
+    s := seconds - (h * 3600) - (m * 60).
+    h > 0 ifTrue: [^h printString, 'h', m printString, 'm'].
+    m > 0 ifTrue: [^m printString, 'm', s printString, 's'].
+    ^s printString, 's'
   ]
 
   method: cmdWorkflowCancel: args [
