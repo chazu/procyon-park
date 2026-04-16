@@ -506,8 +506,9 @@ ApiServer subclass: Object
   "--- Work Items ---"
 
   method: handleWorkitemCreate: req [
-    "POST /api/workitem/create — create a work item (epic or story)."
-    | body scope identity payload id pinned |
+    "POST /api/workitem/create — create a work item (epic or story).
+     Validates type, status, and template against allowed enums / registry."
+    | body scope identity payload id pinned type status template err |
     body := self parseBody: req.
     body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
 
@@ -517,10 +518,49 @@ ApiServer subclass: Object
     payload := body at: 'payload' ifAbsent: [Dictionary new].
     pinned := body at: 'pinned' ifAbsent: [true].
 
+    "Validate payload fields (type, status, template) if present."
+    err := self validateWorkitemPayload: payload scope: scope.
+    err notNil ifTrue: [^self errorResponse: 400 message: err].
+
     "Use upsertPinned to avoid duplicates if called twice with same identity"
     id := bbs upsertPinned: 'workitem' scope: scope identity: identity payload: payload.
 
     ^self okResponse: (self okWithId: id)
+  ]
+
+  method: validateWorkitemPayload: payload scope: scope [
+    "Validate the type, status, and template fields of a work item payload.
+     Returns an error message string on failure, or nil if valid.
+     - type (if present) must be one of WorkItemFields validTypes
+     - status (if present) must be one of WorkItemFields validStatuses
+     - template (if present) must exist in the template registry
+       (category 'template', scope 'system' or the work item's scope)"
+    | type status template tmpl |
+    (payload includesKey: 'type') ifTrue: [
+      type := payload at: 'type'.
+      (WorkItemFields isValidType: type) ifFalse: [
+        ^'Invalid type: ', type printString, ' (must be one of: ', WorkItemFields validTypesDisplay, ')'
+      ]
+    ].
+    (payload includesKey: 'status') ifTrue: [
+      status := payload at: 'status'.
+      (WorkItemFields isValidStatus: status) ifFalse: [
+        ^'Invalid status: ', status printString, ' (must be one of: ', WorkItemFields validStatusesDisplay, ')'
+      ]
+    ].
+    (payload includesKey: 'template') ifTrue: [
+      template := payload at: 'template'.
+      (template notNil and: [template isEmpty not]) ifTrue: [
+        tmpl := bbs rdp: 'template' scope: 'system' identity: template.
+        tmpl isNil ifTrue: [
+          tmpl := bbs rdp: 'template' scope: scope identity: template
+        ].
+        tmpl isNil ifTrue: [
+          ^'Invalid template: ', template printString, ' (not found in template registry)'
+        ]
+      ]
+    ].
+    ^nil
   ]
 
   method: handleWorkitemUpdate: req [
