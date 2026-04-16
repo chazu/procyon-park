@@ -79,6 +79,7 @@ CliPP subclass: Object
     head = 'read'     ifTrue: [^true].
     head = 'history'  ifTrue: [^true].
     head = 'workflow' ifTrue: [^true].
+    head = 'workitem' ifTrue: [^true].
     ^false
   ]
 
@@ -100,6 +101,7 @@ CliPP subclass: Object
     head = 'dismiss'  ifTrue: [^self runDismiss: args].
     head = 'read'     ifTrue: [^self runRead: args].
     head = 'history'  ifTrue: [^self runHistory: args].
+    head = 'workitem' ifTrue: [^self runWorkitem: args].
     ^0
   ]
 
@@ -1878,4 +1880,544 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     ] on: Exception do: [:e |
       ('Error: ', e messageText) println
     ]
+  ]
+
+  "--- Subcommand: workitem (parent + children) ----------------------------"
+
+  classMethod: runWorkitem: args [
+    "Dispatch `pp workitem <subcmd> ...` through a subcommand tree.
+     All 12 subcommands are leaf commands registered on a parent
+     `workitem` command. Each takes a common --repo flag which
+     overrides the effective scope."
+    | cfg root create show list children update comment ready done block runC plan review rest |
+    cfg := self loadConfig.
+
+    root := Cli::Command named: 'workitem' doc: 'Manage work items (epics, stories)'.
+
+    create := self buildWorkitemCreate: cfg.
+    show := self buildWorkitemShow: cfg.
+    list := self buildWorkitemList: cfg.
+    children := self buildWorkitemChildren: cfg.
+    update := self buildWorkitemUpdate: cfg.
+    comment := self buildWorkitemComment: cfg.
+    ready := self buildWorkitemSetStatus: cfg name: 'ready' doc: 'Mark a work item ready (cascades)' status: 'ready'.
+    done := self buildWorkitemSetStatus: cfg name: 'done' doc: 'Mark a work item done (cascades)' status: 'done'.
+    block := self buildWorkitemBlock: cfg.
+    runC := self buildWorkitemRun: cfg.
+    plan := self buildWorkitemPlan: cfg.
+    review := self buildWorkitemReview: cfg.
+
+    root registerSubcommand: create.
+    root registerSubcommand: show.
+    root registerSubcommand: list.
+    root registerSubcommand: children.
+    root registerSubcommand: update.
+    root registerSubcommand: comment.
+    root registerSubcommand: ready.
+    root registerSubcommand: done.
+    root registerSubcommand: block.
+    root registerSubcommand: runC.
+    root registerSubcommand: plan.
+    root registerSubcommand: review.
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    root setArgs: rest.
+    ^[root execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Scope resolution helper ---------------------------------------------"
+
+  classMethod: workitemScope: cfg repoFlag: repoFlag [
+    "If --repo is set, use it as scope; otherwise fall back to cfg.scope."
+    (repoFlag notNil and: [repoFlag isEmpty not]) ifTrue: [^repoFlag].
+    ^cfg scope
+  ]
+
+  "--- Subcommand builders -------------------------------------------------"
+
+  classMethod: buildWorkitemCreate: cfg [
+    | cmd |
+    cmd := Cli::Command named: 'create' doc: 'Create a work item'.
+    cmd flag: (Cli::Flag name: 'title' type: #string default: '' doc: 'Title of the work item').
+    cmd flag: (Cli::Flag name: 'type' type: #string default: 'story' doc: 'Type: epic | story').
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd flag: (Cli::Flag name: 'status' type: #string default: 'backlog' doc: 'Initial status').
+    cmd flag: (Cli::Flag name: 'parent' type: #string default: '' doc: 'Parent work item identity').
+    cmd flag: (Cli::Flag name: 'description' type: #string default: '' doc: 'Description text').
+    cmd flag: (Cli::Flag name: 'template' type: #string default: 'story' doc: 'Workflow template name').
+    cmd flag: (Cli::Flag name: 'batch' type: #string default: '' doc: 'Batch identifier').
+    cmd flag: (Cli::Flag name: 'wave' type: #int default: 1 doc: 'Execution wave number').
+    cmd flag: (Cli::Flag name: 'depends-on' type: #string default: '' doc: 'Comma-separated dependency ids').
+    cmd flag: (Cli::Flag name: 'label' type: #string default: '' doc: 'Comma-separated labels').
+
+    cmd run: [:runArgs |
+      | identity title type repoArg status parent description template batch wave dependsOn labels theScope payload body exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp workitem create <identity> --title T --type epic|story [flags]' println.
+        exitCode := 1
+      ] ifFalse: [
+        identity := runArgs at: 0.
+        title := cmd flagValue: 'title'.
+        type := cmd flagValue: 'type'.
+        repoArg := cmd flagValue: 'repo'.
+        status := cmd flagValue: 'status'.
+        parent := cmd flagValue: 'parent'.
+        description := cmd flagValue: 'description'.
+        template := cmd flagValue: 'template'.
+        batch := cmd flagValue: 'batch'.
+        wave := cmd flagValue: 'wave'.
+        dependsOn := cmd flagValue: 'depends-on'.
+        labels := cmd flagValue: 'label'.
+
+        (title isNil or: [title isEmpty]) ifTrue: [title := identity].
+        (type isNil or: [type isEmpty]) ifTrue: [type := 'story'].
+        (status isNil or: [status isEmpty]) ifTrue: [status := 'backlog'].
+        (description isNil) ifTrue: [description := ''].
+        (template isNil or: [template isEmpty]) ifTrue: [template := 'story'].
+        (wave isNil or: [wave <= 0]) ifTrue: [wave := 1].
+
+        theScope := self workitemScope: cfg repoFlag: repoArg.
+
+        payload := Dictionary new.
+        payload at: 'title' put: title.
+        payload at: 'description' put: description.
+        payload at: 'status' put: status.
+        payload at: 'type' put: type.
+        (parent notNil and: [parent isEmpty not])
+          ifTrue: [payload at: 'parent' put: parent]
+          ifFalse: [payload at: 'parent' put: nil].
+        payload at: 'children' put: (Array new: 0).
+        (repoArg notNil and: [repoArg isEmpty not]) ifTrue: [
+          payload at: 'repo' put: repoArg
+        ].
+        payload at: 'template' put: template.
+        (batch notNil and: [batch isEmpty not]) ifTrue: [
+          payload at: 'batch' put: batch
+        ].
+        payload at: 'wave' put: wave.
+        (dependsOn notNil and: [dependsOn isEmpty not])
+          ifTrue: [payload at: 'depends_on' put: (dependsOn split: ',')]
+          ifFalse: [payload at: 'depends_on' put: (Array new: 0)].
+        (labels notNil and: [labels isEmpty not])
+          ifTrue: [payload at: 'labels' put: (labels split: ',')]
+          ifFalse: [payload at: 'labels' put: (Array new: 0)].
+        payload at: 'comments' put: (Array new: 0).
+        payload at: 'created_by' put: 'human'.
+        payload at: 'created_at' put: DateTime now epochSeconds.
+        payload at: 'updated_at' put: DateTime now epochSeconds.
+
+        body := Dictionary new.
+        body at: 'category' put: 'workitem'.
+        body at: 'scope' put: theScope.
+        body at: 'identity' put: identity.
+        body at: 'payload' put: payload.
+        body at: 'pinned' put: true.
+
+        self postAndPrint: cfg path: '/api/workitem/create' body: body.
+
+        "Wire up parent->child relationship if --parent is set."
+        (parent notNil and: [parent isEmpty not]) ifTrue: [
+          | linkBody |
+          linkBody := Dictionary new.
+          linkBody at: 'identity' put: parent.
+          linkBody at: 'scope' put: theScope.
+          linkBody at: 'child' put: identity.
+          self postAndPrint: cfg path: '/api/workitem/add-child' body: linkBody
+        ]
+      ].
+      exitCode
+    ].
+    ^cmd
+  ]
+
+  classMethod: buildWorkitemShow: cfg [
+    | cmd |
+    cmd := Cli::Command named: 'show' doc: 'Show work item detail'.
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd run: [:runArgs |
+      | identity repoArg theScope exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp workitem show <identity> [--repo R]' println.
+        exitCode := 1
+      ] ifFalse: [
+        identity := runArgs at: 0.
+        repoArg := cmd flagValue: 'repo'.
+        theScope := self workitemScope: cfg repoFlag: repoArg.
+        self performWorkitemShow: cfg scope: theScope identity: identity
+      ].
+      exitCode
+    ].
+    ^cmd
+  ]
+
+  classMethod: buildWorkitemList: cfg [
+    | cmd |
+    cmd := Cli::Command named: 'list' doc: 'List work items'.
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd flag: (Cli::Flag name: 'status' type: #string default: '' doc: 'Filter by status').
+    cmd flag: (Cli::Flag name: 'type' type: #string default: '' doc: 'Filter by type').
+    cmd flag: (Cli::Flag name: 'parent' type: #string default: '' doc: 'Filter by parent').
+    cmd flag: (Cli::Flag name: 'label' type: #string default: '' doc: 'Filter by label').
+    cmd run: [:runArgs |
+      | repoArg theScope |
+      repoArg := cmd flagValue: 'repo'.
+      theScope := self workitemScope: cfg repoFlag: repoArg.
+      self performWorkitemList: cfg
+           scope: theScope
+           status: (cmd flagValue: 'status')
+           type: (cmd flagValue: 'type')
+           parent: (cmd flagValue: 'parent')
+           label: (cmd flagValue: 'label').
+      0
+    ].
+    ^cmd
+  ]
+
+  classMethod: buildWorkitemChildren: cfg [
+    | cmd |
+    cmd := Cli::Command named: 'children' doc: 'List children of a work item'.
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd run: [:runArgs |
+      | identity repoArg theScope exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp workitem children <identity> [--repo R]' println.
+        exitCode := 1
+      ] ifFalse: [
+        identity := runArgs at: 0.
+        repoArg := cmd flagValue: 'repo'.
+        theScope := self workitemScope: cfg repoFlag: repoArg.
+        self performWorkitemList: cfg
+             scope: theScope
+             status: ''
+             type: ''
+             parent: identity
+             label: ''
+      ].
+      exitCode
+    ].
+    ^cmd
+  ]
+
+  classMethod: buildWorkitemUpdate: cfg [
+    | cmd |
+    cmd := Cli::Command named: 'update' doc: 'Update fields on a work item'.
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd flag: (Cli::Flag name: 'status' type: #string default: '' doc: 'New status').
+    cmd flag: (Cli::Flag name: 'title' type: #string default: '' doc: 'New title').
+    cmd flag: (Cli::Flag name: 'description' type: #string default: '' doc: 'New description').
+    cmd flag: (Cli::Flag name: 'wave' type: #int default: 0 doc: 'New wave number (>0)').
+    cmd flag: (Cli::Flag name: 'depends-on' type: #string default: '' doc: 'Comma-separated dependencies').
+    cmd flag: (Cli::Flag name: 'template' type: #string default: '' doc: 'New template').
+    cmd run: [:runArgs |
+      | identity repoArg theScope fields status title description wave dependsOn template exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp workitem update <identity> [flags]' println.
+        exitCode := 1
+      ] ifFalse: [
+        identity := runArgs at: 0.
+        repoArg := cmd flagValue: 'repo'.
+        theScope := self workitemScope: cfg repoFlag: repoArg.
+
+        fields := Dictionary new.
+        status := cmd flagValue: 'status'.
+        (status notNil and: [status isEmpty not]) ifTrue: [fields at: 'status' put: status].
+        title := cmd flagValue: 'title'.
+        (title notNil and: [title isEmpty not]) ifTrue: [fields at: 'title' put: title].
+        description := cmd flagValue: 'description'.
+        (description notNil and: [description isEmpty not]) ifTrue: [fields at: 'description' put: description].
+        wave := cmd flagValue: 'wave'.
+        (wave notNil and: [wave > 0]) ifTrue: [fields at: 'wave' put: wave].
+        dependsOn := cmd flagValue: 'depends-on'.
+        (dependsOn notNil and: [dependsOn isEmpty not]) ifTrue: [
+          fields at: 'depends_on' put: (dependsOn split: ',')
+        ].
+        template := cmd flagValue: 'template'.
+        (template notNil and: [template isEmpty not]) ifTrue: [fields at: 'template' put: template].
+        fields at: 'updated_at' put: DateTime now epochSeconds.
+
+        self performWorkitemUpdate: cfg
+             scope: theScope
+             identity: identity
+             fields: fields
+             cascade: false
+      ].
+      exitCode
+    ].
+    ^cmd
+  ]
+
+  classMethod: buildWorkitemComment: cfg [
+    | cmd |
+    cmd := Cli::Command named: 'comment' doc: 'Add a comment to a work item'.
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd run: [:runArgs |
+      | identity text repoArg theScope body exitCode |
+      exitCode := 0.
+      runArgs size < 2 ifTrue: [
+        'Usage: pp workitem comment <identity> "text" [--repo R]' println.
+        exitCode := 1
+      ] ifFalse: [
+        identity := runArgs at: 0.
+        text := runArgs at: 1.
+        repoArg := cmd flagValue: 'repo'.
+        theScope := self workitemScope: cfg repoFlag: repoArg.
+        body := Dictionary new.
+        body at: 'identity' put: identity.
+        body at: 'scope' put: theScope.
+        body at: 'author' put: 'human'.
+        body at: 'text' put: text.
+        self postAndPrint: cfg path: '/api/workitem/comment' body: body
+      ].
+      exitCode
+    ].
+    ^cmd
+  ]
+
+  classMethod: buildWorkitemSetStatus: cfg name: cmdName doc: docStr status: newStatus [
+    "Thin wrapper over update: build a fields dict with just status +
+     updated_at, then POST via the cascading update helper. Used for
+     ready / done."
+    | cmd |
+    cmd := Cli::Command named: cmdName doc: docStr.
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd run: [:runArgs |
+      | identity repoArg theScope fields exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        ('Usage: pp workitem ', cmdName, ' <identity> [--repo R]') println.
+        exitCode := 1
+      ] ifFalse: [
+        identity := runArgs at: 0.
+        repoArg := cmd flagValue: 'repo'.
+        theScope := self workitemScope: cfg repoFlag: repoArg.
+        fields := Dictionary new.
+        fields at: 'status' put: newStatus.
+        fields at: 'updated_at' put: DateTime now epochSeconds.
+        self performWorkitemUpdate: cfg
+             scope: theScope
+             identity: identity
+             fields: fields
+             cascade: true
+      ].
+      exitCode
+    ].
+    ^cmd
+  ]
+
+  classMethod: buildWorkitemBlock: cfg [
+    | cmd |
+    cmd := Cli::Command named: 'block' doc: 'Mark a work item blocked'.
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd flag: (Cli::Flag name: 'reason' type: #string default: '' doc: 'Block reason (required)').
+    cmd run: [:runArgs |
+      | identity reason repoArg theScope fields exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp workitem block <identity> --reason "..." [--repo R]' println.
+        exitCode := 1
+      ] ifFalse: [
+        identity := runArgs at: 0.
+        reason := cmd flagValue: 'reason'.
+        reason isNil ifTrue: [reason := ''].
+        repoArg := cmd flagValue: 'repo'.
+        theScope := self workitemScope: cfg repoFlag: repoArg.
+        fields := Dictionary new.
+        fields at: 'status' put: 'blocked'.
+        fields at: 'block_reason' put: reason.
+        fields at: 'updated_at' put: DateTime now epochSeconds.
+        self performWorkitemUpdate: cfg
+             scope: theScope
+             identity: identity
+             fields: fields
+             cascade: false
+      ].
+      exitCode
+    ].
+    ^cmd
+  ]
+
+  classMethod: buildWorkitemRun: cfg [
+    | cmd |
+    cmd := Cli::Command named: 'run' doc: 'Run the work items workflow for this item'.
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd run: [:runArgs |
+      | identity repoArg theScope body exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp workitem run <identity> [--repo R]' println.
+        exitCode := 1
+      ] ifFalse: [
+        identity := runArgs at: 0.
+        repoArg := cmd flagValue: 'repo'.
+        theScope := self workitemScope: cfg repoFlag: repoArg.
+        body := Dictionary new.
+        body at: 'identity' put: identity.
+        body at: 'scope' put: theScope.
+        self postAndPrint: cfg path: '/api/workitem/run' body: body
+      ].
+      exitCode
+    ].
+    ^cmd
+  ]
+
+  classMethod: buildWorkitemPlan: cfg [
+    ^self buildWorkitemWorkflow: cfg
+                            name: 'plan'
+                             doc: 'Start workitem-plan workflow'
+                        template: 'workitem-plan'
+  ]
+
+  classMethod: buildWorkitemReview: cfg [
+    ^self buildWorkitemWorkflow: cfg
+                            name: 'review'
+                             doc: 'Start workitem-review workflow'
+                        template: 'workitem-review'
+  ]
+
+  classMethod: buildWorkitemWorkflow: cfg name: cmdName doc: docStr template: templateId [
+    "Shared builder for `pp workitem plan` and `pp workitem review`.
+     Both start a workflow with {workitem: <id>} params."
+    | cmd |
+    cmd := Cli::Command named: cmdName doc: docStr.
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd run: [:runArgs |
+      | identity repoArg theScope wfParams body exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        ('Usage: pp workitem ', cmdName, ' <identity> [--repo R]') println.
+        exitCode := 1
+      ] ifFalse: [
+        identity := runArgs at: 0.
+        repoArg := cmd flagValue: 'repo'.
+        theScope := self workitemScope: cfg repoFlag: repoArg.
+        wfParams := Dictionary new.
+        wfParams at: 'workitem' put: identity.
+        body := Dictionary new.
+        body at: 'template' put: templateId.
+        body at: 'scope' put: theScope.
+        body at: 'params' put: wfParams.
+        self postAndPrint: cfg path: '/api/workflow/start' body: body
+      ].
+      exitCode
+    ].
+    ^cmd
+  ]
+
+  "--- Workitem perform helpers --------------------------------------------"
+
+  classMethod: performWorkitemUpdate: cfg scope: aScope identity: anIdentity fields: fields cascade: cascade [
+    "Shared helper for update/ready/done/block. Cascade is true for the
+     ready/done shortcuts (matches WorkItemCLI>>cmdSetStatus:status:)."
+    | body |
+    body := Dictionary new.
+    body at: 'identity' put: anIdentity.
+    body at: 'scope' put: aScope.
+    body at: 'fields' put: fields.
+    cascade ifTrue: [body at: 'cascade' put: true].
+    self postAndPrint: cfg path: '/api/workitem/update' body: body
+  ]
+
+  classMethod: performWorkitemShow: cfg scope: aScope identity: anIdentity [
+    "Scan + filter by identity to always see the latest payload (avoids
+     stale persistent tuple reads). Render via Cli::Output dictText:keys:
+     with an explicit key order so fields print Title / Type / Status /
+     etc. deterministically — no more random reordering."
+    | items item payload dict keys comments |
+    items := self safeScan: 'workitem' cfg: cfg scope: aScope.
+    item := items detect: [:t | (t at: 'identity' ifAbsent: ['']) = anIdentity]
+                  ifNone: [nil].
+    item isNil ifTrue: ['Not found.' println. ^self].
+    payload := item at: 'payload' ifAbsent: [Dictionary new].
+
+    dict := Dictionary new.
+    dict at: 'Identity' put: anIdentity.
+    dict at: 'Type' put: (payload at: 'type' ifAbsent: ['?']).
+    dict at: 'Status' put: (payload at: 'status' ifAbsent: ['?']).
+    dict at: 'Title' put: (payload at: 'title' ifAbsent: ['']).
+    dict at: 'Repo' put: (payload at: 'repo' ifAbsent: ['']).
+    dict at: 'Template' put: (payload at: 'template' ifAbsent: ['story']).
+    dict at: 'Wave' put: (payload at: 'wave' ifAbsent: [1]) printString.
+    dict at: 'Parent' put: (payload at: 'parent' ifAbsent: ['(none)']) printString.
+    dict at: 'Children' put: (payload at: 'children' ifAbsent: [#()]) size printString.
+    dict at: 'Depends on' put: (payload at: 'depends_on' ifAbsent: [#()]) printString.
+    dict at: 'Labels' put: (payload at: 'labels' ifAbsent: [#()]) printString.
+    dict at: 'Description' put: (payload at: 'description' ifAbsent: ['']).
+
+    keys := #('Identity' 'Type' 'Status' 'Title' 'Repo' 'Template'
+              'Wave' 'Parent' 'Children' 'Depends on' 'Labels' 'Description').
+    Cli::Output dictText: dict keys: keys.
+
+    comments := payload at: 'comments' ifAbsent: [#()].
+    comments size > 0 ifTrue: [
+      '' println.
+      'Comments:' println.
+      comments do: [:c |
+        ('  [', (c at: 'author' ifAbsent: ['?']), '] ',
+          (c at: 'text' ifAbsent: [''])) println
+      ]
+    ]
+  ]
+
+  classMethod: performWorkitemList: cfg scope: aScope status: statusFilter type: typeFilter parent: parentFilter label: labelFilter [
+    "List work items filtered by any of status/type/parent/label. Empty
+     string (the Cli::Flag default) means no filter. Rendered via
+     Cli::Output table:headers:keys: — which benefits from the recent
+     string-quoting fix."
+    | items filtered rows |
+    items := self safeScan: 'workitem' cfg: cfg scope: aScope.
+
+    filtered := items.
+    (statusFilter notNil and: [statusFilter isEmpty not]) ifTrue: [
+      filtered := filtered select: [:t |
+        ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: ['']) = statusFilter
+      ]
+    ].
+    (typeFilter notNil and: [typeFilter isEmpty not]) ifTrue: [
+      filtered := filtered select: [:t |
+        ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'type' ifAbsent: ['']) = typeFilter
+      ]
+    ].
+    (parentFilter notNil and: [parentFilter isEmpty not]) ifTrue: [
+      filtered := filtered select: [:t |
+        | p |
+        p := (t at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil].
+        p = parentFilter
+      ]
+    ].
+    (labelFilter notNil and: [labelFilter isEmpty not]) ifTrue: [
+      filtered := filtered select: [:t |
+        | lbls |
+        lbls := (t at: 'payload' ifAbsent: [Dictionary new]) at: 'labels' ifAbsent: [#()].
+        lbls includes: labelFilter
+      ]
+    ].
+
+    filtered size = 0 ifTrue: [
+      'No work items found.' println.
+      ^self
+    ].
+
+    rows := Array new: 0.
+    filtered do: [:t |
+      | row p childCount |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      childCount := (p at: 'children' ifAbsent: [#()]) size.
+      row := Dictionary new.
+      row at: 'id' put: (t at: 'identity' ifAbsent: ['?']).
+      row at: 'type' put: (p at: 'type' ifAbsent: ['?']).
+      row at: 'status' put: (p at: 'status' ifAbsent: ['?']).
+      row at: 'title' put: (p at: 'title' ifAbsent: ['']).
+      row at: 'children' put: (childCount > 0
+        ifTrue: [childCount printString]
+        ifFalse: ['']).
+      rows := rows copyWith: row
+    ].
+    Cli::Output
+      table: rows
+      headers: #('ID' 'TYPE' 'STATUS' 'TITLE' 'CHILDREN')
+      keys: #('id' 'type' 'status' 'title' 'children')
   ]
