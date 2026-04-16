@@ -1,0 +1,30 @@
+"Valid enum values for work item fields.
+ Used to validate server-side payloads on /api/workitem/create and similar."
+
+WorkItemFields subclass: Object
+
+  classMethod: validTypes [
+    ^#('epic' 'story')
+  ]
+
+  classMethod: validStatuses [
+    ^#('backlog' 'ready' 'in-progress' 'done' 'blocked' 'cancelled')
+  ]
+
+  classMethod: isValidType: aString [
+    ^self validTypes includes: aString
+  ]
+
+  classMethod: isValidStatus: aString [
+    ^self validStatuses includes: aString
+  ]
+
+  classMethod: validTypesDisplay [
+    "Human-readable list of valid types for error messages."
+    ^'epic, story'
+  ]
+
+  classMethod: validStatusesDisplay [
+    "Human-readable list of valid statuses for error messages."
+    ^'backlog, ready, in-progress, done, blocked, cancelled'
+  ]
