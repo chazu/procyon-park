@@ -8,18 +8,24 @@ DispatchWavesAction subclass: WorkflowAction
      2. A plan decision's subtasks array (legacy fallback)
      Groups by wave, dispatches wave 1 immediately."
 
-    | scope subtasks maxWave wavePayload w epicId epicItem children childItems childItem childPayload decisions plan planPayload st subtasksBuf repoName repoConfig repoPath featureBranch worktreePayload branchCheck |
+    | scope subtasks maxWave wavePayload w epicId epicItem children childItems childItem childPayload decisions plan planPayload st subtasksBuf repoName repoConfig repoPath featureBranch worktreePayload branchCheck failReason epicTitle |
 
     scope := engine scopeForInstance: instanceId.
     subtasks := nil.
+    failReason := nil.
 
     "1a. Try work item path: read children of an epic"
     epicId := params at: 'workitem' ifAbsent: [nil].
     epicId notNil ifTrue: [
       epicItem := bbs findInIndex: 'workitem' scope: scope identity: epicId.
-      epicItem notNil ifTrue: [
+      epicItem isNil ifTrue: [
+        failReason := 'work item ''', epicId, ''' not found in scope ''', scope, ''' — cannot dispatch waves. Create the work item first (e.g. `pp workitem add`) or check the scope.'
+      ] ifFalse: [
         children := (epicItem at: 'payload') at: 'children' ifAbsent: [#()].
-        children isEmpty ifFalse: [
+        children isEmpty ifTrue: [
+          epicTitle := (epicItem at: 'payload') at: 'title' ifAbsent: [epicId].
+          failReason := 'work item ''', epicId, ''' (', epicTitle, ') has no children — cannot dispatch waves on an empty epic. Add subtasks first (e.g. `pp workitem add-child ', epicId, ' <child-id>`) or plan the epic (e.g. `pp workitem plan ', epicId, '`) before running full-pipeline.'
+        ] ifFalse: [
           "Build subtasks array from children work items"
           subtasksBuf := GrowableArray new.
           children do: [:cid |
@@ -37,28 +43,42 @@ DispatchWavesAction subclass: WorkflowAction
               subtasksBuf add: st
             ]
           ].
-          subtasks := subtasksBuf asArray.
-          ('dispatch-waves: loaded ', subtasks size printString, ' subtasks from work item ', epicId) println
+          subtasksBuf isEmpty ifTrue: [
+            failReason := 'work item ''', epicId, ''' lists ', children size printString, ' children but none could be resolved in scope ''', scope, ''' — children may have been deleted or live in a different scope.'
+          ] ifFalse: [
+            subtasks := subtasksBuf asArray.
+            ('dispatch-waves: loaded ', subtasks size printString, ' subtasks from work item ', epicId) println
+          ]
         ]
       ]
     ].
 
-    "1b. Legacy fallback: read plan decision"
-    subtasks isNil ifTrue: [
+    "1b. Legacy fallback: read plan decision (only if no workitem was specified)"
+    (subtasks isNil and: [epicId isNil]) ifTrue: [
       decisions := bbs scan: 'decision' scope: scope.
       plan := nil.
       decisions do: [:d |
         planPayload := d at: 'payload'.
         (planPayload at: 'subtasks' ifAbsent: [nil]) notNil ifTrue: [plan := d]
       ].
-      plan notNil ifTrue: [
-        subtasks := (plan at: 'payload') at: 'subtasks'
+      plan isNil ifTrue: [
+        failReason := 'dispatch-waves precondition failed: no ''workitem'' param was supplied and no plan decision with a ''subtasks'' array exists in scope ''', scope, '''. Either pass `workitem=<id>` (and ensure the work item has children) or create a plan decision first.'
+      ] ifFalse: [
+        subtasks := (plan at: 'payload') at: 'subtasks'.
+        (subtasks isNil or: [subtasks isEmpty]) ifTrue: [
+          failReason := 'dispatch-waves precondition failed: plan decision ''', (plan at: 'identity'), ''' exists but its ''subtasks'' array is empty.'.
+          subtasks := nil
+        ]
       ]
     ].
 
     (subtasks isNil or: [subtasks isEmpty]) ifTrue: [
-      ('dispatch-waves: no subtasks found') println.
-      engine failWorkflow: instanceId reason: 'dispatch-waves: no subtasks found (no work item children or plan decision)'.
+      failReason isNil ifTrue: [
+        failReason := 'dispatch-waves: no subtasks found (no work item children or plan decision)'
+      ].
+      ('dispatch-waves: ', failReason) println.
+      bbs notify: ('dispatch-waves precondition failed: ', failReason) scope: scope severity: 'urgent'.
+      engine failWorkflow: instanceId reason: failReason.
       ^self
     ].
 
