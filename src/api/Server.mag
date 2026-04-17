@@ -600,7 +600,7 @@ ApiServer subclass: Object
      - status (if present) must be one of WorkItemFields validStatuses
      - template (if present) must exist in the template registry
        (category 'template', scope 'system' or the work item's scope)"
-    | type status template tmpl |
+    | type status template tmpl estimate |
     (payload includesKey: 'type') ifTrue: [
       type := payload at: 'type'.
       (WorkItemFields isValidType: type) ifFalse: [
@@ -611,6 +611,14 @@ ApiServer subclass: Object
       status := payload at: 'status'.
       (WorkItemFields isValidStatus: status) ifFalse: [
         ^'Invalid status: ', status printString, ' (must be one of: ', WorkItemFields validStatusesDisplay, ')'
+      ]
+    ].
+    (payload includesKey: 'estimate') ifTrue: [
+      estimate := payload at: 'estimate'.
+      (estimate notNil and: [estimate isEmpty not]) ifTrue: [
+        (WorkItemFields isValidEstimate: estimate) ifFalse: [
+          ^'Invalid estimate: ', estimate printString, ' (must be one of: ', WorkItemFields validEstimatesDisplay, ')'
+        ]
       ]
     ].
     (payload includesKey: 'template') ifTrue: [

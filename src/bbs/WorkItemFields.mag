@@ -11,12 +11,20 @@ WorkItemFields subclass: Object
     ^#('backlog' 'ready' 'in-progress' 'done' 'blocked' 'cancelled')
   ]
 
+  classMethod: validEstimates [
+    ^#('small' 'medium' 'large')
+  ]
+
   classMethod: isValidType: aString [
     ^self validTypes includes: aString
   ]
 
   classMethod: isValidStatus: aString [
     ^self validStatuses includes: aString
+  ]
+
+  classMethod: isValidEstimate: aString [
+    ^self validEstimates includes: aString
   ]
 
   classMethod: validTypesDisplay [
@@ -27,4 +35,9 @@ WorkItemFields subclass: Object
   classMethod: validStatusesDisplay [
     "Human-readable list of valid statuses for error messages."
     ^'backlog, ready, in-progress, done, blocked, cancelled'
+  ]
+
+  classMethod: validEstimatesDisplay [
+    "Human-readable list of valid estimates for error messages."
+    ^'small, medium, large'
   ]
