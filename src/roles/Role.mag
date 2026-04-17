@@ -159,8 +159,15 @@ Violations will be detected and reverted.
   method: assembleContext: bbs scope: scope taskId: taskId workflowInstance: wfInstance [
     "Assemble context tuples from the BBS based on this role''s constraints.
      When wfInstance is non-empty, tuples with a workflow_instance field are
-     filtered to only include those belonging to this workflow."
-    | hard soft budget result conventions remaining |
+     filtered to only include those belonging to this workflow.
+
+     Per-category recency cap: instead of including every tuple in a hard
+     category (which lets stale observations from earlier pipeline cycles
+     crowd out fresh ones), each category contributes only the N most recent
+     tuples. The BBS index is append-ordered by monotonic id, so the tail of
+     a scan is the most recent slice. N is computed per category from the
+     remaining budget so hard and soft categories share fairly."
+    | hard soft budget result conventions remaining totalCats perCatHard perCatSoft take |
     hard := contextConstraints at: 'hard' ifAbsent: [#()].
     soft := contextConstraints at: 'soft' ifAbsent: [#()].
     budget := contextConstraints at: 'budget' ifAbsent: [50].
@@ -170,34 +177,61 @@ Violations will be detected and reverted.
     conventions := bbs scanAll: 'convention'.
     result := result, conventions.
 
-    "Hard constraints — must include, filtered by workflow"
+    "Compute per-category recency cap for hard categories.
+     Split the post-conventions budget evenly across all constrained categories
+     so a few noisy categories (e.g. observation) cannot starve the rest."
+    remaining := budget - result size.
+    totalCats := hard size + soft size.
+    perCatHard := 3.
+    (hard size > 0 and: [remaining > 0]) ifTrue: [
+      perCatHard := (remaining + totalCats - 1) // totalCats.
+      perCatHard < 3 ifTrue: [perCatHard := 3]
+    ].
+
+    "Hard constraints — include N most recent per category, filtered by workflow."
     hard do: [:spec |
-      | cat tuples |
+      | cat tuples recent |
       cat := spec at: 'category'.
       tuples := bbs scan: cat scope: scope.
       tuples := self filterByWorkflow: tuples instance: wfInstance.
-      result := result, tuples
+      recent := self mostRecent: tuples count: perCatHard.
+      result := result, recent
     ].
 
-    "Soft constraints — fill remaining budget, filtered by workflow"
+    "Soft constraints — N most recent per category, bounded by remaining budget."
     remaining := budget - result size.
-    remaining > 0 ifTrue: [
+    (soft size > 0 and: [remaining > 0]) ifTrue: [
+      perCatSoft := (remaining + soft size - 1) // soft size.
+      perCatSoft < 1 ifTrue: [perCatSoft := 1].
       soft do: [:spec |
         remaining > 0 ifTrue: [
-          | cat tuples |
+          | cat tuples recent |
           cat := spec at: 'category'.
           tuples := bbs scan: cat scope: scope.
           tuples := self filterByWorkflow: tuples instance: wfInstance.
-          tuples size > remaining ifTrue: [
-            tuples := tuples copyFrom: 0 to: remaining - 1
-          ].
-          result := result, tuples.
+          take := perCatSoft.
+          take > remaining ifTrue: [take := remaining].
+          recent := self mostRecent: tuples count: take.
+          result := result, recent.
           remaining := budget - result size
         ]
       ]
     ].
 
     ^result
+  ]
+
+  method: mostRecent: tuples count: n [
+    "Return the n most recently appended tuples from a scan result.
+     The BBS index preserves append order (monotonic id), so recency-descending
+     means the last n entries. Returns the input unchanged when it already fits."
+    | size start |
+    n <= 0 ifTrue: [^Array new: 0].
+    size := tuples size.
+    size <= n ifTrue: [^tuples].
+    start := size - n.
+    "copyFrom:to: upper bound is exclusive (Go-style): size yields size-1 inclusive."
+    ^tuples copyFrom: start to: size
   ]
 
   method: filterByWorkflow: tuples instance: wfInstance [
