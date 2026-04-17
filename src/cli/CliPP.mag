@@ -193,6 +193,13 @@ CliPP subclass: Object
       dict := Dictionary new.
       dict at: 'tuples' put: (health at: 'tuples' ifAbsent: ['?']) printString.
       dict at: 'uptime' put: (health at: 'uptime' ifAbsent: ['?']) printString, 's'.
+      dict at: 'slots' put:
+        (health at: 'active_slots' ifAbsent: ['?']) printString, ' / ',
+        (health at: 'max_slots' ifAbsent: ['?']) printString.
+      dict at: 'active_tasks' put: (health at: 'active_tasks' ifAbsent: ['?']) printString.
+      dict at: 'pending_tasks' put: (health at: 'pending_tasks' ifAbsent: ['?']) printString.
+      dict at: 'avg_task_duration_s' put: (health at: 'avg_task_duration_s' ifAbsent: ['?']) printString.
+      dict at: 'error_count_last_hour' put: (health at: 'error_count_last_hour' ifAbsent: ['?']) printString.
       cfg taskId isEmpty ifFalse: [
         dict at: 'task' put: cfg taskId.
         dict at: 'scope' put: cfg scope
