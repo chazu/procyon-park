@@ -158,11 +158,15 @@ DashboardSSE subclass: Object
     ] ifFalse: [
       s := s, '<ul>'.
       recent do: [:n |
-        | p message severity |
+        | p message severity createdAt ts |
         p := n at: 'payload' ifAbsent: [Dictionary new].
         message := p at: 'message' ifAbsent: [''].
         severity := p at: 'severity' ifAbsent: ['info'].
-        s := s, '<li>[', severity, '] ', message, '</li>'
+        createdAt := p at: 'created_at' ifAbsent: [0].
+        ts := createdAt > 0
+          ifTrue: [(DateTime fromEpoch: createdAt) format: '15:04:05']
+          ifFalse: [''].
+        s := s, '<li>', ts, ' [', severity, '] ', message, '</li>'
       ].
       s := s, '</ul>'
     ].
