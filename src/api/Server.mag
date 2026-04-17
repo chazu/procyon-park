@@ -317,12 +317,77 @@ ApiServer subclass: Object
   "--- Health ---"
 
   method: handleHealth: req [
-    | d |
+    | d metrics |
     d := Dictionary new.
     d at: 'status' put: 'ok'.
     d at: 'tuples' put: bbs size.
     d at: 'uptime' put: bbs uptime.
+    metrics := self computeMetrics.
+    metrics keysAndValuesDo: [:k :v | d at: k put: v].
     ^self okResponse: d
+  ]
+
+  method: computeMetrics [
+    "Compute scheduler/task metrics for the health endpoint."
+    | d tasks events now pending active completedDurations totalDur errCount scheduler pinnedWorkitems |
+    d := Dictionary new.
+    now := DateTime now epochSeconds.
+
+    "Scheduler slot metrics — if dispatcher is attached"
+    dispatcher notNil ifTrue: [
+      scheduler := dispatcher scheduler.
+      scheduler notNil ifTrue: [
+        d at: 'active_slots' put: scheduler activeCount.
+        d at: 'max_slots' put: scheduler maxSlots
+      ]
+    ] ifFalse: [
+      d at: 'active_slots' put: 0.
+      d at: 'max_slots' put: 0
+    ].
+
+    "Task counts and average duration"
+    pending := 0.
+    active := 0.
+    totalDur := 0.
+    completedDurations := 0.
+    tasks := bbs scanAll: 'task'.
+    tasks do: [:t |
+      | p status dispatchedAt completedAt |
+      p := t at: 'payload'.
+      status := p at: 'status' ifAbsent: [''].
+      status = 'pending' ifTrue: [pending := pending + 1].
+      (status = 'dispatched' or: [status = 'running']) ifTrue: [active := active + 1].
+      status = 'completed' ifTrue: [
+        dispatchedAt := p at: 'dispatched_at' ifAbsent: [nil].
+        completedAt := p at: 'completed_at' ifAbsent: [nil].
+        (dispatchedAt notNil and: [completedAt notNil]) ifTrue: [
+          totalDur := totalDur + (completedAt - dispatchedAt).
+          completedDurations := completedDurations + 1
+        ]
+      ]
+    ].
+    d at: 'pending_tasks' put: pending.
+    d at: 'active_tasks' put: active.
+    completedDurations > 0
+      ifTrue: [d at: 'avg_task_duration_s' put: (totalDur // completedDurations)]
+      ifFalse: [d at: 'avg_task_duration_s' put: 0].
+
+    "Error count in last hour — task-failed or scope-violation events"
+    errCount := 0.
+    events := bbs scanAll: 'event'.
+    events do: [:e |
+      | ep etype ts |
+      ep := e at: 'payload'.
+      etype := ep at: 'type' ifAbsent: [''].
+      ts := e at: 'created_at' ifAbsent: [0].
+      ((etype = 'task-failed' or: [etype = 'scope-violation']) and:
+        [(now - ts) <= 3600]) ifTrue: [
+        errCount := errCount + 1
+      ]
+    ].
+    d at: 'error_count_last_hour' put: errCount.
+
+    ^d
   ]
 
   "--- Core Operations ---"

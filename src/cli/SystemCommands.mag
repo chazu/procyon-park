@@ -41,8 +41,15 @@ SystemCommands subclass: CLIBase
       ].
       health := Json decode: response.
       'Procyon Park Status:' println.
-      ('  Tuples:  ', (health at: 'tuples' ifAbsent: ['?']) printString) println.
-      ('  Uptime:  ', (health at: 'uptime' ifAbsent: ['?']) printString, 's') println.
+      ('  Tuples:           ', (health at: 'tuples' ifAbsent: ['?']) printString) println.
+      ('  Uptime:           ', (health at: 'uptime' ifAbsent: ['?']) printString, 's') println.
+      ('  Slots:            ',
+        (health at: 'active_slots' ifAbsent: ['?']) printString, ' / ',
+        (health at: 'max_slots' ifAbsent: ['?']) printString) println.
+      ('  Active tasks:     ', (health at: 'active_tasks' ifAbsent: ['?']) printString) println.
+      ('  Pending tasks:    ', (health at: 'pending_tasks' ifAbsent: ['?']) printString) println.
+      ('  Avg duration (s): ', (health at: 'avg_task_duration_s' ifAbsent: ['?']) printString) println.
+      ('  Errors (1h):      ', (health at: 'error_count_last_hour' ifAbsent: ['?']) printString) println.
 
       taskId isEmpty ifFalse: [
         ('  Task:    ', taskId) println.

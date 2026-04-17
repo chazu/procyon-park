@@ -20,6 +20,10 @@ Scheduler subclass: Object
     ^activeSlots size
   ]
 
+  method: maxSlots [
+    ^maxSlots
+  ]
+
   method: availableSlots [
     ^maxSlots - self activeCount
   ]
