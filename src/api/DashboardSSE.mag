@@ -370,15 +370,26 @@ DashboardSSE subclass: Object
     ] ifFalse: [
       s := s, '<ul>'.
       recent do: [:n |
-        | p message severity createdAt ts |
+        | p message severity createdAt ts scope workflow |
         p := n at: 'payload' ifAbsent: [Dictionary new].
         message := p at: 'message' ifAbsent: [''].
         severity := p at: 'severity' ifAbsent: ['info'].
         createdAt := p at: 'created_at' ifAbsent: [0].
+        scope := n at: 'scope' ifAbsent: [''].
+        scope isNil ifTrue: [scope := ''].
+        workflow := (scope startsWith: 'wf-')
+          ifTrue: [scope]
+          ifFalse: [p at: 'workflow_instance' ifAbsent: ['']].
+        workflow isNil ifTrue: [workflow := ''].
         ts := createdAt > 0
           ifTrue: [(DateTime fromEpoch: createdAt) format: '15:04:05']
           ifFalse: [''].
-        s := s, '<li>', ts, ' [', severity, '] ', message, '</li>'
+        s := s, '<li class="notif-item sev-', severity,
+              '" data-scope="', scope,
+              '" data-workflow="', workflow,
+              '" data-severity="', severity, '">',
+              ts, ' <span class="notif-scope">', scope, '</span>',
+              ' [', severity, '] ', message, '</li>'
       ].
       s := s, '</ul>'
     ].
