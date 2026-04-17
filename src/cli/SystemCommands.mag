@@ -17,6 +17,7 @@ SystemCommands subclass: CLIBase
     cmd = 'dashboard' ifTrue: [^self cmdDashboard: args].
     cmd = 'gc'        ifTrue: [^self cmdGc: args].
     cmd = 'session'   ifTrue: [^self cmdSession: args].
+    cmd = 'usage'     ifTrue: [^self cmdUsage: args].
     ('SystemCommands: unknown command: ', cmd) println
   ]
 
@@ -86,6 +87,7 @@ Communicate with it using the `pp` command-line tool.
   pp workflow <template> [--param key=val ...]        Start a workflow
   pp signal <id> <key> <value>                       Upsert a signal
   pp log [--follow] [--no-follow] [--since <secs>]   Tail notification stream
+  pp usage [--json]                                  Report your session token consumption (self-regulate)
 
 Worktree base: ~/.pp/worktrees/
 Dashboard:     ', baseUrl, '/dashboard/
@@ -754,4 +756,136 @@ Dashboard:     ', baseUrl, '/dashboard/
     (input > 0 or: [output > 0]) ifTrue: [
       ('    tokens: in=', input printString, ' out=', output printString) println
     ]
+  ]
+
+  "--- Usage / Self-Regulation ---"
+
+  method: cmdUsage: args [
+    "pp usage [<taskId>] [--json]
+     Report current session token consumption so the agent can self-regulate.
+     Resolution order for which session file to read:
+       1. positional <taskId> argument
+       2. PP_OUTPUT_FILE env var (set by harness)
+       3. PP_TASK env var -> ~/.pp/sessions/<task>.jsonl
+     Output (default, human-readable):
+       context_tokens   approximation of current context size (last turn's
+                        input + cache_creation + cache_read)
+       total_input      sum across all turns of input + cache_creation
+       total_cache_read sum of cache-read input tokens
+       total_output     sum of output tokens
+       turns            count of assistant messages with usage
+     With --json, emit a single JSON object with the same fields."
+    | homeDir sessionsDir taskArg filePath contents lines lf jsonMode i a
+      contextTokens totalInput totalCacheRead totalOutput turns
+      lastInput lastCacheCreation lastCacheRead env outFile result |
+
+    homeDir := System env: 'HOME'.
+    sessionsDir := homeDir, '/.pp/sessions'.
+    lf := Character lf asString.
+
+    "Parse args: --json flag and optional positional taskId"
+    jsonMode := false.
+    taskArg := nil.
+    i := 1.
+    [i < args size] whileTrue: [
+      a := args at: i.
+      a = '--json' ifTrue: [jsonMode := true]
+        ifFalse: [taskArg isNil ifTrue: [taskArg := a]].
+      i := i + 1
+    ].
+
+    "Resolve file path"
+    filePath := nil.
+    taskArg notNil ifTrue: [
+      filePath := sessionsDir, '/', taskArg, '.jsonl'
+    ] ifFalse: [
+      outFile := System env: 'PP_OUTPUT_FILE'.
+      (outFile notNil and: [outFile isEmpty not]) ifTrue: [
+        filePath := outFile
+      ] ifFalse: [
+        env := System env: 'PP_TASK'.
+        (env notNil and: [env isEmpty not]) ifTrue: [
+          filePath := sessionsDir, '/', env, '.jsonl'
+        ]
+      ]
+    ].
+
+    filePath isNil ifTrue: [
+      'Error: no session file. Pass <taskId> or set PP_TASK / PP_OUTPUT_FILE.' println.
+      ^self
+    ].
+
+    (File exists: filePath) ifFalse: [
+      ('Error: session file not found: ', filePath) println.
+      ^self
+    ].
+
+    "Tally usage across all assistant messages"
+    contextTokens := 0.
+    totalInput := 0.
+    totalCacheRead := 0.
+    totalOutput := 0.
+    turns := 0.
+    lastInput := 0.
+    lastCacheCreation := 0.
+    lastCacheRead := 0.
+
+    [
+      contents := File readFileContents: filePath.
+      lines := contents split: lf.
+      lines do: [:line |
+        line isEmpty ifFalse: [
+          [
+            | entry message usage inTok outTok ccTok crTok |
+            entry := Json decode: line.
+            "Usage may live at top level or under message.usage (assistant entries)"
+            usage := entry at: 'usage' ifAbsent: [nil].
+            usage isNil ifTrue: [
+              message := entry at: 'message' ifAbsent: [nil].
+              (message notNil and: [message isKindOf: Dictionary]) ifTrue: [
+                usage := message at: 'usage' ifAbsent: [nil]
+              ]
+            ].
+            usage notNil ifTrue: [
+              inTok := usage at: 'input_tokens' ifAbsent: [0].
+              outTok := usage at: 'output_tokens' ifAbsent: [0].
+              ccTok := usage at: 'cache_creation_input_tokens' ifAbsent: [0].
+              crTok := usage at: 'cache_read_input_tokens' ifAbsent: [0].
+              totalInput := totalInput + inTok + ccTok.
+              totalCacheRead := totalCacheRead + crTok.
+              totalOutput := totalOutput + outTok.
+              turns := turns + 1.
+              lastInput := inTok.
+              lastCacheCreation := ccTok.
+              lastCacheRead := crTok
+            ]
+          ] on: Exception do: [:e | "skip malformed line"]
+        ]
+      ]
+    ] on: Exception do: [:e |
+      ('Error reading session: ', e messageText) println.
+      ^self
+    ].
+
+    contextTokens := lastInput + lastCacheCreation + lastCacheRead.
+
+    jsonMode ifTrue: [
+      result := Dictionary new.
+      result at: 'session_file' put: filePath.
+      result at: 'turns' put: turns.
+      result at: 'context_tokens' put: contextTokens.
+      result at: 'total_input' put: totalInput.
+      result at: 'total_cache_read' put: totalCacheRead.
+      result at: 'total_output' put: totalOutput.
+      (Json encode: result) println.
+      ^self
+    ].
+
+    'Session usage:' println.
+    ('  file:             ', filePath) println.
+    ('  turns:            ', turns printString) println.
+    ('  context_tokens:   ', contextTokens printString, '  (last turn input + cache)') println.
+    ('  total_input:      ', totalInput printString, '  (input + cache_creation, summed)') println.
+    ('  total_cache_read: ', totalCacheRead printString) println.
+    ('  total_output:     ', totalOutput printString)  println
   ]

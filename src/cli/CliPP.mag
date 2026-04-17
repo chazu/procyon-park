@@ -89,6 +89,7 @@ CliPP subclass: Object
     head = 'clean-branches' ifTrue: [^true].
     head = 'task'     ifTrue: [^true].
     head = 'session'  ifTrue: [^true].
+    head = 'usage'    ifTrue: [^true].
     head = 'plan'     ifTrue: [^true].
     ^false
   ]
@@ -118,6 +119,7 @@ CliPP subclass: Object
     head = 'clean-branches' ifTrue: [^self runCleanBranches: args].
     head = 'task'     ifTrue: [^self runTask: args].
     head = 'session'  ifTrue: [^self runSession: args].
+    head = 'usage'    ifTrue: [^self runUsage: args].
     head = 'plan'     ifTrue: [^self runPlan: args].
     ^0
   ]
@@ -3305,6 +3307,32 @@ PPEOF'.
       ].
       sysCmd := SystemCommands new.
       sysCmd cmdSession: callArgs.
+      0
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Subcommand: usage ---------------------------------------------------"
+
+  classMethod: runUsage: args [
+    "`pp usage [<task-id>] [--json]` — report current session token usage so
+     agents can self-regulate. Delegates to SystemCommands>>cmdUsage:."
+    | cmd rest |
+    cmd := Cli::Command named: 'usage' doc: 'Report current session token consumption'.
+    cmd run: [:runArgs |
+      | callArgs sysCmd i |
+      callArgs := Array new: 0.
+      callArgs := callArgs copyWith: 'usage'.
+      i := 0.
+      [i < runArgs size] whileTrue: [
+        callArgs := callArgs copyWith: (runArgs at: i).
+        i := i + 1
+      ].
+      sysCmd := SystemCommands new.
+      sysCmd cmdUsage: callArgs.
       0
     ].
 
