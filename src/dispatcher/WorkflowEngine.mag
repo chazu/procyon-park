@@ -22,6 +22,7 @@ WorkflowEngine subclass: Object
     actions := Dictionary new.
     actions at: 'create-worktree' put: (CreateWorktreeAction on: self).
     actions at: 'merge-worktree' put: (MergeWorktreeAction on: self).
+    actions at: 'discard-worktree' put: (DiscardWorktreeAction on: self).
     actions at: 'spawn-workflow' put: (SpawnWorkflowAction on: self).
     actions at: 'dispatch-waves' put: (DispatchWavesAction on: self).
     actions at: 'notify-head' put: (NotifyHeadAction on: self)
