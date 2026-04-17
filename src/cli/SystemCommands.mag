@@ -557,13 +557,28 @@ Dashboard:     ', baseUrl, '/dashboard/
   "--- Session Viewer ---"
 
   method: cmdSession: args [
-    "pp session [<taskId>] — view Claude Code session logs."
-    | homeDir sessionsDir taskArg filePath contents lines lf |
+    "pp session [<taskId>] [--full|--summary] — view Claude Code session logs.
+       (no flag)  truncate long strings (default)
+       --full     show full untruncated content
+       --summary  show only tool_use names + assistant text blocks"
+    | homeDir sessionsDir taskArg filePath contents lines lf mode i a |
     homeDir := System env: 'HOME'.
     sessionsDir := homeDir, '/.pp/sessions'.
     lf := Character lf asString.
 
-    args size < 2 ifTrue: [
+    "Parse flags; first non-flag after 'session' becomes taskArg."
+    mode := 'default'.
+    taskArg := nil.
+    i := 1.
+    [i < args size] whileTrue: [
+      a := args at: i.
+      a = '--full' ifTrue: [mode := 'full']
+        ifFalse: [a = '--summary' ifTrue: [mode := 'summary']
+        ifFalse: [taskArg isNil ifTrue: [taskArg := a]]].
+      i := i + 1
+    ].
+
+    taskArg isNil ifTrue: [
       "List available session files"
       | listing fileList |
       'Available sessions:' println.
@@ -590,7 +605,6 @@ Dashboard:     ', baseUrl, '/dashboard/
       ^self
     ].
 
-    taskArg := args at: 1.
     filePath := sessionsDir, '/', taskArg, '.jsonl'.
 
     (File exists: filePath) ifFalse: [
@@ -613,24 +627,26 @@ Dashboard:     ', baseUrl, '/dashboard/
             entryType := entry at: 'type' ifAbsent: ['unknown'].
 
             entryType = 'system' ifTrue: [
-              self showSystemEntry: entry
+              mode = 'summary' ifFalse: [self showSystemEntry: entry]
             ].
 
             entryType = 'assistant' ifTrue: [
-              self showAssistantEntry: entry
+              self showAssistantEntry: entry mode: mode
             ].
 
             entryType = 'tool_result' ifTrue: [
-              self showToolResultEntry: entry
+              mode = 'summary' ifFalse: [self showToolResultEntry: entry mode: mode]
             ].
 
             entryType = 'result' ifTrue: [
-              self showResultEntry: entry
+              mode = 'summary' ifFalse: [self showResultEntry: entry]
             ].
 
-            "Show usage if present"
-            (entry at: 'usage' ifAbsent: [nil]) notNil ifTrue: [
-              self showUsage: (entry at: 'usage')
+            "Show usage if present (suppressed in summary mode)"
+            mode = 'summary' ifFalse: [
+              (entry at: 'usage' ifAbsent: [nil]) notNil ifTrue: [
+                self showUsage: (entry at: 'usage')
+              ]
             ]
           ] on: Exception do: [:e | ]
         ]
@@ -650,7 +666,7 @@ Dashboard:     ', baseUrl, '/dashboard/
     msg println
   ]
 
-  method: showAssistantEntry: entry [
+  method: showAssistantEntry: entry mode: mode [
     | content |
     content := entry at: 'content' ifAbsent: [nil].
     content isNil ifTrue: [
@@ -663,11 +679,11 @@ Dashboard:     ', baseUrl, '/dashboard/
     content isNil ifTrue: [^self].
 
     (content isKindOf: String) ifTrue: [
-      | truncated |
-      truncated := content size > 120
-        ifTrue: [content copyFrom: 0 to: 120]
-        ifFalse: [content].
-      ('  [assistant] ', truncated) println.
+      | shown |
+      shown := (mode = 'full' or: [content size <= 120])
+        ifTrue: [content]
+        ifFalse: [content copyFrom: 0 to: 120].
+      ('  [assistant] ', shown) println.
       ^self
     ].
 
@@ -676,40 +692,46 @@ Dashboard:     ', baseUrl, '/dashboard/
         | blockType |
         (block isKindOf: Dictionary) ifTrue: [
           blockType := block at: 'type' ifAbsent: [''].
-          blockType = 'thinking' ifTrue: ["skip thinking blocks"].
+          blockType = 'thinking' ifTrue: ["always skip thinking blocks"].
           blockType = 'text' ifTrue: [
-            | text truncated |
+            | text shown |
             text := block at: 'text' ifAbsent: [''].
-            truncated := text size > 120
-              ifTrue: [text copyFrom: 0 to: 120]
-              ifFalse: [text].
-            ('  [assistant] ', truncated) println
+            shown := (mode = 'full' or: [text size <= 120])
+              ifTrue: [text]
+              ifFalse: [text copyFrom: 0 to: 120].
+            ('  [assistant] ', shown) println
           ].
           blockType = 'tool_use' ifTrue: [
-            | toolName inputStr truncated |
+            | toolName inputStr shown |
             toolName := block at: 'name' ifAbsent: ['?'].
-            inputStr := Json encode: (block at: 'input' ifAbsent: [Dictionary new]).
-            truncated := inputStr size > 80
-              ifTrue: [inputStr copyFrom: 0 to: 80]
-              ifFalse: [inputStr].
-            ('  [tool_use] ', toolName, ' ', truncated) println
+            mode = 'summary'
+              ifTrue: [('  [tool_use] ', toolName) println]
+              ifFalse: [
+                inputStr := Json encode: (block at: 'input' ifAbsent: [Dictionary new]).
+                shown := (mode = 'full' or: [inputStr size <= 80])
+                  ifTrue: [inputStr]
+                  ifFalse: [inputStr copyFrom: 0 to: 80].
+                ('  [tool_use] ', toolName, ' ', shown) println
+              ]
           ]
         ]
       ]
     ]
   ]
 
-  method: showToolResultEntry: entry [
-    | isError content truncated |
+  method: showToolResultEntry: entry mode: mode [
+    | isError content shown |
     isError := entry at: 'is_error' ifAbsent: [false].
     content := entry at: 'content' ifAbsent: [''].
     (content isKindOf: String) ifTrue: [
-      truncated := content size > 80
-        ifTrue: [content copyFrom: 0 to: 80]
-        ifFalse: [content].
+      shown := (mode = 'full' or: [content size <= 80])
+        ifTrue: [content]
+        ifFalse: [content copyFrom: 0 to: 80].
       isError
-        ifTrue: [('  [tool_result] ERROR: ', truncated) println]
-        ifFalse: [('  [tool_result] ok (', content size printString, ' chars)') println]
+        ifTrue: [('  [tool_result] ERROR: ', shown) println]
+        ifFalse: [mode = 'full'
+          ifTrue: [('  [tool_result] ok (', content size printString, ' chars): ', shown) println]
+          ifFalse: [('  [tool_result] ok (', content size printString, ' chars)') println]]
     ] ifFalse: [
       isError
         ifTrue: ['  [tool_result] ERROR' println]
