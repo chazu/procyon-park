@@ -27,7 +27,7 @@ ClaudeHarness subclass: Object
   method: run [
     "Assemble the system prompt, spawn Claude, wait for completion."
 
-    | contextTuples taskTuple taskDescription taskPayload workflowInstance env home sessionsDir outputFile timeoutArgs shellCmd |
+    | contextTuples taskTuple taskDescription taskPayload workflowInstance env home sessionsDir outputFile timeoutArgs shellCmd timeoutSecs timeoutStr |
 
     "Read the task description and workflow instance first (needed for context filtering)"
     taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
@@ -87,12 +87,23 @@ ClaudeHarness subclass: Object
      We reference env vars instead of inlining the system prompt to avoid quoting hell."
     shellCmd := 'claude --output-format stream-json --verbose --system-prompt "$PP_SYSTEM_PROMPT" --allowedTools Bash,Read,Write,Edit,Glob,Grep --max-turns 200 -p "$PP_TASK_DESC" > "$PP_OUTPUT_FILE" 2>&1'.
 
-    "Wrap with 30-minute timeout to prevent silent hangs"
+    "Resolve timeout (seconds) with three-tier precedence:
+       1. transition-level `timeout` field in CUE (threaded via task payload)
+       2. role-level `defaultTimeout` (per-role override of base Role)
+       3. hard 1800s fallback from base Role
+     This keeps short roles (reviewer) from wasting wall-clock and tokens on
+     the one-size-fits-all 30-minute cap, while letting CUE authors extend
+     it per-transition when a specific job needs longer."
+    timeoutSecs := taskPayload at: 'timeout' ifAbsent: [role defaultTimeout].
+    timeoutStr := (timeoutSecs isKindOf: String)
+      ifTrue: [timeoutSecs]
+      ifFalse: [timeoutSecs printString].
     timeoutArgs := Array new: 0.
-    timeoutArgs := timeoutArgs copyWith: '1800'.
+    timeoutArgs := timeoutArgs copyWith: timeoutStr.
     timeoutArgs := timeoutArgs copyWith: 'sh'.
     timeoutArgs := timeoutArgs copyWith: '-c'.
     timeoutArgs := timeoutArgs copyWith: shellCmd.
+    ('Harness timeout: ', timeoutStr, 's (role: ', role name, ')') println.
     process := ExternalProcess command: 'timeout'.
     process args: timeoutArgs.
     process env: env.

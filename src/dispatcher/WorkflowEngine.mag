@@ -377,10 +377,16 @@ WorkflowEngine subclass: Object
     ].
 
     role notNil ifTrue: [
-      | repo |
+      | repo transitionTimeout |
       taskPayload := Dictionary new.
       taskPayload at: 'role' put: role.
       taskPayload at: 'status' put: 'pending'.
+      "Per-transition timeout override (seconds). When absent the harness
+       falls back to the role's defaultTimeout, then to a hard default."
+      transitionTimeout := transition at: 'timeout' ifAbsent: [nil].
+      transitionTimeout notNil ifTrue: [
+        taskPayload at: 'timeout' put: transitionTimeout
+      ].
       "For fixer role, thread verdict rationale and review observations into the task
        description so the fixer does not need to hunt through the observation log."
       role = 'fixer' ifTrue: [

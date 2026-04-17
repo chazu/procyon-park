@@ -46,6 +46,11 @@ MUST NOT: Edit source code. Make commits. Skip writing the verdict signal.'
   classMethod: hardCategories [ ^#('decision') ]
   classMethod: softCategories [ ^#('convention' 'fact') ]
   classMethod: contextBudget [ ^40 ]
+  classMethod: defaultTimeout [
+    "Reviewers just read a diff and write a verdict — 15 minutes is plenty.
+     Overridable per-transition via CUE `timeout` field."
+    ^900
+  ]
 
   method: completionInstructions [
     ^'1. For each issue: pp observe review-issue-N "<description>"
