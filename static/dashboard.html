@@ -51,6 +51,37 @@
 
     #dashboard-completions { margin-top: 24px; }
     #dashboard-workitems { margin-top: 24px; }
+    #dashboard-scope-violations { margin-top: 24px; }
+
+    .sv-summary {
+      color: #c9d1d9;
+      font-size: 0.85em;
+      margin-bottom: 8px;
+      padding: 6px 8px;
+      background: #21262d;
+      border-radius: 3px;
+    }
+    .sv-list { margin: 0; padding: 0; }
+    .sv-list li.sv-role {
+      padding: 6px 8px;
+      border-left: 3px solid #8b949e;
+      margin-bottom: 4px;
+      background: #0d1117;
+      border-bottom: none;
+      font-size: 0.85em;
+    }
+    .sv-list li.sv-single     { border-left-color: #d29922; }
+    .sv-list li.sv-repeat     { border-left-color: #f85149; }
+    .sv-list li.sv-systematic { border-left-color: #f85149; background: #2d1214; }
+    .sv-count {
+      background: #21262d;
+      color: #f0883e;
+      padding: 0 5px;
+      border-radius: 3px;
+      font-size: 0.85em;
+      margin-left: 4px;
+    }
+    .sv-systematic .sv-count { color: #f85149; font-weight: bold; }
 
     .kanban {
       display: grid;
@@ -206,6 +237,10 @@
       </div>
       <div id="dashboard-workitems">
         <h2>Work Items</h2>
+        <div class="empty-state">Connecting...</div>
+      </div>
+      <div id="dashboard-scope-violations">
+        <h2>Scope Violations</h2>
         <div class="empty-state">Connecting...</div>
       </div>
     </div>
