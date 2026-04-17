@@ -26,6 +26,11 @@ You write ONE markdown document with your findings, commit it, then dismiss.'
   classMethod: hardCategories [ ^#('fact') ]
   classMethod: softCategories [ ^#('convention' 'signal') ]
   classMethod: contextBudget [ ^30 ]
+  classMethod: defaultTimeout [
+    "Scouts read broadly and write prose — allow the full 30 minutes.
+     Overridable per-transition via CUE `timeout` field."
+    ^1800
+  ]
 
   method: completionInstructions [
     ^'1. Write findings to a markdown file in your working directory.

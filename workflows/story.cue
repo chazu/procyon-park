@@ -23,6 +23,9 @@ transitions: [
 		in:          ["implemented"]
 		out:         ["reviewed"]
 		role:        "reviewer"
+		// Reviewers read a diff and emit a verdict — 15 minutes is plenty.
+		// Omit `timeout` to fall back to the role's defaultTimeout.
+		timeout:     900
 		description: "Review implementation for: {{description}}. IMPORTANT: When done, write a verdict signal: pp signal verdict:{{instance}} decision pass (or decision fix if changes needed)."
 	},
 	{

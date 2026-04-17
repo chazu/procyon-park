@@ -12,6 +12,13 @@ Role subclass: Object
   classMethod: hardCategories [ ^#() ]
   classMethod: softCategories [ ^#() ]
   classMethod: contextBudget [ ^50 ]
+  classMethod: defaultTimeout [
+    "Default wall-clock timeout (seconds) for agent runs under this role.
+     Override in subclasses when a role's typical work is shorter or longer
+     than the 30-minute default. Transition-level `timeout` in CUE overrides
+     this per-transition."
+    ^1800
+  ]
 
   classMethod: new [
     "Template method: builds a Role from class-side protocol overrides."
@@ -59,6 +66,13 @@ Role subclass: Object
   method: systemPromptTemplate: t [ systemPromptTemplate := t ]
   method: contextConstraints: c [ contextConstraints := c ]
   method: ppCommands: p [ ppCommands := p ]
+
+  method: defaultTimeout [
+    "Instance-side accessor delegating to the class-side default. Harnesses
+     call this to pick a fallback timeout when the transition does not
+     specify one."
+    ^self class defaultTimeout
+  ]
 
   method: primeFor: taskDescription context: contextTuples [
     "Backward compat: no workdir boundary."
