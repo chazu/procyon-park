@@ -1,0 +1,73 @@
+"DiscardWorktree action — removes a spike worktree without merging.
+ Used by the spike template: prototype code is thrown away; only the
+ recorded design decision survives."
+
+DiscardWorktreeAction subclass: WorkflowAction
+
+  method: execute: transition instance: instanceId params: params [
+    "Discard the impl worktree and its branch — no merge to feature branch.
+     1. Read worktree signal.
+     2. Remove the worktree directory.
+     3. Delete the impl branch.
+     4. Delete the feature branch if it was created just for this spike.
+     5. Write an observation recording the discard."
+    | info payload repoPath featureBranch implBranch worktreeDir scope obsPayload |
+
+    scope := engine scopeForInstance: instanceId.
+
+    "1. Read the worktree signal"
+    info := bbs rdp: 'signal' scope: instanceId identity: 'worktree'.
+    info isNil ifTrue: [
+      ('discard-worktree: no worktree signal — nothing to discard') println.
+      ^self
+    ].
+
+    payload := info at: 'payload'.
+    repoPath := payload at: 'repo_path'.
+    featureBranch := payload at: 'feature_branch'.
+    implBranch := payload at: 'branch'.
+    worktreeDir := payload at: 'workdir'.
+
+    ('discard-worktree: discarding ', worktreeDir, ' (branch: ', implBranch, ') in ', repoPath) println.
+
+    "2. Make sure repo is not sitting on a branch we're about to delete"
+    [GitOps checkoutBranch: 'main' in: repoPath]
+      on: Exception do: [:e |
+        ('discard-worktree: checkout main warning: ', e messageText) println
+      ].
+
+    "3. Remove the worktree directory"
+    [
+      GitOps removeWorktree: worktreeDir in: repoPath
+    ] on: Exception do: [:e |
+      ('discard-worktree: removeWorktree warning: ', e messageText) println
+    ].
+
+    "4. Delete the impl branch (prototype code is discarded)"
+    (implBranch isNil or: [implBranch isEmpty]) ifFalse: [
+      [GitOps deleteBranch: implBranch in: repoPath]
+        on: Exception do: [:e |
+          ('discard-worktree: deleteBranch impl warning: ', e messageText) println
+        ]
+    ].
+
+    "5. Delete the feature branch if it was spike-scoped (named feature/<instance>).
+     Shared / wave-level branches (e.g. 'main', or a pipeline-shared branch) are
+     preserved — we only drop branches this spike itself created."
+    (featureBranch notNil and: [featureBranch = ('feature/', instanceId)]) ifTrue: [
+      [GitOps deleteBranch: featureBranch in: repoPath]
+        on: Exception do: [:e |
+          ('discard-worktree: deleteBranch feature warning: ', e messageText) println
+        ]
+    ].
+
+    "6. Record the discard"
+    obsPayload := Dictionary new.
+    obsPayload at: 'detail' put: ('Discarded spike worktree ', worktreeDir, ' (branch ', implBranch, ') — prototype code thrown away').
+    obsPayload at: 'repoPath' put: repoPath.
+    obsPayload at: 'featureBranch' put: featureBranch.
+    obsPayload at: 'implBranch' put: implBranch.
+    bbs out: 'observation' scope: scope identity: 'spike-discarded' payload: obsPayload.
+
+    ('discard-worktree: complete — ', implBranch, ' discarded') println
+  ]
