@@ -118,6 +118,56 @@
       font-size: 0.82em;
     }
     li:last-child { border-bottom: none; }
+    li.notif-hidden { display: none; }
+    li.sev-warn    { color: #d29922; }
+    li.sev-urgent  { color: #f85149; }
+    li.sev-error   { color: #f85149; }
+    .notif-scope {
+      display: inline-block;
+      background: #21262d;
+      color: #8b949e;
+      padding: 0 5px;
+      border-radius: 3px;
+      font-size: 0.9em;
+    }
+
+    .notif-filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #21262d;
+    }
+    .notif-filters select,
+    .notif-filters input {
+      background: #0d1117;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-radius: 3px;
+      padding: 3px 6px;
+      font-size: 0.8em;
+      font-family: inherit;
+      flex: 1;
+      min-width: 80px;
+    }
+    .notif-filters input::placeholder { color: #484f58; }
+    .notif-filters button {
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-radius: 3px;
+      padding: 3px 8px;
+      font-size: 0.8em;
+      cursor: pointer;
+    }
+    .notif-filters button:hover { background: #30363d; }
+    .filter-count {
+      color: #8b949e;
+      font-size: 0.75em;
+      align-self: center;
+      margin-left: auto;
+    }
 
     .empty-state {
       color: #484f58;
@@ -161,6 +211,20 @@
     </div>
 
     <div class="panel feed">
+      <div class="notif-filters" id="notif-filters">
+        <select id="filter-scope" title="Scope"><option value="">all scopes</option></select>
+        <select id="filter-workflow" title="Workflow"><option value="">all workflows</option></select>
+        <select id="filter-severity" title="Severity">
+          <option value="">all severities</option>
+          <option value="info">info</option>
+          <option value="warn">warn</option>
+          <option value="urgent">urgent</option>
+          <option value="error">error</option>
+        </select>
+        <input type="text" id="filter-text" placeholder="search..." />
+        <button type="button" id="filter-clear">clear</button>
+        <span class="filter-count" id="filter-count"></span>
+      </div>
       <div id="dashboard-notifications">
         <h2>Recent Activity</h2>
         <div class="empty-state">Connecting...</div>
@@ -192,12 +256,92 @@
         const target = document.getElementById(root.id);
         if (target) {
           target.outerHTML = root.outerHTML;
+          if (root.id === 'dashboard-notifications') {
+            refreshNotifFilters();
+          }
         }
       }
     });
 
     es.onopen = () => { dot.classList.remove('disconnected'); };
     es.onerror = () => { dot.classList.add('disconnected'); };
+
+    // --- Notification filtering ---
+    // Filters are applied client-side so the SSE broadcast can stay simple
+    // (one flat feed per tick). Filter state persists across SSE patches;
+    // scope / workflow dropdowns are rebuilt from the data-attributes of the
+    // currently rendered notifications.
+    const filterScope    = document.getElementById('filter-scope');
+    const filterWorkflow = document.getElementById('filter-workflow');
+    const filterSeverity = document.getElementById('filter-severity');
+    const filterText     = document.getElementById('filter-text');
+    const filterClear    = document.getElementById('filter-clear');
+    const filterCount    = document.getElementById('filter-count');
+
+    function repopulateSelect(sel, values) {
+      const prev = sel.value;
+      const first = sel.querySelector('option[value=""]');
+      sel.innerHTML = '';
+      if (first) sel.appendChild(first);
+      const sorted = Array.from(values).filter(v => v && v.length > 0).sort();
+      for (const v of sorted) {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = v.length > 30 ? v.substring(0, 30) + '…' : v;
+        sel.appendChild(o);
+      }
+      if (prev && (prev === '' || values.has(prev))) sel.value = prev;
+    }
+
+    function applyNotifFilter() {
+      const scope = filterScope.value;
+      const wf    = filterWorkflow.value;
+      const sev   = filterSeverity.value;
+      const text  = filterText.value.trim().toLowerCase();
+      const items = document.querySelectorAll('#dashboard-notifications li.notif-item');
+      let shown = 0;
+      items.forEach(li => {
+        const ls  = li.getAttribute('data-scope')    || '';
+        const lw  = li.getAttribute('data-workflow') || '';
+        const lsv = li.getAttribute('data-severity') || '';
+        let hide = false;
+        if (scope && ls !== scope)    hide = true;
+        if (wf    && lw !== wf)       hide = true;
+        if (sev   && lsv !== sev)     hide = true;
+        if (text  && !li.textContent.toLowerCase().includes(text)) hide = true;
+        li.classList.toggle('notif-hidden', hide);
+        if (!hide) shown++;
+      });
+      filterCount.textContent = items.length
+        ? (shown + '/' + items.length)
+        : '';
+    }
+
+    function refreshNotifFilters() {
+      const scopes    = new Set();
+      const workflows = new Set();
+      document.querySelectorAll('#dashboard-notifications li.notif-item').forEach(li => {
+        const s = li.getAttribute('data-scope');
+        const w = li.getAttribute('data-workflow');
+        if (s) scopes.add(s);
+        if (w) workflows.add(w);
+      });
+      repopulateSelect(filterScope, scopes);
+      repopulateSelect(filterWorkflow, workflows);
+      applyNotifFilter();
+    }
+
+    [filterScope, filterWorkflow, filterSeverity].forEach(el => {
+      el.addEventListener('change', applyNotifFilter);
+    });
+    filterText.addEventListener('input', applyNotifFilter);
+    filterClear.addEventListener('click', () => {
+      filterScope.value = '';
+      filterWorkflow.value = '';
+      filterSeverity.value = '';
+      filterText.value = '';
+      applyNotifFilter();
+    });
   </script>
 
 </body>
