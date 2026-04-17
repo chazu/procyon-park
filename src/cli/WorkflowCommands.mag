@@ -17,6 +17,8 @@ WorkflowCommands subclass: CLIBase
       ifTrue: [^self cmdWorkflowCancel: args].
     (args size > 1 and: [(args at: 1) = 'wait'])
       ifTrue: [^self cmdWorkflowWait: args].
+    (args size > 1 and: [(args at: 1) = 'viz'])
+      ifTrue: [^self cmdWorkflowViz: args].
     ^self cmdWorkflow: args
   ]
 
@@ -306,6 +308,294 @@ WorkflowCommands subclass: CLIBase
     ].
 
     ('Timeout: workflow ', wfId, ' did not complete within ', maxWait printString, ' seconds') println
+  ]
+
+  method: cmdWorkflowViz: args [
+    "pp workflow viz <workflow-id> [--scope <scope>] [--dot]
+     Render the Petri net state of a workflow as ASCII (default) or DOT.
+     Shows places, transitions, current token positions, and enabled transitions."
+    | wfId wfScope scopeExplicit useDot allWorkflows found |
+    args size < 3 ifTrue: [
+      'Usage: pp workflow viz <workflow-id> [--scope <scope>] [--dot]' println.
+      ^self
+    ].
+
+    wfId := args at: 2.
+    (wfId copyFrom: 0 to: 2) = '--' ifTrue: [
+      'Usage: pp workflow viz <workflow-id> [--scope <scope>] [--dot]' println.
+      ^self
+    ].
+
+    wfScope := self flagValue: '--scope' in: args.
+    scopeExplicit := wfScope notNil.
+    useDot := (args indexOf: '--dot') >= 0.
+
+    "Locate the workflow across scopes (same pattern as showWorkflowDetailSearching)"
+    scopeExplicit ifFalse: [
+      allWorkflows := self safeScan: 'workflow' scope: nil.
+      found := allWorkflows detect: [:wf |
+        (wf at: 'identity' ifAbsent: ['']) = wfId
+      ] ifNone: [nil].
+      found isNil ifTrue: [
+        ('Workflow not found: ', wfId) println.
+        ^self
+      ].
+      wfScope := found at: 'scope' ifAbsent: ['default']
+    ].
+
+    useDot
+      ifTrue: [self renderWorkflowDot: wfId scope: wfScope]
+      ifFalse: [self renderWorkflowAscii: wfId scope: wfScope]
+  ]
+
+  method: loadVizData: wfId scope: wfScope [
+    "Load the tuples needed to render a workflow's Petri net state.
+     Returns a Dictionary with keys: workflow, template, tokens.
+     Returns nil if workflow or template cannot be loaded."
+    | wf wfPayload templateId template tpl allTokens tokens data |
+    wf := self safeRdp: 'workflow' scope: wfScope identity: wfId.
+    wf isNil ifTrue: [
+      ('Workflow not found: ', wfId) println.
+      ^nil
+    ].
+    wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
+    templateId := wfPayload at: 'template' ifAbsent: [nil].
+    templateId isNil ifTrue: [
+      'Workflow has no template.' println.
+      ^nil
+    ].
+
+    "Templates usually live in 'system' scope; fall back to workflow scope."
+    template := self safeRdp: 'template' scope: 'system' identity: templateId.
+    template isNil ifTrue: [
+      template := self safeRdp: 'template' scope: wfScope identity: templateId
+    ].
+    template isNil ifTrue: [
+      ('Template not found: ', templateId) println.
+      ^nil
+    ].
+
+    allTokens := self safeScan: 'token' scope: wfScope.
+    tokens := allTokens select: [:t |
+      ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'workflow_instance' ifAbsent: ['']) = wfId
+    ].
+
+    data := Dictionary new.
+    data at: 'workflow' put: wf.
+    data at: 'template' put: template.
+    data at: 'tokens' put: tokens.
+    ^data
+  ]
+
+  method: collectPlaces: tpl [
+    "Collect the union of start_places, terminal_places, and every transition's
+     in/out places. Returns an ordered Array (first-seen order)."
+    | places addBlock starts terms transitions |
+    places := Array new: 0.
+    addBlock := [:p |
+      (places includes: p) ifFalse: [places := places copyWith: p]
+    ].
+    starts := tpl at: 'start_places' ifAbsent: [#()].
+    starts do: addBlock.
+    transitions := tpl at: 'transitions' ifAbsent: [#()].
+    transitions do: [:tr |
+      (tr at: 'in' ifAbsent: [#()]) do: addBlock.
+      (tr at: 'out' ifAbsent: [#()]) do: addBlock
+    ].
+    terms := tpl at: 'terminal_places' ifAbsent: [#()].
+    terms do: addBlock.
+    ^places
+  ]
+
+  method: tokensAtPlace: place tokens: tokens [
+    "Return tokens whose payload.place matches `place`."
+    ^tokens select: [:t |
+      ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'place' ifAbsent: ['']) = place
+    ]
+  ]
+
+  method: positiveTokensAtPlace: place tokens: tokens [
+    ^(self tokensAtPlace: place tokens: tokens) select: [:t |
+      ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: ['']) = 'positive'
+    ]
+  ]
+
+  method: transitionEnabled: tr tokens: tokens [
+    "A transition is enabled when every input place has at least one positive token."
+    | inPlaces |
+    inPlaces := tr at: 'in' ifAbsent: [#()].
+    inPlaces isEmpty ifTrue: [^false].
+    ^(inPlaces detect: [:p |
+      (self positiveTokensAtPlace: p tokens: tokens) isEmpty
+    ] ifNone: [nil]) isNil
+  ]
+
+  method: renderWorkflowAscii: wfId scope: wfScope [
+    "ASCII rendering of the Petri net state."
+    | data wf wfPayload template tpl tokens places transitions startPlaces termPlaces |
+    data := self loadVizData: wfId scope: wfScope.
+    data isNil ifTrue: [^self].
+    wf := data at: 'workflow'.
+    template := data at: 'template'.
+    tokens := data at: 'tokens'.
+    wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
+    tpl := template at: 'payload' ifAbsent: [Dictionary new].
+
+    places := self collectPlaces: tpl.
+    transitions := tpl at: 'transitions' ifAbsent: [#()].
+    startPlaces := tpl at: 'start_places' ifAbsent: [#()].
+    termPlaces := tpl at: 'terminal_places' ifAbsent: [#()].
+
+    ('Workflow: ', wfId) println.
+    ('  Template: ', (wfPayload at: 'template' ifAbsent: ['?'])) println.
+    ('  Status:   ', (wfPayload at: 'status' ifAbsent: ['?'])) println.
+    ('  Scope:    ', wfScope) println.
+    '' println.
+
+    'Places:' println.
+    places do: [:p |
+      | pTokens marker tags positiveCount waitingCount |
+      pTokens := self tokensAtPlace: p tokens: tokens.
+      positiveCount := 0.
+      waitingCount := 0.
+      pTokens do: [:t |
+        | s |
+        s := (t at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: [''].
+        s = 'positive' ifTrue: [positiveCount := positiveCount + 1].
+        s = 'waiting' ifTrue: [waitingCount := waitingCount + 1]
+      ].
+      marker := positiveCount > 0
+        ifTrue: ['[*]']
+        ifFalse: [waitingCount > 0 ifTrue: ['[~]'] ifFalse: ['[ ]']].
+      tags := ''.
+      (startPlaces includes: p) ifTrue: [tags := tags, ' (start)'].
+      (termPlaces includes: p) ifTrue: [tags := tags, ' (terminal)'].
+      positiveCount > 0 ifTrue: [
+        tags := tags, ' tokens=', positiveCount printString
+      ].
+      waitingCount > 0 ifTrue: [
+        tags := tags, ' waiting=', waitingCount printString
+      ].
+      ('  ', marker, ' ', p, tags) println
+    ].
+    '  Legend: [*]=positive token present  [~]=waiting token  [ ]=empty' println.
+    '' println.
+
+    'Transitions:' println.
+    transitions do: [:tr |
+      | trId inPlaces outPlaces enabled marker role action inStr outStr extra |
+      trId := tr at: 'id' ifAbsent: ['?'].
+      inPlaces := tr at: 'in' ifAbsent: [#()].
+      outPlaces := tr at: 'out' ifAbsent: [#()].
+      enabled := self transitionEnabled: tr tokens: tokens.
+      marker := enabled ifTrue: ['[enabled] '] ifFalse: ['[blocked] '].
+      role := tr at: 'role' ifAbsent: [nil].
+      action := tr at: 'action' ifAbsent: [nil].
+      inStr := self joinArray: inPlaces with: ','.
+      outStr := self joinArray: outPlaces with: ','.
+      extra := ''.
+      role notNil ifTrue: [extra := extra, ' role:', role].
+      action notNil ifTrue: [extra := extra, ' action:', action].
+      ('  ', marker, trId, '  ', inStr, ' -> ', outStr, extra) println
+    ].
+    '' println.
+
+    'Graph:' println.
+    transitions do: [:tr |
+      | trId inPlaces outPlaces arrow |
+      trId := tr at: 'id' ifAbsent: ['?'].
+      inPlaces := tr at: 'in' ifAbsent: [#()].
+      outPlaces := tr at: 'out' ifAbsent: [#()].
+      arrow := (self joinArray: inPlaces with: ',').
+      arrow := arrow, ' --[', trId, ']--> '.
+      arrow := arrow, (self joinArray: outPlaces with: ',').
+      ('  ', arrow) println
+    ]
+  ]
+
+  method: renderWorkflowDot: wfId scope: wfScope [
+    "DOT-format rendering for graphviz. Places are ellipses, transitions are boxes.
+     Places with positive tokens are filled green; waiting tokens yellow.
+     Enabled transitions are filled light-blue."
+    | data wf template tpl tokens places transitions wfPayload |
+    data := self loadVizData: wfId scope: wfScope.
+    data isNil ifTrue: [^self].
+    wf := data at: 'workflow'.
+    template := data at: 'template'.
+    tokens := data at: 'tokens'.
+    tpl := template at: 'payload' ifAbsent: [Dictionary new].
+    wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
+    places := self collectPlaces: tpl.
+    transitions := tpl at: 'transitions' ifAbsent: [#()].
+
+    'digraph workflow {' println.
+    '  rankdir=LR;' println.
+    ('  label="', wfId, ' (', (wfPayload at: 'status' ifAbsent: ['?']), ')";') println.
+    '  labelloc=t;' println.
+    '  node [fontname="Helvetica"];' println.
+
+    "Places"
+    places do: [:p |
+      | positive waiting style label |
+      positive := (self positiveTokensAtPlace: p tokens: tokens) size.
+      waiting := ((self tokensAtPlace: p tokens: tokens) select: [:t |
+        ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: ['']) = 'waiting'
+      ]) size.
+      style := 'shape=ellipse'.
+      positive > 0 ifTrue: [
+        style := style, ', style=filled, fillcolor=palegreen'
+      ] ifFalse: [
+        waiting > 0 ifTrue: [style := style, ', style=filled, fillcolor=lightyellow']
+      ].
+      label := p.
+      positive > 0 ifTrue: [label := label, ' (', positive printString, ')'].
+      waiting > 0 ifTrue: [label := label, ' ~', waiting printString].
+      ('  "p_', p, '" [', style, ', label="', label, '"];') println
+    ].
+
+    "Transitions"
+    transitions do: [:tr |
+      | trId enabled style label role action |
+      trId := tr at: 'id' ifAbsent: ['?'].
+      enabled := self transitionEnabled: tr tokens: tokens.
+      style := 'shape=box'.
+      enabled ifTrue: [style := style, ', style=filled, fillcolor=lightblue'].
+      role := tr at: 'role' ifAbsent: [nil].
+      action := tr at: 'action' ifAbsent: [nil].
+      label := trId.
+      role notNil ifTrue: [label := label, '\\nrole: ', role].
+      action notNil ifTrue: [label := label, '\\naction: ', action].
+      ('  "t_', trId, '" [', style, ', label="', label, '"];') println
+    ].
+
+    "Edges"
+    transitions do: [:tr |
+      | trId inPlaces outPlaces |
+      trId := tr at: 'id' ifAbsent: ['?'].
+      inPlaces := tr at: 'in' ifAbsent: [#()].
+      outPlaces := tr at: 'out' ifAbsent: [#()].
+      inPlaces do: [:p |
+        ('  "p_', p, '" -> "t_', trId, '";') println
+      ].
+      outPlaces do: [:p |
+        ('  "t_', trId, '" -> "p_', p, '";') println
+      ]
+    ].
+
+    '}' println
+  ]
+
+  method: joinArray: arr with: sep [
+    "Join an array of strings with a separator."
+    | result first |
+    result := ''.
+    first := true.
+    arr do: [:s |
+      first
+        ifTrue: [result := s. first := false]
+        ifFalse: [result := result, sep, s]
+    ].
+    ^result
   ]
 
   method: showWorkflowDetail: wfId scope: wfScope [
