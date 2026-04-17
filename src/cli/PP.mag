@@ -33,6 +33,7 @@ PP subclass: CLIBase
     cmd = 'history'   ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'dashboard' ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'session'   ifTrue: [^SystemCommands new runCommand: cmd args: args].
+    cmd = 'usage'     ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'workitem'  ifTrue: [^WorkItemCLI new runWith: args].
     cmd = 'repo'      ifTrue: [^Repo new runWith: args].
     cmd = 'worktree'  ifTrue: [
@@ -298,6 +299,7 @@ PP subclass: CLIBase
     '  dashboard                                        Open web dashboard in browser' println.
     '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
     '  session  [<taskId>]                              View Claude Code session logs' println.
+    '  usage    [<taskId>]                              Report current session token consumption' println.
     '  help                                             Show this help' println.
     '' println.
     'Environment:' println.
