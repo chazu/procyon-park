@@ -94,7 +94,7 @@ DashboardSSE subclass: Object
     now := DateTime now epochSeconds.
     s := '<div id="dashboard-workflows"><h2>Active Workflows</h2>'.
     workflows do: [:w |
-      | p status template wfId desc label places activeTask taskLine |
+      | p status template wfId desc label places activeTask taskLine tokenTotals tokenLine |
       p := w at: 'payload' ifAbsent: [Dictionary new].
       status := p at: 'status' ifAbsent: ['?'].
       status = 'running' ifTrue: [
@@ -117,14 +117,97 @@ DashboardSSE subclass: Object
             ifFalse: ['pending'].
           taskLine := '<br><small>role: <b>', role, '</b> · ', tStatus, ' · ', durStr, '</small>'
         ].
+        tokenTotals := self tokenTotalsFor: wfId in: allTasks.
+        tokenLine := self renderTokenLine: tokenTotals.
         s := s, '<div class="wf-card"><b>', template, '</b> ', label,
              '<br><small>place: ', places, '</small>',
              taskLine,
+             tokenLine,
              '<br><small>', wfId, '</small></div>'
       ]
     ].
     s := s, '</div>'.
     conn send: ('elements ', s) event: 'datastar-patch-elements'
+  ]
+
+  method: tokenTotalsFor: wfId in: allTasks [
+    "Aggregate input_tokens + output_tokens across every session JSONL file
+     for tasks belonging to this workflow instance. Session files live in
+     $HOME/.pp/sessions/<taskId>.jsonl (see ClaudeHarness#run)."
+    | home sessionsDir prefix result |
+    home := System env: 'HOME'.
+    (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
+    sessionsDir := home, '/.pp/sessions'.
+    prefix := wfId, ':task:'.
+    result := Dictionary new.
+    result at: 'input' put: 0.
+    result at: 'output' put: 0.
+    allTasks do: [:t |
+      | tid filePath |
+      tid := t at: 'identity' ifAbsent: [''].
+      (tid startsWith: prefix) ifTrue: [
+        filePath := sessionsDir, '/', tid, '.jsonl'.
+        (File exists: filePath) ifTrue: [
+          self accumulateTokensFrom: filePath into: result
+        ]
+      ]
+    ].
+    ^result
+  ]
+
+  method: accumulateTokensFrom: filePath into: result [
+    "Stream a session JSONL file; for every entry with a usage block (either
+     top-level or nested under message), add its input_tokens + output_tokens
+     into the running totals. Silently tolerates malformed lines / IO errors
+     so a single bad session cannot break the dashboard."
+    | contents lines |
+    [
+      contents := File readFileContents: filePath.
+      lines := contents split: Character lf.
+      lines do: [:line |
+        line isEmpty ifFalse: [
+          [self accumulateLine: line into: result] on: Exception do: [:e | ]
+        ]
+      ]
+    ] on: Exception do: [:e | ]
+  ]
+
+  method: accumulateLine: line into: result [
+    | entry usage msg inTok outTok |
+    entry := Json decode: line.
+    (entry isKindOf: Dictionary) ifFalse: [^self].
+    usage := entry at: 'usage' ifAbsent: [nil].
+    usage isNil ifTrue: [
+      msg := entry at: 'message' ifAbsent: [nil].
+      (msg notNil and: [msg isKindOf: Dictionary]) ifTrue: [
+        usage := msg at: 'usage' ifAbsent: [nil]
+      ]
+    ].
+    usage isNil ifTrue: [^self].
+    (usage isKindOf: Dictionary) ifFalse: [^self].
+    inTok := usage at: 'input_tokens' ifAbsent: [0].
+    outTok := usage at: 'output_tokens' ifAbsent: [0].
+    result at: 'input' put: (result at: 'input') + inTok.
+    result at: 'output' put: (result at: 'output') + outTok
+  ]
+
+  method: renderTokenLine: totals [
+    | inTok outTok |
+    inTok := totals at: 'input' ifAbsent: [0].
+    outTok := totals at: 'output' ifAbsent: [0].
+    (inTok = 0 and: [outTok = 0]) ifTrue: [^''].
+    ^'<br><small>tokens: in=', (self formatTokens: inTok),
+        ' out=', (self formatTokens: outTok),
+        ' (total ', (self formatTokens: inTok + outTok), ')</small>'
+  ]
+
+  method: formatTokens: n [
+    "Compact human display: 1234 → 1.2k, 5,432,100 → 5.4M."
+    n < 1000 ifTrue: [^n printString].
+    n < 1000000 ifTrue: [
+      ^(n // 1000) printString, '.', ((n \\ 1000) // 100) printString, 'k'
+    ].
+    ^(n // 1000000) printString, '.', ((n \\ 1000000) // 100000) printString, 'M'
   ]
 
   method: placesFor: instanceId in: allTokens [
@@ -186,9 +269,10 @@ DashboardSSE subclass: Object
      Running workflows are handled by sendWorkflows: and disappear from the active
      list on completion, so this section gives operators a short-lived record of
      terminal workflows so they don't vanish without a trace."
-    | s workflows topN maxCount |
+    | s workflows topN maxCount allTasks |
     maxCount := 10.
     workflows := bbs scanAll: 'workflow'.
+    allTasks := bbs scanAll: 'task'.
     topN := Array new: 0.
     workflows do: [:w |
       | p status endedAt startedAt entry |
@@ -214,7 +298,7 @@ DashboardSSE subclass: Object
       s := s, '<div class="empty-state">No recent completions</div>'
     ] ifFalse: [
       topN do: [:entry |
-        | wf p template wfId status endedAt startedAt duration durationStr |
+        | wf p template wfId status endedAt startedAt duration durationStr tokenTotals tokenLine |
         wf := entry at: 'wf'.
         p := wf at: 'payload' ifAbsent: [Dictionary new].
         template := p at: 'template' ifAbsent: ['?'].
@@ -226,8 +310,12 @@ DashboardSSE subclass: Object
           ifTrue: [endedAt - startedAt]
           ifFalse: [-1].
         durationStr := self formatDuration: duration.
+        tokenTotals := self tokenTotalsFor: wfId in: allTasks.
+        tokenLine := self renderTokenLine: tokenTotals.
         s := s, '<div class="wf-card completion-', status, '"><b>', template, '</b> ', wfId,
-              '<br><small>[', status, '] ', durationStr, '</small></div>'
+              '<br><small>[', status, '] ', durationStr, '</small>',
+              tokenLine,
+              '</div>'
       ]
     ].
     s := s, '</div>'.
