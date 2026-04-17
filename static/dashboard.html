@@ -50,6 +50,65 @@
     .wf-card.completion-cancelled { border-left-color: #8b949e; }
 
     #dashboard-completions { margin-top: 24px; }
+    #dashboard-workitems { margin-top: 24px; }
+
+    .kanban {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+    }
+    .kanban-col {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 8px;
+      min-height: 80px;
+    }
+    .kanban-header {
+      font-size: 0.75em;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #8b949e;
+      margin-bottom: 8px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid #21262d;
+    }
+    .kanban-count {
+      display: inline-block;
+      background: #21262d;
+      color: #c9d1d9;
+      padding: 0 6px;
+      border-radius: 8px;
+      font-size: 0.9em;
+      margin-left: 4px;
+    }
+    .kanban-backlog     .kanban-header { color: #8b949e; }
+    .kanban-ready       .kanban-header { color: #58a6ff; }
+    .kanban-in-progress .kanban-header { color: #d29922; }
+    .kanban-done        .kanban-header { color: #3fb950; }
+    .kanban-blocked     .kanban-header { color: #f85149; }
+
+    .wi-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-left: 3px solid #58a6ff;
+      border-radius: 3px;
+      padding: 6px 8px;
+      margin-bottom: 6px;
+      font-size: 0.82em;
+    }
+    .wi-card.wi-epic  { border-left-color: #bc8cff; }
+    .wi-card.wi-story { border-left-color: #58a6ff; }
+    .wi-card.wi-task  { border-left-color: #3fb950; }
+    .wi-title { color: #c9d1d9; margin-bottom: 2px; }
+    .wi-meta { color: #8b949e; font-size: 0.9em; }
+    .wi-type {
+      background: #21262d;
+      padding: 0 4px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      font-size: 0.85em;
+    }
 
     .feed { max-height: 80vh; overflow-y: auto; }
     ul { list-style: none; }
@@ -93,6 +152,10 @@
       </div>
       <div id="dashboard-completions">
         <h2>Recent Completions</h2>
+        <div class="empty-state">Connecting...</div>
+      </div>
+      <div id="dashboard-workitems">
+        <h2>Work Items</h2>
         <div class="empty-state">Connecting...</div>
       </div>
     </div>

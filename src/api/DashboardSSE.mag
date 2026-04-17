@@ -33,7 +33,57 @@ DashboardSSE subclass: Object
   method: broadcastTo: conn [
     self sendWorkflows: conn.
     self sendCompletions: conn.
+    self sendWorkitems: conn.
     self sendNotifs: conn
+  ]
+
+  method: sendWorkitems: conn [
+    "Broadcast work items grouped by status as a Kanban-style board.
+     Columns: backlog, ready, in-progress, done, blocked."
+    | s workitems statuses buckets |
+    workitems := bbs scanAll: 'workitem'.
+    statuses := #('backlog' 'ready' 'in-progress' 'done' 'blocked').
+    buckets := Dictionary new.
+    statuses do: [:st | buckets at: st put: Array new].
+    workitems do: [:w |
+      | p status bucket |
+      p := w at: 'payload' ifAbsent: [Dictionary new].
+      status := p at: 'status' ifAbsent: ['backlog'].
+      (buckets includesKey: status) ifFalse: [
+        buckets at: status put: Array new.
+      ].
+      bucket := buckets at: status.
+      buckets at: status put: (bucket copyWith: w)
+    ].
+    s := '<div id="dashboard-workitems"><h2>Work Items</h2><div class="kanban">'.
+    statuses do: [:st |
+      | items count |
+      items := buckets at: st ifAbsent: [#()].
+      count := items size.
+      s := s, '<div class="kanban-col kanban-', st, '">',
+            '<div class="kanban-header">', st, ' <span class="kanban-count">', count printString, '</span></div>'.
+      count = 0 ifTrue: [
+        s := s, '<div class="empty-state">—</div>'
+      ] ifFalse: [
+        items do: [:w |
+          | p title wid type identity |
+          p := w at: 'payload' ifAbsent: [Dictionary new].
+          identity := w at: 'identity' ifAbsent: ['?'].
+          title := p at: 'title' ifAbsent: [identity].
+          type := p at: 'type' ifAbsent: ['story'].
+          wid := identity.
+          title size > 60 ifTrue: [title := (title copyFrom: 1 to: 60), '...'].
+          s := s, '<div class="wi-card wi-', type, '">',
+                '<div class="wi-title">', title, '</div>',
+                '<div class="wi-meta"><span class="wi-type">', type, '</span> ',
+                '<small>', wid, '</small></div>',
+                '</div>'
+        ]
+      ].
+      s := s, '</div>'
+    ].
+    s := s, '</div></div>'.
+    conn send: ('elements ', s) event: 'datastar-patch-elements'
   ]
 
   method: sendWorkflows: conn [
