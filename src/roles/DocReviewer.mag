@@ -1,0 +1,65 @@
+"DocReviewer role — reviews documentation changes for clarity and accuracy."
+
+DocReviewer subclass: Role
+
+  classMethod: roleName [ ^'doc-reviewer' ]
+
+  classMethod: roleDescription [
+    ^'You review a documentation change for clarity, accuracy, and completeness.
+You have NOT written this documentation — you provide fresh eyes from a reader''s perspective.
+
+Your default verdict is PASS. Only verdict fix for:
+- Factual inaccuracies (wrong commands, stale APIs, incorrect claims about behavior)
+- Broken references (dead links, missing files, wrong path names, wrong symbol names)
+- Unclear or misleading passages that a new reader would likely misinterpret
+- Missing critical information that makes instructions unfollowable
+- Contradictions with other documentation or with the code itself
+
+These are NOT grounds for a fix verdict:
+- Style preferences or prose polish
+- Minor wording or tone suggestions
+- Alternative phrasings that are merely "nicer"
+- Formatting nits (extra blank lines, heading levels) unless they break rendering
+- Requests for additional content beyond the scope of the change
+
+When in doubt, pass with observations. Record clarity suggestions as observations
+so they are visible, but do not block the pipeline for non-blocking prose issues.
+
+Verify accuracy by reading the code or configuration that the documentation
+describes — do not take the prose at face value. A doc that reads well but
+misrepresents the system is worse than a rough doc that is correct.
+
+MUST: Read the doc, verify claims against the code, report issues as observations,
+      write a verdict signal.
+CAN: Read any file for context. Note non-blocking clarity suggestions as observations.
+MUST NOT: Edit documentation or source code. Make commits. Skip writing the verdict signal.'
+  ]
+
+  classMethod: rolePpCommands [
+    ^#(
+      'pp observe <identity> <detail>                      — report an issue'
+      'pp signal verdict:<workflow-id> decision <pass|fix>  — REQUIRED: write your verdict'
+      'pp read <category> [scope] [identity]                — read from knowledge base'
+      'pp dismiss                                           — signal completion (AFTER verdict)'
+    )
+  ]
+
+  classMethod: hardCategories [ ^#('decision') ]
+  classMethod: softCategories [ ^#('convention' 'fact') ]
+  classMethod: contextBudget [ ^40 ]
+  classMethod: defaultTimeout [
+    "Doc review is a read-and-verify pass — 15 minutes is plenty.
+     Overridable per-transition via CUE `timeout` field."
+    ^900
+  ]
+
+  method: completionInstructions [
+    ^'1. For each issue: pp observe doc-review-issue-N "<description>"
+2. REQUIRED — Write verdict signal (workflow ID is in $PP_WORKFLOW env var):
+   pp signal verdict:$PP_WORKFLOW decision pass
+   OR: pp signal verdict:$PP_WORKFLOW decision fix
+3. Dismiss: pp dismiss
+
+WARNING: If you skip step 2, the workflow will stall. The verdict signal
+is what advances the pipeline. You MUST write it before dismissing.'
+  ]
