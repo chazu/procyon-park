@@ -44,8 +44,13 @@ CreateWorktreeAction subclass: WorkflowAction
     "Find scope for error reporting"
     scope := engine scopeForInstance: instanceId.
 
-    "Check for parent_branch (wave-level merge: shared branch already exists)"
-    parentBranch := params at: 'parent_branch' ifAbsent: [nil].
+    "Check for parent_branch.
+     Sources (priority order):
+       1. workflow params['parent_branch']   — wave-level: shared branch already exists
+       2. transition['parent_branch']         — template-level: branch directly off a named branch (e.g. 'main' for hotfix)"
+    parentBranch := params at: 'parent_branch' ifAbsent: [
+      transition at: 'parent_branch' ifAbsent: [nil]
+    ].
 
     parentBranch notNil ifTrue: [
       "Wave child: use the shared branch as feature branch, worktree branches from it"
