@@ -1,7 +1,7 @@
-// Feature design: idea → epic → stories → review → finalize
+// Feature design: idea → epic → stories+review → finalize
 // Takes a feature description and produces a complete set of
 // implementation-ready stories with dependencies.
-description: "Feature design: research, design epic, decompose stories, review, finalize"
+description: "Feature design: research, design epic, decompose+review stories, finalize"
 start_places: ["idea"]
 terminal_places: ["ready"]
 
@@ -34,15 +34,15 @@ transitions: [
 			"""
 	},
 	{
-		id:          "review-design"
+		id:          "review"
 		in:          ["designed"]
-		out:         ["design-reviewed"]
+		out:         ["reviewed"]
 		role:        "reviewer"
 		description: """
-			Review the feature design epic created by the designer agent.
+			Combined design review + story decomposition + technical feasibility.
 			Read the epic document (check pp read observation for its file path).
 
-			Evaluate:
+			STEP 1 — Evaluate the design:
 			- Are the user stories clear and complete?
 			- Are acceptance criteria specific and testable?
 			- Does the design account for edge cases?
@@ -51,9 +51,9 @@ transitions: [
 
 			If the design needs significant rework, write a verdict signal with
 			decision "redesign" and explain what needs to change in the rationale.
+			STOP here in that case — the designer will iterate.
 
-			If the design is solid, decompose the epic into specific, orthogonal
-			implementation stories. For each story write:
+			STEP 2 — Decompose into orthogonal implementation stories. For each:
 			- A clear title
 			- Specific implementation instructions (files to modify, methods to add)
 			- Documentation updates needed (if any)
@@ -63,8 +63,19 @@ transitions: [
 			Stories must be orthogonal — no two stories should modify the same code
 			for the same reason. Prefer many small stories over few large ones.
 
-			Write the stories as a plan decision via pp decide.
-			Write verdict signal with decision "pass" when done.
+			STEP 3 — Technical feasibility check for each story:
+			- The specified files and methods actually exist in the codebase
+			- The implementation approach is technically sound
+			- The story is appropriately scoped (decompose further if too large)
+			- No two stories overlap in the code they modify
+			- Test requirements are achievable
+
+			Fix any minor issues (wrong file paths, missing edge cases, scope
+			adjustments) directly as you go — do not bounce back for small fixes.
+
+			Write the final stories as a plan decision via pp decide.
+			Write verdict signal with decision "pass" when done, or "redesign" if
+			the whole epic needs rework.
 			"""
 		preconditions: [
 			{
@@ -75,7 +86,7 @@ transitions: [
 	},
 	{
 		id:  "redesign"
-		in:  ["design-reviewed"]
+		in:  ["reviewed"]
 		out: ["researching"]
 		preconditions: [
 			{
@@ -86,65 +97,8 @@ transitions: [
 		]
 	},
 	{
-		id:  "stories-ready"
-		in:  ["design-reviewed"]
-		out: ["stories-drafted"]
-		preconditions: [
-			{
-				category:   "signal"
-				identity:   "verdict:{{instance}}"
-				constraint: "{decision: \"pass\"}"
-			},
-		]
-	},
-	{
-		id:          "technical-review"
-		in:          ["stories-drafted"]
-		out:         ["tech-reviewed"]
-		role:        "reviewer"
-		description: """
-			Technical feasibility review of the decomposed stories.
-			Read the stories from the plan decision (pp read decision).
-
-			For each story, verify:
-			- The specified files and methods actually exist in the codebase
-			- The implementation approach is technically sound
-			- The story is appropriately scoped (decompose further if too large)
-			- No two stories overlap in the code they modify
-			- Test requirements are achievable
-			- Dependencies between stories are implicit in the ordering
-
-			If you find a blocker you cannot work around, write verdict "rework"
-			with details on what needs to change — the story decomposer will fix it.
-
-			If stories just need minor tweaks (wrong file paths, missing edge cases,
-			scope adjustments), fix them directly and write the corrected plan as a
-			new decision via pp decide.
-
-			Write verdict signal with decision "pass" or "rework" when done.
-			"""
-		preconditions: [
-			{
-				category: "event"
-				identity: "task-complete:{{instance}}:task:review-design"
-			},
-		]
-	},
-	{
-		id:  "rework-stories"
-		in:  ["tech-reviewed"]
-		out: ["design-reviewed"]
-		preconditions: [
-			{
-				category:   "signal"
-				identity:   "verdict:{{instance}}"
-				constraint: "{decision: \"rework\"}"
-			},
-		]
-	},
-	{
 		id:  "stories-approved"
-		in:  ["tech-reviewed"]
+		in:  ["reviewed"]
 		out: ["finalizing"]
 		preconditions: [
 			{
@@ -190,7 +144,7 @@ transitions: [
 		preconditions: [
 			{
 				category: "event"
-				identity: "task-complete:{{instance}}:task:technical-review"
+				identity: "task-complete:{{instance}}:task:review"
 			},
 		]
 	},
