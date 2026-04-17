@@ -582,7 +582,7 @@ WorkflowEngine subclass: Object
 
   method: completeWorkflow: wf [
     "Mark a workflow as complete, emit events, notify user."
-    | instanceId scope |
+    | instanceId scope payload params workitemId |
     instanceId := wf at: 'identity'.
     scope := wf at: 'scope'.
 
@@ -594,6 +594,14 @@ WorkflowEngine subclass: Object
       p at: 'completed_at' put: DateTime now epochSeconds
     ].
 
+    "Promote originating work item to done (cascades to parent epic)."
+    payload := wf at: 'payload' ifAbsent: [Dictionary new].
+    params := payload at: 'params' ifAbsent: [Dictionary new].
+    workitemId := params at: 'workitem' ifAbsent: [nil].
+    (workitemId notNil and: [workitemId isString and: [workitemId isEmpty not]]) ifTrue: [
+      self markWorkitemDone: workitemId scope: scope
+    ].
+
     "Emit completion event"
     bbs emitEvent: scope identity: (Identity workflowComplete: instanceId) type: 'workflow-complete' summary: 'Workflow completed: ', instanceId.
 
@@ -602,6 +610,54 @@ WorkflowEngine subclass: Object
 
     "Clean up worktree directory"
     self cleanupWorktree: instanceId
+  ]
+
+  method: markWorkitemDone: identity scope: scope [
+    "Set a work item to 'done' and recursively promote parent epic
+     when all of that epic's children are done."
+    | item payload newPayload |
+    item := bbs findInIndex: 'workitem' scope: scope identity: identity.
+    item isNil ifTrue: [^self].
+    payload := item at: 'payload'.
+    (payload at: 'status' ifAbsent: ['']) = 'done' ifTrue: [^self].
+    newPayload := Dictionary new.
+    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
+    newPayload at: 'status' put: 'done'.
+    newPayload at: 'updated_at' put: DateTime now epochSeconds.
+    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload.
+    self maybePromoteParent: newPayload scope: scope
+  ]
+
+  method: maybePromoteParent: payload scope: scope [
+    "Promote parent epic to done when all children are done. Recurses upward."
+    | parentId parentItem parentPayload children allDone newParentPayload |
+    parentId := payload at: 'parent' ifAbsent: [nil].
+    parentId isNil ifTrue: [^self].
+    (parentId isString and: [parentId isEmpty]) ifTrue: [^self].
+    parentItem := bbs findInIndex: 'workitem' scope: scope identity: parentId.
+    parentItem isNil ifTrue: [^self].
+    parentPayload := parentItem at: 'payload'.
+    (parentPayload at: 'status' ifAbsent: ['']) = 'done' ifTrue: [^self].
+    children := parentPayload at: 'children' ifAbsent: [#()].
+    children isEmpty ifTrue: [^self].
+    allDone := true.
+    children do: [:cId |
+      | child cStatus |
+      child := bbs findInIndex: 'workitem' scope: scope identity: cId.
+      child isNil
+        ifTrue: [allDone := false]
+        ifFalse: [
+          cStatus := (child at: 'payload') at: 'status' ifAbsent: [''].
+          cStatus = 'done' ifFalse: [allDone := false]
+        ]
+    ].
+    allDone ifFalse: [^self].
+    newParentPayload := Dictionary new.
+    parentPayload keysAndValuesDo: [:k :v | newParentPayload at: k put: v].
+    newParentPayload at: 'status' put: 'done'.
+    newParentPayload at: 'updated_at' put: DateTime now epochSeconds.
+    bbs upsertPinned: 'workitem' scope: scope identity: parentId payload: newParentPayload.
+    self maybePromoteParent: newParentPayload scope: scope
   ]
 
   "--- Workflow Cancellation ---"
