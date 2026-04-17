@@ -378,7 +378,7 @@ WorkflowEngine subclass: Object
     ].
 
     role notNil ifTrue: [
-      | repo transitionTimeout |
+      | repo transitionTimeout workitemId |
       taskPayload := Dictionary new.
       taskPayload at: 'role' put: role.
       taskPayload at: 'status' put: 'pending'.
@@ -405,6 +405,9 @@ WorkflowEngine subclass: Object
       "Propagate repo from workflow params"
       repo := params at: 'repo' ifAbsent: [nil].
       repo notNil ifTrue: [taskPayload at: 'repo' put: repo].
+      "Propagate workitem identity from workflow params (for duration tracking)"
+      workitemId := params at: 'workitem' ifAbsent: [nil].
+      workitemId notNil ifTrue: [taskPayload at: 'workitem' put: workitemId].
       "Pass through workdir if specified in transition"
       workdir := transition at: 'workdir' ifAbsent: [nil].
       workdir notNil ifTrue: [

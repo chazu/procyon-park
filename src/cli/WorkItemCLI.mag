@@ -51,7 +51,7 @@ WorkItemCLI subclass: Object
   method: cmdCreate: args [
     "pp workitem create <identity> --title T --type epic|story [--repo R] [--status S] [--parent P]
        [--description D] [--template T] [--batch B] [--wave N] [--depends-on X,Y] [--label L1,L2]"
-    | identity title type repo status parent description template batch wave dependsOn labels body payload |
+    | identity title type repo status parent description template batch wave dependsOn labels body payload estimate |
     args size < 3 ifTrue: [
       'Usage: pp workitem create <identity> --title "Title" --type epic|story [--repo R] [--status S] [--parent P]' println.
       ^self
@@ -76,6 +76,7 @@ WorkItemCLI subclass: Object
     wave isNil ifTrue: [wave := 1] ifFalse: [wave := wave asInteger].
     dependsOn := self flagValue: '--depends-on' in: args.
     labels := self flagValue: '--label' in: args.
+    estimate := self flagValue: '--estimate' in: args.
 
     "Build payload"
     payload := Dictionary new.
@@ -89,6 +90,7 @@ WorkItemCLI subclass: Object
     payload at: 'template' put: template.
     batch notNil ifTrue: [payload at: 'batch' put: batch].
     payload at: 'wave' put: wave.
+    estimate notNil ifTrue: [payload at: 'estimate' put: estimate].
     dependsOn notNil
       ifTrue: [payload at: 'depends_on' put: (dependsOn split: ',')]
       ifFalse: [payload at: 'depends_on' put: (Array new: 0)].
@@ -234,7 +236,7 @@ WorkItemCLI subclass: Object
      If parentOverride is non-nil, uses it as the parent (unless dict already has one).
      Missing fields get sensible defaults."
     | identity title type status parent description template batch wave dependsOn labels
-      payload body repoField |
+      payload body repoField estimate |
     identity := dict at: 'identity' ifAbsent: [nil].
     identity isNil ifTrue: [
       'Skipping item with no identity.' println.
@@ -255,6 +257,7 @@ WorkItemCLI subclass: Object
     labels := dict at: 'labels' ifAbsent: [Array new: 0].
     (labels isKindOf: String) ifTrue: [labels := labels split: ','].
     repoField := dict at: 'repo' ifAbsent: [nil].
+    estimate := dict at: 'estimate' ifAbsent: [nil].
 
     "Build payload"
     payload := Dictionary new.
@@ -268,6 +271,7 @@ WorkItemCLI subclass: Object
     payload at: 'template' put: template.
     batch notNil ifTrue: [payload at: 'batch' put: batch].
     payload at: 'wave' put: wave.
+    estimate notNil ifTrue: [payload at: 'estimate' put: estimate].
     payload at: 'depends_on' put: dependsOn.
     payload at: 'labels' put: labels.
     payload at: 'comments' put: (Array new: 0).
@@ -296,7 +300,7 @@ WorkItemCLI subclass: Object
 
   method: cmdShow: args [
     "pp workitem show <identity> [--repo R]"
-    | identity repo response result tuples item payload comments |
+    | identity repo response result tuples item payload comments estimate taskResponse taskResult taskTuples relatedTasks |
     args size < 3 ifTrue: [
       'Usage: pp workitem show <identity>' println.
       ^self
@@ -327,6 +331,8 @@ WorkItemCLI subclass: Object
       ('Repo:        ', (payload at: 'repo' ifAbsent: [''])) println.
       ('Template:    ', (payload at: 'template' ifAbsent: ['story'])) println.
       ('Wave:        ', (payload at: 'wave' ifAbsent: [1]) printString) println.
+      estimate := payload at: 'estimate' ifAbsent: [nil].
+      estimate notNil ifTrue: [('Estimate:    ', estimate) println].
       ('Parent:      ', (payload at: 'parent' ifAbsent: ['(none)']) printString) println.
       ('Children:    ', (payload at: 'children' ifAbsent: [#()]) size printString) println.
       ('Depends on:  ', (payload at: 'depends_on' ifAbsent: [#()]) printString) println.
@@ -340,6 +346,34 @@ WorkItemCLI subclass: Object
         'Comments:' println.
         comments do: [:c |
           ('  [', (c at: 'author' ifAbsent: ['?']), '] ', (c at: 'text' ifAbsent: [''])) println
+        ]
+      ].
+
+      "Fetch related agent task sessions (dispatched_at -> completed_at durations)"
+      taskResponse := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"task","scope":"', scope, '"}'''.
+      (taskResponse notNil and: [taskResponse isEmpty not]) ifTrue: [
+        taskResult := Json decode: taskResponse.
+        taskTuples := taskResult at: 'tuples' ifAbsent: [#()].
+        relatedTasks := taskTuples select: [:t |
+          ((t at: 'payload') at: 'workitem' ifAbsent: ['']) = identity
+        ].
+        relatedTasks size > 0 ifTrue: [
+          '' println.
+          'Agent Sessions:' println.
+          relatedTasks do: [:t |
+            | tp tRole tStatus dAt cAt durStr |
+            tp := t at: 'payload'.
+            tRole := tp at: 'role' ifAbsent: ['?'].
+            tStatus := tp at: 'status' ifAbsent: ['?'].
+            dAt := tp at: 'dispatched_at' ifAbsent: [nil].
+            cAt := tp at: 'completed_at' ifAbsent: [nil].
+            durStr := (dAt notNil and: [cAt notNil])
+              ifTrue: [self formatDuration: (cAt - dAt)]
+              ifFalse: [dAt notNil
+                ifTrue: ['in-progress']
+                ifFalse: ['pending']].
+            ('  [', tRole, '] ', tStatus, ' — ', durStr, '  (', (t at: 'identity'), ')') println
+          ]
         ]
       ]
     ] on: Exception do: [:e |
@@ -427,8 +461,8 @@ WorkItemCLI subclass: Object
   ]
 
   method: cmdUpdate: args [
-    "pp workitem update <identity> [--status S] [--title T] [--description D] [--wave N] [--depends-on X,Y] [--template T]"
-    | identity body fields status title description wave dependsOn template repo |
+    "pp workitem update <identity> [--status S] [--title T] [--description D] [--wave N] [--depends-on X,Y] [--template T] [--estimate small|medium|large]"
+    | identity body fields status title description wave dependsOn template repo estimate |
     args size < 3 ifTrue: [
       'Usage: pp workitem update <identity> [--status S] [--title T] [--description D]' println.
       ^self
@@ -451,6 +485,8 @@ WorkItemCLI subclass: Object
     dependsOn notNil ifTrue: [fields at: 'depends_on' put: (dependsOn split: ',')].
     template := self flagValue: '--template' in: args.
     template notNil ifTrue: [fields at: 'template' put: template].
+    estimate := self flagValue: '--estimate' in: args.
+    estimate notNil ifTrue: [fields at: 'estimate' put: estimate].
     fields at: 'updated_at' put: DateTime now epochSeconds.
 
     body := Dictionary new.
@@ -816,11 +852,24 @@ WorkItemCLI subclass: Object
       ifFalse: [^nil]
   ]
 
+  method: formatDuration: seconds [
+    "Format a non-negative second count as a compact human-readable duration.
+     Examples: 0 -> '-', 45 -> '45s', 150 -> '2m30s', 7200 -> '2h0m'."
+    | h m s |
+    seconds <= 0 ifTrue: [^'-'].
+    h := seconds / 3600.
+    m := (seconds - (h * 3600)) / 60.
+    s := seconds - (h * 3600) - (m * 60).
+    h > 0 ifTrue: [^h printString, 'h', m printString, 'm'].
+    m > 0 ifTrue: [^m printString, 'm', s printString, 's'].
+    ^s printString, 's'
+  ]
+
   method: printUsage [
     'pp workitem — manage work items (epics, stories)' println.
     '' println.
     'Commands:' println.
-    '  create <id> --title T --type epic|story [--repo R] [--status S] [--parent P]' println.
+    '  create <id> --title T --type epic|story [--repo R] [--status S] [--parent P] [--estimate small|medium|large]' println.
     '  create-from <file.yaml|file.json> [--repo R]  Bulk-create epic + stories from a file' println.
     '  show <id> [--repo R]                    Show work item detail' println.
     '  list [--repo R] [--status S] [--type T] [--parent P]  List work items' println.
