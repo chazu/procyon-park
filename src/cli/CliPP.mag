@@ -2007,7 +2007,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
      All 12 subcommands are leaf commands registered on a parent
      `workitem` command. Each takes a common --repo flag which
      overrides the effective scope."
-    | cfg root create show list children update comment ready done block runC plan review rest |
+    | cfg root create show list children update comment ready done block runC plan review rewave rest |
     cfg := self loadConfig.
 
     root := Cli::Command named: 'workitem' doc: 'Manage work items (epics, stories)'.
@@ -2024,6 +2024,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     runC := self buildWorkitemRun: cfg.
     plan := self buildWorkitemPlan: cfg.
     review := self buildWorkitemReview: cfg.
+    rewave := self buildWorkitemRewave: cfg.
 
     root registerSubcommand: create.
     root registerSubcommand: show.
@@ -2037,6 +2038,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     root registerSubcommand: runC.
     root registerSubcommand: plan.
     root registerSubcommand: review.
+    root registerSubcommand: rewave.
 
     rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
     root setArgs: rest.
@@ -2423,6 +2425,197 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       exitCode
     ].
     ^cmd
+  ]
+
+  classMethod: buildWorkitemRewave: cfg [
+    "pp workitem rewave <epic-id> [mapping] [--file path]
+     Bulk-update the wave number on stories under an epic. The mapping can
+     be supplied inline as 'story1=2,story2=3' or via --file pointing to a
+     JSON/YAML/CUE file. File format is a top-level map of story-id to
+     integer wave number."
+    | cmd |
+    cmd := Cli::Command named: 'rewave' doc: 'Bulk-update wave numbers for stories under an epic'.
+    cmd flag: (Cli::Flag name: 'repo' type: #string default: '' doc: 'Repo (becomes scope)').
+    cmd flag: (Cli::Flag name: 'file' type: #string default: '' doc: 'Path to YAML/JSON/CUE mapping file').
+    cmd flag: (Cli::Flag name: 'dry-run' type: #bool default: false doc: 'Print actions without updating').
+    cmd run: [:runArgs |
+      | epicId repoArg theScope fileArg inlineArg dryRun mapping exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp workitem rewave <epic-id> [story1=2,story2=3] [--file path] [--repo R] [--dry-run]' println.
+        exitCode := 1
+      ] ifFalse: [
+        epicId := runArgs at: 0.
+        repoArg := cmd flagValue: 'repo'.
+        theScope := self workitemScope: cfg repoFlag: repoArg.
+        fileArg := cmd flagValue: 'file'.
+        dryRun := cmd flagValue: 'dry-run'.
+        inlineArg := runArgs size > 1 ifTrue: [runArgs at: 1] ifFalse: [nil].
+
+        mapping := nil.
+        (fileArg notNil and: [fileArg isEmpty not]) ifTrue: [
+          mapping := self loadRewaveMappingFile: fileArg
+        ] ifFalse: [
+          (inlineArg notNil and: [inlineArg isEmpty not]) ifTrue: [
+            mapping := self parseRewaveInline: inlineArg
+          ]
+        ].
+
+        mapping isNil ifTrue: [
+          'Error: supply a mapping, either inline (id1=2,id2=3) or via --file.' println.
+          exitCode := 1
+        ] ifFalse: [
+          mapping isEmpty ifTrue: [
+            'No mappings parsed; nothing to do.' println
+          ] ifFalse: [
+            exitCode := self performWorkitemRewave: cfg
+                              scope: theScope
+                              epic: epicId
+                              mapping: mapping
+                              dryRun: (dryRun = true)
+          ]
+        ]
+      ].
+      exitCode
+    ].
+    ^cmd
+  ]
+
+  classMethod: parseRewaveInline: aString [
+    "Parse 'id1=2,id2=3' into a Dictionary {id1 -> 2, id2 -> 3}.
+     Skips malformed entries with a warning."
+    | result pairs |
+    result := Dictionary new.
+    pairs := aString split: ','.
+    pairs do: [:pair |
+      | parts key waveStr waveNum |
+      (pair isEmpty or: [pair size = 0]) ifFalse: [
+        parts := pair split: '='.
+        parts size = 2 ifTrue: [
+          key := parts at: 0.
+          waveStr := parts at: 1.
+          waveNum := waveStr asInteger.
+          (key isEmpty not and: [waveNum > 0]) ifTrue: [
+            result at: key put: waveNum
+          ] ifFalse: [
+            ('Skipping malformed entry: ', pair) println
+          ]
+        ] ifFalse: [
+          ('Skipping malformed entry (expected id=N): ', pair) println
+        ]
+      ]
+    ].
+    ^result
+  ]
+
+  classMethod: loadRewaveMappingFile: path [
+    "Load a YAML/JSON/CUE mapping file of {story-id: wave-number}.
+     Returns a Dictionary or nil on failure. Uses `cue export` for yaml/cue
+     as elsewhere in the codebase."
+    | lower ext contents jsonText raw result |
+    (File exists: path) ifFalse: [
+      ('File not found: ', path) println. ^nil
+    ].
+    lower := path asLowercase.
+    ext := ''.
+    (lower endsWith: '.json') ifTrue: [ext := 'json'].
+    (lower endsWith: '.yaml') ifTrue: [ext := 'yaml'].
+    (lower endsWith: '.yml')  ifTrue: [ext := 'yaml'].
+    (lower endsWith: '.cue')  ifTrue: [ext := 'cue'].
+    ext isEmpty ifTrue: [
+      'Unsupported file extension; expected .yaml, .yml, .json, or .cue' println.
+      ^nil
+    ].
+
+    raw := nil.
+    ext = 'json' ifTrue: [
+      [
+        contents := File readFileContents: path.
+        contents isNil ifTrue: [^nil].
+        raw := Json decode: contents
+      ] on: Exception do: [:e |
+        ('JSON parse error: ', e messageText) println. ^nil
+      ]
+    ] ifFalse: [
+      [
+        jsonText := Shell capture: 'cue export "', path, '" --out json 2>/dev/null'.
+        (jsonText isNil or: [jsonText isEmpty]) ifTrue: [
+          ('Failed to convert to JSON via `cue export`: ', path) println.
+          ^nil
+        ].
+        raw := Json decode: jsonText
+      ] on: Exception do: [:e |
+        ('Parse error: ', e messageText) println. ^nil
+      ]
+    ].
+
+    raw isNil ifTrue: [^nil].
+    (raw isKindOf: Dictionary) ifFalse: [
+      'Rewave mapping file must be a top-level map of story-id -> wave-number.' println.
+      ^nil
+    ].
+
+    "Normalise: coerce wave values to integers, skip bad entries."
+    result := Dictionary new.
+    raw keysAndValuesDo: [:k :v |
+      | waveNum |
+      (v isKindOf: String)
+        ifTrue: [waveNum := v asInteger]
+        ifFalse: [waveNum := v asInteger].
+      (waveNum notNil and: [waveNum > 0])
+        ifTrue: [result at: k put: waveNum]
+        ifFalse: [('Skipping ', k printString, ' (invalid wave ', v printString, ')') println]
+    ].
+    ^result
+  ]
+
+  classMethod: performWorkitemRewave: cfg scope: aScope epic: epicId mapping: mapping dryRun: dryRun [
+    "Apply a rewave mapping to stories under an epic. Verifies each story is
+     a child of the epic (warning and skipping if not). Returns 0 on success,
+     1 if any story was skipped or failed."
+    | items epicItem payload childrenList childSet updated skipped |
+    items := self safeScan: 'workitem' cfg: cfg scope: aScope.
+    epicItem := items detect: [:t | (t at: 'identity' ifAbsent: ['']) = epicId]
+                      ifNone: [nil].
+    epicItem isNil ifTrue: [
+      ('Epic not found: ', epicId) println.
+      ^1
+    ].
+    payload := epicItem at: 'payload' ifAbsent: [Dictionary new].
+    childrenList := payload at: 'children' ifAbsent: [#()].
+    childSet := Set new.
+    childrenList do: [:c | childSet add: c].
+
+    updated := 0.
+    skipped := 0.
+    mapping keysAndValuesDo: [:storyId :newWave |
+      (childSet includes: storyId) ifFalse: [
+        ('Skipping ', storyId, ': not a child of ', epicId) println.
+        skipped := skipped + 1
+      ] ifTrue: [
+        dryRun
+          ifTrue: [
+            ('[dry-run] ', storyId, ' -> wave ', newWave printString) println.
+            updated := updated + 1
+          ]
+          ifFalse: [
+            | fields |
+            fields := Dictionary new.
+            fields at: 'wave' put: newWave.
+            fields at: 'updated_at' put: DateTime now epochSeconds.
+            self performWorkitemUpdate: cfg
+                 scope: aScope
+                 identity: storyId
+                 fields: fields
+                 cascade: false.
+            updated := updated + 1
+          ]
+      ]
+    ].
+
+    ('Rewave complete: ', updated printString, ' updated, ',
+      skipped printString, ' skipped.') println.
+    ^skipped > 0 ifTrue: [1] ifFalse: [0]
   ]
 
   "--- Workitem perform helpers --------------------------------------------"
