@@ -39,6 +39,7 @@ WorkItemCLI subclass: Object
     subcmd = 'run'      ifTrue: [^self cmdRun: args].
     subcmd = 'plan'     ifTrue: [^self cmdPlan: args].
     subcmd = 'review'   ifTrue: [^self cmdReview: args].
+    subcmd = 'rewave'   ifTrue: [^self cmdRewave: args].
     subcmd = 'help'     ifTrue: [^self printUsage].
 
     ('Unknown workitem command: ', subcmd) println.
@@ -597,6 +598,145 @@ WorkItemCLI subclass: Object
     self post: '/api/workflow/start' body: body
   ]
 
+  method: cmdRewave: args [
+    "pp workitem rewave <epic-id> [story1=2,story2=3] [--file path] [--repo R] [--dry-run]
+     Bulk-update wave numbers on stories under an epic. Accepts either an
+     inline mapping as the second positional arg, or --file pointing to a
+     YAML/JSON/CUE file whose top-level is a map of story-id -> wave-number."
+    | epicId repo file inline dryRunFlag dryRun mapping response result tuples epicItem childrenList childSet
+      updated skipped fields body |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem rewave <epic-id> [story1=2,story2=3] [--file path] [--repo R] [--dry-run]' println.
+      ^self
+    ].
+
+    epicId := args at: 2.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+    file := self flagValue: '--file' in: args.
+    dryRunFlag := args indexOf: '--dry-run'.
+    dryRun := dryRunFlag >= 0.
+
+    "Inline mapping: first positional arg after epic that isn't a flag."
+    inline := nil.
+    (args size >= 4 and: [((args at: 3) startsWith: '--') not]) ifTrue: [
+      inline := args at: 3
+    ].
+
+    mapping := nil.
+    (file notNil and: [file isEmpty not]) ifTrue: [
+      mapping := self loadRewaveMapping: file
+    ] ifFalse: [
+      (inline notNil and: [inline isEmpty not]) ifTrue: [
+        mapping := self parseRewaveInline: inline
+      ]
+    ].
+
+    mapping isNil ifTrue: [
+      'Error: supply a mapping, either inline (id1=2,id2=3) or via --file.' println.
+      ^self
+    ].
+    mapping isEmpty ifTrue: [
+      'No mappings parsed; nothing to do.' println.
+      ^self
+    ].
+
+    "Fetch epic to verify children."
+    response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"workitem","scope":"', scope, '"}'''.
+    (response isNil or: [response isEmpty]) ifTrue: [
+      ('Epic not found: ', epicId) println. ^self
+    ].
+    epicItem := nil.
+    [
+      result := Json decode: response.
+      tuples := result at: 'tuples' ifAbsent: [#()].
+      tuples do: [:t | (t at: 'identity') = epicId ifTrue: [epicItem := t]]
+    ] on: Exception do: [:e | ('Error: ', e messageText) println. ^self].
+    epicItem isNil ifTrue: [
+      ('Epic not found: ', epicId) println. ^self
+    ].
+    childrenList := (epicItem at: 'payload') at: 'children' ifAbsent: [#()].
+    childSet := Set new.
+    childrenList do: [:c | childSet add: c].
+
+    updated := 0.
+    skipped := 0.
+    mapping keysAndValuesDo: [:storyId :newWave |
+      (childSet includes: storyId) ifFalse: [
+        ('Skipping ', storyId, ': not a child of ', epicId) println.
+        skipped := skipped + 1
+      ] ifTrue: [
+        dryRun
+          ifTrue: [
+            ('[dry-run] ', storyId, ' -> wave ', newWave printString) println.
+            updated := updated + 1
+          ]
+          ifFalse: [
+            fields := Dictionary new.
+            fields at: 'wave' put: newWave.
+            fields at: 'updated_at' put: DateTime now epochSeconds.
+            body := Dictionary new.
+            body at: 'identity' put: storyId.
+            body at: 'scope' put: scope.
+            body at: 'fields' put: fields.
+            self post: '/api/workitem/update' body: body.
+            updated := updated + 1
+          ]
+      ]
+    ].
+
+    ('Rewave complete: ', updated printString, ' updated, ',
+      skipped printString, ' skipped.') println
+  ]
+
+  method: parseRewaveInline: aString [
+    "Parse 'id1=2,id2=3' into a Dictionary {id1 -> 2, id2 -> 3}."
+    | result pairs |
+    result := Dictionary new.
+    pairs := aString split: ','.
+    pairs do: [:pair |
+      | parts key waveStr waveNum |
+      pair isEmpty ifFalse: [
+        parts := pair split: '='.
+        parts size = 2 ifTrue: [
+          key := parts at: 0.
+          waveStr := parts at: 1.
+          waveNum := waveStr asInteger.
+          (key isEmpty not and: [waveNum > 0]) ifTrue: [
+            result at: key put: waveNum
+          ] ifFalse: [
+            ('Skipping malformed entry: ', pair) println
+          ]
+        ] ifFalse: [
+          ('Skipping malformed entry (expected id=N): ', pair) println
+        ]
+      ]
+    ].
+    ^result
+  ]
+
+  method: loadRewaveMapping: path [
+    "Load YAML/JSON/CUE mapping file. Returns Dictionary or nil."
+    | raw result |
+    raw := self loadDataFile: path.
+    raw isNil ifTrue: [^nil].
+    (raw isKindOf: Dictionary) ifFalse: [
+      'Rewave mapping file must be a top-level map of story-id -> wave-number.' println.
+      ^nil
+    ].
+    result := Dictionary new.
+    raw keysAndValuesDo: [:k :v |
+      | waveNum |
+      (v isKindOf: String)
+        ifTrue: [waveNum := v asInteger]
+        ifFalse: [waveNum := v asInteger].
+      (waveNum notNil and: [waveNum > 0])
+        ifTrue: [result at: k put: waveNum]
+        ifFalse: [('Skipping ', k printString, ' (invalid wave ', v printString, ')') println]
+    ].
+    ^result
+  ]
+
   "--- Helpers ---"
 
   method: addChildToParent: childIdentity parent: parentIdentity [
@@ -692,5 +832,6 @@ WorkItemCLI subclass: Object
     '  block <id> --reason "..."               Set status to blocked' println.
     '  run <id>                                Execute via workflow' println.
     '  plan <id>                               Agentic planning/decomposition' println.
-    '  review <id>                             Agentic review/refinement' println
+    '  review <id>                             Agentic review/refinement' println.
+    '  rewave <epic-id> [id=N,...] [--file p]  Bulk-update story wave numbers' println
   ]
