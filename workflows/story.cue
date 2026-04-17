@@ -4,12 +4,28 @@ start_places: ["request"]
 terminal_places: ["done"]
 max_review_cycles: 3
 
+// Shared fragments embedded below. Hidden fields (underscore-prefixed) are
+// stripped by `cue export`, so they never appear in the emitted template.
+//
+//   _worktree_bookend.create  → action: "create-worktree"
+//   _worktree_bookend.merge   → action: "merge-worktree"
+//   _notify_on_complete       → action: "notify-head"
+//
+// Transitions embed the fragment (bare reference inside a struct literal)
+// alongside their own id/in/out — this keeps the action wiring DRY and makes
+// the bookended create → merge → notify pattern easy to add to new templates.
+_worktree_bookend: {
+	create: {action: "create-worktree"}
+	merge: {action:  "merge-worktree"}
+}
+_notify_on_complete: {action: "notify-head"}
+
 transitions: [
 	{
-		id:     "setup"
-		in:     ["request"]
-		out:    ["ready"]
-		action: "create-worktree"
+		id:  "setup"
+		in:  ["request"]
+		out: ["ready"]
+		_worktree_bookend.create
 	},
 	{
 		id:          "implement"
@@ -41,16 +57,16 @@ transitions: [
 		]
 	},
 	{
-		id:     "integrate"
-		in:     ["merging"]
-		out:    ["merged"]
-		action: "merge-worktree"
+		id:  "integrate"
+		in:  ["merging"]
+		out: ["merged"]
+		_worktree_bookend.merge
 	},
 	{
-		id:     "notify"
-		in:     ["merged"]
-		out:    ["done"]
-		action: "notify-head"
+		id:  "notify"
+		in:  ["merged"]
+		out: ["done"]
+		_notify_on_complete
 	},
 	{
 		id:  "fail"

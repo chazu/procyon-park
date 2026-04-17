@@ -7,12 +7,21 @@ description: "Hotfix: implement, test, merge directly to main (no review)"
 start_places: ["request"]
 terminal_places: ["done"]
 
+// Shared fragments for the create-worktree → merge-worktree → notify-head
+// bookend. Hidden fields are stripped by `cue export` so they never reach
+// the emitted template.
+_worktree_bookend: {
+	create: {action: "create-worktree"}
+	merge: {action:  "merge-worktree"}
+}
+_notify_on_complete: {action: "notify-head"}
+
 transitions: [
 	{
-		id:            "setup"
-		in:            ["request"]
-		out:           ["ready"]
-		action:        "create-worktree"
+		id:  "setup"
+		in:  ["request"]
+		out: ["ready"]
+		_worktree_bookend.create
 		// Branch the worktree directly off main. On integrate, merge-worktree
 		// will merge the impl branch back into main — no feature branch is created.
 		parent_branch: "main"
@@ -32,10 +41,10 @@ transitions: [
 		description: "Run and verify tests for hotfix: {{description}}. Ensure the change is correct and regression-free; record any failing tests or unexpected behavior as observations. No review cycle — if tests pass, the change merges to main."
 	},
 	{
-		id:     "integrate"
-		in:     ["tested"]
-		out:    ["merged"]
-		action: "merge-worktree"
+		id:  "integrate"
+		in:  ["tested"]
+		out: ["merged"]
+		_worktree_bookend.merge
 		preconditions: [
 			{
 				category: "event"
@@ -44,9 +53,9 @@ transitions: [
 		]
 	},
 	{
-		id:     "notify"
-		in:     ["merged"]
-		out:    ["done"]
-		action: "notify-head"
+		id:  "notify"
+		in:  ["merged"]
+		out: ["done"]
+		_notify_on_complete
 	},
 ]
