@@ -7,7 +7,7 @@ Main subclass: Object
   classMethod: ppCommands [
     "Commands that route to PP (thin HTTP client)."
     ^#('observe' 'decide' 'event' 'plan' 'read' 'notify' 'dismiss'
-       'status' 'prime' 'task' 'workflow' 'signal' 'log' 'history' 'dashboard'
+       'status' 'prime' 'task' 'workflow' 'signal' 'verdict' 'log' 'history' 'dashboard'
        'workitem' 'gc' 'session')
   ]
 
@@ -104,6 +104,7 @@ Main subclass: Object
     '  workflow cancel <id> [--scope <scope>]         Cancel a running workflow' println.
     '  workflow wait <id> [--timeout <secs>]          Block until workflow completes' println.
     '  signal   <id> <key> <value>                    Upsert a signal' println.
+    '  verdict  <pass|fix|exhausted> [--workflow <id>] Write review verdict (uses PP_WORKFLOW)' println.
     '  repo     add|list|remove|info                  Manage repositories' println.
     '  worktree list|clean                            Manage worktrees' println.
     '  clean-branches [--dry-run] [--all]             Remove stale branches' println.

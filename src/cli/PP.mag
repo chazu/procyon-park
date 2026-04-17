@@ -22,6 +22,7 @@ PP subclass: CLIBase
     cmd = 'dismiss'   ifTrue: [^self cmdDismiss: args].
     cmd = 'workflow'  ifTrue: [^WorkflowCommands new runWith: args].
     cmd = 'signal'    ifTrue: [^self cmdSignal: args].
+    cmd = 'verdict'   ifTrue: [^self cmdVerdict: args].
 
     "System commands delegated to SystemCommands"
     cmd = 'gc'        ifTrue: [^SystemCommands new runCommand: cmd args: args].
@@ -215,7 +216,62 @@ PP subclass: CLIBase
     self post: '/api/signal' body: body
   ]
 
+  method: cmdVerdict: args [
+    "pp verdict <pass|fix|exhausted> [--workflow <id>]
+     Shorthand for: pp signal verdict:<workflow-instance> decision <decision>.
+     Reads PP_WORKFLOW from env (set by harness for agents). Humans can pass --workflow <id>,
+     or if neither is set, the command lists running workflows so the user can pick one."
+    | decision wfId wfFlag body payload wfEnv workflows |
+    args size < 2 ifTrue: [
+      'Usage: pp verdict <pass|fix|exhausted> [--workflow <id>]' println.
+      ^self
+    ].
 
+    decision := args at: 1.
+    (decision = 'pass' or: [decision = 'fix' or: [decision = 'exhausted']]) ifFalse: [
+      ('Invalid decision: ', decision, ' (expected pass|fix|exhausted)') println.
+      ^self
+    ].
+
+    "Resolve workflow instance: --workflow flag > PP_WORKFLOW env"
+    wfFlag := self flagValue: '--workflow' in: args.
+    wfFlag notNil ifTrue: [wfId := wfFlag] ifFalse: [
+      wfEnv := System env: 'PP_WORKFLOW'.
+      (wfEnv isNil or: [wfEnv isEmpty])
+        ifTrue: [wfId := nil]
+        ifFalse: [wfId := wfEnv]
+    ].
+
+    wfId isNil ifTrue: [
+      'Error: no workflow instance ID.' println.
+      'Set PP_WORKFLOW env var or pass --workflow <id>.' println.
+      workflows := self safeScan: 'workflow' scope: nil.
+      workflows size > 0 ifTrue: [
+        '' println.
+        'Running workflows:' println.
+        workflows do: [:wf |
+          | wfp wfStatus wfIdent |
+          wfp := wf at: 'payload' ifAbsent: [Dictionary new].
+          wfStatus := wfp at: 'status' ifAbsent: ['?'].
+          wfIdent := wf at: 'identity' ifAbsent: ['?'].
+          wfStatus = 'running' ifTrue: [
+            ('  ', wfIdent, '  [', (wfp at: 'template' ifAbsent: ['?']), ']') println
+          ]
+        ]
+      ].
+      ^self
+    ].
+
+    payload := Dictionary new.
+    payload at: 'decision' put: decision.
+
+    body := Dictionary new.
+    body at: 'scope' put: scope.
+    body at: 'identity' put: 'verdict:', wfId.
+    body at: 'payload' put: payload.
+
+    self post: '/api/signal' body: body
+  ]
 
   method: printUsage [
     'Procyon Park CLI' println.
@@ -230,6 +286,7 @@ PP subclass: CLIBase
     '  read     <category> [scope] [identity]           Read tuples' println.
     '  notify   <message> [--severity info|warn|urgent] Notify the user' println.
     '  dismiss                                          Signal task completion' println.
+    '  verdict  <pass|fix|exhausted> [--workflow <id>]   Write review verdict (uses PP_WORKFLOW)' println.
     '  status                                           Show system status' println.
     '  workflow <template> [--param key=val ...]        Start a workflow' println.
     '  workflow status [<id>]                           Show workflow status' println.
