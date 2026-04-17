@@ -34,7 +34,112 @@ DashboardSSE subclass: Object
     self sendWorkflows: conn.
     self sendCompletions: conn.
     self sendWorkitems: conn.
+    self sendScopeViolations: conn.
     self sendNotifs: conn
+  ]
+
+  method: sendScopeViolations: conn [
+    "Aggregate scope-violation events per role so operators can spot systematic
+     prompt issues (e.g. one role consistently editing outside its workdir).
+     Each scope-violation event emitted by Scheduler>>validateScope:taskId:scope:
+     has identity 'scope-violation:<taskId>' and summary '<n> file(s) modified
+     outside workdir'. We join events to tasks by id to recover role."
+    | s events tasks taskRoles roleCounts roleFiles roleTasks totalViolations totalFiles prefix |
+    events := bbs scanAll: 'event'.
+    tasks := bbs scanAll: 'task'.
+
+    "Build taskId -> role map"
+    taskRoles := Dictionary new.
+    tasks do: [:t |
+      | tid p role |
+      tid := t at: 'identity' ifAbsent: [''].
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      role := p at: 'role' ifAbsent: ['unknown'].
+      taskRoles at: tid put: role
+    ].
+
+    roleCounts := Dictionary new.
+    roleFiles := Dictionary new.
+    roleTasks := Dictionary new.
+    totalViolations := 0.
+    totalFiles := 0.
+    prefix := 'scope-violation:'.
+
+    events do: [:e |
+      | ep etype eid taskId role summary fileCount existing |
+      ep := e at: 'payload' ifAbsent: [Dictionary new].
+      etype := ep at: 'type' ifAbsent: [''].
+      etype = 'scope-violation' ifTrue: [
+        totalViolations := totalViolations + 1.
+        eid := e at: 'identity' ifAbsent: [''].
+        taskId := (eid startsWith: prefix)
+          ifTrue: [eid copyFrom: prefix size + 1 to: eid size]
+          ifFalse: [eid].
+        role := taskRoles at: taskId ifAbsent: ['unknown'].
+
+        "Count files from summary leading integer (e.g. '3 file(s) modified...')"
+        summary := ep at: 'summary' ifAbsent: [''].
+        fileCount := self leadingInteger: summary.
+        totalFiles := totalFiles + fileCount.
+
+        roleCounts at: role put: (roleCounts at: role ifAbsent: [0]) + 1.
+        roleFiles at: role put: (roleFiles at: role ifAbsent: [0]) + fileCount.
+        existing := roleTasks at: role ifAbsent: [Array new: 0].
+        (self array: existing includesString: taskId) ifFalse: [
+          roleTasks at: role put: (existing copyWith: taskId)
+        ]
+      ]
+    ].
+
+    s := '<div id="dashboard-scope-violations"><h2>Scope Violations</h2>'.
+    totalViolations = 0 ifTrue: [
+      s := s, '<div class="empty-state">No scope violations recorded</div>'
+    ] ifFalse: [
+      s := s, '<div class="sv-summary"><b>', totalViolations printString,
+            '</b> violation(s), <b>', totalFiles printString,
+            '</b> file(s) reverted across <b>', roleCounts size printString, '</b> role(s)</div>'.
+      s := s, '<ul class="sv-list">'.
+      roleCounts keysAndValuesDo: [:role :count |
+        | files taskList taskCount severity |
+        files := roleFiles at: role ifAbsent: [0].
+        taskList := roleTasks at: role ifAbsent: [Array new: 0].
+        taskCount := taskList size.
+        "Severity: 3+ violations in a single role = systematic, warn hard"
+        severity := count >= 3 ifTrue: ['sv-systematic'] ifFalse: [
+          count >= 2 ifTrue: ['sv-repeat'] ifFalse: ['sv-single']
+        ].
+        s := s, '<li class="sv-role ', severity, '">',
+              '<b>', role, '</b> ',
+              '<span class="sv-count">', count printString, ' violation(s)</span>',
+              ' <small>', taskCount printString, ' task(s), ',
+              files printString, ' file(s) reverted</small>',
+              '</li>'
+      ].
+      s := s, '</ul>'
+    ].
+    s := s, '</div>'.
+    conn send: ('elements ', s) event: 'datastar-patch-elements'
+  ]
+
+  method: array: anArray includesString: aString [
+    "Simple membership test — no Set to rely on."
+    anArray do: [:x | x = aString ifTrue: [^true]].
+    ^false
+  ]
+
+  method: leadingInteger: aString [
+    "Parse the leading non-negative integer of aString (e.g. '3 file(s) ...' -> 3).
+     Returns 0 if no leading token or it doesn't parse. Uses split-on-space since
+     Scheduler emits summaries of the form '<n> file(s) modified outside workdir'."
+    | parts first n |
+    aString isEmpty ifTrue: [^0].
+    parts := aString split: ' '.
+    parts isEmpty ifTrue: [^0].
+    first := parts first.
+    first isEmpty ifTrue: [^0].
+    n := [first asInteger] on: Exception do: [:e | 0].
+    n isNil ifTrue: [^0].
+    ^n
   ]
 
   method: sendWorkitems: conn [
