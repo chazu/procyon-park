@@ -26,7 +26,8 @@ WorkItemCLI subclass: Object
 
     subcmd := args at: 1.
 
-    subcmd = 'create'   ifTrue: [^self cmdCreate: args].
+    subcmd = 'create'      ifTrue: [^self cmdCreate: args].
+    subcmd = 'create-from' ifTrue: [^self cmdCreateFrom: args].
     subcmd = 'show'     ifTrue: [^self cmdShow: args].
     subcmd = 'list'     ifTrue: [^self cmdList: args].
     subcmd = 'children' ifTrue: [^self cmdChildren: args].
@@ -115,6 +116,181 @@ WorkItemCLI subclass: Object
     parent notNil ifTrue: [
       self addChildToParent: identity parent: parent
     ]
+  ]
+
+  method: cmdCreateFrom: args [
+    "pp workitem create-from <file.yaml|file.json> [--repo R]
+     File format (YAML or JSON):
+       epic:
+         identity: my-epic
+         title: ...
+         description: ...
+         labels: [a, b]
+         template: story
+       stories:
+         - identity: s1
+           title: ...
+           wave: 1
+           depends_on: []
+         - identity: s2
+           ..."
+    | path repo data epic stories epicIdentity storyCount |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem create-from <file.yaml|file.json> [--repo R]' println.
+      ^self
+    ].
+
+    path := args at: 2.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+
+    (File exists: path) ifFalse: [
+      ('File not found: ', path) println.
+      ^self
+    ].
+
+    data := self loadDataFile: path.
+    data isNil ifTrue: [
+      ('Failed to parse file: ', path) println.
+      ^self
+    ].
+
+    epic := data at: 'epic' ifAbsent: [nil].
+    stories := data at: 'stories' ifAbsent: [Array new: 0].
+    epicIdentity := nil.
+
+    epic notNil ifTrue: [
+      epicIdentity := self createItemFromDict: epic defaultType: 'epic' parent: nil.
+      epicIdentity notNil ifTrue: [
+        ('Created epic: ', epicIdentity) println
+      ]
+    ].
+
+    storyCount := 0.
+    stories do: [:story |
+      | sid storyParent |
+      storyParent := story at: 'parent' ifAbsent: [nil].
+      (storyParent isNil and: [epicIdentity notNil]) ifTrue: [
+        storyParent := epicIdentity
+      ].
+      sid := self createItemFromDict: story defaultType: 'story' parent: storyParent.
+      sid notNil ifTrue: [
+        ('Created story: ', sid) println.
+        storyCount := storyCount + 1
+      ]
+    ].
+
+    ('Done. Created ', (epic notNil ifTrue: ['1 epic and '] ifFalse: ['']),
+      storyCount printString, ' stor', (storyCount = 1 ifTrue: ['y'] ifFalse: ['ies']), '.') println
+  ]
+
+  method: loadDataFile: path [
+    "Load a YAML, JSON, or CUE file as a Maggie Dictionary. Detects by extension.
+     JSON: Json decode on file contents.
+     YAML/CUE: shell out to `cue export --out json` for broad compatibility.
+     Returns nil on error."
+    | ext lower contents jsonText |
+    lower := path asLowercase.
+    ext := ''.
+    (lower endsWith: '.yaml')  ifTrue: [ext := 'yaml'].
+    (lower endsWith: '.yml')   ifTrue: [ext := 'yaml'].
+    (lower endsWith: '.json')  ifTrue: [ext := 'json'].
+    (lower endsWith: '.cue')   ifTrue: [ext := 'cue'].
+
+    ext isEmpty ifTrue: [
+      'Unsupported file extension; expected .yaml, .yml, .json, or .cue' println.
+      ^nil
+    ].
+
+    ext = 'json' ifTrue: [
+      [
+        contents := File readFileContents: path.
+        contents isNil ifTrue: [^nil].
+        ^Json decode: contents
+      ] on: Exception do: [:e |
+        ('JSON parse error: ', e messageText) println.
+        ^nil
+      ]
+    ].
+
+    "YAML or CUE: shell out to `cue export` which handles yaml/cue and emits JSON."
+    [
+      jsonText := Shell capture: 'cue export "', path, '" --out json 2>/dev/null'.
+      (jsonText isNil or: [jsonText isEmpty]) ifTrue: [
+        ('Failed to convert to JSON via `cue export`: ', path) println.
+        'Is the `cue` CLI installed and on PATH?' println.
+        ^nil
+      ].
+      ^Json decode: jsonText
+    ] on: Exception do: [:e |
+      ('Parse error: ', e messageText) println.
+      ^nil
+    ]
+  ]
+
+  method: createItemFromDict: dict defaultType: defaultType parent: parentOverride [
+    "Create a work item from a Dictionary of fields. Returns the identity, or nil on error.
+     If parentOverride is non-nil, uses it as the parent (unless dict already has one).
+     Missing fields get sensible defaults."
+    | identity title type status parent description template batch wave dependsOn labels
+      payload body repoField |
+    identity := dict at: 'identity' ifAbsent: [nil].
+    identity isNil ifTrue: [
+      'Skipping item with no identity.' println.
+      ^nil
+    ].
+
+    title := dict at: 'title' ifAbsent: [identity].
+    type := dict at: 'type' ifAbsent: [defaultType].
+    status := dict at: 'status' ifAbsent: ['backlog'].
+    parent := dict at: 'parent' ifAbsent: [parentOverride].
+    description := dict at: 'description' ifAbsent: [''].
+    template := dict at: 'template' ifAbsent: ['story'].
+    batch := dict at: 'batch' ifAbsent: [nil].
+    wave := dict at: 'wave' ifAbsent: [1].
+    (wave isKindOf: String) ifTrue: [wave := wave asInteger].
+    dependsOn := dict at: 'depends_on' ifAbsent: [Array new: 0].
+    (dependsOn isKindOf: String) ifTrue: [dependsOn := dependsOn split: ','].
+    labels := dict at: 'labels' ifAbsent: [Array new: 0].
+    (labels isKindOf: String) ifTrue: [labels := labels split: ','].
+    repoField := dict at: 'repo' ifAbsent: [nil].
+
+    "Build payload"
+    payload := Dictionary new.
+    payload at: 'title' put: title.
+    payload at: 'description' put: description.
+    payload at: 'status' put: status.
+    payload at: 'type' put: type.
+    payload at: 'parent' put: parent.
+    payload at: 'children' put: (Array new: 0).
+    repoField notNil ifTrue: [payload at: 'repo' put: repoField].
+    payload at: 'template' put: template.
+    batch notNil ifTrue: [payload at: 'batch' put: batch].
+    payload at: 'wave' put: wave.
+    payload at: 'depends_on' put: dependsOn.
+    payload at: 'labels' put: labels.
+    payload at: 'comments' put: (Array new: 0).
+    payload at: 'created_by' put: 'human'.
+    payload at: 'created_at' put: DateTime now epochSeconds.
+    payload at: 'updated_at' put: DateTime now epochSeconds.
+
+    "POST to server"
+    body := Dictionary new.
+    body at: 'category' put: 'workitem'.
+    repoField notNil
+      ifTrue: [body at: 'scope' put: repoField]
+      ifFalse: [body at: 'scope' put: scope].
+    body at: 'identity' put: identity.
+    body at: 'payload' put: payload.
+    body at: 'pinned' put: true.
+
+    self post: '/api/workitem/create' body: body.
+
+    parent notNil ifTrue: [
+      self addChildToParent: identity parent: parent
+    ].
+
+    ^identity
   ]
 
   method: cmdShow: args [
@@ -505,6 +681,7 @@ WorkItemCLI subclass: Object
     '' println.
     'Commands:' println.
     '  create <id> --title T --type epic|story [--repo R] [--status S] [--parent P]' println.
+    '  create-from <file.yaml|file.json> [--repo R]  Bulk-create epic + stories from a file' println.
     '  show <id> [--repo R]                    Show work item detail' println.
     '  list [--repo R] [--status S] [--type T] [--parent P]  List work items' println.
     '  children <id> [--repo R]                List children of an epic' println.
