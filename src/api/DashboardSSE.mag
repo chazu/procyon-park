@@ -37,11 +37,14 @@ DashboardSSE subclass: Object
   ]
 
   method: sendWorkflows: conn [
-    | s workflows |
+    | s workflows allTokens allTasks now |
     workflows := bbs scanAll: 'workflow'.
+    allTokens := bbs scanAll: 'token'.
+    allTasks := bbs scanAll: 'task'.
+    now := DateTime now epochSeconds.
     s := '<div id="dashboard-workflows"><h2>Active Workflows</h2>'.
     workflows do: [:w |
-      | p status template wfId desc label |
+      | p status template wfId desc label places activeTask taskLine |
       p := w at: 'payload' ifAbsent: [Dictionary new].
       status := p at: 'status' ifAbsent: ['?'].
       status = 'running' ifTrue: [
@@ -50,11 +53,82 @@ DashboardSSE subclass: Object
         desc := (p at: 'params' ifAbsent: [Dictionary new]) at: 'description' ifAbsent: [''].
         desc size > 100 ifTrue: [desc := (desc copyFrom: 1 to: 100), '...'].
         label := desc isEmpty ifTrue: [wfId] ifFalse: [desc].
-        s := s, '<div class="wf-card"><b>', template, '</b> ', label, '<br><small>', wfId, '</small></div>'
+        places := self placesFor: wfId in: allTokens.
+        activeTask := self activeTaskFor: wfId in: allTasks.
+        taskLine := ''.
+        activeTask notNil ifTrue: [
+          | tp role tStatus dispatchedAt durStr |
+          tp := activeTask at: 'payload' ifAbsent: [Dictionary new].
+          role := tp at: 'role' ifAbsent: ['?'].
+          tStatus := tp at: 'status' ifAbsent: ['?'].
+          dispatchedAt := tp at: 'dispatched_at' ifAbsent: [0].
+          durStr := dispatchedAt > 0
+            ifTrue: [self formatDuration: (now - dispatchedAt)]
+            ifFalse: ['pending'].
+          taskLine := '<br><small>role: <b>', role, '</b> · ', tStatus, ' · ', durStr, '</small>'
+        ].
+        s := s, '<div class="wf-card"><b>', template, '</b> ', label,
+             '<br><small>place: ', places, '</small>',
+             taskLine,
+             '<br><small>', wfId, '</small></div>'
       ]
     ].
     s := s, '</div>'.
     conn send: ('elements ', s) event: 'datastar-patch-elements'
+  ]
+
+  method: placesFor: instanceId in: allTokens [
+    "Return a comma-separated string of place names for positive tokens of the
+     given workflow instance."
+    | matching names |
+    matching := allTokens select: [:t |
+      | tp |
+      tp := t at: 'payload' ifAbsent: [Dictionary new].
+      (tp at: 'workflow_instance' ifAbsent: ['']) = instanceId
+        and: [(tp at: 'status' ifAbsent: ['']) = 'positive']
+    ].
+    matching isEmpty ifTrue: [^'(none)'].
+    names := matching collect: [:t | (t at: 'payload') at: 'place' ifAbsent: ['?']].
+    ^self joinStrings: names with: ', '
+  ]
+
+  method: activeTaskFor: instanceId in: allTasks [
+    "Return the most recent non-completed task for this workflow instance, or nil.
+     Prefers dispatched tasks; falls back to pending."
+    | prefix candidates dispatched pending best bestTime |
+    prefix := instanceId, ':task:'.
+    candidates := allTasks select: [:t |
+      | tp tStatus |
+      tp := t at: 'payload' ifAbsent: [Dictionary new].
+      tStatus := tp at: 'status' ifAbsent: [''].
+      ((t at: 'identity' ifAbsent: ['']) startsWith: prefix)
+        and: [(tStatus = 'completed') not and: [(tStatus = 'cancelled') not]]
+    ].
+    candidates isEmpty ifTrue: [^nil].
+    dispatched := candidates select: [:t |
+      ((t at: 'payload') at: 'status' ifAbsent: ['']) = 'dispatched'
+    ].
+    pending := dispatched isEmpty ifTrue: [candidates] ifFalse: [dispatched].
+    best := nil.
+    bestTime := -1.
+    pending do: [:t |
+      | tp ts |
+      tp := t at: 'payload' ifAbsent: [Dictionary new].
+      ts := tp at: 'dispatched_at' ifAbsent: [0].
+      ts > bestTime ifTrue: [best := t. bestTime := ts]
+    ].
+    ^best ifNil: [pending first]
+  ]
+
+  method: joinStrings: aCollection with: sep [
+    | s first |
+    s := ''.
+    first := true.
+    aCollection do: [:x |
+      first ifTrue: [s := x asString. first := false]
+            ifFalse: [s := s, sep, x asString]
+    ].
+    ^s
   ]
 
   method: sendCompletions: conn [
