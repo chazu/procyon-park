@@ -15,7 +15,7 @@
  See docs/cli-poc-writeup.md for findings."
 
 PPCliConfig subclass: Object
-  instanceVars: baseUrl scope taskId logFollow logSince
+  instanceVars: baseUrl scope taskId logFollow logSince workflowInstance
 
   classMethod: new [
     | c |
@@ -29,7 +29,8 @@ PPCliConfig subclass: Object
     scope := 'default'.
     taskId := ''.
     logFollow := true.
-    logSince := ''
+    logSince := ''.
+    workflowInstance := ''
   ]
 
   method: baseUrl [ ^baseUrl ]
@@ -42,6 +43,8 @@ PPCliConfig subclass: Object
   method: logFollow: aValue [ logFollow := aValue ]
   method: logSince [ ^logSince ]
   method: logSince: aValue [ logSince := aValue ]
+  method: workflowInstance [ ^workflowInstance ]
+  method: workflowInstance: aValue [ workflowInstance := aValue ]
 
 
 CliPP subclass: Object
@@ -75,6 +78,7 @@ CliPP subclass: Object
     head = 'event'    ifTrue: [^true].
     head = 'notify'   ifTrue: [^true].
     head = 'signal'   ifTrue: [^true].
+    head = 'verdict'  ifTrue: [^true].
     head = 'dismiss'  ifTrue: [^true].
     head = 'read'     ifTrue: [^true].
     head = 'history'  ifTrue: [^true].
@@ -104,6 +108,7 @@ CliPP subclass: Object
     head = 'event'    ifTrue: [^self runEvent: args].
     head = 'notify'   ifTrue: [^self runNotify: args].
     head = 'signal'   ifTrue: [^self runSignal: args].
+    head = 'verdict'  ifTrue: [^self runVerdict: args].
     head = 'dismiss'  ifTrue: [^self runDismiss: args].
     head = 'read'     ifTrue: [^self runRead: args].
     head = 'history'  ifTrue: [^self runHistory: args].
@@ -1483,6 +1488,100 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         body at: 'task_id' put: cfg taskId.
         body at: 'scope' put: cfg scope.
         self postAndPrint: cfg path: '/api/dismiss' body: body
+      ].
+      exitCode
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Subcommand: verdict -----------------------------------------------"
+
+  classMethod: runVerdict: args [
+    "Build, configure, and dispatch the `verdict` shorthand command.
+
+     Shorthand for: pp signal verdict:<workflow-instance> decision <pass|fix|exhausted>.
+     Agents receive PP_WORKFLOW from the harness; humans can supply
+     --workflow <id>. When neither is available, the command lists
+     running workflows so the caller can pick one explicitly."
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'verdict'
+           doc: 'Write a review verdict (pass|fix|exhausted) for the current workflow'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_WORKFLOW'
+      setter: #workflowInstance:
+      type: #string
+      default: '').
+    cmd flag: (Cli::Flag
+      name: 'workflow'
+      type: #string
+      default: ''
+      doc: 'Workflow instance ID (overrides PP_WORKFLOW)').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | decision wfFlag wfId payload body exitCode workflows |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp verdict <pass|fix|exhausted> [--workflow <id>]' println.
+        exitCode := 1
+      ] ifFalse: [
+        decision := runArgs at: 0.
+        (decision = 'pass' or: [decision = 'fix' or: [decision = 'exhausted']]) ifFalse: [
+          ('Invalid decision: ', decision, ' (expected pass|fix|exhausted)') println.
+          exitCode := 1
+        ] ifTrue: [
+          cmd applyEnvBindings: cfg.
+          wfFlag := cmd flagValue: 'workflow'.
+          (wfFlag notNil and: [wfFlag isEmpty not])
+            ifTrue: [wfId := wfFlag]
+            ifFalse: [
+              cfg workflowInstance isEmpty
+                ifTrue: [wfId := nil]
+                ifFalse: [wfId := cfg workflowInstance]
+            ].
+          wfId isNil ifTrue: [
+            'Error: no workflow instance ID.' println.
+            'Set PP_WORKFLOW env var (agents get this from the harness) or pass --workflow <id>.' println.
+            workflows := self safeScanWorkflows: cfg scope: nil.
+            workflows size > 0 ifTrue: [
+              '' println.
+              'Running workflows:' println.
+              workflows do: [:wf |
+                | wfp wfStatus wfIdent wfTmpl |
+                wfp := wf at: 'payload' ifAbsent: [Dictionary new].
+                wfStatus := wfp at: 'status' ifAbsent: ['?'].
+                wfIdent := wf at: 'identity' ifAbsent: ['?'].
+                wfTmpl := wfp at: 'template' ifAbsent: ['?'].
+                wfStatus = 'running' ifTrue: [
+                  ('  ', wfIdent, '  [', wfTmpl, ']') println
+                ]
+              ]
+            ].
+            exitCode := 1
+          ] ifFalse: [
+            payload := Dictionary new.
+            payload at: 'decision' put: decision.
+            body := Dictionary new.
+            body at: 'scope' put: cfg scope.
+            body at: 'identity' put: 'verdict:', wfId.
+            body at: 'payload' put: payload.
+            self postAndPrint: cfg path: '/api/signal' body: body
+          ]
+        ]
       ].
       exitCode
     ].
