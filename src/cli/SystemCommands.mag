@@ -345,14 +345,31 @@ Dashboard:     ', baseUrl, '/dashboard/
   "--- Garbage Collection ---"
 
   method: cmdGc: args [
-    "pp gc — clean up finished workflows and merged branches."
-    | dryRun count |
+    "pp gc — clean up finished workflows and merged branches.
+     Flags:
+       --dry-run                 show what would be removed, do not modify state
+       --sessions                also clean orphaned session JSONL files
+       --older-than <hours>      (with --sessions) only remove session files whose
+                                 mtime is older than N hours (default: 24)"
+    | dryRun count sessionsFlag olderThanStr olderThanHours sessionCount |
     dryRun := (args indexOf: '--dry-run') >= 0.
+    sessionsFlag := (args indexOf: '--sessions') >= 0.
+    olderThanStr := self flagValue: '--older-than' in: args.
+    olderThanHours := olderThanStr notNil
+      ifTrue: [olderThanStr asInteger]
+      ifFalse: [24].
     'Procyon Park GC' println.
     dryRun ifTrue: ['(dry-run)' println].
     count := self gcWorkflows: dryRun.
     self gcBranches: dryRun.
-    ('Done. Removed ', count printString, ' workflows.') println
+    sessionCount := 0.
+    sessionsFlag ifTrue: [
+      sessionCount := self gcSessionsOlderThanHours: olderThanHours dryRun: dryRun
+    ].
+    ('Done. Removed ', count printString, ' workflows.') println.
+    sessionsFlag ifTrue: [
+      ('       Removed ', sessionCount printString, ' session file(s).') println
+    ]
   ]
 
   method: gcWorkflows: dryRun [
@@ -456,6 +473,78 @@ Dashboard:     ', baseUrl, '/dashboard/
         ]
       ]
     ] on: Exception do: [:e | ]
+  ]
+
+  method: gcSessionsOlderThanHours: olderThanHours dryRun: dryRun [
+    "Clean up session JSONL files in ~/.pp/sessions/ whose mtime is older than
+     olderThanHours AND whose workflow ID is no longer present as a workflow
+     tuple (i.e. the workflow has completed and been GC'd, or never existed).
+     Returns the number of files removed (or that would be removed in dry-run)."
+    | homeDir sessionsDir minutes output lines body response result workflows
+      existingIds removedCount lf marker |
+    removedCount := 0.
+    homeDir := System env: 'HOME'.
+    (homeDir isNil or: [homeDir isEmpty]) ifTrue: [^0].
+    sessionsDir := homeDir, '/.pp/sessions'.
+    (File exists: sessionsDir) ifFalse: [^0].
+    minutes := olderThanHours * 60.
+    lf := Character lf asString.
+    marker := ':task:'.
+
+    "Collect workflow IDs still present in tuple space (these we keep)."
+    existingIds := Array new: 0.
+    [
+      body := Dictionary new.
+      body at: 'category' put: 'workflow'.
+      response := client post: baseUrl, '/api/scan'
+        body: (Json encode: body) contentType: 'application/json'.
+      (response notNil and: [response isEmpty not]) ifTrue: [
+        result := Json decode: response.
+        workflows := result at: 'tuples' ifAbsent: [#()].
+        workflows do: [:wf |
+          | wfId |
+          wfId := wf at: 'identity' ifAbsent: [''].
+          wfId isEmpty ifFalse: [
+            existingIds := existingIds copyWith: wfId
+          ]
+        ]
+      ]
+    ] on: Exception do: [:e |
+      ('Warning: could not scan workflows: ', e messageText) println
+    ].
+
+    ('Cleaning orphaned session files older than ', olderThanHours printString, ' hour(s)...') println.
+    [
+      output := Shell capture: 'find "', sessionsDir, '" -maxdepth 1 -name "*.jsonl" -type f -mmin +', minutes printString, ' 2>/dev/null'.
+      (output notNil and: [output isEmpty not]) ifTrue: [
+        lines := output split: lf.
+        lines do: [:path |
+          path isEmpty ifFalse: [
+            | fname wfId mIdx prefixLen |
+            "Extract basename by stripping the known sessionsDir prefix + '/'"
+            prefixLen := sessionsDir size + 1.
+            fname := path size > prefixLen
+              ifTrue: [path copyFrom: prefixLen to: path size]
+              ifFalse: [path].
+            "Extract workflow id: prefix before ':task:'"
+            mIdx := fname indexOf: marker.
+            wfId := mIdx >= 0
+              ifTrue: [fname copyFrom: 0 to: mIdx]
+              ifFalse: [''].
+            (wfId isEmpty not and: [(existingIds includes: wfId) not]) ifTrue: [
+              ('  session: ', fname) println.
+              dryRun ifFalse: [
+                Shell run: 'rm -f "', path, '"'
+              ].
+              removedCount := removedCount + 1
+            ]
+          ]
+        ]
+      ]
+    ] on: Exception do: [:e |
+      ('Error cleaning sessions: ', e messageText) println
+    ].
+    ^removedCount
   ]
 
   "--- Session Viewer ---"
