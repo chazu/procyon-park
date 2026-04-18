@@ -171,17 +171,20 @@ DashboardSSE subclass: Object
         s := s, '<div class="empty-state">—</div>'
       ] ifFalse: [
         items do: [:w |
-          | p title wid type identity |
+          | p title wid type identity repo |
           p := w at: 'payload' ifAbsent: [Dictionary new].
           identity := w at: 'identity' ifAbsent: ['?'].
           title := p at: 'title' ifAbsent: [identity].
           type := p at: 'type' ifAbsent: ['story'].
+          repo := p at: 'repo' ifAbsent: [w at: 'scope' ifAbsent: ['']].
           wid := identity.
           title size > 60 ifTrue: [title := (title copyFrom: 1 to: 60), '...'].
-          s := s, '<div class="wi-card wi-', type, '">',
+          s := s, '<div class="wi-card wi-', type, '" data-repo="', repo, '">',
                 '<div class="wi-title">', title, '</div>',
                 '<div class="wi-meta"><span class="wi-type">', type, '</span> ',
-                '<small>', wid, '</small></div>',
+                '<small>', wid, '</small>',
+                (repo isEmpty ifTrue: [''] ifFalse: [' <small class="wi-repo">', repo, '</small>']),
+                '</div>',
                 '</div>'
         ]
       ].

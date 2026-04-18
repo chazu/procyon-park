@@ -516,6 +516,50 @@
     }
     #dashboard-notifications li:last-child{ border-bottom: none; }
     #dashboard-notifications li.notif-hidden{ display: none; }
+    .wi-card.wi-hidden{ display: none; }
+    .wi-repo{
+      font-family: var(--f-mono);
+      font-size: 10px;
+      color: var(--cream-dim);
+      letter-spacing: 0.05em;
+      margin-left: 6px;
+    }
+    .board-filters{
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) auto 1fr auto;
+      gap: 8px;
+      align-items: center;
+      margin: 0 0 12px 0;
+      padding: 10px 12px;
+      background: var(--bg-2);
+      border: 1px solid var(--surface);
+      border-radius: 6px;
+    }
+    .board-filters select,
+    .board-filters input{
+      background: var(--bg);
+      color: var(--cream-hi);
+      border: 1px solid var(--surface);
+      border-radius: 4px;
+      padding: 6px 8px;
+      font-family: var(--f-mono);
+      font-size: 11px;
+    }
+    .board-filters button{
+      background: var(--bg);
+      color: var(--cream-hi);
+      border: 1px solid var(--surface);
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-family: var(--f-mono);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .board-filters button:hover{
+      background: var(--terra);
+      color: var(--cream-hi);
+      border-color: var(--terra);
+    }
     li.sev-info   { border-left-color: var(--cobalt); }
     li.sev-warn   { border-left-color: var(--sun);   color: var(--cream); }
     li.sev-urgent { border-left-color: var(--terra); color: var(--terra); font-weight: 500; }
@@ -649,6 +693,12 @@
 
     <section class="tab-view" id="view-board" role="tabpanel">
       <div class="board-plate">
+        <div class="board-filters" id="board-filters">
+          <select id="board-filter-repo" title="Repo"><option value="">all repos</option></select>
+          <button type="button" id="board-filter-clear">clear</button>
+          <input type="text" id="board-filter-text" placeholder="search title…" />
+          <span class="filter-count" id="board-filter-count"></span>
+        </div>
         <div id="dashboard-workitems">
           <h2 style="display:none">Work Items</h2>
           <div class="empty-state">Connecting…</div>
@@ -692,6 +742,7 @@
         if (target) {
           target.outerHTML = root.outerHTML;
           if (root.id === 'dashboard-notifications') refreshNotifFilters();
+          if (root.id === 'dashboard-workitems') refreshBoardFilters();
         }
       }
     });
@@ -763,6 +814,43 @@
       filterSeverity.value = '';
       filterText.value = '';
       applyNotifFilter();
+    });
+
+    const boardRepo  = document.getElementById('board-filter-repo');
+    const boardText  = document.getElementById('board-filter-text');
+    const boardClear = document.getElementById('board-filter-clear');
+    const boardCount = document.getElementById('board-filter-count');
+
+    function applyBoardFilter() {
+      const repo = boardRepo.value;
+      const text = boardText.value.trim().toLowerCase();
+      const cards = document.querySelectorAll('#dashboard-workitems .wi-card');
+      let shown = 0;
+      cards.forEach(card => {
+        const r = card.getAttribute('data-repo') || '';
+        let hide = false;
+        if (repo && r !== repo) hide = true;
+        if (text && !card.textContent.toLowerCase().includes(text)) hide = true;
+        card.classList.toggle('wi-hidden', hide);
+        if (!hide) shown++;
+      });
+      boardCount.textContent = cards.length ? (shown + ' / ' + cards.length) : '';
+    }
+    function refreshBoardFilters() {
+      const repos = new Set();
+      document.querySelectorAll('#dashboard-workitems .wi-card').forEach(card => {
+        const r = card.getAttribute('data-repo');
+        if (r) repos.add(r);
+      });
+      repopulateSelect(boardRepo, repos);
+      applyBoardFilter();
+    }
+    boardRepo.addEventListener('change', applyBoardFilter);
+    boardText.addEventListener('input', applyBoardFilter);
+    boardClear.addEventListener('click', () => {
+      boardRepo.value = '';
+      boardText.value = '';
+      applyBoardFilter();
     });
   </script>
 </body>
