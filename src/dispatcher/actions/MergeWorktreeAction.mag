@@ -24,18 +24,18 @@ MergeWorktreeAction subclass: WorkflowAction
 
     "Pipeline-level merge: no impl branch, merge shared feature branch directly to main"
     implBranch isEmpty ifTrue: [
-      ('merge-worktree: pipeline merge — merging ', featureBranch, ' into main in ', repoPath) println.
+      bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Pipeline merge — merging ', featureBranch, ' into main in ', repoPath).
       [
         GitOps checkoutBranch: 'main' in: repoPath
       ] on: Exception do: [:e |
-        ('merge-worktree: checkout main failed: ', e messageText) println.
+        bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Checkout main failed: ', e messageText).
         engine failWorkflow: instanceId reason: 'Pipeline merge failed: could not checkout main — ', e messageText.
         ^self
       ].
       [
         GitOps mergeBranch: featureBranch in: repoPath
       ] on: Exception do: [:e |
-        ('merge-worktree: pipeline merge failed: ', e messageText) println.
+        bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Pipeline merge failed: ', e messageText).
         obsPayload := Dictionary new.
         obsPayload at: 'detail' put: ('Pipeline merge conflict: ', featureBranch, ' into main — ', e messageText).
         bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
@@ -48,17 +48,17 @@ MergeWorktreeAction subclass: WorkflowAction
       obsPayload at: 'repoPath' put: repoPath.
       obsPayload at: 'featureBranch' put: featureBranch.
       bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
-      ('merge-worktree: pipeline merge complete — ', featureBranch, ' merged into main') println.
+      bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Pipeline merge complete — ', featureBranch, ' merged into main').
       ^self
     ].
 
-    ('merge-worktree: merging ', implBranch, ' into ', featureBranch, ' in ', repoPath) println.
+    bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Merging ', implBranch, ' into ', featureBranch, ' in ', repoPath).
 
     "2. Checkout the feature branch"
     [
       GitOps checkoutBranch: featureBranch in: repoPath
     ] on: Exception do: [:e |
-      ('merge-worktree: checkout failed: ', e messageText) println.
+      bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Checkout failed: ', e messageText).
       obsPayload := Dictionary new.
       obsPayload at: 'detail' put: ('Checkout failed: ', e messageText).
       bbs out: 'observation' scope: scope identity: 'merge-checkout-failed' payload: obsPayload.
@@ -70,7 +70,7 @@ MergeWorktreeAction subclass: WorkflowAction
     [
       GitOps mergeBranch: implBranch in: repoPath
     ] on: Exception do: [:e |
-      ('merge-worktree: merge failed: ', e messageText) println.
+      bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Merge failed: ', e messageText).
       obsPayload := Dictionary new.
       obsPayload at: 'detail' put: ('Merge conflict: ', implBranch, ' into ', featureBranch, ' — ', e messageText).
       bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
@@ -85,7 +85,7 @@ MergeWorktreeAction subclass: WorkflowAction
     "5. Checkout main so repo is not left on feature branch"
     [GitOps checkoutBranch: 'main' in: repoPath]
       on: Exception do: [:e |
-        ('merge-worktree: checkout main warning: ', e messageText) println
+        bbs logEngine: 'warn' component: 'merge-worktree' scope: scope message: ('Checkout main warning: ', e messageText)
       ].
 
     "6. Write observation recording the merge"
@@ -96,5 +96,5 @@ MergeWorktreeAction subclass: WorkflowAction
     obsPayload at: 'implBranch' put: implBranch.
     bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
 
-    ('merge-worktree: complete — merged ', implBranch, ' into ', featureBranch) println
+    bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Complete — merged ', implBranch, ' into ', featureBranch)
   ]

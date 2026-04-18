@@ -72,7 +72,7 @@ Scheduler subclass: Object
     ].
     claimed isNil ifTrue: [^self].  "Lost the race"
 
-    ('Dispatching task: ', taskId, ' (role: ', role, ')') println.
+    bbs logEngine: 'info' component: 'Scheduler' scope: scope message: ('Dispatching task: ', taskId, ' (role: ', role, ')').
     bbs notify: ('Task dispatched: ', taskId, ' (role: ', role, ')') scope: scope severity: 'info'.
 
     "Spawn harness in a forked process"
@@ -92,22 +92,22 @@ Scheduler subclass: Object
           "workdir overrides repo path (e.g. worktree within repo)"
           workdir isNil ifTrue: [
             harness workDir: repoPath.
-            ('  Repo: ', repoField, ' (', repoPath, ')') println
+            bbs logEngine: 'info' component: 'Scheduler' scope: scope message: ('Task ', taskId, ' repo: ', repoField, ' (', repoPath, ')')
           ]
         ]
       ] ifFalse: [
-        ('  WARNING: repo not registered: ', repoField) println
+        bbs logEngine: 'warn' component: 'Scheduler' scope: scope message: ('Task ', taskId, ': repo not registered: ', repoField)
       ]
     ].
 
     workdir notNil ifTrue: [
       harness workDir: workdir.
-      ('  Using workdir: ', workdir) println
+      bbs logEngine: 'info' component: 'Scheduler' scope: scope message: ('Task ', taskId, ' using workdir: ', workdir)
     ].
 
     [
       [harness run] on: Exception do: [:e |
-        ('Task failed: ', taskId, ' - ', e messageText) println.
+        bbs logEngine: 'error' component: 'Scheduler' scope: scope message: ('Task failed: ', taskId, ' - ', e messageText).
         bbs notify: ('Task failed: ', taskId, ' - ', e messageText) scope: scope severity: 'warn'.
         bbs emitEvent: scope
             identity: (Identity taskFailed: taskId)
@@ -184,12 +184,12 @@ Scheduler subclass: Object
     ].
 
     violations size > 0 ifTrue: [
-      ('SCOPE VIOLATION in task ', aTaskId, ': ', violations size printString, ' file(s) outside ', expectedDir) println.
-      violations do: [:v | ('  - ', v) println].
+      bbs logEngine: 'warn' component: 'Scheduler' scope: aScope message: ('SCOPE VIOLATION in task ', aTaskId, ': ', violations size printString, ' file(s) outside ', expectedDir).
+      violations do: [:v | bbs logEngine: 'warn' component: 'Scheduler' scope: aScope message: ('  violation: ', v)].
 
       "Revert out-of-scope changes"
       violations do: [:v |
-        ('  Reverting: ', v) println.
+        bbs logEngine: 'info' component: 'Scheduler' scope: aScope message: ('Reverting out-of-scope change: ', v).
         proc := ExternalProcess command: '/bin/sh'.
         shellArgs := Array new: 0.
         shellArgs := shellArgs copyWith: '-c'.
@@ -221,7 +221,7 @@ Scheduler subclass: Object
     evt notNil ifTrue: [^self].
 
     "No task-complete found — auto-emit with warning"
-    ('WARNING: task ', taskId, ' exited without task-complete event; auto-emitting') println.
+    bbs logEngine: 'warn' component: 'Scheduler' scope: scope message: ('Task ', taskId, ' exited without task-complete event; auto-emitting').
     bbs emitEvent: scope
         identity: 'task-complete:', taskId
         type: 'task-complete'

@@ -9,7 +9,7 @@ SpawnWorkflowAction subclass: WorkflowAction
 
     spawnConfig := transition at: 'spawn' ifAbsent: [nil].
     spawnConfig isNil ifTrue: [
-      ('spawn-workflow: missing spawn config on transition ', (transition at: 'id')) println.
+      bbs logEngine: 'warn' component: 'spawn-workflow' scope: (engine scopeForInstance: instanceId) message: ('Missing spawn config on transition ', (transition at: 'id'), ' (instance: ', instanceId, ')').
       ^self
     ].
 
@@ -45,6 +45,6 @@ SpawnWorkflowAction subclass: WorkflowAction
     signalPayload at: 'parent_transition' put: (transition at: 'id').
     bbs upsertSignal: instanceId identity: (Identity childSpawn: (transition at: 'id') child: childInstanceId) payload: signalPayload.
 
-    ('  Spawned child workflow: ', childInstanceId, ' from ', (transition at: 'id')) println.
+    bbs logEngine: 'info' component: 'spawn-workflow' scope: childScope message: ('Spawned child workflow: ', childInstanceId, ' from ', (transition at: 'id'), ' (parent: ', instanceId, ')').
     bbs notify: ('Spawned child workflow: ', childInstanceId) scope: childScope severity: 'info'
   ]

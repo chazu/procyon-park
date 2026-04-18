@@ -90,7 +90,7 @@ WorkflowEngine subclass: Object
       bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
     ].
 
-    ('Workflow instantiated: ', instanceId) println.
+    bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Workflow instantiated: ', instanceId).
     bbs notify: ('Workflow started: ', instanceId) scope: scope severity: 'info'.
     ^instanceId
   ]
@@ -179,7 +179,7 @@ WorkflowEngine subclass: Object
         cycleSignal := bbs rdp: 'signal' scope: scope identity: (Identity verdict: instanceId).
         cycleSignal notNil ifTrue: [
           (((cycleSignal at: 'payload') at: 'decision' ifAbsent: ['']) = 'fix') ifTrue: [
-            ('  Review cycle cap reached (', cycleCount printString, '/', maxCycles printString, ') — overriding verdict to exhausted') println.
+            bbs logEngine: 'warn' component: 'WorkflowEngine' scope: scope message: ('Review cycle cap reached (', cycleCount printString, '/', maxCycles printString, ') — overriding verdict to exhausted for ', instanceId).
             verdictPayload := Dictionary new.
             verdictPayload at: 'decision' put: 'exhausted'.
             verdictPayload at: 'reason' put: ('Review cycle cap exceeded (', cycleCount printString, ' reviews >= ', maxCycles printString, ')').
@@ -261,7 +261,7 @@ WorkflowEngine subclass: Object
         bbs update: 'token' scope: scope identity: tokIdentity do: [:p |
           p at: 'status' put: 'positive'
         ].
-        ('  Promoted waiting token: ', tokIdentity) println.
+        bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Promoted waiting token: ', tokIdentity).
         bbs notify: ('Token promoted: ', tokIdentity) scope: scope severity: 'info'
       ]
     ]
@@ -289,7 +289,7 @@ WorkflowEngine subclass: Object
     ].
 
     "Fire! Consume input tokens, produce output tokens"
-    ('  Firing transition: ', (transition at: 'id')) println.
+    bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Firing transition: ', (transition at: 'id'), ' in ', instanceId).
     bbs notify: ('Transition fired: ', (transition at: 'id'), ' in ', instanceId) scope: scope severity: 'info'.
 
     "Consume input tokens and track them"
@@ -319,7 +319,7 @@ WorkflowEngine subclass: Object
         [
           self executeAction: action transition: transition instance: instanceId params: params
         ] on: Exception do: [:e |
-          ('  Async action ', action, ' failed: ', e messageText) println.
+          bbs logEngine: 'error' component: 'WorkflowEngine' scope: scope message: ('Async action ', action, ' failed: ', e messageText, ' (instance: ', instanceId, ')').
           bbs notify: ('Async action ', action, ' failed: ', e messageText) scope: scope severity: 'urgent'.
           self failWorkflow: instanceId reason: ('Async action ', action, ' failed: ', e messageText)
         ]
@@ -328,7 +328,7 @@ WorkflowEngine subclass: Object
         [
           self executeAction: action transition: transition instance: instanceId params: params
         ] on: Exception do: [:e |
-          ('  Action ', action, ' failed: ', e messageText) println.
+          bbs logEngine: 'error' component: 'WorkflowEngine' scope: scope message: ('Action ', action, ' failed: ', e messageText, ' (instance: ', instanceId, ')').
           self failWorkflow: instanceId reason: ('Action ', action, ' failed: ', e messageText).
           ^consumedTokens
         ].
@@ -560,7 +560,7 @@ WorkflowEngine subclass: Object
     | scope |
     scope := self scopeForInstance: instanceId.
 
-    ('Workflow FAILED: ', instanceId, ' — ', reason) println.
+    bbs logEngine: 'error' component: 'WorkflowEngine' scope: scope message: ('Workflow FAILED: ', instanceId, ' — ', reason).
 
     "Atomically update workflow status to failed"
     bbs update: 'workflow' scope: scope identity: instanceId do: [:p |
@@ -577,7 +577,7 @@ WorkflowEngine subclass: Object
 
     "Preserve worktree on failure — contents may hold uncommitted work the
      operator needs to recover. Clean up manually with `pp worktree clean`."
-    ('  Preserving worktree for recovery: ~/.pp/worktrees/', instanceId) println
+    bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Preserving worktree for recovery: ~/.pp/worktrees/', instanceId)
   ]
 
   method: completeWorkflow: wf [
@@ -586,7 +586,7 @@ WorkflowEngine subclass: Object
     instanceId := wf at: 'identity'.
     scope := wf at: 'scope'.
 
-    ('Workflow complete: ', instanceId) println.
+    bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Workflow complete: ', instanceId).
 
     "Atomically update workflow status to completed"
     bbs update: 'workflow' scope: scope identity: instanceId do: [:p |
@@ -715,7 +715,7 @@ WorkflowEngine subclass: Object
             childPayload := childWf at: 'payload'.
             childStatus := childPayload at: 'status' ifAbsent: ['unknown'].
             (childStatus = 'completed' or: [childStatus = 'cancelled' or: [childStatus = 'failed']]) ifFalse: [
-              ('  Cascading cancel to child: ', childInstance) println.
+              bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Cascading cancel to child: ', childInstance, ' (parent: ', instanceId, ')').
               cancelledCount := cancelledCount + (self cancelWorkflow: childInstance scope: childScope)
             ]
           ]
@@ -730,7 +730,7 @@ WorkflowEngine subclass: Object
     "Clean up worktree directory"
     self cleanupWorktree: instanceId.
 
-    ('Workflow cancelled: ', instanceId, ' (', cancelledCount printString, ' tasks cancelled)') println.
+    bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Workflow cancelled: ', instanceId, ' (', cancelledCount printString, ' tasks cancelled)').
     ^cancelledCount
   ]
 
@@ -742,6 +742,6 @@ WorkflowEngine subclass: Object
     worktreeDir := home, '/.pp/worktrees/', instanceId.
     [Shell run: 'rm -rf "', worktreeDir, '"']
       on: Exception do: [:e |
-        ('  Warning: could not clean up worktree: ', e messageText) println
+        bbs logEngine: 'warn' component: 'WorkflowEngine' scope: 'system' message: ('Could not clean up worktree for ', instanceId, ': ', e messageText)
       ]
   ]

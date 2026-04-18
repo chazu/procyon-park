@@ -433,6 +433,34 @@ BBS subclass: Object
     File appendToFile: historyPath contents: jsonLine, (Character lf asString)
   ]
 
+  method: logEngine: level component: component scope: aScope message: message [
+    "Append a structured engine log entry to the history log.
+     Shares the same JSONL shape as appendHistory: entries so the `pp history`
+     filters keep working; an extra 'msg' field carries the human-readable text.
+     Uses op='log', category='engine', identity=component, modality=level."
+    | entry jsonLine scopeStr compStr levelStr msgStr |
+    self rotateHistoryIfNeeded.
+    scopeStr := aScope.
+    scopeStr isNil ifTrue: [scopeStr := ''].
+    compStr := component.
+    compStr isNil ifTrue: [compStr := ''].
+    levelStr := level.
+    levelStr isNil ifTrue: [levelStr := 'info'].
+    msgStr := message.
+    msgStr isNil ifTrue: [msgStr := ''].
+    entry := Dictionary new.
+    entry at: 'ts' put: DateTime now epochSeconds.
+    entry at: 'op' put: 'log'.
+    entry at: 'id' put: 0.
+    entry at: 'category' put: 'engine'.
+    entry at: 'scope' put: scopeStr.
+    entry at: 'identity' put: compStr.
+    entry at: 'modality' put: levelStr.
+    entry at: 'msg' put: msgStr.
+    jsonLine := Json encode: entry.
+    File appendToFile: historyPath contents: jsonLine, (Character lf asString)
+  ]
+
   method: rotateHistoryIfNeeded [
     "Rotate history.jsonl when it exceeds 10MB. Keeps one backup (.1)."
     | sizeStr size |

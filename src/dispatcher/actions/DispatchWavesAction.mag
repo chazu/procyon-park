@@ -47,7 +47,7 @@ DispatchWavesAction subclass: WorkflowAction
             failReason := 'work item ''', epicId, ''' lists ', children size printString, ' children but none could be resolved in scope ''', scope, ''' — children may have been deleted or live in a different scope.'
           ] ifFalse: [
             subtasks := subtasksBuf asArray.
-            ('dispatch-waves: loaded ', subtasks size printString, ' subtasks from work item ', epicId) println
+            bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: ('Loaded ', subtasks size printString, ' subtasks from work item ', epicId)
           ]
         ]
       ]
@@ -76,7 +76,7 @@ DispatchWavesAction subclass: WorkflowAction
       failReason isNil ifTrue: [
         failReason := 'dispatch-waves: no subtasks found (no work item children or plan decision)'
       ].
-      ('dispatch-waves: ', failReason) println.
+      bbs logEngine: 'error' component: 'dispatch-waves' scope: scope message: failReason.
       bbs notify: ('dispatch-waves precondition failed: ', failReason) scope: scope severity: 'urgent'.
       engine failWorkflow: instanceId reason: failReason.
       ^self
@@ -110,19 +110,19 @@ DispatchWavesAction subclass: WorkflowAction
     (branchCheck = 'missing') ifTrue: [
       [
         GitOps createFeatureBranch: featureBranch in: repoPath.
-        ('  dispatch-waves: created shared branch: ', featureBranch) println.
+        bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: ('Created shared branch: ', featureBranch).
         "Restore main so repo is not left on the feature branch"
         [GitOps checkoutBranch: 'main' in: repoPath]
           on: Exception do: [:e |
-            ('  dispatch-waves: checkout main warning: ', e messageText) println
+            bbs logEngine: 'warn' component: 'dispatch-waves' scope: scope message: ('Checkout main warning: ', e messageText)
           ]
       ] on: Exception do: [:e |
-        ('  dispatch-waves: shared branch creation failed: ', e messageText) println.
+        bbs logEngine: 'error' component: 'dispatch-waves' scope: scope message: ('Shared branch creation failed: ', e messageText).
         engine failWorkflow: instanceId reason: 'dispatch-waves: could not create shared branch — ', e messageText.
         ^self
       ]
     ] ifFalse: [
-      ('  dispatch-waves: reusing existing branch: ', featureBranch) println
+      bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: ('Reusing existing branch: ', featureBranch)
     ].
 
     "Thread parent_branch into params for child workflows"
@@ -149,11 +149,11 @@ DispatchWavesAction subclass: WorkflowAction
     [
       self dispatchWave: 1 subtasks: subtasks instance: instanceId scope: scope params: params.
 
-      ('  dispatch-waves: ', subtasks size printString, ' subtasks across ', maxWave printString, ' waves. Wave 1 dispatched.') println.
+      bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: (subtasks size printString, ' subtasks across ', maxWave printString, ' waves. Wave 1 dispatched.').
       bbs notify: ('Wave dispatch started: ', subtasks size printString, ' subtasks, ', maxWave printString, ' waves')
         scope: scope severity: 'info'
     ] on: Exception do: [:e |
-      ('  dispatch-waves: FAILED dispatching wave 1: ', e messageText) println.
+      bbs logEngine: 'error' component: 'dispatch-waves' scope: scope message: ('FAILED dispatching wave 1: ', e messageText).
       bbs notify: ('dispatch-waves failed: ', e messageText) scope: scope severity: 'urgent'.
       engine failWorkflow: instanceId reason: 'dispatch-waves: wave 1 failed — ', e messageText
     ]
@@ -168,7 +168,7 @@ DispatchWavesAction subclass: WorkflowAction
     waveSubtasks := subtasks select: [:st | (st at: 'wave' ifAbsent: [1]) = waveNum].
     waveChildIdsBuf := GrowableArray new.
 
-    ('  Dispatching wave ', waveNum printString, ': ', waveSubtasks size printString, ' tasks') println.
+    bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: ('Dispatching wave ', waveNum printString, ': ', waveSubtasks size printString, ' tasks (', instanceId, ')').
 
     "Group by batch tag — unbatched tasks get dispatched individually"
     batchGroups := Dictionary new.
@@ -198,7 +198,7 @@ DispatchWavesAction subclass: WorkflowAction
         signalPayload at: 'subtask_identity' put: identity.
         bbs upsertSignal: instanceId identity: (Identity waveChild: waveNum child: childId) payload: signalPayload.
 
-        ('    Dispatched: ', identity, ' → ', childId) println
+        bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: ('Dispatched: ', identity, ' → ', childId)
       ] ifFalse: [
         "Batched — collect for grouped dispatch"
         batchList := batchGroups at: batchKey ifAbsent: [nil].
@@ -239,7 +239,7 @@ DispatchWavesAction subclass: WorkflowAction
       signalPayload at: 'subtask_identity' put: 'batch:', key.
       bbs upsertSignal: instanceId identity: (Identity waveChild: waveNum child: childId) payload: signalPayload.
 
-      ('    Dispatched batch [', key, '] (', tasks size printString, ' tasks) → ', childId) println
+      bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: ('Dispatched batch [', key, '] (', tasks size printString, ' tasks) → ', childId)
     ].
 
     "Write wave status signal"
@@ -287,7 +287,7 @@ DispatchWavesAction subclass: WorkflowAction
 
     allDone ifFalse: [^nil].
 
-    ('  Wave ', currentWave printString, ' complete (', childIds size printString, ' workflows)') println.
+    bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: ('Wave ', currentWave printString, ' complete (', childIds size printString, ' workflows) for ', instanceId).
     bbs notify: ('Wave ', currentWave printString, ' of ', maxWave printString, ' complete') scope: scope severity: 'info'.
 
     "If there are more waves, dispatch the next one"
@@ -302,7 +302,7 @@ DispatchWavesAction subclass: WorkflowAction
     ].
 
     "All waves complete — return truthy to trigger token promotion"
-    ('  All ', maxWave printString, ' waves complete for ', instanceId) println.
+    bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: ('All ', maxWave printString, ' waves complete for ', instanceId).
     bbs notify: ('All waves complete for ', instanceId) scope: scope severity: 'info'.
     ^waveDispatch  "Return the signal as a truthy value"
   ]
