@@ -1,5 +1,18 @@
 Procyon Park orchestration interface. Use this when the user wants to interact with the PP agent orchestration system — managing work items, dispatching workflows, checking status, or coordinating agents.
 
+## Common Questions → Commands
+
+When the user asks...                        | Run this
+---------------------------------------------|--------------------------------------------
+"What issues/tasks/work are tracked?"         | `pp workitem list`
+"What's running?"                             | `pp workflow status`
+"What workflow templates exist?"              | `pp read template system`
+"What happened recently?"                     | `pp log --no-follow --since 3600`
+"What did agents find?"                       | `pp read observation default`
+"What signals/verdicts are pending?"          | `pp read signal default`
+
+**Terminology note:** PP is the issue tracker — "issues" means work items (`pp workitem`), not GitHub issues. "Workflows" can mean running instances (`pp workflow status`) or template definitions (`pp read template system`) — ask the user which if ambiguous.
+
 ## Setup
 
 Check if the server is running:
@@ -207,6 +220,34 @@ pp log --no-follow --since 300
 ### Research: send a scout
 ```bash
 pp workflow scout-mission --param description="Survey error handling patterns in the codebase" --repo my-repo
+```
+
+## Rebuilding & Restarting
+
+After modifying PP source code (`.mag` files in `src/`), rebuild and restart:
+```bash
+rm -f pp && mag build                          # clean + rebuild (mag caches aggressively)
+pkill -f './pp serve'; sleep 1; ./pp serve &disown   # restart server
+pp status                                      # verify it's back
+```
+
+## Key Source Files
+
+| File | What it does |
+|------|-------------|
+| `src/api/Server.mag` | HTTP API, routes, SSE endpoints |
+| `src/api/DashboardSSE.mag` | Web dashboard SSE rendering (workflow cards, notifications) |
+| `static/dashboard.html` | Dashboard HTML/CSS/JS |
+| `src/dispatcher/WorkflowEngine.mag` | Workflow instantiation, Petri net execution |
+| `src/dispatcher/actions/` | Built-in transition actions (merge-worktree, notify-head, etc.) |
+| `src/cli/` | `pp` CLI command implementations |
+| `workflows/` | CUE workflow template definitions |
+
+## Data Model Notes
+
+Workflow tuples store params nested — `payload.params.description`, NOT `payload.description`. When reading workflow metadata from the tuplespace, access the description like:
+```
+(payload at: 'params' ifAbsent: [Dictionary new]) at: 'description'
 ```
 
 ## Environment

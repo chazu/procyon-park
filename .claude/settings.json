@@ -1,9 +1,26 @@
 {
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "nous guide observations \u0026\u0026 echo \u0026\u0026 nous guide scope"
+          }
+        ]
+      }
+    ]
+  },
   "lsp": {
     "maggie": {
+      "args": [
+        "lsp"
+      ],
       "command": "mag",
-      "args": ["lsp"],
-      "filePatterns": ["*.mag"]
+      "filePatterns": [
+        "*.mag"
+      ]
     }
   }
 }
