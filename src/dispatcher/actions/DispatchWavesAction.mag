@@ -8,7 +8,7 @@ DispatchWavesAction subclass: WorkflowAction
      2. A plan decision's subtasks array (legacy fallback)
      Groups by wave, dispatches wave 1 immediately."
 
-    | scope subtasks maxWave wavePayload w epicId epicItem children childItems childItem childPayload decisions plan planPayload st subtasksBuf repoName repoConfig repoPath featureBranch worktreePayload branchCheck failReason epicTitle |
+    | scope subtasks maxWave wavePayload w epicId epicItem childTuples childPayload decisions plan planPayload st subtasksBuf repoName repoConfig repoPath featureBranch worktreePayload branchCheck failReason epicTitle |
 
     scope := engine scopeForInstance: instanceId.
     subtasks := nil.
@@ -21,34 +21,29 @@ DispatchWavesAction subclass: WorkflowAction
       epicItem isNil ifTrue: [
         failReason := 'work item ''', epicId, ''' not found in scope ''', scope, ''' — cannot dispatch waves. Create the work item first (e.g. `pp workitem add`) or check the scope.'
       ] ifFalse: [
-        children := (epicItem at: 'payload') at: 'children' ifAbsent: [#()].
-        children isEmpty ifTrue: [
+        "Derive children by scanning workitems and filtering on payload.parent = epicId.
+         Single source of truth is child.parent; the legacy children[] array is ignored."
+        childTuples := bbs scanChildrenOf: epicId scope: scope.
+        childTuples isEmpty ifTrue: [
           epicTitle := (epicItem at: 'payload') at: 'title' ifAbsent: [epicId].
-          failReason := 'work item ''', epicId, ''' (', epicTitle, ') has no children — cannot dispatch waves on an empty epic. Add subtasks first (e.g. `pp workitem add-child ', epicId, ' <child-id>`) or plan the epic (e.g. `pp workitem plan ', epicId, '`) before running full-pipeline.'
+          failReason := 'work item ''', epicId, ''' (', epicTitle, ') has no children — cannot dispatch waves on an empty epic. Add child work items (e.g. `pp workitem create <id> --parent ', epicId, '`) or plan the epic (e.g. `pp workitem plan ', epicId, '`) before running full-pipeline.'
         ] ifFalse: [
-          "Build subtasks array from children work items"
+          "Build subtasks array from child work items (already ordered by wave/identity)."
           subtasksBuf := GrowableArray new.
-          children do: [:cid |
-            childItem := bbs findInIndex: 'workitem' scope: scope identity: cid.
-            childItem notNil ifTrue: [
-              childPayload := childItem at: 'payload'.
-              st := Dictionary new.
-              st at: 'identity' put: (childItem at: 'identity').
-              st at: 'description' put: (childPayload at: 'description' ifAbsent: [childPayload at: 'title' ifAbsent: ['']]).
-              st at: 'wave' put: (childPayload at: 'wave' ifAbsent: [1]).
-              st at: 'template' put: (childPayload at: 'template' ifAbsent: ['story']).
-              st at: 'repo' put: (childPayload at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]]).
-              st at: 'batch' put: (childPayload at: 'batch' ifAbsent: [nil]).
-              st at: 'role' put: 'implementer'.
-              subtasksBuf add: st
-            ]
+          childTuples do: [:childItem |
+            childPayload := childItem at: 'payload'.
+            st := Dictionary new.
+            st at: 'identity' put: (childItem at: 'identity').
+            st at: 'description' put: (childPayload at: 'description' ifAbsent: [childPayload at: 'title' ifAbsent: ['']]).
+            st at: 'wave' put: (childPayload at: 'wave' ifAbsent: [1]).
+            st at: 'template' put: (childPayload at: 'template' ifAbsent: ['story']).
+            st at: 'repo' put: (childPayload at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]]).
+            st at: 'batch' put: (childPayload at: 'batch' ifAbsent: [nil]).
+            st at: 'role' put: 'implementer'.
+            subtasksBuf add: st
           ].
-          subtasksBuf isEmpty ifTrue: [
-            failReason := 'work item ''', epicId, ''' lists ', children size printString, ' children but none could be resolved in scope ''', scope, ''' — children may have been deleted or live in a different scope.'
-          ] ifFalse: [
-            subtasks := subtasksBuf asArray.
-            bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: ('Loaded ', subtasks size printString, ' subtasks from work item ', epicId)
-          ]
+          subtasks := subtasksBuf asArray.
+          bbs logEngine: 'info' component: 'dispatch-waves' scope: scope message: ('Loaded ', subtasks size printString, ' subtasks from work item ', epicId)
         ]
       ]
     ].

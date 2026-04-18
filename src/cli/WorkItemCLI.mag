@@ -85,7 +85,6 @@ WorkItemCLI subclass: Object
     payload at: 'status' put: status.
     payload at: 'type' put: type.
     payload at: 'parent' put: parent.
-    payload at: 'children' put: (Array new: 0).
     repo notNil ifTrue: [payload at: 'repo' put: repo].
     payload at: 'template' put: template.
     batch notNil ifTrue: [payload at: 'batch' put: batch].
@@ -113,12 +112,9 @@ WorkItemCLI subclass: Object
     body at: 'payload' put: payload.
     body at: 'pinned' put: true.
 
-    self post: '/api/workitem/create' body: body.
-
-    "If parent specified, add this identity to parent's children"
-    parent notNil ifTrue: [
-      self addChildToParent: identity parent: parent
-    ]
+    "Single POST — payload.parent on the child is the sole source of truth for the
+     parent/child relationship. No add-child follow-up is needed."
+    self post: '/api/workitem/create' body: body
   ]
 
   method: cmdCreateFrom: args [
@@ -266,7 +262,6 @@ WorkItemCLI subclass: Object
     payload at: 'status' put: status.
     payload at: 'type' put: type.
     payload at: 'parent' put: parent.
-    payload at: 'children' put: (Array new: 0).
     repoField notNil ifTrue: [payload at: 'repo' put: repoField].
     payload at: 'template' put: template.
     batch notNil ifTrue: [payload at: 'batch' put: batch].
@@ -289,11 +284,8 @@ WorkItemCLI subclass: Object
     body at: 'payload' put: payload.
     body at: 'pinned' put: true.
 
+    "Single POST — child.parent is the sole source of truth."
     self post: '/api/workitem/create' body: body.
-
-    parent notNil ifTrue: [
-      self addChildToParent: identity parent: parent
-    ].
 
     ^identity
   ]
@@ -317,6 +309,7 @@ WorkItemCLI subclass: Object
     ].
 
     [
+      | childCount |
       result := Json decode: response.
       tuples := result at: 'tuples' ifAbsent: [#()].
       item := nil.
@@ -324,6 +317,12 @@ WorkItemCLI subclass: Object
       item isNil ifTrue: ['Not found.' println. ^self].
 
       payload := item at: 'payload'.
+      "Derive child count from the same scan: a child is any tuple whose
+       payload.parent equals this identity. The legacy children[] field
+       is no longer trusted."
+      childCount := (tuples select: [:t |
+        ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil]) = identity
+      ]) size.
       ('Identity:    ', identity) println.
       ('Type:        ', (payload at: 'type' ifAbsent: ['?'])) println.
       ('Status:      ', (payload at: 'status' ifAbsent: ['?'])) println.
@@ -334,7 +333,7 @@ WorkItemCLI subclass: Object
       estimate := payload at: 'estimate' ifAbsent: [nil].
       estimate notNil ifTrue: [('Estimate:    ', estimate) println].
       ('Parent:      ', (payload at: 'parent' ifAbsent: ['(none)']) printString) println.
-      ('Children:    ', (payload at: 'children' ifAbsent: [#()]) size printString) println.
+      ('Children:    ', childCount printString) println.
       ('Depends on:  ', (payload at: 'depends_on' ifAbsent: [#()]) printString) println.
       ('Labels:      ', (payload at: 'labels' ifAbsent: [#()]) printString) println.
       '' println.
@@ -397,8 +396,13 @@ WorkItemCLI subclass: Object
     ].
 
     [
+      | allTuples |
       result := Json decode: response.
       tuples := result at: 'tuples' ifAbsent: [#()].
+      "Keep the full, unfiltered list so child counts reflect reality
+       regardless of --parent/--status filters. Children are derived from
+       payload.parent (single source of truth) — no children[] read."
+      allTuples := tuples.
 
       "Apply filters"
       filterStatus notNil ifTrue: [
@@ -423,12 +427,16 @@ WorkItemCLI subclass: Object
       ].
 
       tuples do: [:t |
+        | tid |
         payload := t at: 'payload'.
         typeStr := payload at: 'type' ifAbsent: ['?'].
         statusStr := payload at: 'status' ifAbsent: ['?'].
         titleStr := payload at: 'title' ifAbsent: [''].
-        childCount := (payload at: 'children' ifAbsent: [#()]) size.
-        ((t at: 'identity'), '  [', typeStr, '] [', statusStr, ']  ', titleStr) print.
+        tid := t at: 'identity'.
+        childCount := (allTuples select: [:x |
+          ((x at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil]) = tid
+        ]) size.
+        (tid, '  [', typeStr, '] [', statusStr, ']  ', titleStr) print.
         childCount > 0 ifTrue: [(' (', childCount printString, ' children)') print].
         '' println
       ]
@@ -639,7 +647,7 @@ WorkItemCLI subclass: Object
      Bulk-update wave numbers on stories under an epic. Accepts either an
      inline mapping as the second positional arg, or --file pointing to a
      YAML/JSON/CUE file whose top-level is a map of story-id -> wave-number."
-    | epicId repo file inline dryRunFlag dryRun mapping response result tuples epicItem childrenList childSet
+    | epicId repo file inline dryRunFlag dryRun mapping response result tuples epicItem childParents
       updated skipped fields body |
     args size < 3 ifTrue: [
       'Usage: pp workitem rewave <epic-id> [story1=2,story2=3] [--file path] [--repo R] [--dry-run]' println.
@@ -691,14 +699,18 @@ WorkItemCLI subclass: Object
     epicItem isNil ifTrue: [
       ('Epic not found: ', epicId) println. ^self
     ].
-    childrenList := (epicItem at: 'payload') at: 'children' ifAbsent: [#()].
-    childSet := Set new.
-    childrenList do: [:c | childSet add: c].
+    "Derive parent-of map from the scanned tuples (single source of truth)."
+    childParents := Dictionary new.
+    tuples do: [:t |
+      | p |
+      p := (t at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil].
+      p notNil ifTrue: [childParents at: (t at: 'identity') put: p]
+    ].
 
     updated := 0.
     skipped := 0.
     mapping keysAndValuesDo: [:storyId :newWave |
-      (childSet includes: storyId) ifFalse: [
+      (childParents at: storyId ifAbsent: [nil]) = epicId ifFalse: [
         ('Skipping ', storyId, ': not a child of ', epicId) println.
         skipped := skipped + 1
       ] ifTrue: [
@@ -775,17 +787,6 @@ WorkItemCLI subclass: Object
 
   "--- Helpers ---"
 
-  method: addChildToParent: childIdentity parent: parentIdentity [
-    "Add a child identity to the parent work item's children array."
-    | body |
-    body := Dictionary new.
-    body at: 'identity' put: parentIdentity.
-    body at: 'scope' put: scope.
-    body at: 'child' put: childIdentity.
-
-    self post: '/api/workitem/add-child' body: body
-  ]
-
   method: post: path body: dict [
     "POST JSON and print response."
     | url jsonBody response result |
@@ -824,7 +825,9 @@ WorkItemCLI subclass: Object
         ('Template:    ', (payload at: 'template' ifAbsent: ['story'])) println.
         ('Wave:        ', (payload at: 'wave' ifAbsent: [1]) printString) println.
         ('Parent:      ', (payload at: 'parent' ifAbsent: ['(none)']) printString) println.
-        ('Children:    ', (payload at: 'children' ifAbsent: [#()]) size printString) println.
+        "Note: postAndFormat only has one tuple from /rdp. Child count is
+         intentionally omitted here — use `pp workitem show` (which scans)
+         or `pp workitem children` to enumerate children."
         ('Depends on:  ', (payload at: 'depends_on' ifAbsent: [#()]) printString) println.
         ('Labels:      ', (payload at: 'labels' ifAbsent: [#()]) printString) println.
         '' println.

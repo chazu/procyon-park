@@ -599,8 +599,14 @@ ApiServer subclass: Object
      - type (if present) must be one of WorkItemFields validTypes
      - status (if present) must be one of WorkItemFields validStatuses
      - template (if present) must exist in the template registry
-       (category 'template', scope 'system' or the work item's scope)"
+       (category 'template', scope 'system' or the work item's scope)
+     Also strips a legacy 'children' key from the payload if present — the
+     single source of truth is the child's parent field, and no inbound
+     caller is permitted to plant a denormalised children[] array."
     | type status template tmpl estimate |
+    (payload includesKey: 'children') ifTrue: [
+      payload removeKey: 'children' ifAbsent: [nil]
+    ].
     (payload includesKey: 'type') ifTrue: [
       type := payload at: 'type'.
       (WorkItemFields isValidType: type) ifFalse: [
@@ -653,29 +659,50 @@ ApiServer subclass: Object
     item := bbs findInIndex: 'workitem' scope: scope identity: identity.
     item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
 
+    "Guard: 'children' and 'parent' are not mutable via /api/workitem/update.
+     'children' is fully derived from child.parent and must never be written.
+     'parent' is immutable here — re-parenting would require a dedicated
+     endpoint that does not exist yet. Silently drop both keys from the
+     incoming fields dict so legacy clients degrade gracefully."
+    (fields includesKey: 'children') ifTrue: [
+      bbs logEngine: 'warn' component: 'workitem-update' scope: scope
+          message: ('dropped ''children'' from update fields for ', identity, ' — children are derived from child.parent').
+      fields removeKey: 'children' ifAbsent: [nil]
+    ].
+    (fields includesKey: 'parent') ifTrue: [
+      bbs logEngine: 'warn' component: 'workitem-update' scope: scope
+          message: ('dropped ''parent'' from update fields for ', identity, ' — re-parenting via update is not supported').
+      fields removeKey: 'parent' ifAbsent: [nil]
+    ].
+
     "Merge fields into existing payload"
     payload := item at: 'payload'.
     newPayload := Dictionary new.
     payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
     fields keysAndValuesDo: [:k :v | newPayload at: k put: v].
+    "Also strip any legacy 'children' field from the stored payload itself
+     so rewrites of older tuples eliminate stale data opportunistically."
+    (newPayload includesKey: 'children') ifTrue: [
+      newPayload removeKey: 'children' ifAbsent: [nil]
+    ].
 
     "Atomically replace"
     bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload.
 
-    "Cascade status to children if requested"
+    "Cascade status to children if requested. Children are derived from
+     payload.parent — scan workitems in scope rather than trusting a
+     denormalised children[] field."
     (cascade and: [fields includesKey: 'status']) ifTrue: [
-      | children childItem childPayload newChildPayload |
-      children := newPayload at: 'children' ifAbsent: [#()].
-      children do: [:childId |
-        childItem := bbs findInIndex: 'workitem' scope: scope identity: childId.
-        childItem notNil ifTrue: [
-          childPayload := childItem at: 'payload'.
-          newChildPayload := Dictionary new.
-          childPayload keysAndValuesDo: [:k :v | newChildPayload at: k put: v].
-          newChildPayload at: 'status' put: (fields at: 'status').
-          newChildPayload at: 'updated_at' put: DateTime now epochSeconds.
-          bbs upsertPinned: 'workitem' scope: scope identity: childId payload: newChildPayload
-        ]
+      | children childPayload newChildPayload childId |
+      children := bbs scanChildrenOf: identity scope: scope.
+      children do: [:childItem |
+        childId := childItem at: 'identity'.
+        childPayload := childItem at: 'payload'.
+        newChildPayload := Dictionary new.
+        childPayload keysAndValuesDo: [:k :v | newChildPayload at: k put: v].
+        newChildPayload at: 'status' put: (fields at: 'status').
+        newChildPayload at: 'updated_at' put: DateTime now epochSeconds.
+        bbs upsertPinned: 'workitem' scope: scope identity: childId payload: newChildPayload
       ]
     ].
 
@@ -699,18 +726,14 @@ ApiServer subclass: Object
     parentItem isNil ifTrue: [^self].
     parentPayload := parentItem at: 'payload'.
     (parentPayload at: 'status' ifAbsent: ['']) = 'done' ifTrue: [^self].
-    children := parentPayload at: 'children' ifAbsent: [#()].
+    "Derive children by scanning workitems in scope — child.parent is the source of truth."
+    children := bbs scanChildrenOf: parentId scope: aScope.
     children isEmpty ifTrue: [^self].
     allDone := true.
-    children do: [:cId |
-      | child cStatus |
-      child := bbs findInIndex: 'workitem' scope: aScope identity: cId.
-      child isNil
-        ifTrue: [allDone := false]
-        ifFalse: [
-          cStatus := (child at: 'payload') at: 'status' ifAbsent: [''].
-          cStatus = 'done' ifFalse: [allDone := false]
-        ]
+    children do: [:child |
+      | cStatus |
+      cStatus := (child at: 'payload') at: 'status' ifAbsent: [''].
+      cStatus = 'done' ifFalse: [allDone := false]
     ].
     allDone ifFalse: [^self].
     newParentPayload := Dictionary new.
@@ -758,8 +781,13 @@ ApiServer subclass: Object
   ]
 
   method: handleWorkitemAddChild: req [
-    "POST /api/workitem/add-child — add a child identity to a parent's children array."
-    | body scope identity child item payload children newPayload |
+    "POST /api/workitem/add-child — DEPRECATED compat shim.
+     Parent-child linkage is now stored only on the child (payload.parent).
+     This endpoint no longer mutates any tuple. It verifies that the child
+     exists and that its parent matches the requested parent, then returns.
+     Plan removal in a follow-up; a deprecation log entry is emitted so
+     the few remaining callers are visible in history."
+    | body scope identity child parentItem childItem childParent |
     body := self parseBody: req.
     body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
 
@@ -769,24 +797,22 @@ ApiServer subclass: Object
     child := body at: 'child' ifAbsent: [nil].
     child isNil ifTrue: [^self errorResponse: 400 message: 'child required'].
 
-    item := bbs findInIndex: 'workitem' scope: scope identity: identity.
-    item isNil ifTrue: [^self errorResponse: 404 message: 'parent work item not found'].
+    bbs logEngine: 'warn' component: 'workitem-add-child'
+        scope: scope
+        message: ('/api/workitem/add-child is deprecated — set payload.parent on create/update instead. parent=', identity, ' child=', child).
 
-    payload := item at: 'payload'.
-    children := payload at: 'children' ifAbsent: [#()].
-    "Avoid duplicate children"
-    (children includes: child) ifFalse: [
-      children := children copyWith: child
+    parentItem := bbs findInIndex: 'workitem' scope: scope identity: identity.
+    parentItem isNil ifTrue: [^self errorResponse: 404 message: 'parent work item not found'].
+
+    childItem := bbs findInIndex: 'workitem' scope: scope identity: child.
+    childItem isNil ifTrue: [^self errorResponse: 404 message: 'child work item not found'].
+
+    childParent := (childItem at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil].
+    childParent = identity ifFalse: [
+      ^self errorResponse: 409 message: ('child ', child, ' has parent=', childParent printString, '; expected ', identity, '. Re-parent via /api/workitem/update is not supported; recreate the child.')
     ].
 
-    newPayload := Dictionary new.
-    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
-    newPayload at: 'children' put: children.
-    newPayload at: 'updated_at' put: DateTime now epochSeconds.
-
-    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload.
-
-    ^self okResponse: (self okWithCount: 'children' count: children size)
+    ^self okResponse: (self okWithIdentity: child)
   ]
 
   method: handleWorkitemRun: req [

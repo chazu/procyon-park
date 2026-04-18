@@ -638,18 +638,14 @@ WorkflowEngine subclass: Object
     parentItem isNil ifTrue: [^self].
     parentPayload := parentItem at: 'payload'.
     (parentPayload at: 'status' ifAbsent: ['']) = 'done' ifTrue: [^self].
-    children := parentPayload at: 'children' ifAbsent: [#()].
+    "Derive children by scanning workitems — child.parent is the source of truth."
+    children := bbs scanChildrenOf: parentId scope: scope.
     children isEmpty ifTrue: [^self].
     allDone := true.
-    children do: [:cId |
-      | child cStatus |
-      child := bbs findInIndex: 'workitem' scope: scope identity: cId.
-      child isNil
-        ifTrue: [allDone := false]
-        ifFalse: [
-          cStatus := (child at: 'payload') at: 'status' ifAbsent: [''].
-          cStatus = 'done' ifFalse: [allDone := false]
-        ]
+    children do: [:child |
+      | cStatus |
+      cStatus := (child at: 'payload') at: 'status' ifAbsent: [''].
+      cStatus = 'done' ifFalse: [allDone := false]
     ].
     allDone ifFalse: [^self].
     newParentPayload := Dictionary new.
