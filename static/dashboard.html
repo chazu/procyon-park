@@ -560,6 +560,105 @@
       color: var(--cream-hi);
       border-color: var(--terra);
     }
+
+    /* History Explorer */
+    .history-plate{
+      padding: 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--surface);
+      border-radius: 8px;
+    }
+    .history-filters{
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr)) auto auto;
+      gap: 6px;
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px dashed var(--surface);
+    }
+    .history-filters input,
+    .history-filters select{
+      background: var(--bg);
+      color: var(--cream-hi);
+      border: 1px solid var(--surface);
+      border-radius: 4px;
+      padding: 6px 8px;
+      font-family: var(--f-mono);
+      font-size: 11px;
+      min-width: 0;
+    }
+    .history-filters input::placeholder{ color: var(--fog); }
+    .history-filters button{
+      background: var(--bg);
+      color: var(--cream-hi);
+      border: 1px solid var(--surface);
+      border-radius: 4px;
+      padding: 6px 12px;
+      font-family: var(--f-mono);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .history-filters button:hover{
+      background: var(--terra);
+      color: var(--cream-hi);
+      border-color: var(--terra);
+    }
+    .history-filters button.primary{
+      background: var(--cobalt);
+      border-color: var(--cobalt);
+      color: var(--cream-hi);
+    }
+    .history-filters button.primary:hover{
+      background: var(--sun);
+      border-color: var(--sun);
+      color: var(--bg);
+    }
+    .history-wrap{
+      max-height: 70vh;
+      overflow-y: auto;
+    }
+    .history-table{
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--f-mono);
+      font-size: 11px;
+    }
+    .history-table th{
+      text-align: left;
+      color: var(--cream-dim);
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--surface);
+      background: var(--bg-2);
+      position: sticky;
+      top: 0;
+    }
+    .history-table td{
+      padding: 5px 10px;
+      border-bottom: 1px solid var(--surface);
+      color: var(--cream-hi);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 280px;
+    }
+    .history-table tr:hover td{ background: var(--bg); }
+    .history-table .hist-op-out    { color: var(--moss); }
+    .history-table .hist-op-inp    { color: var(--sun); }
+    .history-table .hist-op-rd     { color: var(--cobalt); }
+    .history-table .hist-op-rdp    { color: var(--cobalt); }
+    .history-table .hist-op-expire { color: var(--cream-dim); }
+    .history-table .hist-op-pin    { color: var(--terra); }
+    .history-table .hist-op-unpin  { color: var(--terra); }
+    .history-table .hist-op-upsert { color: var(--cream-hi); }
+    .history-status{
+      color: var(--cream-dim);
+      font-size: 11px;
+      font-family: var(--f-mono);
+      margin-top: 8px;
+    }
     li.sev-info   { border-left-color: var(--cobalt); }
     li.sev-warn   { border-left-color: var(--sun);   color: var(--cream); }
     li.sev-urgent { border-left-color: var(--terra); color: var(--terra); font-weight: 500; }
@@ -640,6 +739,7 @@
   <nav class="tabbar" role="tablist">
     <button class="tab is-active" role="tab" data-tab="overview" aria-selected="true">Overview</button>
     <button class="tab" role="tab" data-tab="board" aria-selected="false">Board</button>
+    <button class="tab" role="tab" data-tab="history" aria-selected="false">History</button>
     <div class="tabbar-tail" aria-hidden="true"></div>
   </nav>
 
@@ -706,6 +806,61 @@
       </div>
     </section>
 
+    <section class="tab-view" id="view-history" role="tabpanel">
+      <div class="history-plate">
+        <h2>History Explorer</h2>
+        <div class="history-filters">
+          <select id="hist-op" title="Op">
+            <option value="">any op</option>
+            <option value="out">out</option>
+            <option value="inp">inp</option>
+            <option value="rd">rd</option>
+            <option value="rdp">rdp</option>
+            <option value="expire">expire</option>
+            <option value="pin">pin</option>
+            <option value="unpin">unpin</option>
+            <option value="upsert">upsert</option>
+          </select>
+          <select id="hist-category" title="Category">
+            <option value="">any category</option>
+            <option value="task">task</option>
+            <option value="workflow">workflow</option>
+            <option value="event">event</option>
+            <option value="notification">notification</option>
+            <option value="observation">observation</option>
+            <option value="decision">decision</option>
+            <option value="signal">signal</option>
+            <option value="token">token</option>
+            <option value="workitem">workitem</option>
+            <option value="template">template</option>
+          </select>
+          <input type="text" id="hist-scope" placeholder="scope" />
+          <input type="text" id="hist-identity" placeholder="identity" />
+          <input type="number" id="hist-since" placeholder="since (epoch s)" />
+          <input type="number" id="hist-limit" placeholder="limit" value="100" />
+          <button type="button" id="hist-refresh" class="primary">Query</button>
+          <button type="button" id="hist-clear">Clear</button>
+        </div>
+        <div class="history-wrap">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Op</th>
+                <th>Category</th>
+                <th>Scope</th>
+                <th>Identity</th>
+              </tr>
+            </thead>
+            <tbody id="hist-tbody">
+              <tr><td colspan="5" class="empty-state">Click Query to load history</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="history-status" id="hist-status"></div>
+      </div>
+    </section>
+
   </div>
 
   <script>
@@ -722,7 +877,7 @@
     }
     tabs.forEach(t => t.addEventListener('click', () => activateTab(t.dataset.tab)));
     const startTab = (location.hash || '').replace('#','');
-    if (startTab === 'board' || startTab === 'overview') activateTab(startTab);
+    if (startTab === 'board' || startTab === 'overview' || startTab === 'history') activateTab(startTab);
 
     const es   = new EventSource('/api/sse/dashboard');
     const conn = document.getElementById('conn');
@@ -851,6 +1006,92 @@
       boardRepo.value = '';
       boardText.value = '';
       applyBoardFilter();
+    });
+
+    // --- History Explorer ---
+    const histOp       = document.getElementById('hist-op');
+    const histCategory = document.getElementById('hist-category');
+    const histScopeEl  = document.getElementById('hist-scope');
+    const histIdentity = document.getElementById('hist-identity');
+    const histSince    = document.getElementById('hist-since');
+    const histLimit    = document.getElementById('hist-limit');
+    const histRefresh  = document.getElementById('hist-refresh');
+    const histClear    = document.getElementById('hist-clear');
+    const histTbody    = document.getElementById('hist-tbody');
+    const histStatus   = document.getElementById('hist-status');
+
+    function histFmtTime(ts) {
+      if (!ts || typeof ts !== 'number') return String(ts || '');
+      const d = new Date(ts * 1000);
+      if (isNaN(d.getTime())) return String(ts);
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ` +
+             `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+    function histEscape(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+    async function histQuery() {
+      const params = new URLSearchParams();
+      const lim = histLimit.value.trim() || '100';
+      params.set('limit', lim);
+      if (histOp.value)              params.set('op',       histOp.value);
+      if (histCategory.value)        params.set('category', histCategory.value);
+      if (histScopeEl.value.trim())  params.set('scope',    histScopeEl.value.trim());
+      if (histIdentity.value.trim()) params.set('identity', histIdentity.value.trim());
+      if (histSince.value)           params.set('since',    histSince.value);
+
+      histStatus.textContent = 'Loading…';
+      try {
+        const resp = await fetch('/api/history?' + params.toString());
+        if (!resp.ok) { histStatus.textContent = 'Error: HTTP ' + resp.status; return; }
+        const data = await resp.json();
+        const entries = data.entries || [];
+        histRender(entries);
+        histStatus.textContent = entries.length + ' entries' +
+          (entries.length >= parseInt(lim, 10) ? ' (limit reached — increase limit to see more)' : '');
+      } catch (err) {
+        histStatus.textContent = 'Error: ' + err.message;
+      }
+    }
+    function histRender(entries) {
+      if (!entries.length) {
+        histTbody.innerHTML = '<tr><td colspan="5" class="empty-state">No entries match these filters</td></tr>';
+        return;
+      }
+      const rows = [];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i];
+        const op = e.op || '';
+        rows.push(
+          '<tr>' +
+            '<td>' + histEscape(histFmtTime(e.ts)) + '</td>' +
+            '<td class="hist-op-' + histEscape(op) + '">' + histEscape(op) + '</td>' +
+            '<td>' + histEscape(e.category || '') + '</td>' +
+            '<td>' + histEscape(e.scope || '') + '</td>' +
+            '<td title="' + histEscape(e.identity || '') + '">' + histEscape(e.identity || '') + '</td>' +
+          '</tr>'
+        );
+      }
+      histTbody.innerHTML = rows.join('');
+    }
+    histRefresh.addEventListener('click', histQuery);
+    histClear.addEventListener('click', () => {
+      histOp.value = '';
+      histCategory.value = '';
+      histScopeEl.value = '';
+      histIdentity.value = '';
+      histSince.value = '';
+      histLimit.value = '100';
+      histTbody.innerHTML = '<tr><td colspan="5" class="empty-state">Click Query to load history</td></tr>';
+      histStatus.textContent = '';
+    });
+    [histScopeEl, histIdentity, histSince, histLimit].forEach(el => {
+      el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') histQuery(); });
     });
   </script>
 </body>
