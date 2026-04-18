@@ -2109,7 +2109,6 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         (parent notNil and: [parent isEmpty not])
           ifTrue: [payload at: 'parent' put: parent]
           ifFalse: [payload at: 'parent' put: nil].
-        payload at: 'children' put: (Array new: 0).
         (repoArg notNil and: [repoArg isEmpty not]) ifTrue: [
           payload at: 'repo' put: repoArg
         ].
@@ -2136,17 +2135,9 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         body at: 'payload' put: payload.
         body at: 'pinned' put: true.
 
-        self postAndPrint: cfg path: '/api/workitem/create' body: body.
-
-        "Wire up parent->child relationship if --parent is set."
-        (parent notNil and: [parent isEmpty not]) ifTrue: [
-          | linkBody |
-          linkBody := Dictionary new.
-          linkBody at: 'identity' put: parent.
-          linkBody at: 'scope' put: theScope.
-          linkBody at: 'child' put: identity.
-          self postAndPrint: cfg path: '/api/workitem/add-child' body: linkBody
-        ]
+        "Single POST — child.parent is the sole source of truth for the
+         parent/child relationship. No add-child follow-up is needed."
+        self postAndPrint: cfg path: '/api/workitem/create' body: body
       ].
       exitCode
     ].
@@ -2575,7 +2566,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     "Apply a rewave mapping to stories under an epic. Verifies each story is
      a child of the epic (warning and skipping if not). Returns 0 on success,
      1 if any story was skipped or failed."
-    | items epicItem payload childrenList childSet updated skipped |
+    | items epicItem childParents updated skipped |
     items := self safeScan: 'workitem' cfg: cfg scope: aScope.
     epicItem := items detect: [:t | (t at: 'identity' ifAbsent: ['']) = epicId]
                       ifNone: [nil].
@@ -2583,15 +2574,18 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       ('Epic not found: ', epicId) println.
       ^1
     ].
-    payload := epicItem at: 'payload' ifAbsent: [Dictionary new].
-    childrenList := payload at: 'children' ifAbsent: [#()].
-    childSet := Set new.
-    childrenList do: [:c | childSet add: c].
+    "Derive parent-of map from the same scan (single source of truth)."
+    childParents := Dictionary new.
+    items do: [:t |
+      | p |
+      p := (t at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil].
+      p notNil ifTrue: [childParents at: (t at: 'identity') put: p]
+    ].
 
     updated := 0.
     skipped := 0.
     mapping keysAndValuesDo: [:storyId :newWave |
-      (childSet includes: storyId) ifFalse: [
+      (childParents at: storyId ifAbsent: [nil]) = epicId ifFalse: [
         ('Skipping ', storyId, ': not a child of ', epicId) println.
         skipped := skipped + 1
       ] ifTrue: [
@@ -2639,12 +2633,16 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
      stale persistent tuple reads). Render via Cli::Output dictText:keys:
      with an explicit key order so fields print Title / Type / Status /
      etc. deterministically — no more random reordering."
-    | items item payload dict keys comments |
+    | items item payload dict keys comments childCount |
     items := self safeScan: 'workitem' cfg: cfg scope: aScope.
     item := items detect: [:t | (t at: 'identity' ifAbsent: ['']) = anIdentity]
                   ifNone: [nil].
     item isNil ifTrue: ['Not found.' println. ^self].
     payload := item at: 'payload' ifAbsent: [Dictionary new].
+    "Derive child count from the scan — children are tuples whose parent = this identity."
+    childCount := (items select: [:t |
+      ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil]) = anIdentity
+    ]) size.
 
     dict := Dictionary new.
     dict at: 'Identity' put: anIdentity.
@@ -2655,7 +2653,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     dict at: 'Template' put: (payload at: 'template' ifAbsent: ['story']).
     dict at: 'Wave' put: (payload at: 'wave' ifAbsent: [1]) printString.
     dict at: 'Parent' put: (payload at: 'parent' ifAbsent: ['(none)']) printString.
-    dict at: 'Children' put: (payload at: 'children' ifAbsent: [#()]) size printString.
+    dict at: 'Children' put: childCount printString.
     dict at: 'Depends on' put: (payload at: 'depends_on' ifAbsent: [#()]) printString.
     dict at: 'Labels' put: (payload at: 'labels' ifAbsent: [#()]) printString.
     dict at: 'Description' put: (payload at: 'description' ifAbsent: ['']).
@@ -2716,11 +2714,17 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
 
     rows := Array new: 0.
     filtered do: [:t |
-      | row p childCount |
+      | row p childCount tid |
       p := t at: 'payload' ifAbsent: [Dictionary new].
-      childCount := (p at: 'children' ifAbsent: [#()]) size.
+      tid := t at: 'identity' ifAbsent: ['?'].
+      "Count children by scanning the full (pre-filter) list for tuples
+       whose parent matches. Filters may have narrowed `filtered`, but
+       `items` still holds the complete scan."
+      childCount := (items select: [:x |
+        ((x at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil]) = tid
+      ]) size.
       row := Dictionary new.
-      row at: 'id' put: (t at: 'identity' ifAbsent: ['?']).
+      row at: 'id' put: tid.
       row at: 'type' put: (p at: 'type' ifAbsent: ['?']).
       row at: 'status' put: (p at: 'status' ifAbsent: ['?']).
       row at: 'title' put: (p at: 'title' ifAbsent: ['']).

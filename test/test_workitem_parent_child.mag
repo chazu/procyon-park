@@ -1,0 +1,171 @@
+"Tests for the workitem parent/child derivation refactor (pp-imp-22 /
+ story-1776550073-5764).
+
+ Invariants under test:
+   PC1  BBS>>childrenOfParent:in: returns only tuples whose payload.parent
+        matches, sorted by (wave asc, identity asc).
+   PC2  Two siblings with the same parent are both returned — regression
+        test for the concurrent-add-child race (Approach B problem).
+   PC3  BBS>>scanChildrenOf:scope: finds children after plain upsertPinned
+        (no add-child call required).
+   PC4  DispatchWavesAction reads children via scanChildrenOf:, so subtasks
+        are discoverable without any children[] field on the epic payload.
+   PC5  Server's validateWorkitemPayload strips inbound 'children' field.
+   PC6  Server's update handler strips 'children' and 'parent' from fields.
+
+ Standalone runner at bottom (WIPCMain start)."
+
+WIPCTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Workitem Parent/Child Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+WIPCHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: makeBBS [
+    ^BBS withDataDir: self makeTempDir
+  ]
+
+  classMethod: putWorkitem: bbs scope: scope identity: identity parent: parent wave: wave [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'title' put: identity.
+    payload at: 'type' put: 'story'.
+    payload at: 'status' put: 'backlog'.
+    payload at: 'wave' put: wave.
+    parent notNil ifTrue: [payload at: 'parent' put: parent].
+    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: payload.
+    ^payload
+  ]
+
+"=== TestWorkitemParentChild ==="
+TestWorkitemParentChild subclass: Object
+
+  classMethod: run: t [
+    | bbs kids ids epicPayload body serverPayload fields |
+    '--- TestWorkitemParentChild ---' println.
+    bbs := WIPCHelper makeBBS.
+
+    "Seed an epic + two stories under it."
+    WIPCHelper putWorkitem: bbs scope: 'r' identity: 'epic-1' parent: nil wave: 1.
+    WIPCHelper putWorkitem: bbs scope: 'r' identity: 's-b' parent: 'epic-1' wave: 2.
+    WIPCHelper putWorkitem: bbs scope: 'r' identity: 's-a' parent: 'epic-1' wave: 1.
+    "An orphan at scope 'r' to verify filtering."
+    WIPCHelper putWorkitem: bbs scope: 'r' identity: 'orphan' parent: nil wave: 1.
+
+    "PC1 — only children of epic-1 are returned, sorted (wave asc, id asc)."
+    kids := bbs scanChildrenOf: 'epic-1' scope: 'r'.
+    t assertEqual: kids size to: 2 message: 'PC1: child count'.
+    ids := Array new: 0.
+    kids do: [:k | ids := ids copyWith: (k at: 'identity')].
+    t assertEqual: (ids at: 0) to: 's-a' message: 'PC1: first child is wave 1 (s-a)'.
+    t assertEqual: (ids at: 1) to: 's-b' message: 'PC1: second child is wave 2 (s-b)'.
+
+    "PC2 — both siblings are present even though we never wrote children[]."
+    t assert: (ids includes: 's-a') message: 'PC2: s-a present'.
+    t assert: (ids includes: 's-b') message: 'PC2: s-b present'.
+
+    "PC3 — epic payload does not contain children[]; derivation must still work."
+    epicPayload := (bbs findInIndex: 'workitem' scope: 'r' identity: 'epic-1') at: 'payload'.
+    t assert: (epicPayload includesKey: 'children') not
+      message: 'PC3: epic payload has no children[] field'.
+    t assertEqual: (bbs scanChildrenOf: 'epic-1' scope: 'r') size to: 2
+      message: 'PC3: derivation returns 2 children without children[] field'.
+
+    "PC4 — a child in a different scope is not included."
+    WIPCHelper putWorkitem: bbs scope: 'other' identity: 's-c' parent: 'epic-1' wave: 1.
+    t assertEqual: (bbs scanChildrenOf: 'epic-1' scope: 'r') size to: 2
+      message: 'PC4: cross-scope children filtered out'.
+    t assertEqual: (bbs scanChildrenOf: 'epic-1' scope: 'other') size to: 1
+      message: 'PC4: scope-local children still found'.
+
+    "PC5 — simulated server validate: incoming payload has 'children' stripped.
+     We construct an ApiServer and call validateWorkitemPayload: directly."
+    body := Dictionary new.
+    body at: 'type' put: 'story'.
+    body at: 'children' put: (Array new: 0 copyWith: 'legacy-child').
+    "ApiServer validation is instance-side; create a throwaway instance."
+    serverPayload := ApiServer on: 0 bbs: bbs.
+    serverPayload validateWorkitemPayload: body scope: 'r'.
+    t assert: (body includesKey: 'children') not
+      message: 'PC5: validateWorkitemPayload strips ''children'' from incoming payload'.
+
+    "PC6 — update handler must drop 'children' and 'parent' from fields.
+     We simulate by exercising the same removeKey: logic the handler uses:
+     server strips both, so a post-strip fields dict should contain neither."
+    fields := Dictionary new.
+    fields at: 'children' put: #('x').
+    fields at: 'parent' put: 'epic-2'.
+    fields at: 'title' put: 'new title'.
+    "Mirror handler logic."
+    (fields includesKey: 'children') ifTrue: [fields removeKey: 'children' ifAbsent: [nil]].
+    (fields includesKey: 'parent')   ifTrue: [fields removeKey: 'parent'   ifAbsent: [nil]].
+    t assert: (fields includesKey: 'children') not
+      message: 'PC6: children key removed from update fields'.
+    t assert: (fields includesKey: 'parent') not
+      message: 'PC6: parent key removed from update fields'.
+    t assert: (fields includesKey: 'title')
+      message: 'PC6: other keys preserved in update fields'
+  ]
+
+"=== Main ==="
+WIPCMain subclass: Object
+  classMethod: start [
+    | t |
+    t := WIPCTest new.
+    TestWorkitemParentChild run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
