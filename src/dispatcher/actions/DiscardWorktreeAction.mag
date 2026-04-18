@@ -18,7 +18,7 @@ DiscardWorktreeAction subclass: WorkflowAction
     "1. Read the worktree signal"
     info := bbs rdp: 'signal' scope: instanceId identity: 'worktree'.
     info isNil ifTrue: [
-      ('discard-worktree: no worktree signal — nothing to discard') println.
+      bbs logEngine: 'info' component: 'discard-worktree' scope: scope message: ('No worktree signal for ', instanceId, ' — nothing to discard').
       ^self
     ].
 
@@ -28,26 +28,26 @@ DiscardWorktreeAction subclass: WorkflowAction
     implBranch := payload at: 'branch'.
     worktreeDir := payload at: 'workdir'.
 
-    ('discard-worktree: discarding ', worktreeDir, ' (branch: ', implBranch, ') in ', repoPath) println.
+    bbs logEngine: 'info' component: 'discard-worktree' scope: scope message: ('Discarding ', worktreeDir, ' (branch: ', implBranch, ') in ', repoPath).
 
     "2. Make sure repo is not sitting on a branch we're about to delete"
     [GitOps checkoutBranch: 'main' in: repoPath]
       on: Exception do: [:e |
-        ('discard-worktree: checkout main warning: ', e messageText) println
+        bbs logEngine: 'warn' component: 'discard-worktree' scope: scope message: ('Checkout main warning: ', e messageText)
       ].
 
     "3. Remove the worktree directory"
     [
       GitOps removeWorktree: worktreeDir in: repoPath
     ] on: Exception do: [:e |
-      ('discard-worktree: removeWorktree warning: ', e messageText) println
+      bbs logEngine: 'warn' component: 'discard-worktree' scope: scope message: ('removeWorktree warning: ', e messageText)
     ].
 
     "4. Delete the impl branch (prototype code is discarded)"
     (implBranch isNil or: [implBranch isEmpty]) ifFalse: [
       [GitOps deleteBranch: implBranch in: repoPath]
         on: Exception do: [:e |
-          ('discard-worktree: deleteBranch impl warning: ', e messageText) println
+          bbs logEngine: 'warn' component: 'discard-worktree' scope: scope message: ('deleteBranch impl warning: ', e messageText)
         ]
     ].
 
@@ -57,7 +57,7 @@ DiscardWorktreeAction subclass: WorkflowAction
     (featureBranch notNil and: [featureBranch = ('feature/', instanceId)]) ifTrue: [
       [GitOps deleteBranch: featureBranch in: repoPath]
         on: Exception do: [:e |
-          ('discard-worktree: deleteBranch feature warning: ', e messageText) println
+          bbs logEngine: 'warn' component: 'discard-worktree' scope: scope message: ('deleteBranch feature warning: ', e messageText)
         ]
     ].
 
@@ -69,5 +69,5 @@ DiscardWorktreeAction subclass: WorkflowAction
     obsPayload at: 'implBranch' put: implBranch.
     bbs out: 'observation' scope: scope identity: 'spike-discarded' payload: obsPayload.
 
-    ('discard-worktree: complete — ', implBranch, ' discarded') println
+    bbs logEngine: 'info' component: 'discard-worktree' scope: scope message: ('Complete — ', implBranch, ' discarded')
   ]
