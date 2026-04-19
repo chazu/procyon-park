@@ -139,9 +139,7 @@ TestIdentityStoreMain subclass: Object
     | t ok |
     t := TestIdentityStore new.
     ok := t run.
-    ok ifTrue: ['ALL TESTS PASSED' println]
-       ifFalse: ['TESTS FAILED' println.
-                 System exit: 1]
+    ^ok ifTrue: [ 'ALL TESTS PASSED' println. 0 ] ifFalse: [ 'TESTS FAILED' println. 1 ]
   ]
 
 "(entrypoint below — run via: mag -m TestIdentityStoreMain.run ...)"

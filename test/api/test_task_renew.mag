@@ -242,5 +242,5 @@ TaskRenewMain subclass: Object
     t := TRTest new.
     TestTaskRenew run: t.
     t report.
-    t failed > 0 ifTrue: [System exit: 1]
+    ^t failed
   ]

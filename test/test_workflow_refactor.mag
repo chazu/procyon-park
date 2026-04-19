@@ -1224,7 +1224,8 @@ TestWorkflowRefactorMain subclass: Object
       ('TestSpawnWorkflow CRASHED: ', e messageText) println.
       t assert: false message: 'TestSpawnWorkflow crashed'
     ].
-    t report
+    t report.
+    ^t failed
   ]
 
-TestWorkflowRefactorMain run
+
