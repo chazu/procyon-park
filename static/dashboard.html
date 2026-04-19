@@ -242,7 +242,69 @@
       background-image: repeating-linear-gradient(90deg, var(--rule-hi) 0 3px, transparent 3px 6px);
     }
 
-    #dashboard-completions, #dashboard-scope-violations{ margin-top: 16px; }
+    #dashboard-completions, #dashboard-scope-violations, #dashboard-presence{ margin-top: 16px; }
+
+    /* ══════════════ PRESENCE ══════════════ */
+    .presence .presence-grid{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 720px){ .presence .presence-grid{ grid-template-columns: 1fr; } }
+    .presence-col{
+      background: var(--bg-2);
+      border: 1px solid var(--rule);
+      padding: 8px 10px 10px;
+    }
+    .presence-col h3{
+      font-family: var(--f-slab);
+      font-weight: 800;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--cream-hi);
+      margin: 0 0 6px;
+      display: flex; gap: 8px; align-items: baseline;
+    }
+    .presence-count{
+      font-family: var(--f-mono);
+      background: var(--cream);
+      color: var(--bg);
+      padding: 0 6px;
+      font-size: 10px;
+      letter-spacing: 0.04em;
+    }
+    .presence-humans  h3 .presence-count{ background: var(--moss);   color: var(--bg); }
+    .presence-workers h3 .presence-count{ background: var(--cobalt); color: var(--cream-hi); }
+    .presence-list{ list-style: none; margin: 0; padding: 0; }
+    .presence-list li{
+      padding: 4px 8px;
+      margin-bottom: 4px;
+      background: var(--surface);
+      border: 1px solid var(--rule);
+      border-left: 3px solid var(--moss);
+      font-family: var(--f-mono);
+      font-size: 11px;
+      color: var(--cream);
+      word-break: break-all;
+    }
+    .presence-worker{ border-left-color: var(--cobalt) !important; }
+    .presence-worker.presence-drain{ border-left-color: var(--sun) !important; opacity: .85; }
+    .presence-id{ font-weight: 500; color: var(--cream-hi); }
+    .presence-multi{ color: var(--terra); font-weight: 700; }
+    .presence-badge-drain{
+      display: inline-block;
+      background: var(--sun);
+      color: var(--bg);
+      padding: 0 6px;
+      font-family: var(--f-slab);
+      font-weight: 800;
+      font-size: 9.5px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .presence-digest{ color: var(--fog); font-size: 10px; }
+    .presence-budget{ color: var(--sun); }
 
     /* ══════════════ WORKFLOW / COMPLETION CARDS ══════════════ */
     .wf-card{
@@ -773,6 +835,10 @@
               <h2>Scope Violations</h2>
               <div class="empty-state">Connecting…</div>
             </div>
+            <section id="dashboard-presence" class="presence">
+              <h2>Presence</h2>
+              <div class="empty-state">Connecting…</div>
+            </section>
           </div>
         </div>
         <div class="col col-feed">

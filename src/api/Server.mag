@@ -1968,7 +1968,24 @@ ApiServer subclass: Object
   "--- SSE Dashboard Stream ---"
 
   method: handleSSEDashboard: conn request: req [
-    dashboardSSE onConnect: conn
+    "Accept SSE dashboard subscribers. Attempts signed upgrade via
+     standard X-PP-* headers first, then falls back to query-string
+     credentials (?actor=&ts=&sig=) which is the only viable auth path
+     for the browser's EventSource. When signature enforcement is on and
+     both attempts fail, the subscription is refused. When enforcement
+     is off (--local per §4.9) the connection is accepted anonymously."
+    | actorCtx identity |
+    actorCtx := signatureVerifier verify: req adminList: adminList skewSeconds: skewSeconds.
+    actorCtx isNil ifTrue: [
+      actorCtx := signatureVerifier verifySSE: req adminList: adminList skewSeconds: skewSeconds
+    ].
+    (enforceSignatures and: [actorCtx isNil]) ifTrue: [
+      ('SSE dashboard: refusing unsigned connection (enforce_signatures=true)') println.
+      ^self
+    ].
+    actorCtx isNil ifTrue: [actorCtx := ActorContext anonymous].
+    identity := actorCtx actor.
+    dashboardSSE onConnect: conn identity: identity
   ]
 
   method: startSSETick [

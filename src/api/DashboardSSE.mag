@@ -14,16 +14,34 @@ DashboardSSE subclass: Object
   ]
 
   method: onConnect: conn [
-    sseSubscribers := sseSubscribers copyWith: conn.
-    ('SSE dashboard client connected, total: ', sseSubscribers size printString) println
+    "Backwards-compatible entry point — anonymous subscription."
+    ^self onConnect: conn identity: 'anonymous'
+  ]
+
+  method: onConnect: conn identity: identity [
+    "Register an SSE subscriber along with the verified identity that
+     upgraded the stream. Identity is either 'user:<name>', 'admin:<hex>',
+     'worker:<name>', or 'anonymous'. The tuple is tracked in-memory so the
+     presence panel can render the humans currently watching."
+    | entry id |
+    id := identity ifNil: ['anonymous'].
+    entry := Dictionary new.
+    entry at: 'conn' put: conn.
+    entry at: 'identity' put: id.
+    entry at: 'subscribedAt' put: DateTime now epochSeconds.
+    sseSubscribers := sseSubscribers copyWith: entry.
+    ('SSE dashboard client connected as ', id,
+      ', total: ', sseSubscribers size printString) println
   ]
 
   method: tick [
     | live |
     sseSubscribers isEmpty ifTrue: [^self].
-    live := sseSubscribers select: [:conn | conn isOpen].
+    live := sseSubscribers select: [:entry | (entry at: 'conn') isOpen].
     sseSubscribers := live.
-    live do: [:conn |
+    live do: [:entry |
+      | conn |
+      conn := entry at: 'conn'.
       [self broadcastTo: conn] on: Exception do: [:e |
         ('SSE error: ', e messageText) println
       ]
@@ -35,6 +53,7 @@ DashboardSSE subclass: Object
     self sendCompletions: conn.
     self sendWorkitems: conn.
     self sendScopeViolations: conn.
+    self sendPresence: conn.
     self sendNotifs: conn
   ]
 
@@ -118,6 +137,110 @@ DashboardSSE subclass: Object
       s := s, '</ul>'
     ].
     s := s, '</div>'.
+    conn send: ('elements ', s) event: 'datastar-patch-elements'
+  ]
+
+  method: sendPresence: conn [
+    "Render the two-column presence panel: humans currently connected to
+     the SSE stream (live sseSubscribers) on the left, affine worker tuples
+     (active heartbeat, scope='/') on the right. Workers are rendered with
+     manifest capability summary (slots, models, drain, operator) and any
+     budget state surfaced in the worker payload. §4.7, D6.7."
+    | s humanCounts human workers humanCount workerCount now |
+    now := DateTime now epochSeconds.
+    humanCounts := Dictionary new.
+    sseSubscribers do: [:entry |
+      | id existing |
+      id := entry at: 'identity' ifAbsent: ['anonymous'].
+      existing := humanCounts at: id ifAbsent: [nil].
+      existing isNil ifTrue: [
+        | r |
+        r := Dictionary new.
+        r at: 'count' put: 1.
+        r at: 'subscribedAt' put: (entry at: 'subscribedAt' ifAbsent: [now]).
+        humanCounts at: id put: r
+      ] ifFalse: [
+        existing at: 'count' put: (existing at: 'count') + 1.
+        ((entry at: 'subscribedAt' ifAbsent: [now]) < (existing at: 'subscribedAt'))
+          ifTrue: [existing at: 'subscribedAt' put: (entry at: 'subscribedAt')]
+      ]
+    ].
+    humanCount := humanCounts size.
+
+    workers := bbs scanAll: 'worker'.
+    workerCount := workers size.
+
+    s := '<section id="dashboard-presence" class="presence"><h2>Presence</h2>'.
+    s := s, '<div class="presence-grid">'.
+
+    "--- Humans column ---"
+    s := s, '<div class="presence-col presence-humans">'.
+    s := s, '<h3>Humans <span class="presence-count">', humanCount printString, '</span></h3>'.
+    humanCount = 0 ifTrue: [
+      s := s, '<div class="empty-state">No subscribers</div>'
+    ] ifFalse: [
+      s := s, '<ul class="presence-list">'.
+      humanCounts keysAndValuesDo: [:id :r |
+        | count dur |
+        count := r at: 'count'.
+        dur := self formatDuration: (now - (r at: 'subscribedAt')).
+        s := s, '<li class="presence-human">',
+              '<span class="presence-id">', id, '</span>',
+              (count > 1 ifTrue: [' <span class="presence-multi">x', count printString, '</span>'] ifFalse: ['']),
+              ' <small>', dur, '</small></li>'
+      ].
+      s := s, '</ul>'
+    ].
+    s := s, '</div>'.
+
+    "--- Workers column ---"
+    s := s, '<div class="presence-col presence-workers">'.
+    s := s, '<h3>Workers <span class="presence-count">', workerCount printString, '</span></h3>'.
+    workerCount = 0 ifTrue: [
+      s := s, '<div class="empty-state">No workers online</div>'
+    ] ifFalse: [
+      s := s, '<ul class="presence-list">'.
+      workers do: [:w |
+        | wid p manifest slots models drain operator digest budget line modelsStr |
+        wid := w at: 'identity' ifAbsent: ['worker:?'].
+        p := w at: 'payload' ifAbsent: [Dictionary new].
+        manifest := p at: 'manifest' ifAbsent: [Dictionary new].
+        (manifest isKindOf: Dictionary) ifFalse: [manifest := Dictionary new].
+        slots := manifest at: 'slots' ifAbsent: [p at: 'slots' ifAbsent: ['?']].
+        models := manifest at: 'models' ifAbsent: [p at: 'models' ifAbsent: #()].
+        operator := manifest at: 'operator' ifAbsent: [p at: 'operator' ifAbsent: ['?']].
+        drain := p at: 'drain' ifAbsent: [false].
+        digest := p at: 'capability_digest' ifAbsent: [
+          manifest at: 'capability_digest' ifAbsent: ['']].
+        budget := p at: 'budget' ifAbsent: [manifest at: 'budget' ifAbsent: [nil]].
+        modelsStr := (models isKindOf: Array)
+          ifTrue: [self joinStrings: models with: ','] ifFalse: [models asString].
+        line := '<li class="presence-worker', (drain = true ifTrue: [' presence-drain'] ifFalse: ['']), '">',
+              '<span class="presence-id">', wid, '</span>',
+              ' <small>op=<b>', operator asString, '</b></small>',
+              ' <small>slots=', slots printString, '</small>',
+              (modelsStr isEmpty ifTrue: [''] ifFalse: [' <small>models=', modelsStr, '</small>']),
+              (drain = true ifTrue: [' <span class="presence-badge-drain">drain</span>'] ifFalse: ['']),
+              (digest isEmpty ifTrue: [''] ifFalse: [' <small class="presence-digest">',
+                 (digest size > 12 ifTrue: [digest copyFrom: 1 to: 12] ifFalse: [digest]), '</small>']).
+        (budget notNil and: [budget isKindOf: Dictionary]) ifTrue: [
+          | bState bRem bLimit |
+          bState := budget at: 'state' ifAbsent: [budget at: 'status' ifAbsent: ['']].
+          bRem := budget at: 'remaining' ifAbsent: [nil].
+          bLimit := budget at: 'limit' ifAbsent: [nil].
+          line := line, ' <small class="presence-budget">budget=', bState asString,
+            (bRem notNil ifTrue: [' rem=', bRem printString] ifFalse: ['']),
+            (bLimit notNil ifTrue: ['/', bLimit printString] ifFalse: ['']),
+            '</small>'
+        ].
+        line := line, '</li>'.
+        s := s, line
+      ].
+      s := s, '</ul>'
+    ].
+    s := s, '</div>'.
+
+    s := s, '</div></section>'.
     conn send: ('elements ', s) event: 'datastar-patch-elements'
   ]
 
