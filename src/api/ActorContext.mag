@@ -1,0 +1,43 @@
+"ActorContext — value object describing the verified actor of an HTTP request.
+
+ Constructed by SignatureVerifier after a successful verification (or as an
+ anonymous fallback when signature enforcement is disabled). Passed through to
+ route handler blocks so that BBS writes can be stamped with the correct actor.
+
+ Fields:
+   actor     — 'user:<name>' for registered identities, 'admin:<hex>' for
+               admin-list signers, or 'anonymous' for unenforced requests.
+   timestamp — unix epoch seconds of the signed request (0 for anonymous).
+   verified  — true iff signature verification succeeded.
+   isAdmin   — true iff the signer's pubkey was in the admin list.
+"
+
+ActorContext subclass: Object
+  instanceVars: actor timestamp verified isAdmin
+
+  classMethod: actor: anActor timestamp: ts verified: aBool isAdmin: adminBool [
+    ^super new initActor: anActor timestamp: ts verified: aBool isAdmin: adminBool
+  ]
+
+  classMethod: anonymous [
+    "Fallback used when [security].enforce_signatures is false. Writes
+     produced under this context are stamped with actor='anonymous'."
+    ^super new initActor: 'anonymous' timestamp: 0 verified: false isAdmin: false
+  ]
+
+  method: initActor: anActor timestamp: ts verified: aBool isAdmin: adminBool [
+    actor := anActor.
+    timestamp := ts.
+    verified := aBool.
+    isAdmin := adminBool
+  ]
+
+  method: actor [ ^actor ]
+  method: timestamp [ ^timestamp ]
+  method: verified [ ^verified ]
+  method: isAdmin [ ^isAdmin ]
+
+  method: printString [
+    ^'ActorContext(', actor, ', verified=', verified printString,
+     ', admin=', isAdmin printString, ')'
+  ]

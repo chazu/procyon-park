@@ -1,0 +1,110 @@
+"SignatureVerifier — ed25519 request-signature checker.
+
+ Given an HttpRequest, the configured admin pubkey list, and the skew window,
+ returns an ActorContext on success or nil on any failure.
+
+ Canonical bytes signed by the client: method || LF || path || LF || timestamp
+ || LF || sha256(body). Signature is hex-encoded ed25519. The pubkey is looked
+ up either in the admin allowlist or the pinned 'identity' category; revoked
+ identities are rejected.
+
+ Depends on the Maggie crypto primitives added by multiplayer:maggie-crypto-primitives:
+   Sha256 hash: <bytes> -> hex-encoded digest
+   Identity verify: <hexSig> data: <canonical> pub: <hexPub> -> Boolean
+
+ If those primitives are absent at runtime (i.e. the dependency story has not
+ yet merged), verify:adminList:skewSeconds: catches the DNU and returns nil,
+ so enforcement simply fails closed while the code continues to compile and
+ route."
+
+SignatureVerifier subclass: Object
+  instanceVars: bbs
+
+  classMethod: on: aBBS [
+    ^super new initBBS: aBBS
+  ]
+
+  method: initBBS: aBBS [
+    bbs := aBBS
+  ]
+
+  method: verify: req adminList: admins skewSeconds: skew [
+    "Primary entry point. Returns ActorContext or nil.
+     Any exception from the crypto primitives (including DNU when the
+     primitives have not yet been linked) is treated as verification failure."
+    ^[self doVerify: req adminList: admins skewSeconds: skew requireOldPub: nil]
+        on: Exception do: [:e | nil]
+  ]
+
+  method: verify: req adminList: admins skewSeconds: skew requireOldPub: oldPub [
+    "Rotation variant. On success, additionally confirms that the signature
+     was produced with oldPub AND that oldPub is the currently-registered
+     pubkey for the actor."
+    ^[self doVerify: req adminList: admins skewSeconds: skew requireOldPub: oldPub]
+        on: Exception do: [:e | nil]
+  ]
+
+  method: doVerify: req adminList: admins skewSeconds: skew requireOldPub: oldPub [
+    | actorHeader tsHeader sigHeader ts now delta body canonical pubkey isAdmin resolvedActor idTuple payload status method path |
+    actorHeader := req header: 'X-PP-Actor'.
+    tsHeader := req header: 'X-PP-Timestamp'.
+    sigHeader := req header: 'X-PP-Signature'.
+    (self isMissing: actorHeader) ifTrue: [^nil].
+    (self isMissing: tsHeader) ifTrue: [^nil].
+    (self isMissing: sigHeader) ifTrue: [^nil].
+
+    "Skew check"
+    ts := tsHeader asInteger.
+    now := DateTime now epochSeconds.
+    delta := now - ts.
+    delta < 0 ifTrue: [delta := delta negated].
+    delta > skew ifTrue: [^nil].
+
+    "Resolve pubkey + actor"
+    body := req body.
+    body isNil ifTrue: [body := ''].
+    method := req method.
+    path := req path.
+    canonical := method, (String with: Character lf),
+                 path, (String with: Character lf),
+                 tsHeader, (String with: Character lf),
+                 (Sha256 hash: body).
+
+    isAdmin := false.
+    resolvedActor := nil.
+    pubkey := nil.
+
+    "1. If actorHeader hex is in admin list, treat as admin signer."
+    (admins notNil and: [admins includes: actorHeader]) ifTrue: [
+      pubkey := actorHeader.
+      isAdmin := true.
+      resolvedActor := 'admin:', actorHeader
+    ] ifFalse: [
+      "2. Else treat actorHeader as a user name and look up identity tuple."
+      idTuple := bbs rdp: 'identity' scope: '/' identity: 'user:', actorHeader.
+      idTuple isNil ifTrue: [^nil].
+      payload := idTuple at: 'payload' ifAbsent: [Dictionary new].
+      status := payload at: 'status' ifAbsent: ['active'].
+      status = 'active' ifFalse: [^nil].
+      pubkey := payload at: 'pubkey' ifAbsent: [nil].
+      pubkey isNil ifTrue: [^nil].
+      resolvedActor := 'user:', actorHeader
+    ].
+
+    "Rotation gate: signature must be produced with oldPub AND match the
+     currently-registered key. If caller supplied oldPub, override pubkey
+     for the verify step and confirm registry match."
+    oldPub notNil ifTrue: [
+      pubkey = oldPub ifFalse: [^nil].
+      pubkey := oldPub
+    ].
+
+    "3. Verify ed25519 signature against canonical bytes."
+    (Identity verify: sigHeader data: canonical pub: pubkey) ifFalse: [^nil].
+
+    ^ActorContext actor: resolvedActor timestamp: ts verified: true isAdmin: isAdmin
+  ]
+
+  method: isMissing: aString [
+    ^aString isNil or: [aString isEmpty]
+  ]
