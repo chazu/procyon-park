@@ -31,11 +31,15 @@ ApiServer subclass: Object
   method: loadSecurityConfig [
     "Read ~/.config/pp/server.toml for [admin].admins, [security].skew_seconds,
      and [security].enforce_signatures. Missing file or malformed TOML leaves
-     defaults: adminList=[], skew=120, enforceSignatures=false."
+     defaults: adminList=[], skew=120, enforceSignatures=true.
+     The default flipped to true with the wave-3 rollout of the multiplayer
+     identity epic — every mutating endpoint now requires a valid ed25519
+     signature out of the box. Operators who explicitly want the legacy
+     anonymous path back must set [security].enforce_signatures = false."
     | home path config adminCfg secCfg |
     adminList := Array new: 0.
     skewSeconds := 120.
-    enforceSignatures := false.
+    enforceSignatures := true.
     home := System env: 'HOME'.
     home isNil ifTrue: [home := ''].
     path := home, '/.config/pp/server.toml'.
@@ -49,7 +53,7 @@ ApiServer subclass: Object
         secCfg := config at: 'security' ifAbsent: [nil].
         secCfg notNil ifTrue: [
           skewSeconds := secCfg at: 'skew_seconds' ifAbsent: [120].
-          enforceSignatures := secCfg at: 'enforce_signatures' ifAbsent: [false]
+          enforceSignatures := secCfg at: 'enforce_signatures' ifAbsent: [true]
         ]
       ] on: Exception do: [:e |
         ('Warning: could not load server.toml: ', e messageText) println

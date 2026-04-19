@@ -1,0 +1,159 @@
+"CliUser — `pp user add` and `pp user revoke` subcommand implementations.
+
+   pp user add <name> --pubkey <hex>   POST /api/user/add
+   pp user revoke <name>               POST /api/user/revoke
+
+ Both endpoints are admin-gated: the request MUST be ed25519-signed by a
+ keypair whose public key appears in [admin].admins of server.toml. The
+ caller's local identity (loaded via IdentityStore loadCurrent) is used
+ to sign the request, with X-PP-Actor set to the local identity's hex
+ pubkey so the server's SignatureVerifier resolves it as an admin.
+
+ 401 / admin-rejected responses are rendered as a single operator-friendly
+ line, never a raw JSON dump."
+
+CliUserAdd subclass: Object
+
+  classMethod: run: args [
+    "Build `pp user add <name> --pubkey <hex>` and execute."
+    | cmd rest |
+    cmd := Cli::Command named: 'add' doc: 'Register a user identity (admin-only).'.
+    cmd flag: (Cli::Flag
+      name: 'pubkey'
+      type: #string
+      default: ''
+      doc: 'Hex-encoded ed25519 public key for the new user').
+    cmd flag: (Cli::Flag
+      name: 'replace'
+      type: #bool
+      default: false
+      doc: 'Overwrite an existing identity with the same name').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+
+    cmd run: [:runArgs |
+      | cfg name pubkey replace exitCode body |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp user add <name> --pubkey <hex> [--replace]' println.
+        exitCode := 1
+      ] ifFalse: [
+        cfg := PPCliConfig new.
+        cmd applyEnvBindings: cfg.
+        name := runArgs at: 0.
+        pubkey := cmd flagValue: 'pubkey'.
+        replace := cmd flagValue: 'replace'.
+        replace isNil ifTrue: [replace := false].
+        (pubkey isNil or: [pubkey isEmpty]) ifTrue: [
+          'Error: --pubkey <hex> is required.' println.
+          exitCode := 1
+        ] ifFalse: [
+          body := Dictionary new.
+          body at: 'name' put: name.
+          body at: 'pubkey' put: pubkey.
+          replace ifTrue: [body at: 'replace' put: true].
+          (CliUserHelper signedAdminPost: cfg path: '/api/user/add' body: body) ifFalse: [
+            exitCode := 1
+          ]
+        ]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+
+CliUserRevoke subclass: Object
+
+  classMethod: run: args [
+    "Build `pp user revoke <name>` and execute."
+    | cmd rest |
+    cmd := Cli::Command named: 'revoke' doc: 'Revoke a user identity (admin-only).'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+
+    cmd run: [:runArgs |
+      | cfg name body exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp user revoke <name>' println.
+        exitCode := 1
+      ] ifFalse: [
+        cfg := PPCliConfig new.
+        cmd applyEnvBindings: cfg.
+        name := runArgs at: 0.
+        body := Dictionary new.
+        body at: 'name' put: name.
+        (CliUserHelper signedAdminPost: cfg path: '/api/user/revoke' body: body) ifFalse: [
+          exitCode := 1
+        ]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+
+CliUserHelper subclass: Object
+
+  classMethod: signedAdminPost: cfg path: path body: body [
+    "Sign and POST a body to an admin-only endpoint. Returns true on
+     server-acknowledged success, false otherwise. Surfaces 401 / admin
+     errors as operator-friendly hints rather than raw JSON."
+    | rec ident pubHex response result errMsg |
+    rec := IdentityStore loadCurrent.
+    rec isNil ifTrue: [
+      'Error: no current identity. Run `pp identity init <name>` first.' println.
+      ^false
+    ].
+    ident := rec at: 'identity'.
+    pubHex := rec at: 'pubHex'.
+    "Admin endpoints expect X-PP-Actor = hex pubkey (not the local
+     identity name) so the server resolves us against [admin].admins.
+     Delegate the actual HTTP+signing to CLIBase so we don't grow yet
+     another HttpClient construction site."
+    response := CLIBase
+      signedPost: path
+      body: body
+      baseUrl: cfg baseUrl
+      asActor: pubHex
+      signer: ident.
+    (response isNil or: [(response isKindOf: String) not or: [response isEmpty]]) ifTrue: [
+      'Error: empty or invalid response from server.' println.
+      ^false
+    ].
+    [result := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      response println.
+      ^false
+    ].
+    (result isKindOf: Dictionary) ifFalse: [
+      response println.
+      ^false
+    ].
+    errMsg := result at: 'error' ifAbsent: [nil].
+    errMsg notNil ifTrue: [
+      ('Request rejected: ', errMsg) println.
+      ((errMsg asLowercase includesSubstring: 'admin')
+        or: [errMsg asLowercase includesSubstring: 'signature']) ifTrue: [
+        'Hint: this endpoint is admin-only. Your local identity must have its' println.
+        '      hex pubkey listed in ~/.config/pp/server.toml under [admin].admins,' println.
+        '      and your system clock must be within the configured skew window.' println
+      ].
+      ^false
+    ].
+    (Json encodePretty: result) println.
+    ^true
+  ]

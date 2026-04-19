@@ -2,7 +2,7 @@
  Work items are planning artifacts, separate from agent execution tasks."
 
 WorkItemCLI subclass: Object
-  instanceVars: baseUrl client scope
+  instanceVars: baseUrl scope
 
   classMethod: new [
     ^super new initialize
@@ -12,8 +12,7 @@ WorkItemCLI subclass: Object
     baseUrl := System env: 'PP_URL'.
     (baseUrl isNil or: [baseUrl isEmpty]) ifTrue: [baseUrl := 'http://localhost:7777'].
     scope := System env: 'PP_SCOPE'.
-    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default'].
-    client := HttpClient new
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default']
   ]
 
   method: runWith: args [
