@@ -202,7 +202,7 @@ DashboardSSE subclass: Object
     now := DateTime now epochSeconds.
     s := '<div id="dashboard-workflows"><h2>Active Workflows</h2>'.
     workflows do: [:w |
-      | p status template wfId desc label places activeTask taskLine tokenTotals tokenLine |
+      | p status template wfId desc label places activeTask taskLine tokenTotals tokenLine launchedBy launchedByLine executedByAttr |
       p := w at: 'payload' ifAbsent: [Dictionary new].
       status := p at: 'status' ifAbsent: ['?'].
       status = 'running' ifTrue: [
@@ -212,10 +212,15 @@ DashboardSSE subclass: Object
         desc size > 100 ifTrue: [desc := (desc copyFrom: 1 to: 100), '...'].
         label := desc isEmpty ifTrue: [wfId] ifFalse: [desc].
         places := self placesFor: wfId in: allTokens.
+        launchedBy := w at: 'launched_by' ifAbsent: [p at: 'launched_by' ifAbsent: [nil]].
+        launchedByLine := (launchedBy isNil or: [launchedBy isEmpty])
+          ifTrue: ['']
+          ifFalse: ['<br><small>launched by <b>', (self htmlEscape: launchedBy), '</b></small>'].
         activeTask := self activeTaskFor: wfId in: allTasks.
         taskLine := ''.
+        executedByAttr := ''.
         activeTask notNil ifTrue: [
-          | tp role tStatus dispatchedAt durStr |
+          | tp role tStatus dispatchedAt durStr executedBy execLine |
           tp := activeTask at: 'payload' ifAbsent: [Dictionary new].
           role := tp at: 'role' ifAbsent: ['?'].
           tStatus := tp at: 'status' ifAbsent: ['?'].
@@ -223,14 +228,24 @@ DashboardSSE subclass: Object
           durStr := dispatchedAt > 0
             ifTrue: [self formatDuration: (now - dispatchedAt)]
             ifFalse: ['pending'].
+          executedBy := activeTask at: 'executed_by' ifAbsent: [tp at: 'executed_by' ifAbsent: [nil]].
+          execLine := ''.
+          ((tStatus = 'claimed' or: [tStatus = 'dispatched' or: [tStatus = 'running']])
+            and: [executedBy notNil and: [executedBy isEmpty not]]) ifTrue: [
+              execLine := ' · executed by <b>', (self htmlEscape: executedBy), '</b>'.
+              executedByAttr := ' data-executed-by="', (self htmlEscape: executedBy), '"'
+          ].
           taskLine := '<br><small>role: <b>', role, '</b>',
             '<img class="role-badge" src="/dashboard/roles/role-', role, '.png" alt="" onerror="this.style.display=''none''">',
-            ' · ', tStatus, ' · ', durStr, '</small>'
+            ' · ', tStatus, ' · ', durStr, execLine, '</small>'
         ].
         tokenTotals := self tokenTotalsFor: wfId in: allTasks.
         tokenLine := self renderTokenLine: tokenTotals.
-        s := s, '<div class="wf-card"><b>', template, '</b> ', label,
+        s := s, '<div class="wf-card" data-launched-by="',
+             ((launchedBy isNil or: [launchedBy isEmpty]) ifTrue: [''] ifFalse: [self htmlEscape: launchedBy]),
+             '"', executedByAttr, '><b>', template, '</b> ', label,
              '<br><small>place: ', places, '</small>',
+             launchedByLine,
              taskLine,
              tokenLine,
              '<br><small>', wfId, '</small></div>'
@@ -361,6 +376,21 @@ DashboardSSE subclass: Object
       ts > bestTime ifTrue: [best := t. bestTime := ts]
     ].
     ^best ifNil: [pending first]
+  ]
+
+  method: htmlEscape: aString [
+    "Escape HTML metacharacters (ampersand, angle brackets, quotes) so
+     user-controlled identity strings cannot break out of attribute or
+     element context in the dashboard HTML."
+    | s |
+    aString isNil ifTrue: [^''].
+    s := aString asString.
+    s := s replaceAll: '&' with: '&amp;'.
+    s := s replaceAll: '<' with: '&lt;'.
+    s := s replaceAll: '>' with: '&gt;'.
+    s := s replaceAll: '"' with: '&quot;'.
+    s := s replaceAll: '''' with: '&#39;'.
+    ^s
   ]
 
   method: joinStrings: aCollection with: sep [
