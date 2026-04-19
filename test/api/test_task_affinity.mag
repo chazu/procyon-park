@@ -1,0 +1,306 @@
+"Tests for F3.1 affinity matching at /api/tasks/available and
+ /api/tasks/claim. Every supported affinity shape is exercised against
+ both a matching worker and a non-matching worker, asserting the pair of
+ endpoints agree (available offers iff claim allows)."
+
+AFRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== /api affinity match Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+AFHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedWorker: name operator: op roles: roles repos: repos models: models onBBS: bbs [
+    | manifest payload |
+    manifest := Dictionary new.
+    manifest at: 'slots' put: 1.
+    manifest at: 'models' put: models.
+    manifest at: 'repos' put: repos.
+    manifest at: 'roles' put: roles.
+    manifest at: 'operator' put: op.
+    manifest at: 'accept_from' put: #('*').
+    payload := Dictionary new.
+    payload at: 'worker_pubkey' put: 'deadbeef'.
+    payload at: 'operator_pubkey' put: 'cafef00d'.
+    payload at: 'manifest' put: manifest.
+    payload at: 'drain' put: false.
+    payload at: 'registered_at' put: 1.
+    bbs outAffine: 'worker' scope: '/' identity: (Identity worker: name)
+        payload: payload ttl: 90 actor: (Identity worker: name)
+  ]
+
+  classMethod: seedTask: id scope: scope role: role repo: repo affinity: affinity launchedBy: launchedBy onBBS: bbs [
+    | p |
+    p := Dictionary new.
+    p at: 'role' put: role.
+    p at: 'status' put: 'pending'.
+    p at: 'description' put: 'desc'.
+    p at: 'repo' put: repo.
+    affinity notNil ifTrue: [p at: 'affinity' put: affinity].
+    bbs out: 'task' scope: scope identity: id payload: p actor: launchedBy launchedBy: launchedBy executedBy: nil
+  ]
+
+  classMethod: ctxFor: workerName [
+    ^ActorContext actor: (Identity worker: workerName)
+                   timestamp: 1 verified: true isAdmin: false
+  ]
+
+  classMethod: availableFor: workerName on: server [
+    | body |
+    body := Dictionary new. body at: 'worker_id' put: workerName.
+    ^server handleTasksAvailable: body actor: (self ctxFor: workerName)
+  ]
+
+  classMethod: idsFrom: resp [
+    | d tasks |
+    d := Json decode: resp body.
+    tasks := d at: 'tasks' ifAbsent: [#()].
+    ^tasks collect: [:x | x at: 'identity']
+  ]
+
+  classMethod: claim: taskId by: workerName on: server [
+    | body claimId |
+    body := Dictionary new.
+    body at: 'task_id' put: taskId.
+    body at: 'worker_id' put: workerName.
+    claimId := workerName, '-claim-', taskId.
+    body at: 'claim_id' put: claimId.
+    ^server handleTaskClaim: body actor: (self ctxFor: workerName)
+  ]
+
+TestTaskAffinity subclass: Object
+
+  classMethod: run: t [
+    self testLauncherOnly: t.
+    self testWorkers: t.
+    self testModel: t.
+    self testRepo: t.
+    self testTeam: t.
+    self testCombined: t
+  ]
+
+  classMethod: setup [
+    "Seed two workers — op-alice and op-bob — on a fresh BBS.
+     Both accept all roles/repos/models so only affinity varies."
+    | bbs server |
+    bbs := BBS withDataDir: AFHelper makeTempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    AFHelper seedWorker: 'wa' operator: 'user:alice'
+             roles: #('implementer') repos: #('pp-main') models: #('sonnet')
+             onBBS: bbs.
+    AFHelper seedWorker: 'wb' operator: 'user:bob'
+             roles: #('implementer') repos: #('other') models: #('opus')
+             onBBS: bbs.
+    ^Array with: bbs with: server
+  ]
+
+  classMethod: testLauncherOnly: t [
+    | pair bbs server aff idsA idsB claimA claimB |
+    '--- AF1: launcher_only ---' println.
+    pair := self setup. bbs := pair at: 0. server := pair at: 1.
+    aff := Dictionary new. aff at: 'launcher_only' put: true.
+    "Task launched by user:alice — only alice's worker 'wa' may take it."
+    AFHelper seedTask: 'lo-task' scope: 'demo'
+             role: 'implementer' repo: 'pp-main'
+             affinity: aff launchedBy: 'user:alice' onBBS: bbs.
+
+    idsA := AFHelper idsFrom: (AFHelper availableFor: 'wa' on: server).
+    idsB := AFHelper idsFrom: (AFHelper availableFor: 'wb' on: server).
+    t assert: (idsA includes: 'lo-task') message: 'AF1: alice worker offered the task'.
+    t assert: ((idsB includes: 'lo-task') not) message: 'AF1: bob worker NOT offered the task'.
+
+    claimA := AFHelper claim: 'lo-task' by: 'wa' on: server.
+    t assertEqual: claimA status to: 200 message: 'AF1: alice claim succeeds'.
+    claimB := AFHelper claim: 'lo-task' by: 'wb' on: server.
+    t assertEqual: claimB status to: 403 message: 'AF1: bob claim rejected'
+  ]
+
+  classMethod: testWorkers: t [
+    | pair bbs server aff idsA idsB claimA claimB |
+    '--- AF2: workers list ---' println.
+    pair := self setup. bbs := pair at: 0. server := pair at: 1.
+    aff := Dictionary new.
+    aff at: 'workers' put: #('worker:wa').
+    AFHelper seedTask: 'w-task' scope: 'demo'
+             role: 'implementer' repo: 'pp-main'
+             affinity: aff launchedBy: 'user:alice' onBBS: bbs.
+
+    idsA := AFHelper idsFrom: (AFHelper availableFor: 'wa' on: server).
+    idsB := AFHelper idsFrom: (AFHelper availableFor: 'wb' on: server).
+    t assert: (idsA includes: 'w-task') message: 'AF2: wa in workers list offered'.
+    t assert: ((idsB includes: 'w-task') not) message: 'AF2: wb not in workers list filtered'.
+
+    claimB := AFHelper claim: 'w-task' by: 'wb' on: server.
+    t assertEqual: claimB status to: 403 message: 'AF2: wb claim rejected'.
+    claimA := AFHelper claim: 'w-task' by: 'wa' on: server.
+    t assertEqual: claimA status to: 200 message: 'AF2: wa claim succeeds'
+  ]
+
+  classMethod: testModel: t [
+    | pair bbs server aff idsA idsB claimA claimB |
+    '--- AF3: model ---' println.
+    pair := self setup. bbs := pair at: 0. server := pair at: 1.
+    aff := Dictionary new. aff at: 'model' put: 'sonnet'.
+    AFHelper seedTask: 'm-task' scope: 'demo'
+             role: 'implementer' repo: 'pp-main'
+             affinity: aff launchedBy: 'user:alice' onBBS: bbs.
+
+    idsA := AFHelper idsFrom: (AFHelper availableFor: 'wa' on: server).
+    idsB := AFHelper idsFrom: (AFHelper availableFor: 'wb' on: server).
+    t assert: (idsA includes: 'm-task') message: 'AF3: sonnet worker offered'.
+    t assert: ((idsB includes: 'm-task') not) message: 'AF3: opus worker filtered'.
+
+    claimB := AFHelper claim: 'm-task' by: 'wb' on: server.
+    t assertEqual: claimB status to: 403 message: 'AF3: opus claim rejected'.
+    claimA := AFHelper claim: 'm-task' by: 'wa' on: server.
+    t assertEqual: claimA status to: 200 message: 'AF3: sonnet claim succeeds'
+  ]
+
+  classMethod: testRepo: t [
+    | pair bbs server aff idsA idsB claimA claimB repos repoDict |
+    '--- AF4: repo (name match, commit advisory) ---' println.
+    pair := self setup. bbs := pair at: 0. server := pair at: 1.
+
+    "Switch both workers to dict-form repos so the match stresses the
+     {name,path,head} branch in repoNameMatches:inRepos:."
+    bbs := BBS withDataDir: AFHelper makeTempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    repoDict := Dictionary new.
+    repoDict at: 'name' put: 'pp-main'.
+    repoDict at: 'path' put: '/tmp'.
+    repoDict at: 'head' put: 'abc123'.
+    repos := Array new: 0.
+    repos := repos copyWith: repoDict.
+    AFHelper seedWorker: 'wa' operator: 'user:alice'
+             roles: #('implementer') repos: #('pp-main') models: #('sonnet')
+             onBBS: bbs.
+    "Reseed wa with dict-form repos by overwriting its tuple."
+    AFHelper seedWorker: 'wa' operator: 'user:alice'
+             roles: #('implementer') repos: repos models: #('sonnet')
+             onBBS: bbs.
+    AFHelper seedWorker: 'wb' operator: 'user:bob'
+             roles: #('implementer') repos: #('other') models: #('sonnet')
+             onBBS: bbs.
+
+    aff := Dictionary new. aff at: 'repo' put: 'pp-main@abc123'.
+    AFHelper seedTask: 'r-task' scope: 'demo'
+             role: 'implementer' repo: 'pp-main'
+             affinity: aff launchedBy: 'user:alice' onBBS: bbs.
+
+    idsA := AFHelper idsFrom: (AFHelper availableFor: 'wa' on: server).
+    idsB := AFHelper idsFrom: (AFHelper availableFor: 'wb' on: server).
+    t assert: (idsA includes: 'r-task') message: 'AF4: worker hosting pp-main offered'.
+    t assert: ((idsB includes: 'r-task') not) message: 'AF4: worker without pp-main filtered'.
+
+    claimB := AFHelper claim: 'r-task' by: 'wb' on: server.
+    t assertEqual: claimB status to: 403 message: 'AF4: wb claim rejected'.
+    claimA := AFHelper claim: 'r-task' by: 'wa' on: server.
+    t assertEqual: claimA status to: 200 message: 'AF4: wa claim succeeds'
+  ]
+
+  classMethod: testTeam: t [
+    | bbs server aff idsA idsB |
+    '--- AF5: team (wide open) ---' println.
+    "Fresh BBS — seed both workers identically-capable so team=true is
+     the only variable. outAffine append-semantics (observation filed
+     elsewhere) makes reseeding within a single BBS unreliable."
+    bbs := BBS withDataDir: AFHelper makeTempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    AFHelper seedWorker: 'wa' operator: 'user:alice'
+             roles: #('implementer') repos: #('pp-main') models: #('sonnet')
+             onBBS: bbs.
+    AFHelper seedWorker: 'wb' operator: 'user:bob'
+             roles: #('implementer') repos: #('pp-main') models: #('sonnet')
+             onBBS: bbs.
+    aff := Dictionary new. aff at: 'team' put: true.
+    AFHelper seedTask: 't-task' scope: 'demo'
+             role: 'implementer' repo: 'pp-main'
+             affinity: aff launchedBy: 'user:alice' onBBS: bbs.
+
+    idsA := AFHelper idsFrom: (AFHelper availableFor: 'wa' on: server).
+    t assert: (idsA includes: 't-task') message: 'AF5: team task offered to wa'.
+    idsB := AFHelper idsFrom: (AFHelper availableFor: 'wb' on: server).
+    t assert: (idsB includes: 't-task') message: 'AF5: team task offered to wb'
+  ]
+
+  classMethod: testCombined: t [
+    | pair bbs server aff idsA idsB claimB |
+    '--- AF6: combined keys AND together ---' println.
+    pair := self setup. bbs := pair at: 0. server := pair at: 1.
+    "launcher_only + model: alice worker has model sonnet, bob worker has
+     model opus, so only wa matches both."
+    aff := Dictionary new.
+    aff at: 'launcher_only' put: true.
+    aff at: 'model' put: 'sonnet'.
+    AFHelper seedTask: 'c-task' scope: 'demo'
+             role: 'implementer' repo: 'pp-main'
+             affinity: aff launchedBy: 'user:alice' onBBS: bbs.
+
+    idsA := AFHelper idsFrom: (AFHelper availableFor: 'wa' on: server).
+    idsB := AFHelper idsFrom: (AFHelper availableFor: 'wb' on: server).
+    t assert: (idsA includes: 'c-task') message: 'AF6: wa (alice+sonnet) matches'.
+    t assert: ((idsB includes: 'c-task') not) message: 'AF6: wb fails launcher_only'.
+
+    claimB := AFHelper claim: 'c-task' by: 'wb' on: server.
+    t assertEqual: claimB status to: 403 message: 'AF6: wb claim rejected'
+  ]
+
+TaskAffinityMain subclass: Object
+  classMethod: start [
+    | t |
+    t := AFRunner new.
+    TestTaskAffinity run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

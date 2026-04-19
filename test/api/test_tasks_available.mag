@@ -75,7 +75,9 @@ TAHelper subclass: Object
     manifest at: 'repos' put: repos.
     manifest at: 'roles' put: roles.
     manifest at: 'operator' put: 'op'.
-    manifest at: 'accept_from' put: #('op').
+    "Wildcard accept_from matches the CLI default (#('*')); tests focused on
+     role/repo/model filtering should not accidentally trip F2.7 gating."
+    manifest at: 'accept_from' put: #('*').
     payload := Dictionary new.
     payload at: 'worker_pubkey' put: 'deadbeef'.
     payload at: 'operator_pubkey' put: 'cafef00d'.
