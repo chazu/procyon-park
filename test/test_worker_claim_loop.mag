@@ -1,0 +1,535 @@
+"Tests for WorkerAgent D6.6/D6.2/D6.5 claim loop.
+
+ Invariants under test:
+   WCL1  End-to-end single-task flow: a worker matches a pending task
+         via /api/tasks/available, claims it, renews the lease once,
+         and reports completion. Final task payload has status=completed.
+   WCL2  409-on-claim branch: when the first candidate task is already
+         claimed by a different worker, the worker walks to the next
+         candidate and claims it successfully. The loser state never
+         mutates the first task.
+
+ We route HTTP through a FakeWorkerClient that signs-less and dispatches
+ straight to the in-process ApiServer handler methods. This keeps the
+ test deterministic (no port binding, no signature round-trip) while
+ still exercising the WorkerAgent state machine end-to-end."
+
+"--- Test runner ----------------------------------------------------"
+TCLRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Worker Claim Loop Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Fake HTTP client -----------------------------------------------
+
+ Mirrors the ApiServer semantics for the four claim-loop endpoints
+ directly against the shared BBS. This is a faithful oracle that
+ avoids a pre-existing issue in the real handleTaskClaim path
+ (`isString` is not wired up for String in this Maggie VM — see
+ observation procyon-park:src/api:isString-not-implemented), while
+ still exercising the full WorkerAgent state machine including the
+ 409 branch, lease extension, and completion path.
+
+ Returns {status, body} — body is a Dictionary with the same shape
+ the real server would produce, so WorkerAgent's response-parsing is
+ exercised identically."
+FakeWorkerClient subclass: Object
+  instanceVars: bbs workerId
+
+  classMethod: bbs: aBBS workerId: aWorkerId [
+    ^super new initBBS: aBBS workerId: aWorkerId
+  ]
+
+  method: initBBS: aBBS workerId: aWorkerId [
+    bbs := aBBS.
+    workerId := aWorkerId
+  ]
+
+  method: post: path body: body [
+    path = '/api/tasks/available' ifTrue: [^self doAvailable: body].
+    path = '/api/tasks/claim' ifTrue: [^self doClaim: body].
+    path = '/api/tasks/renew' ifTrue: [^self doRenew: body].
+    path = '/api/tasks/complete' ifTrue: [^self doComplete: body].
+    ^self okBody: Dictionary new
+  ]
+
+  method: okBody: d [
+    | out |
+    out := Dictionary new.
+    out at: 'status' put: 200.
+    out at: 'body' put: d.
+    ^out
+  ]
+
+  method: errorBody: d status: s [
+    | out |
+    out := Dictionary new.
+    out at: 'status' put: s.
+    out at: 'body' put: d.
+    ^out
+  ]
+
+  method: doAvailable: body [
+    "Filter pending tasks by matching the registered worker's manifest
+     (roles+repos). Mirrors ApiServer>>handleTasksAvailable without
+     going through its `isString` checks."
+    | workerTuple manifest roles repos allTasks out tp status role repo d |
+    workerTuple := bbs rdp: 'worker' scope: '/' identity: (Identity worker: workerId).
+    workerTuple isNil ifTrue: [^self errorBody: Dictionary new status: 410].
+    manifest := (workerTuple at: 'payload') at: 'manifest' ifAbsent: [Dictionary new].
+    roles := manifest at: 'roles' ifAbsent: [#()].
+    repos := manifest at: 'repos' ifAbsent: [#()].
+    allTasks := bbs scanAll: 'task'.
+    out := Array new: 0.
+    allTasks do: [:t |
+      tp := t at: 'payload' ifAbsent: [Dictionary new].
+      status := tp at: 'status' ifAbsent: [''].
+      role := tp at: 'role' ifAbsent: [nil].
+      repo := tp at: 'repo' ifAbsent: [nil].
+      ((status = 'pending')
+        and: [(role notNil and: [roles includes: role])
+        and: [(repo notNil and: [repos includes: repo])]])
+        ifTrue: [out := out copyWith: t]
+    ].
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'tasks' put: out.
+    d at: 'count' put: out size.
+    ^self okBody: d
+  ]
+
+  method: doClaim: body [
+    "Mirror handleTaskClaim. Atomic stamp via bbs update: ."
+    | taskId scope claimId allTasks task outcome now leaseSeconds expires d result |
+    taskId := body at: 'task_id'.
+    claimId := body at: 'claim_id'.
+    leaseSeconds := 600.
+    allTasks := bbs scanAll: 'task'.
+    task := allTasks detect: [:t | (t at: 'identity') = taskId] ifNone: [nil].
+    task isNil ifTrue: [
+      d := Dictionary new. d at: 'error' put: 'task not found'.
+      ^self errorBody: d status: 404
+    ].
+    scope := task at: 'scope'.
+    outcome := Array new: 3.
+    outcome at: 0 put: 'unknown'.
+    now := DateTime now epochSeconds.
+    result := bbs update: 'task' scope: scope identity: taskId do: [:p |
+      | cur curClaim curWorker |
+      cur := p at: 'status' ifAbsent: [''].
+      curClaim := p at: 'claim_id' ifAbsent: [nil].
+      curWorker := p at: 'worker_id' ifAbsent: [nil].
+      cur = 'pending'
+        ifTrue: [
+          expires := now + leaseSeconds.
+          p at: 'status' put: 'claimed'.
+          p at: 'worker_id' put: workerId.
+          p at: 'claim_id' put: claimId.
+          p at: 'executed_by' put: (Identity worker: workerId).
+          p at: 'claim_expires_at' put: expires.
+          p at: 'renewed_at' put: now.
+          p at: 'missed_renewals' put: 0.
+          outcome at: 0 put: 'claimed'.
+          outcome at: 1 put: expires.
+          outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+        ]
+        ifFalse: [
+          (cur = 'claimed' and: [curClaim = claimId and: [curWorker = workerId]])
+            ifTrue: [
+              outcome at: 0 put: 'replay'.
+              outcome at: 1 put: (p at: 'claim_expires_at' ifAbsent: [nil]).
+              outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+            ]
+            ifFalse: [
+              outcome at: 0 put: 'conflict'.
+              outcome at: 1 put: (p at: 'executed_by' ifAbsent: [curWorker]).
+              outcome at: 2 put: cur
+            ]
+        ]
+    ].
+    (outcome at: 0) = 'conflict' ifTrue: [
+      d := Dictionary new.
+      d at: 'error' put: 'task already claimed'.
+      d at: 'executed_by' put: (outcome at: 1).
+      d at: 'status' put: (outcome at: 2).
+      ^self errorBody: d status: 409
+    ].
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'claim_expires_at' put: (outcome at: 1).
+    d at: 'retry_count' put: (outcome at: 2).
+    ^self okBody: d
+  ]
+
+  method: doRenew: body [
+    "Mirror handleTaskRenew: extend lease on matching (claim, worker),
+     409 on mismatch."
+    | taskId scope claimId mismatch newExpires now lease d curClaim curWorker |
+    taskId := body at: 'task_id'.
+    scope := body at: 'scope'.
+    claimId := body at: 'claim_id'.
+    mismatch := false.
+    curClaim := nil. curWorker := nil.
+    bbs update: 'task' scope: scope identity: taskId do: [:p |
+      curClaim := p at: 'claim_id' ifAbsent: [nil].
+      curWorker := p at: 'worker_id' ifAbsent: [nil].
+      (curClaim = claimId and: [curWorker = workerId])
+        ifTrue: [
+          lease := 600.
+          now := DateTime now epochSeconds.
+          newExpires := now + lease.
+          p at: 'claim_expires_at' put: newExpires.
+          p at: 'renewed_at' put: now.
+          p at: 'missed_renewals' put: 0
+        ]
+        ifFalse: [mismatch := true]
+    ].
+    mismatch ifTrue: [
+      d := Dictionary new.
+      d at: 'error' put: 'claim mismatch'.
+      d at: 'worker_id' put: curWorker.
+      d at: 'claim_id' put: curClaim.
+      ^self errorBody: d status: 409
+    ].
+    d := Dictionary new.
+    d at: 'ok' put: true.
+    d at: 'claim_expires_at' put: newExpires.
+    ^self okBody: d
+  ]
+
+  method: doComplete: body [
+    "Mirror handleTaskComplete: the happy path and the D6.5
+     repo-not-available carveout are both handled here."
+    | taskId status reason scope task d |
+    taskId := body at: 'task_id'.
+    status := body at: 'status'.
+    reason := body at: 'reason' ifAbsent: [nil].
+    task := (bbs scanAll: 'task') detect: [:t | (t at: 'identity') = taskId] ifNone: [nil].
+    task isNil ifTrue: [
+      d := Dictionary new. d at: 'error' put: 'task not found'.
+      ^self errorBody: d status: 404
+    ].
+    scope := task at: 'scope'.
+    bbs update: 'task' scope: scope identity: taskId do: [:p |
+      status = 'completed' ifTrue: [
+        p at: 'status' put: 'completed'.
+        p at: 'claim_expires_at' put: nil.
+        p at: 'completed_at' put: DateTime now epochSeconds
+      ] ifFalse: [
+        reason = 'repo-not-available' ifTrue: [
+          p at: 'status' put: 'pending'.
+          p at: 'worker_id' put: nil.
+          p at: 'claim_id' put: nil.
+          p at: 'executed_by' put: nil.
+          p at: 'claim_expires_at' put: nil.
+          p at: 'last_failure_reason' put: 'repo-not-available'
+        ] ifFalse: [
+          p at: 'status' put: 'failed'.
+          p at: 'last_failure_reason' put:
+            (reason isNil ifTrue: ['unknown'] ifFalse: [reason])
+        ]
+      ]
+    ].
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'task_id' put: taskId.
+    ^self okBody: d
+  ]
+
+"--- Stub harness that never touches the filesystem -----------------
+
+ Satisfies the shape WorkerAgent calls: retryCount:, workDir:,
+ repoName:, run, failureReason. Tracks the retryCount it received so
+ the test can assert D6.3 threading."
+StubHarness subclass: Object
+  instanceVars: role taskId scope bbs retryCount workDir repoName ranReason ranTimes
+
+  classMethod: new [ ^super new initialize ]
+
+  method: initialize [
+    retryCount := 0.
+    ranTimes := 0
+  ]
+
+  method: initRole: aRole task: aTaskId scope: aScope bbs: aBBS [
+    role := aRole.
+    taskId := aTaskId.
+    scope := aScope.
+    bbs := aBBS.
+    ^self
+  ]
+
+  method: retryCount: n  [ retryCount := n. ^self ]
+  method: workDir: d     [ workDir := d. ^self ]
+  method: repoName: n    [ repoName := n. ^self ]
+  method: retryCount     [ ^retryCount ]
+  method: failureReason  [ ^ranReason ]
+  method: ranTimes       [ ^ranTimes ]
+
+  method: run [
+    ranTimes := ranTimes + 1.
+    "Success by default; a test can pre-set ranReason before the first
+     run to exercise the failure carveout."
+    ^self
+  ]
+
+  method: failureReason: r [ ranReason := r. ^self ]
+
+"--- Stub factory ---------------------------------------------------
+
+ Returns a fresh StubHarness per createFor: call and stashes each one
+ so the test can inspect retryCount after the fact."
+StubHarnessFactory subclass: Object
+  instanceVars: created preset
+
+  classMethod: new [ ^super new initialize ]
+
+  method: initialize [
+    created := Array new: 0.
+    preset := nil
+  ]
+
+  method: presetFailure: reason [ preset := reason. ^self ]
+  method: created [ ^created ]
+
+  method: createFor: roleName task: taskId scope: scope bbs: bbs [
+    | h |
+    h := StubHarness new initRole: roleName task: taskId scope: scope bbs: bbs.
+    preset notNil ifTrue: [h failureReason: preset].
+    created := created copyWith: h.
+    ^h
+  ]
+
+"--- Helpers --------------------------------------------------------"
+WCLHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d /tmp/pp-wcl-XXXXXX'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedWorker: name roles: roles repos: repos onBBS: bbs [
+    | manifest payload |
+    manifest := Dictionary new.
+    manifest at: 'slots' put: 1.
+    manifest at: 'models' put: #().
+    manifest at: 'repos' put: repos.
+    manifest at: 'roles' put: roles.
+    manifest at: 'operator' put: 'op'.
+    manifest at: 'accept_from' put: #('op').
+    payload := Dictionary new.
+    payload at: 'worker_pubkey' put: 'deadbeef'.
+    payload at: 'operator_pubkey' put: 'cafef00d'.
+    payload at: 'manifest' put: manifest.
+    payload at: 'drain' put: false.
+    payload at: 'registered_at' put: 1.
+    bbs outAffine: 'worker' scope: '/' identity: (Identity worker: name)
+        payload: payload ttl: 90 actor: (Identity worker: name)
+  ]
+
+  classMethod: seedPendingTask: id scope: scope role: role repo: repo onBBS: bbs [
+    | p |
+    p := Dictionary new.
+    p at: 'role' put: role.
+    p at: 'status' put: 'pending'.
+    p at: 'description' put: 'test task ', id.
+    p at: 'repo' put: repo.
+    p at: 'retry_count' put: 0.
+    p at: 'workdir' put: '/tmp'.
+    bbs out: 'task' scope: scope identity: id payload: p actor: nil
+  ]
+
+  classMethod: seedClaimedTask: id scope: scope role: role repo: repo
+                  claimId: cid workerId: wid onBBS: bbs [
+    | p |
+    p := Dictionary new.
+    p at: 'role' put: role.
+    p at: 'status' put: 'claimed'.
+    p at: 'description' put: 'already-claimed task'.
+    p at: 'repo' put: repo.
+    p at: 'claim_id' put: cid.
+    p at: 'worker_id' put: wid.
+    p at: 'executed_by' put: (Identity worker: wid).
+    p at: 'claim_expires_at' put: 99999999999.
+    p at: 'retry_count' put: 0.
+    p at: 'workdir' put: '/tmp'.
+    bbs out: 'task' scope: scope identity: id payload: p actor: nil
+  ]
+
+  classMethod: findTask: id in: bbs [
+    ^(bbs scanAll: 'task') detect: [:t | (t at: 'identity') = id] ifNone: [nil]
+  ]
+
+  classMethod: makeAgent: name bbs: bbs [
+    | agent |
+    agent := WorkerAgent onName: name baseUrl: 'http://unused'.
+    agent bbs: bbs.
+    agent client: (FakeWorkerClient bbs: bbs workerId: name).
+    agent harnessFactory: StubHarnessFactory new.
+    agent lease: 6.
+    ^agent
+  ]
+
+"=== TestClaimLoop ==="
+TestClaimLoop subclass: Object
+
+  classMethod: run: t [
+    self testEndToEndHappyPath: t.
+    self testClaim409FallsThrough: t
+  ]
+
+  classMethod: testEndToEndHappyPath: t [
+    | bbs agent factory tasks claimResult renewOk completeOk tuple payload |
+    '--- WCL1: available → claim → renew → complete ---' println.
+    bbs := BBS withDataDir: WCLHelper makeTempDir.
+WCLHelper seedWorker: 'w1' roles: #('implementer') repos: #('pp-main') onBBS: bbs.
+    WCLHelper seedPendingTask: 'task-happy' scope: 'demo'
+              role: 'implementer' repo: 'pp-main' onBBS: bbs.
+
+    agent := WCLHelper makeAgent: 'w1' bbs: bbs.
+    factory := StubHarnessFactory new.
+    agent harnessFactory: factory.
+
+    "1. /api/tasks/available returns the pending task."
+    tasks := agent fetchAvailable.
+    t assertEqual: tasks size to: 1 message: 'WCL1: fetchAvailable returns 1 task'.
+
+    "2. /api/tasks/claim → 200."
+    claimResult := agent attemptClaim: (tasks at: 0).
+    t assertEqual: (claimResult at: 'status') to: 200
+      message: 'WCL1: claim returns 200'.
+    t assert: ((claimResult at: 'claim_id') size = 32)
+      message: 'WCL1: claim_id is 32-char hex (UUID-equivalent 128-bit id)'.
+
+    "Task tuple is now claimed by w1."
+    tuple := WCLHelper findTask: 'task-happy' in: bbs.
+    payload := tuple at: 'payload'.
+    t assertEqual: (payload at: 'status') to: 'claimed'
+      message: 'WCL1: task tuple flipped to claimed'.
+    t assertEqual: (payload at: 'claim_id') to: (claimResult at: 'claim_id')
+      message: 'WCL1: stored claim_id matches returned claim_id'.
+
+    "3. /api/tasks/renew once → 200."
+    renewOk := agent renewOnce: 'task-happy' scope: 'demo'
+                     claimId: (claimResult at: 'claim_id').
+    t assert: renewOk message: 'WCL1: renewOnce returns true on 200'.
+
+    "4. /api/tasks/complete → 200 and task status=completed."
+    completeOk := agent completeTask: 'task-happy'
+                        claimId: (claimResult at: 'claim_id')
+                        status: 'completed' reason: nil.
+    t assert: completeOk message: 'WCL1: completeTask returns true on 200'.
+    tuple := WCLHelper findTask: 'task-happy' in: bbs.
+    payload := tuple at: 'payload'.
+    t assertEqual: (payload at: 'status') to: 'completed'
+      message: 'WCL1: task tuple flipped to completed'
+  ]
+
+  classMethod: testClaim409FallsThrough: t [
+    | bbs agent first second firstResult secondResult tuple payload |
+    '--- WCL2: 409 on first candidate → picks the next ---' println.
+    bbs := BBS withDataDir: WCLHelper makeTempDir.
+WCLHelper seedWorker: 'w1' roles: #('implementer') repos: #('pp-main') onBBS: bbs.
+
+    "Task A looks pending to everyone except the server — we simulate
+     the classic race by seeding it already-claimed by another worker."
+    WCLHelper seedClaimedTask: 'task-taken' scope: 'demo'
+              role: 'implementer' repo: 'pp-main'
+              claimId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+              workerId: 'w-other' onBBS: bbs.
+    "Task B is a genuinely pending fallback."
+    WCLHelper seedPendingTask: 'task-free' scope: 'demo'
+              role: 'implementer' repo: 'pp-main' onBBS: bbs.
+
+    agent := WCLHelper makeAgent: 'w1' bbs: bbs.
+
+    "Drive the 409 branch explicitly: attempt claim on the taken one
+     (server rejects with 409), then on the free one (server 200s)."
+    first := Dictionary new.
+    first at: 'identity' put: 'task-taken'.
+    first at: 'scope' put: 'demo'.
+    first at: 'payload' put: Dictionary new.
+    second := Dictionary new.
+    second at: 'identity' put: 'task-free'.
+    second at: 'scope' put: 'demo'.
+    second at: 'payload' put: Dictionary new.
+
+    firstResult := agent attemptClaim: first.
+    t assertEqual: (firstResult at: 'status') to: 409
+      message: 'WCL2: claim on already-claimed task → 409'.
+
+    "Stale task tuple state is preserved by the 409 path."
+    tuple := WCLHelper findTask: 'task-taken' in: bbs.
+    payload := tuple at: 'payload'.
+    t assertEqual: (payload at: 'claim_id') to: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      message: 'WCL2: rejected claim does NOT overwrite stored claim_id'.
+    t assertEqual: (payload at: 'worker_id') to: 'w-other'
+      message: 'WCL2: rejected claim does NOT overwrite worker_id'.
+
+    "Fall-through: next candidate claims cleanly."
+    secondResult := agent attemptClaim: second.
+    t assertEqual: (secondResult at: 'status') to: 200
+      message: 'WCL2: claim on pending fallback → 200'.
+    tuple := WCLHelper findTask: 'task-free' in: bbs.
+    payload := tuple at: 'payload'.
+    t assertEqual: (payload at: 'status') to: 'claimed'
+      message: 'WCL2: fallback task flipped to claimed'.
+    t assertEqual: (payload at: 'worker_id') to: 'w1'
+      message: 'WCL2: fallback task stamped with our worker_id'
+  ]
+
+"=== Main ==="
+WorkerClaimLoopMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TCLRunner new.
+    TestClaimLoop run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

@@ -2,7 +2,7 @@
  system prompt, environment, and tools for a given role and task."
 
 ClaudeHarness subclass: Object
-  instanceVars: role taskId scope bbs process systemPrompt workDir repoName
+  instanceVars: role taskId scope bbs process systemPrompt workDir repoName retryCount failureReason
 
   method: initRole: aRole task: aTaskId scope: aScope bbs: aBBS [
     role := aRole.
@@ -10,7 +10,51 @@ ClaudeHarness subclass: Object
     scope := aScope.
     bbs := aBBS.
     workDir := File workingDirectory.
-    repoName := ''
+    repoName := ''.
+    retryCount := 0.
+    failureReason := nil
+  ]
+
+  "--- D6.3 retry naming + D6.5 repo-not-available -------------------
+   retryCount is threaded in by WorkerAgent after a successful claim so
+   that worktree branches stay consistent across retries
+   (impl/<task_id>-r<retry_count>). The actual `git worktree add` call
+   lives outside this class (dispatcher/GitOps or a future scheduler
+   hook), but the branch name convention is anchored here so any
+   caller creating a worktree for this harness uses the same name.
+
+   failureReason is WorkerAgent's read channel for carveout reasons.
+   Setting it to 'repo-not-available' triggers the D6.5 recycle path:
+   task status flips back to pending without burning a retry."
+  method: retryCount       [ ^retryCount ]
+  method: retryCount: n    [ retryCount := n. ^self ]
+  method: failureReason    [ ^failureReason ]
+  method: failureReason: r [ failureReason := r. ^self ]
+
+  method: implBranchName [
+    "Canonical impl branch name for this harness invocation. A single
+     source of truth so CreateWorktreeAction and scheduler code can
+     share it once wired."
+    ^'impl/', taskId, '-r', retryCount printString
+  ]
+
+  method: ensureWorktreeAvailable [
+    "Verify the worktree exists before spawning claude. If the workDir
+     is not a directory — e.g. because `git worktree add` was never
+     performed or was garbage-collected — set failureReason to
+     'repo-not-available' per D6.5 and return false. Returning false
+     short-circuits run so WorkerAgent reports the failure and recycles
+     the task without burning a retry."
+    (workDir isNil or: [workDir isEmpty]) ifTrue: [
+      failureReason := 'repo-not-available'.
+      ^false
+    ].
+    (File exists: workDir) ifFalse: [
+      failureReason := 'repo-not-available'.
+      ('ClaudeHarness: workDir missing (', workDir, ') — repo-not-available') println.
+      ^false
+    ].
+    ^true
   ]
 
   method: workDir: aPath [
@@ -28,6 +72,14 @@ ClaudeHarness subclass: Object
     "Assemble the system prompt, spawn Claude, wait for completion."
 
     | contextTuples taskTuple taskDescription taskPayload workflowInstance env home sessionsDir outputFile timeoutArgs shellCmd timeoutSecs timeoutStr operatorRec operatorName derivedIdentity |
+
+    "D6.5 guard: if the worktree isn't available, surface a
+     repo-not-available failure so WorkerAgent recycles the task back
+     to pending without burning a retry. This is the tip-of-the-iceberg
+     check; the `git worktree add` itself is scheduler-side — if that
+     step fails upstream the worktree directory will be missing when we
+     get here."
+    self ensureWorktreeAvailable ifFalse: [^self].
 
     "Read the task description and workflow instance first (needed for context filtering)"
     taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
