@@ -183,7 +183,7 @@ DispatchWavesAction subclass: WorkflowAction
           childParams at: 'parent_branch' put: (params at: 'parent_branch')
         ].
 
-        childId := engine instantiate: childTemplate scope: scope params: childParams.
+        childId := engine instantiate: childTemplate scope: scope params: childParams launchedBy: (engine launchedByForInstance: instanceId).
         waveChildIdsBuf add: childId.
 
         signalPayload := Dictionary new.
@@ -224,7 +224,7 @@ DispatchWavesAction subclass: WorkflowAction
         childParams at: 'parent_branch' put: (params at: 'parent_branch')
       ].
 
-      childId := engine instantiate: childTemplate scope: scope params: childParams.
+      childId := engine instantiate: childTemplate scope: scope params: childParams launchedBy: (engine launchedByForInstance: instanceId).
       waveChildIdsBuf add: childId.
 
       signalPayload := Dictionary new.

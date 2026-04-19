@@ -35,7 +35,7 @@ SpawnWorkflowAction subclass: WorkflowAction
     mergedParams at: '_depth' put: (params at: '_depth' ifAbsent: [0]) + 1.
 
     "Instantiate the child"
-    childInstanceId := engine instantiate: childTemplate scope: childScope params: mergedParams.
+    childInstanceId := engine instantiate: childTemplate scope: childScope params: mergedParams launchedBy: (engine launchedByForInstance: instanceId).
 
     "Write signal keyed to transition AND child ID"
     signalPayload := Dictionary new.

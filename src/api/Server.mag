@@ -202,7 +202,7 @@ ApiServer subclass: Object
         self errorResponse: 500 message: 'No dispatcher configured'
       ] ifFalse: [
         [
-          instanceId := dispatcher instantiateWorkflow: (body at: 'template') scope: (body at: 'scope') params: (body at: 'params' ifAbsent: [Dictionary new]).
+          instanceId := dispatcher instantiateWorkflow: (body at: 'template') scope: (body at: 'scope') params: (body at: 'params' ifAbsent: [Dictionary new]) launchedBy: (self actorOf: actorCtx).
           d := Dictionary new. d at: 'status' put: 'ok'. d at: 'workflow_id' put: instanceId.
           self okResponse: d
         ] on: Exception do: [:e |
@@ -270,7 +270,9 @@ ApiServer subclass: Object
     (body includesKey: 'workdir') ifTrue: [taskPayload at: 'workdir' put: (body at: 'workdir')].
     (body includesKey: 'workflow_instance') ifTrue: [taskPayload at: 'workflow_instance' put: (body at: 'workflow_instance')].
     (body includesKey: 'repo') ifTrue: [taskPayload at: 'repo' put: (body at: 'repo')].
-    id := bbs out: 'task' scope: (body at: 'scope') identity: (body at: 'identity') payload: taskPayload actor: actor.
+    "Stamp launched_by with the verified signer (nil when anonymous so the
+     key stays absent, preserving byte-compat)."
+    id := bbs out: 'task' scope: (body at: 'scope') identity: (body at: 'identity') payload: taskPayload actor: actor launchedBy: actor executedBy: nil.
     "If spawned by another task (workflow_instance contains :task:), record parent-child link"
     (body includesKey: 'workflow_instance') ifTrue: [
       wfInst := body at: 'workflow_instance'.
@@ -980,7 +982,7 @@ ApiServer subclass: Object
       type = 'epic' ifTrue: ['full-pipeline'] ifFalse: ['story']
     ].
     [
-      instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams.
+      instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams launchedBy: (self actorOf: actorCtx).
       ^self okResponse: (self okWithWorkflow: instanceId type: type)
     ] on: Exception do: [:e |
       ^self errorResponse: 400 message: e messageText
