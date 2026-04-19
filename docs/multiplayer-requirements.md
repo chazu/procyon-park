@@ -1,7 +1,7 @@
 # Procyon Park — Multi-User Collaboration & Distributed Execution
 
-**Status:** Requirements (v1)
-**Author:** Scout mission 1776560650
+**Status:** Requirements (v1) — open questions resolved 2026-04-18
+**Author:** Scout mission 1776560650; decisions recorded by interactive walkthrough
 **Date:** 2026-04-18
 **Predecessor:** `docs/multiplayer-research.md` (branch `feature/scout-mission-1776559250-5826`)
 
@@ -445,119 +445,212 @@ escape hatch for single-user users.
 
 ---
 
-## 6. Open Questions
+## 6. Resolved Design Decisions
 
-Each open question is phrased as a decision with options. None are resolved
-here.
+Resolved via interactive walkthrough on 2026-04-18. Each decision includes
+rationale and cross-references the feature IDs it refines. Decisions are
+also recorded as `pp decide` tuples in the tuplespace for audit trail
+(`pp read decision default` to query).
 
-**6.1 `witnessed-by` semantics.**
-Who may populate `witnessed-by` on an `observation` tuple?
- - (a) Always identical to `actor` (the signer). Simple, but loses the
-   ability to record "Alice told me X".
- - (b) A separate field that the signer MAY set to any registered identity,
-   with the implicit meaning "the signer vouches that this identity
-   witnessed it."
- - (c) An array permitting multiple witnesses.
-*Recommendation from prior discussion:* (b) — `actor` is always the signer;
-`witnessed-by` is a separate, signer-supplied field.
+**D6.1 `witnessed-by` semantics.** Separate signer-supplied field, single
+identity (not array). `actor` is always the verified signer — non-negotiable.
+`witnessed-by` MAY be set by the signer to any registered identity, meaning
+"signer vouches that this identity witnessed the observation."
+*Rationale:* preserves audit integrity while supporting "Alice told me X"
+reporting. Array support deferred (trivial schema widening later).
+*Refines:* F5.1.
 
-**6.2 Claim lease duration & renewal cadence.**
- - Default lease: 5 min? 10 min? Model-dependent (Opus tasks run longer)?
- - Renewal cadence: lease/2? lease/3? Renew-on-progress vs renew-on-timer?
+**D6.2 Claim lease duration & renewal cadence.** Default lease **10 minutes**,
+renewal every **lease/3 (≈3 min)** on a timer (not on progress). Reaper
+requires **two consecutive missed renewals past expiry** before reaping.
+Not model-dependent; model-awareness deferred. A task MAY declare
+`max_runtime` to override the default.
+*Rationale:* Opus reviewer tasks commonly exceed 5 min. Err long;
+false-reap corrupts worktrees while a slightly-long lease only delays real
+crash recovery by minutes. Timer renewal is simpler than progress-detection
+and robust to agent behavior.
+*Refines:* F3.2, F3.3.
 
-**6.3 In-flight task on worker disconnect.**
-When a worker drops mid-execution:
- - (a) Reap immediately on heartbeat miss (3× interval), re-queue.
- - (b) Wait for `claim_expires_at`, then re-queue.
- - (c) Let the worker publish periodic progress; reap only if both
-   heartbeat AND progress stall.
- - What happens to Claude's in-flight file edits? (Answer likely: the
-   worktree is left as-is; retry starts a new worktree. But this needs
-   confirmation against `src/dispatcher/GitOps.mag` semantics.)
+**D6.3 Worker disconnect handling.** Lease expiry is the **single source of
+truth** for reaping (option b). Heartbeats feed the dashboard and
+early-warning UI but MUST NOT trigger reaping. In-flight worktrees are left
+as-is on the disconnected worker; retries create a fresh worktree with a
+retry-suffixed branch name: `impl/<task-id>-r<n>`. `retry_count` is
+incremented on the task tuple.
+*Rationale:* one reaper, one state machine. Two reapers disagree in edge
+cases. Retry-suffixed branches prevent late-completion collisions with
+retry branches.
+*Refines:* F3.3.
 
-**6.4 Server discovery by workers.**
- - (a) `~/.config/pp/config` with server URL (explicit, operator-managed).
- - (b) `$PP_SERVER` env var.
- - (c) mDNS/Bonjour (`_pp._tcp.local.`).
- - (d) All of the above with precedence (flag > env > config > mDNS).
+**D6.4 Server discovery by workers.** Precedence: **flag > env > config
+file**, no mDNS. Config at `~/.config/pp/config.toml` stores both the
+server URL and identity path. `pp identity init` SHOULD prompt for
+`server` when the config file is absent, bootstrapping both in one step.
+*Rationale:* mDNS cost (per-OS daemons, firewall rules, name collisions)
+outweighs benefit for a one-line-config problem.
+*Refines:* F1.1.
 
-**6.5 Repo capability verification.**
- - (a) Trust worker self-declaration of `repos[]` including `head_commit`.
- - (b) Server challenges worker to produce a signed `git rev-parse HEAD`
-   for a named repo at claim time.
- - (c) Task payload declares required commit, worker attests at claim;
-   harness `cd`s to the declared path and fails fast if the commit is
-   absent.
+**D6.5 Repo capability verification.** Claim-time filter by **repo name
+only** (worker self-declares `repos[]` as eligibility hints). Commit
+verification happens at harness start time via `git worktree add <ref>`;
+if that fails, emit `task-failed` with reason `repo-not-available` and
+release the claim. **`repo-not-available` failures MUST NOT count toward
+`max_retries`** — one misconfigured worker must not exhaust retries for
+a task.
+*Rationale:* execution *is* verification. Server-side challenges are
+expensive and stale by runtime.
+*Refines:* F2.2, F3.1, F3.3.
 
-**6.6 Wire protocol.**
- - (a) Keep JSON over HTTP+SSE (extends `Server.mag` / `DashboardSSE.mag`).
- - (b) Introduce Maggie `Node`/`RemoteProcess` links (adds a dependency on
-   distributed-runtime features that are young).
- - *Recommendation:* (a) for v1; revisit (b) only if measurable throughput
-   issues appear.
+**D6.6 Wire protocol.** JSON over HTTP+SSE. Maggie `Node`/`RemoteProcess`
+links explicitly deferred. Revisit trigger: measurable >100ms p50 latency
+attributable to HTTP overhead, or a need for bidirectional streaming
+beyond SSE.
+*Rationale:* debuggable with curl, composes with reverse proxies
+(Tailscale/Cloudflared/nginx), keeps door open for non-Maggie workers,
+avoids coupling to young distributed-runtime features.
+*Refines:* all of §4 (transport assumption throughout).
 
-**6.7 Default dashboard scope.**
- - (a) "All users" by default — maximizes team awareness.
- - (b) "Mine only" by default — reduces noise; users opt into team view.
- - Does the answer change for humans-online vs workflow-cards?
+**D6.7 Default dashboard scope.** Split answer:
+ - **Presence panel (humans online, workers online):** always shows
+   everyone. Low-volume, bounded by team size, it's the point of the
+   feature.
+ - **Workflow cards:** default to **team** (show all) with a persistent
+   per-user `mine | team` toggle.
+ - **Notifications:** stay opt-in via `pp watch` (F8.2) — *seeing* others'
+   work is cheap, *being interrupted* by it is not.
+*Rationale:* collective improvement requires visibility; a "mine only"
+default silos users. Noise mitigated by easy toggle + opt-in notifications.
+*Refines:* F7.4, F8.1, F8.2.
 
-**6.8 Worker budget enforcement.**
- - (a) Hard stop: stop claiming and refuse renewal.
- - (b) Soft warn: notify but keep running.
- - (c) Hard stop on `--max-usd-per-day`, soft warn on `--max-tokens-per-day`.
- - (d) User configurable per limit.
+**D6.8 Worker budget enforcement.** **Hard stop as default.** On exceeding
+any configured limit, worker enters soft-drain (stops claiming, finishes
+in-flight) and emits `notification` severity `urgent`. **`--budget-mode
+soft`** is an opt-in escape hatch: worker continues claiming, emits
+severity `warning` on each claim past threshold. In-flight tasks are never
+yanked mid-execution (worktree corruption risk). Budget accounting lives
+on the worker (authoritative); server records reported usage per task for
+attribution only.
+*Rationale:* the default must protect the operator's Anthropic balance
+from overnight runaways. Soft-warn-only is the wrong default for money.
+*Refines:* F2.5.
 
-**6.9 Key rotation UX.**
-How does Alice rotate without locking herself out?
- - (a) Run `pp identity init alice --force` locally, then coordinate with
-   the operator to run `pp user add alice --pubkey <new> --replace` on the
-   server — there is a window where neither key works.
- - (b) Support a signed self-rotation endpoint: old key signs a message
-   attesting the new pubkey; server accepts.
- - (c) Allow an overlap window where both old and new keys verify, for N
-   hours.
+**D6.9 Key rotation UX.** **Self-rotate via old-key-signed attestation.**
+`pp identity rotate` generates a new keypair locally, signs
+`{old_pubkey, new_pubkey, timestamp}` with the **old** key, POSTs to
+`/api/user/rotate`. Server verifies against registered pubkey, updates
+the `identity` tuple, appends an `event` tuple `key-rotated:<actor>` for
+audit. Old key stops verifying immediately. Operator `pp user add
+--replace` is reserved for **lost-key recovery** (the only case requiring
+operator intervention).
+*Rationale:* possession of the old private key is the correct authority
+for transition. Zero operator involvement for routine rotation, no lockout
+window, immediate revocation of old key supports compromise scenarios.
+*Refines:* F1.5.
 
-**6.10 Admin role / bootstrap.**
-Who may call `pp user add`?
- - (a) A bootstrap identity baked into the server's config file
-   (`~/.config/pp/server.toml`) whose pubkey is trusted without being in
-   the `identity` category.
- - (b) The first user registered via a local-only endpoint at server init.
- - (c) A pinned tuple `identity:root` seeded by the operator on first run.
- - (d) Any registered identity (flat model per NF5) until roles land.
+**D6.10 Admin role / bootstrap.** Admin pubkeys listed in
+`~/.config/pp/server.toml` under `[admin] admins = ["<hex>", ...]`. Admin
+gate applies **only** to `pp user add / revoke / replace`. All other
+mutating endpoints are open to any registered active identity (flat per
+NF5). On first run, server prints bootstrap instructions if no admins are
+configured.
+*Rationale:* NF5 governs *between* registered users; *becoming* registered
+is a separate trust-root boundary. Config-file admins avoid chicken-and-egg
+(can't seed identity tuples via signed writes without first having an
+identity).
+*Refines:* F1.2, F1.6.
 
-**6.11 Backpressure.**
-If the task queue grows faster than workers drain:
- - (a) Unbounded growth; visible in dashboard.
- - (b) Configurable `max_pending_tasks`; new `pp run` calls are rejected
-   above threshold.
- - (c) Per-launcher fairness: throttle the noisiest launcher.
+**D6.11 Backpressure.** Unbounded queue by default; dashboard shows queue
+depth prominently and renders red when depth exceeds `3 × total_slots`.
+Opt-in hard cap via `[queue] max_pending = N` in server config — when hit,
+`pp run` returns `429 Too Many Requests` with current depth so the CLI
+can surface or retry. No per-launcher fairness in v1 (revisit only if
+empirically starving; first lever is talking to the noisy launcher).
+*Rationale:* "your work is refused" is a worse default UX than "your work
+is queued behind N others, check the dashboard." Claim-side backpressure
+(D6.2) already handles the consumer side.
+*Refines:* new requirement — add §4.10.
 
-**6.12 Claim idempotency under network partitions.**
-If a worker claims a task, the server records the claim, but the response
-is lost:
- - (a) Worker retries with a deterministic `claim_id`; server treats a
-   re-claim of the same `claim_id` by the same worker as a no-op success.
- - (b) Worker times out, tries again, possibly loses the claim to a peer,
-   and must handle "claim conflict" cleanly.
+**D6.12 Claim idempotency.** Worker generates a UUIDv4 `claim_id` **before**
+sending the claim; retries reuse the same `claim_id`. Server records
+`claim_id` on the task tuple when flipping to `claimed`. Retry with
+matching `(task_id, claim_id, worker_id)` returns `200 OK` (idempotent
+no-op). Different `(worker_id, claim_id)` that already won returns
+`409 Conflict` with current `executed-by`. `claim_id` is threaded through
+`renew` and `complete` so the server can reject operations from a worker
+that thinks it holds a claim it actually lost.
+*Rationale:* partitions during claim are the normal case over long enough
+timelines. Deterministic IDs absorb them; non-deterministic IDs throw work
+away on transient failures.
+*Refines:* F2.6, F3.2.
 
-**6.13 Worker identity keys.**
-Is a worker's key distinct from its operator's human key?
- - (a) Yes — each worker has its own keypair signed into existence by its
-   operator. Better blast radius on compromise.
- - (b) No — worker just uses operator's key. Simpler.
+**D6.13 Worker identity keys.** **Distinct keypair per worker**, signed
+into existence by an operator-key attestation. `pp worker init` generates
+at `~/.config/pp/worker/<name>.key`; `pp worker register` posts worker
+pubkey + operator-signed `{worker_pubkey, operator_pubkey, nonce}`
+attestation. Server records both on the `worker` tuple. Heartbeat, claim,
+renew, complete are signed by worker key. Revocation: **operator-or-admin**
+(owners of compromised machines need fast self-serve revocation).
+*Rationale:* blast radius. A worker on a public port with a private key
+in memory must not be able to sign as its operator. Per-worker scoping
+(accept_from, budgets) is the natural policy granularity. Granular
+revocation: `pp worker revoke` is cheap and common; human revoke is rare
+and heavy.
+*Refines:* F2.1, F2.2.
 
-**6.14 Observation fan-out and SSE backpressure.**
-The current SSE tick in `ApiServer>>startSSETick` pushes to all connected
-clients. With N humans and M workflows, how is fan-out rate-limited?
- - (a) No limit; assume small teams (<20).
- - (b) Per-client ring buffer with slowest-client disconnect.
+**D6.14 SSE fan-out & backpressure.** Per-connection bounded queue (256
+events). When full, server closes the connection with a "reconnect to
+resync" signal. Client reconnects, fetches current state via `/api/scan`,
+resumes streaming. Instrumented in the existing `ApiServer>>startSSETick`
+broadcast loop as a channel-full check.
+*Rationale:* SSE lacks flow control; one slow client (sleeping laptop,
+background tab) shouldn't block the broadcast loop for everyone.
+Drop-and-reconnect is the standard SSE recipe and the client already
+fetches fresh state on reconnect.
+*Refines:* new requirement — add §4.11.
 
-**6.15 Workflow cancellation authority.**
-May any user cancel any workflow, or only the launcher?
- - (a) Launcher only.
- - (b) Launcher + any user whose agents are executing tasks in it.
- - (c) Any registered user (flat model per NF5).
+**D6.15 Workflow cancellation authority.** Launcher, **plus** operators of
+any worker currently executing a task in the workflow, plus admins.
+`/api/workflow/cancel/<id>` verifies signer is in this set. Cancellation
+MUST carry a `--reason` (CLI) / `reason` (API) field; cancelled workflow
+emits a `notification` to the launcher with severity `urgent` including
+the cancelling actor and reason.
+*Rationale:* cancellation is asymmetric — the launcher pays in progress,
+executing operators pay in API costs. Bob shouldn't need Alice's consent
+to stop her misbehaving scout-mission that's burning his tokens. Open
+"any registered user" invites griefing with no benefit.
+*Refines:* new requirement — add §4.12.
+
+---
+
+### Additional requirements from resolved decisions
+
+These refine or extend §4 based on resolutions above.
+
+**4.10 Queue backpressure (D6.11)**
+- The dashboard MUST display current pending-task count.
+- When `pending_tasks > 3 × sum(worker.slots)`, the dashboard MUST render
+  queue depth in a warning color.
+- If server config sets `[queue] max_pending = N`, `/api/workflow/run` MUST
+  return HTTP 429 with a JSON body `{depth: <current>, max_pending: N}`
+  when pending exceeds N.
+
+**4.11 SSE client backpressure (D6.14)**
+- Each SSE connection MUST have a bounded per-connection queue (256
+  events).
+- When the queue is full, the server MUST close the connection with a
+  body indicating resync is required.
+- The dashboard client MUST, on SSE close, re-fetch current state via
+  `/api/scan` before resuming its SSE subscription.
+
+**4.12 Workflow cancellation (D6.15)**
+- `POST /api/workflow/cancel/<id>` MUST verify the signer is in
+  `{launched-by, any operator whose worker has an active claim on a task
+  in this workflow, any admin}`.
+- The request body MUST include a `reason` string (min length 1); the CLI
+  flag `--reason` is required.
+- On successful cancel, the server MUST emit a `notification` tuple to
+  the launcher (severity `urgent`) containing the cancelling actor and
+  reason.
 
 ---
 
