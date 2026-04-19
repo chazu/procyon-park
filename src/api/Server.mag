@@ -256,7 +256,129 @@ ApiServer subclass: Object
     "Rotate is NOT admin-gated — its own signed handler does old-pub verification."
     httpServer route: '/api/user/rotate' method: 'POST' handler: [:req |
       self handleUserRotate: req
-    ]
+    ].
+    self registerWorkerRoutes
+  ]
+
+  method: registerWorkerRoutes [
+    "Worker lifecycle routes — birth certificate (D6.13) and friends.
+     Register is a signed POST where the operator's human key signs a
+     request whose body contains the worker attestation. The request-level
+     signature (X-PP-Actor=<operator user>, X-PP-Signature over the
+     canonical bytes) IS the attestation signature: the body's bytes
+     include worker_pubkey/operator_pubkey/nonce, so SignatureVerifier's
+     sha256(body) check binds the attestation to the operator's key."
+    self signedPost: '/api/worker/register'
+         fields: #('worker_pubkey' 'operator_pubkey' 'nonce' 'manifest' 'name')
+         do: [:body :actorCtx | self handleWorkerRegister: body actor: actorCtx]
+  ]
+
+  method: handleWorkerRegister: body actor: actorCtx [
+    "Handle POST /api/worker/register.
+
+     Body: {worker_pubkey, operator_pubkey, nonce, manifest, name}.
+     manifest must be a Dictionary carrying slots/models/repos/roles/operator/accept_from.
+
+     Auth gates:
+       - actorCtx must be verified; anonymous fallback → 503 when
+         signatures are unenforced, 401 when enforcement is on.
+       - The authenticated actor must be a user: identity whose registered
+         pubkey equals body.operator_pubkey. Any mismatch → 403.
+       - Duplicate worker name claimed by a different operator → 409.
+
+     Success writes an affine worker tuple with ttl = 3 * heartbeatInterval
+     (default 30s → 90s)."
+    | workerPub operatorPub nonce manifest name manifestErr existing existingOp payload identity ttl heartbeat now opIdentityTuple opPayload actor |
+
+    actorCtx verified ifFalse: [
+      enforceSignatures
+        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
+        ifFalse: [^self errorResponse: 503
+                         message: 'enforce_signatures must be true for worker registration']
+    ].
+
+    workerPub := body at: 'worker_pubkey'.
+    operatorPub := body at: 'operator_pubkey'.
+    nonce := body at: 'nonce'.
+    manifest := body at: 'manifest'.
+    name := body at: 'name'.
+
+    (workerPub isString and: [workerPub size = 64]) ifFalse: [
+      ^self errorResponse: 400 message: 'worker_pubkey must be 64 hex chars'
+    ].
+    (operatorPub isString and: [operatorPub isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'operator_pubkey must be a non-empty hex string'
+    ].
+    (nonce isString and: [nonce isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'nonce must be a non-empty string'
+    ].
+    (manifest isKindOf: Dictionary) ifFalse: [
+      ^self errorResponse: 400 message: 'manifest must be a dict'
+    ].
+    manifestErr := self validateWorkerManifest: manifest.
+    manifestErr notNil ifTrue: [^self errorResponse: 400 message: manifestErr].
+    (name isString and: [name isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'name must be a non-empty string'
+    ].
+
+    "Bind attestation: body.operator_pubkey must equal the registered pubkey
+     of the authenticated actor. Admin-pubkey signers cannot register a
+     worker — they have no user: identity whose pubkey to compare."
+    opIdentityTuple := bbs rdp: 'identity' scope: '/' identity: actorCtx actor.
+    opIdentityTuple isNil ifTrue: [
+      ^self errorResponse: 403 message: 'operator identity not found: ', actorCtx actor
+    ].
+    opPayload := opIdentityTuple at: 'payload' ifAbsent: [Dictionary new].
+    (opPayload at: 'status' ifAbsent: ['active']) = 'active' ifFalse: [
+      ^self errorResponse: 403 message: 'operator identity is not active'
+    ].
+    (opPayload at: 'pubkey' ifAbsent: [nil]) = operatorPub ifFalse: [
+      ^self errorResponse: 403 message: 'operator_pubkey does not match authenticated actor'
+    ].
+
+    identity := Identity worker: name.
+    existing := bbs rdp: 'worker' scope: '/' identity: identity.
+    existing notNil ifTrue: [
+      existingOp := (existing at: 'payload' ifAbsent: [Dictionary new])
+                      at: 'operator_pubkey' ifAbsent: [nil].
+      (existingOp notNil and: [existingOp = operatorPub]) ifFalse: [
+        ^self errorResponse: 409
+                 message: 'worker name ', name, ' already claimed by a different operator'
+      ]
+    ].
+
+    "TTL = 3 * heartbeatInterval. Default heartbeat 30s → ttl 90s."
+    heartbeat := self workerHeartbeatInterval.
+    ttl := heartbeat * 3.
+
+    now := DateTime now epochSeconds.
+    payload := Dictionary new.
+    payload at: 'worker_pubkey' put: workerPub.
+    payload at: 'operator_pubkey' put: operatorPub.
+    payload at: 'manifest' put: manifest.
+    payload at: 'drain' put: false.
+    payload at: 'registered_at' put: now.
+
+    actor := identity.
+    bbs outAffine: 'worker' scope: '/' identity: identity payload: payload ttl: ttl actor: actor.
+
+    ^self okResponse: (self okWithIdentity: identity)
+  ]
+
+  method: validateWorkerManifest: manifest [
+    "Require the canonical manifest fields (D6.13). Returns error or nil."
+    #('slots' 'models' 'repos' 'roles' 'operator' 'accept_from') do: [:f |
+      (manifest includesKey: f) ifFalse: [
+        ^'manifest missing required field: ', f
+      ]
+    ].
+    ^nil
+  ]
+
+  method: workerHeartbeatInterval [
+    "Worker heartbeat interval in seconds. Future work: read from server.toml
+     [worker].heartbeat_interval. Default: 30s → 3x = 90s tuple TTL."
+    ^30
   ]
 
   method: handleTaskCreate: body actor: actorCtx [
