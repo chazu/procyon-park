@@ -84,6 +84,8 @@ CliPP subclass: Object
     head = 'history'  ifTrue: [^true].
     head = 'audit'    ifTrue: [^true].
     head = 'workflow' ifTrue: [^true].
+    head = 'watch'    ifTrue: [^true].
+    head = 'unwatch'  ifTrue: [^true].
     head = 'workitem' ifTrue: [^true].
     head = 'repo'     ifTrue: [^true].
     head = 'worktree' ifTrue: [^true].
@@ -103,6 +105,8 @@ CliPP subclass: Object
     head := args at: 0.
     head = 'status'   ifTrue: [^self runStatus: args].
     head = 'workflow' ifTrue: [^self runWorkflow: args].
+    head = 'watch'    ifTrue: [^self runWatch: args].
+    head = 'unwatch'  ifTrue: [^self runUnwatch: args].
     head = 'log'      ifTrue: [^self runLog: args].
     head = 'prime'    ifTrue: [^self runPrime: args].
     head = 'gc'       ifTrue: [^self runGc: args].
@@ -1683,6 +1687,40 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  "--- Subcommand: watch / unwatch (F8.2) --------------------------------"
+
+  classMethod: runWatch: args [
+    "pp watch <workflow_id> — subscribe to a workflow's lifecycle events.
+     Signed POST /api/workflow/watch; server derives user from signature."
+    | cfg body wfId |
+    args size < 2 ifTrue: [
+      'Usage: pp watch <workflow_id>' println.
+      ^1
+    ].
+    wfId := args at: 1.
+    cfg := self loadConfig.
+    body := Dictionary new.
+    body at: 'workflow_id' put: wfId.
+    self postAndPrint: cfg path: '/api/workflow/watch' body: body.
+    ^0
+  ]
+
+  classMethod: runUnwatch: args [
+    "pp unwatch <workflow_id> — remove the caller's subscription.
+     Signed POST /api/workflow/unwatch."
+    | cfg body wfId |
+    args size < 2 ifTrue: [
+      'Usage: pp unwatch <workflow_id>' println.
+      ^1
+    ].
+    wfId := args at: 1.
+    cfg := self loadConfig.
+    body := Dictionary new.
+    body at: 'workflow_id' put: wfId.
+    self postAndPrint: cfg path: '/api/workflow/unwatch' body: body.
+    ^0
   ]
 
   "--- Subcommand: verdict -----------------------------------------------"

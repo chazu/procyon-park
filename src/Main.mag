@@ -7,7 +7,7 @@ Main subclass: Object
   classMethod: ppCommands [
     "Commands that route to PP (thin HTTP client)."
     ^#('observe' 'decide' 'event' 'plan' 'read' 'notify' 'dismiss'
-       'status' 'prime' 'task' 'workflow' 'signal' 'verdict' 'log' 'history' 'audit' 'dashboard'
+       'status' 'prime' 'task' 'workflow' 'watch' 'unwatch' 'signal' 'verdict' 'log' 'history' 'audit' 'dashboard'
        'workitem' 'gc' 'session' 'usage' 'identity' 'worker' 'user')
   ]
 

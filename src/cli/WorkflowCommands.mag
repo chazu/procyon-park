@@ -713,3 +713,37 @@ WorkflowCommands subclass: CLIBase
       ('  Review cycle: ', (cp at: 'count' ifAbsent: ['?']) printString) println
     ]
   ]
+
+  "--- Watch / unwatch (F8.2) ---------------------------------------------
+
+   These ports back `pp watch <wf-id>` and `pp unwatch <wf-id>` at the
+   CliPP root (not under `pp workflow`). They live here so the PP.mag
+   dispatcher can delegate cleanly — the legacy (non-PP_USE_CLI) path
+   shares the same signed-POST plumbing as the rest of WorkflowCommands."
+
+  method: cmdWatch: args [
+    "pp watch <workflow_id> — signed POST /api/workflow/watch. Server
+     derives user from the request signature."
+    | body wfId |
+    args size < 2 ifTrue: [
+      'Usage: pp watch <workflow_id>' println.
+      ^self
+    ].
+    wfId := args at: 1.
+    body := Dictionary new.
+    body at: 'workflow_id' put: wfId.
+    self post: '/api/workflow/watch' body: body
+  ]
+
+  method: cmdUnwatch: args [
+    "pp unwatch <workflow_id> — signed POST /api/workflow/unwatch."
+    | body wfId |
+    args size < 2 ifTrue: [
+      'Usage: pp unwatch <workflow_id>' println.
+      ^self
+    ].
+    wfId := args at: 1.
+    body := Dictionary new.
+    body at: 'workflow_id' put: wfId.
+    self post: '/api/workflow/unwatch' body: body
+  ]
