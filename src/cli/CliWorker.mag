@@ -224,6 +224,11 @@ CliWorkerRegister subclass: Object
       type: #string
       default: ''
       doc: 'Override server URL (precedence: --server > PP_URL > default)').
+    cmd flag: (Cli::Flag
+      name: 'refresh'
+      type: #bool
+      default: false
+      doc: 'Signal intent to update an existing worker manifest (same behavior; label-only, the server is idempotent on matching operator_pubkey)').
     cmd envBinding: (Cli::EnvBinding
       envName: 'PP_URL'
       setter: #baseUrl:

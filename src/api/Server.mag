@@ -299,8 +299,18 @@ ApiServer subclass: Object
        - Duplicate worker name claimed by a different operator → 409.
 
      Success writes an affine worker tuple with ttl = 3 * heartbeatInterval
-     (default 30s → 90s)."
-    | workerPub operatorPub nonce manifest name manifestErr existing existingOp payload identity ttl heartbeat now opIdentityTuple opPayload actor |
+     (default 30s → 90s).
+
+     Refresh semantics (F2.2): if a worker tuple with this name already
+     exists AND its operator_pubkey matches the request's operator_pubkey,
+     the call is idempotent — the existing payload is consumed, the
+     manifest is replaced with the new one, and the drain flag and
+     registered_at timestamp are preserved. The TTL resets to now + ttl.
+     This lets operators push an updated manifest (e.g. after adding a
+     repo clone) without interrupting any in-flight claim or lease work,
+     and without losing an operator-initiated drain. A mismatched
+     operator_pubkey continues to return 409 (impersonation guard)."
+    | workerPub operatorPub nonce manifest name manifestErr existing existingOp existingPayload payload identity ttl heartbeat now opIdentityTuple opPayload actor drainFlag regAt isRefresh |
 
     actorCtx verified ifFalse: [
       enforceSignatures
@@ -350,13 +360,23 @@ ApiServer subclass: Object
 
     identity := Identity worker: name.
     existing := bbs rdp: 'worker' scope: '/' identity: identity.
+    isRefresh := false.
+    drainFlag := false.
+    regAt := nil.
     existing notNil ifTrue: [
-      existingOp := (existing at: 'payload' ifAbsent: [Dictionary new])
-                      at: 'operator_pubkey' ifAbsent: [nil].
+      existingPayload := existing at: 'payload' ifAbsent: [Dictionary new].
+      existingOp := existingPayload at: 'operator_pubkey' ifAbsent: [nil].
       (existingOp notNil and: [existingOp = operatorPub]) ifFalse: [
         ^self errorResponse: 409
                  message: 'worker name ', name, ' already claimed by a different operator'
-      ]
+      ].
+      "Same operator re-registering — refresh path. Preserve drain and
+       registered_at, consume the old tuple, and fall through to write a
+       fresh one with the updated manifest."
+      isRefresh := true.
+      drainFlag := existingPayload at: 'drain' ifAbsent: [false].
+      regAt := existingPayload at: 'registered_at' ifAbsent: [nil].
+      bbs inp: 'worker' scope: '/' identity: identity
     ].
 
     "TTL = 3 * heartbeatInterval. Default heartbeat 30s → ttl 90s."
@@ -364,12 +384,14 @@ ApiServer subclass: Object
     ttl := heartbeat * 3.
 
     now := DateTime now epochSeconds.
+    regAt isNil ifTrue: [regAt := now].
     payload := Dictionary new.
     payload at: 'worker_pubkey' put: workerPub.
     payload at: 'operator_pubkey' put: operatorPub.
     payload at: 'manifest' put: manifest.
-    payload at: 'drain' put: false.
-    payload at: 'registered_at' put: now.
+    payload at: 'drain' put: drainFlag.
+    payload at: 'registered_at' put: regAt.
+    isRefresh ifTrue: [payload at: 'refreshed_at' put: now].
 
     actor := identity.
     bbs outAffine: 'worker' scope: '/' identity: identity payload: payload ttl: ttl actor: actor.

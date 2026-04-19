@@ -1,0 +1,360 @@
+"Tests for handleWorkerRegister: — idempotent manifest refresh (F2.2).
+
+ Re-POSTing /api/worker/register for the SAME worker name by the SAME
+ operator must:
+   WMR1  Succeed (200) and update the stored manifest (new repo list
+         shows up in the payload).
+   WMR2  Preserve the drain flag when it was set to true on the prior
+         tuple (operators draining a worker cannot have drain cleared
+         by accident).
+   WMR3  Preserve registered_at (the first-registration timestamp is
+         durable across refreshes) and stamp a fresh refreshed_at.
+   WMR4  Still return 409 when a DIFFERENT operator tries to refresh.
+         Operator mismatch is not weakened by the refresh path.
+   WMR5  Reset the TTL (fresh expiry relative to now).
+
+ The handler is invoked directly (no HTTP round-trip); synthetic
+ ActorContext instances bypass signature verification so the test
+ isolates business logic. Mirrors the harness used in
+ test_worker_register.mag."
+
+TWMRTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Worker Manifest Refresh Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TWMRHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | ts |
+    ts := DateTime now epochSeconds printString.
+    ^'/tmp/pp-test-bbs-refresh-', ts, '-', (Object new identityHash printString)
+  ]
+
+  classMethod: makeBBS [
+    ^BBS withDataDir: self makeTempDir
+  ]
+
+  classMethod: makeServerFor: bbs [
+    ^ApiServer on: 19992 bbs: bbs
+  ]
+
+  classMethod: baseManifest [
+    | m repos rec |
+    m := Dictionary new.
+    m at: 'slots' put: 2.
+    m at: 'models' put: #('sonnet').
+    repos := Array new: 0.
+    rec := Dictionary new.
+    rec at: 'name' put: 'procyon-park'.
+    rec at: 'path' put: '/tmp/pp'.
+    rec at: 'head' put: 'main'.
+    repos := repos copyWith: rec.
+    m at: 'repos' put: repos.
+    m at: 'roles' put: #('implementer').
+    m at: 'operator' put: 'alice'.
+    m at: 'accept_from' put: #('alice').
+    ^m
+  ]
+
+  classMethod: extendedManifest [
+    "Same as baseManifest but with an additional repo clone entry —
+     this simulates an operator adding a new repo to an existing
+     worker's manifest."
+    | m repos rec1 rec2 |
+    m := Dictionary new.
+    m at: 'slots' put: 2.
+    m at: 'models' put: #('sonnet').
+    repos := Array new: 0.
+    rec1 := Dictionary new.
+    rec1 at: 'name' put: 'procyon-park'.
+    rec1 at: 'path' put: '/tmp/pp'.
+    rec1 at: 'head' put: 'main'.
+    repos := repos copyWith: rec1.
+    rec2 := Dictionary new.
+    rec2 at: 'name' put: 'maggie'.
+    rec2 at: 'path' put: '/tmp/maggie'.
+    rec2 at: 'head' put: 'main'.
+    repos := repos copyWith: rec2.
+    m at: 'repos' put: repos.
+    m at: 'roles' put: #('implementer').
+    m at: 'operator' put: 'alice'.
+    m at: 'accept_from' put: #('alice').
+    ^m
+  ]
+
+  classMethod: workerPub [
+    ^'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899'
+  ]
+
+  classMethod: altWorkerPub [
+    ^'1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff'
+  ]
+
+  classMethod: registerUser: name pubkey: pubHex onBBS: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'pubkey' put: pubHex.
+    payload at: 'status' put: 'active'.
+    payload at: 'created_at' put: 1234567890.
+    bbs upsertPinned: 'identity' scope: '/' identity: 'user:', name
+        payload: payload actor: 'test-admin'
+  ]
+
+  classMethod: bodyFor: name workerPub: wp operatorPub: op nonce: n manifest: m [
+    | body |
+    body := Dictionary new.
+    body at: 'worker_pubkey' put: wp.
+    body at: 'operator_pubkey' put: op.
+    body at: 'nonce' put: n.
+    body at: 'manifest' put: m.
+    body at: 'name' put: name.
+    ^body
+  ]
+
+  classMethod: ctxFor: userName verified: v [
+    ^ActorContext actor: 'user:', userName timestamp: 1234567890
+                  verified: v isAdmin: false
+  ]
+
+
+"=== TestWorkerManifestRefresh ==="
+TestWorkerManifestRefresh subclass: Object
+
+  classMethod: run: t [
+    self testRefreshUpdatesManifest: t.
+    self testRefreshPreservesDrain: t.
+    self testRefreshPreservesRegisteredAt: t.
+    self testRefreshRejectsMismatchedOperator: t.
+    self testRefreshResetsTTL: t
+  ]
+
+  classMethod: aliceHex [
+    ^'ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100'
+  ]
+
+  classMethod: bobHex [
+    ^'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  ]
+
+  classMethod: registerFirst: bbs server: server name: name [
+    "Helper: initial registration by alice. Returns the resp."
+    | body ctx |
+    body := TWMRHelper bodyFor: name
+                       workerPub: TWMRHelper workerPub
+                       operatorPub: self aliceHex
+                       nonce: 'nonce-1'
+                       manifest: TWMRHelper baseManifest.
+    ctx := TWMRHelper ctxFor: 'alice' verified: true.
+    ^server handleWorkerRegister: body actor: ctx
+  ]
+
+  classMethod: testRefreshUpdatesManifest: t [
+    | bbs server body ctx resp tuple payload manifest repos |
+    '--- WMR1: refresh updates manifest (added repo) ---' println.
+    bbs := TWMRHelper makeBBS.
+    server := TWMRHelper makeServerFor: bbs.
+    TWMRHelper registerUser: 'alice' pubkey: self aliceHex onBBS: bbs.
+
+    "First registration with 1 repo."
+    resp := self registerFirst: bbs server: server name: 'alice-w1'.
+    t assertEqual: resp status to: 200 message: 'WMR1: initial register 200'.
+
+    "Second registration with an added repo — same operator, same name."
+    body := TWMRHelper bodyFor: 'alice-w1'
+                       workerPub: TWMRHelper workerPub
+                       operatorPub: self aliceHex
+                       nonce: 'nonce-2'
+                       manifest: TWMRHelper extendedManifest.
+    ctx := TWMRHelper ctxFor: 'alice' verified: true.
+    resp := server handleWorkerRegister: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WMR1: refresh returns 200'.
+
+    tuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-w1'.
+    t assert: tuple notNil message: 'WMR1: tuple still present after refresh'.
+    tuple notNil ifTrue: [
+      payload := tuple at: 'payload'.
+      manifest := payload at: 'manifest'.
+      repos := manifest at: 'repos'.
+      t assertEqual: repos size to: 2
+        message: 'WMR1: manifest.repos updated to 2 entries after refresh'.
+      t assert: (payload includesKey: 'refreshed_at')
+        message: 'WMR1: refresh stamps refreshed_at'
+    ]
+  ]
+
+  classMethod: testRefreshPreservesDrain: t [
+    | bbs server resp tuple payload newPayload body ctx |
+    '--- WMR2: refresh preserves drain=true ---' println.
+    bbs := TWMRHelper makeBBS.
+    server := TWMRHelper makeServerFor: bbs.
+    TWMRHelper registerUser: 'alice' pubkey: self aliceHex onBBS: bbs.
+
+    resp := self registerFirst: bbs server: server name: 'alice-wd'.
+    t assertEqual: resp status to: 200 message: 'WMR2: initial register 200'.
+
+    "Simulate an operator setting drain=true on the existing tuple.
+     We rewrite the worker tuple in place via the BBS API with the
+     drain flag flipped — then refresh and confirm drain survives."
+    tuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-wd'.
+    payload := tuple at: 'payload'.
+    newPayload := Dictionary new.
+    payload keysDo: [:k | newPayload at: k put: (payload at: k)].
+    newPayload at: 'drain' put: true.
+    bbs inp: 'worker' scope: '/' identity: 'worker:alice-wd'.
+    bbs outAffine: 'worker' scope: '/' identity: 'worker:alice-wd'
+        payload: newPayload ttl: 90 actor: 'worker:alice-wd'.
+
+    "Refresh with new manifest."
+    body := TWMRHelper bodyFor: 'alice-wd'
+                       workerPub: TWMRHelper workerPub
+                       operatorPub: self aliceHex
+                       nonce: 'nonce-drain'
+                       manifest: TWMRHelper extendedManifest.
+    ctx := TWMRHelper ctxFor: 'alice' verified: true.
+    resp := server handleWorkerRegister: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WMR2: refresh returns 200'.
+
+    tuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-wd'.
+    payload := tuple at: 'payload'.
+    t assertEqual: (payload at: 'drain') to: true
+      message: 'WMR2: drain=true preserved across refresh'
+  ]
+
+  classMethod: testRefreshPreservesRegisteredAt: t [
+    | bbs server resp tuple payload initialRegAt body ctx |
+    '--- WMR3: refresh preserves registered_at ---' println.
+    bbs := TWMRHelper makeBBS.
+    server := TWMRHelper makeServerFor: bbs.
+    TWMRHelper registerUser: 'alice' pubkey: self aliceHex onBBS: bbs.
+
+    resp := self registerFirst: bbs server: server name: 'alice-wr'.
+    t assertEqual: resp status to: 200 message: 'WMR3: initial register 200'.
+
+    tuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-wr'.
+    payload := tuple at: 'payload'.
+    initialRegAt := payload at: 'registered_at'.
+    t assert: initialRegAt notNil message: 'WMR3: initial registered_at stamped'.
+
+    "Refresh."
+    body := TWMRHelper bodyFor: 'alice-wr'
+                       workerPub: TWMRHelper workerPub
+                       operatorPub: self aliceHex
+                       nonce: 'nonce-reg'
+                       manifest: TWMRHelper extendedManifest.
+    ctx := TWMRHelper ctxFor: 'alice' verified: true.
+    resp := server handleWorkerRegister: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WMR3: refresh 200'.
+
+    tuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-wr'.
+    payload := tuple at: 'payload'.
+    t assertEqual: (payload at: 'registered_at') to: initialRegAt
+      message: 'WMR3: registered_at unchanged after refresh'
+  ]
+
+  classMethod: testRefreshRejectsMismatchedOperator: t [
+    | bbs server resp body ctx |
+    '--- WMR4: mismatched operator still 409 on refresh path ---' println.
+    bbs := TWMRHelper makeBBS.
+    server := TWMRHelper makeServerFor: bbs.
+    TWMRHelper registerUser: 'alice' pubkey: self aliceHex onBBS: bbs.
+    TWMRHelper registerUser: 'bob' pubkey: self bobHex onBBS: bbs.
+
+    resp := self registerFirst: bbs server: server name: 'shared-w'.
+    t assertEqual: resp status to: 200 message: 'WMR4: alice initial 200'.
+
+    "Bob tries to 'refresh' the same worker name — must still 409."
+    body := TWMRHelper bodyFor: 'shared-w'
+                       workerPub: TWMRHelper altWorkerPub
+                       operatorPub: self bobHex
+                       nonce: 'nonce-bob'
+                       manifest: TWMRHelper baseManifest.
+    ctx := TWMRHelper ctxFor: 'bob' verified: true.
+    resp := server handleWorkerRegister: body actor: ctx.
+    t assertEqual: resp status to: 409
+      message: 'WMR4: different-operator refresh attempt → 409'
+  ]
+
+  classMethod: testRefreshResetsTTL: t [
+    | bbs server resp tuple ttl1 ttl2 body ctx |
+    '--- WMR5: refresh resets the TTL on the tuple ---' println.
+    bbs := TWMRHelper makeBBS.
+    server := TWMRHelper makeServerFor: bbs.
+    TWMRHelper registerUser: 'alice' pubkey: self aliceHex onBBS: bbs.
+
+    resp := self registerFirst: bbs server: server name: 'alice-wt'.
+    t assertEqual: resp status to: 200 message: 'WMR5: initial 200'.
+
+    tuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-wt'.
+    ttl1 := tuple at: 'ttl' ifAbsent: [nil].
+
+    "Refresh."
+    body := TWMRHelper bodyFor: 'alice-wt'
+                       workerPub: TWMRHelper workerPub
+                       operatorPub: self aliceHex
+                       nonce: 'nonce-ttl'
+                       manifest: TWMRHelper extendedManifest.
+    ctx := TWMRHelper ctxFor: 'alice' verified: true.
+    resp := server handleWorkerRegister: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WMR5: refresh 200'.
+
+    tuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-wt'.
+    ttl2 := tuple at: 'ttl' ifAbsent: [nil].
+    t assert: (ttl1 notNil and: [ttl2 notNil])
+      message: 'WMR5: ttl present before and after refresh'.
+    ttl2 notNil ifTrue: [
+      t assertEqual: ttl2 to: 90
+        message: 'WMR5: ttl reset to configured 90s on refresh'
+    ]
+  ]
+
+
+"=== Main ==="
+TWMRMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TWMRTest new.
+    TestWorkerManifestRefresh run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
