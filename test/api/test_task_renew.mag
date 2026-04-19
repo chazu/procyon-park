@@ -1,0 +1,246 @@
+"Tests for ApiServer>>handleTaskRenew: — /api/tasks/renew lease renewal.
+
+ Invariants under test:
+   TR1  Happy path: renew with the (claim_id, worker_id) currently stamped
+        on the task atomically extends claim_expires_at by the lease,
+        sets renewed_at to now, zeroes missed_renewals, and leaves
+        retry_count intact. Returns 200 with new claim_expires_at.
+   TR2  Stale claim_id (after reap+reclaim by another worker) returns
+        409 with the current executed_by/worker_id and does NOT mutate
+        the task payload.
+   TR3  Wrong worker_id (claim lost to another worker) returns 409 and
+        leaves payload alone (renew after 409 loss).
+   TR4  task.max_runtime, when present and positive, is honored as the
+        lease window in place of the 600s default."
+
+TRTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Task Renew Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TRHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d /tmp/pp-test-bbs-renew-XXXXXX'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: makeBBS [
+    ^BBS withDataDir: self makeTempDir
+  ]
+
+  classMethod: makeServerFor: bbs [
+    ^ApiServer on: 19993 bbs: bbs
+  ]
+
+  classMethod: seedClaimedTask: identity claimId: cid workerId: wid onBBS: bbs [
+    "Seed a task tuple already stamped with a claim and a small initial
+     claim_expires_at so we can detect the lease extension."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: 'dispatched'.
+    payload at: 'description' put: 'renewable task'.
+    payload at: 'claim_id' put: cid.
+    payload at: 'worker_id' put: wid.
+    payload at: 'claim_expires_at' put: 1.
+    payload at: 'renewed_at' put: nil.
+    payload at: 'missed_renewals' put: 2.
+    payload at: 'retry_count' put: 1.
+    payload at: 'max_retries' put: 3.
+    payload at: 'last_failure_reason' put: nil.
+    bbs out: 'task' scope: 'demo-scope' identity: identity payload: payload
+        actor: 'user:alice' launchedBy: 'user:alice' executedBy: wid
+  ]
+
+  classMethod: body: identity claimId: cid workerId: wid [
+    | b |
+    b := Dictionary new.
+    b at: 'task_id' put: identity.
+    b at: 'scope' put: 'demo-scope'.
+    b at: 'claim_id' put: cid.
+    b at: 'worker_id' put: wid.
+    ^b
+  ]
+
+  classMethod: anonCtx [ ^ActorContext anonymous ]
+
+  classMethod: findTask: identity in: bbs [
+    ^(bbs scanAll: 'task') detect: [:t | (t at: 'identity') = identity] ifNone: [nil]
+  ]
+
+"=== TestTaskRenew ==="
+TestTaskRenew subclass: Object
+
+  classMethod: run: t [
+    self testHappyPath: t.
+    self testStaleClaimAfterReclaim: t.
+    self testWrongWorker: t.
+    self testMaxRuntimeRespected: t
+  ]
+
+  classMethod: testHappyPath: t [
+    | bbs server body resp respBody tuple payload newExpires |
+    '--- TR1: matching claim extends lease ---' println.
+    bbs := TRHelper makeBBS.
+    server := TRHelper makeServerFor: bbs.
+    TRHelper seedClaimedTask: 'task-tr1' claimId: 'claim-aaa' workerId: 'worker:alice' onBBS: bbs.
+
+    body := TRHelper body: 'task-tr1' claimId: 'claim-aaa' workerId: 'worker:alice'.
+    resp := server handleTaskRenew: body actor: TRHelper anonCtx.
+    t assertEqual: resp status to: 200 message: 'TR1: returns 200 on match'.
+
+    respBody := Json decode: resp body.
+    t assertEqual: (respBody at: 'ok' ifAbsent: [false]) to: true
+      message: 'TR1: response.ok = true'.
+    newExpires := respBody at: 'claim_expires_at' ifAbsent: [nil].
+    t assert: (newExpires notNil and: [newExpires > 1])
+      message: 'TR1: claim_expires_at extended past seeded value (1)'.
+
+    tuple := TRHelper findTask: 'task-tr1' in: bbs.
+    t assert: tuple notNil message: 'TR1: task tuple still present'.
+    payload := tuple at: 'payload'.
+    t assertEqual: (payload at: 'claim_expires_at') to: newExpires
+      message: 'TR1: payload.claim_expires_at matches response'.
+    t assertEqual: (payload at: 'missed_renewals') to: 0
+      message: 'TR1: missed_renewals reset to 0'.
+    t assert: ((payload at: 'renewed_at' ifAbsent: [nil]) notNil)
+      message: 'TR1: renewed_at stamped'.
+    t assertEqual: (payload at: 'retry_count') to: 1
+      message: 'TR1: retry_count NOT modified (still 1)'.
+    t assertEqual: (payload at: 'claim_id') to: 'claim-aaa'
+      message: 'TR1: claim_id preserved'.
+    t assertEqual: (payload at: 'worker_id') to: 'worker:alice'
+      message: 'TR1: worker_id preserved'
+  ]
+
+  classMethod: testStaleClaimAfterReclaim: t [
+    | bbs server body resp respBody tuple payload |
+    '--- TR2: stale claim after reap+reclaim → 409 ---' println.
+    bbs := TRHelper makeBBS.
+    server := TRHelper makeServerFor: bbs.
+    "Originally claimed by alice (claim-aaa); after reap a new worker
+     bob took the claim with a fresh claim_id."
+    TRHelper seedClaimedTask: 'task-tr2' claimId: 'claim-bbb' workerId: 'worker:bob' onBBS: bbs.
+
+    body := TRHelper body: 'task-tr2' claimId: 'claim-aaa' workerId: 'worker:alice'.
+    resp := server handleTaskRenew: body actor: TRHelper anonCtx.
+    t assertEqual: resp status to: 409 message: 'TR2: stale claim → 409'.
+
+    respBody := Json decode: resp body.
+    t assertEqual: (respBody at: 'executed_by' ifAbsent: [nil]) to: 'worker:bob'
+      message: 'TR2: 409 includes current executed_by'.
+
+    tuple := TRHelper findTask: 'task-tr2' in: bbs.
+    payload := tuple at: 'payload'.
+    t assertEqual: (payload at: 'claim_id') to: 'claim-bbb'
+      message: 'TR2: claim_id unchanged after rejected renew'.
+    t assertEqual: (payload at: 'worker_id') to: 'worker:bob'
+      message: 'TR2: worker_id unchanged after rejected renew'.
+    t assertEqual: (payload at: 'claim_expires_at') to: 1
+      message: 'TR2: claim_expires_at unchanged after rejected renew'.
+    t assertEqual: (payload at: 'missed_renewals') to: 2
+      message: 'TR2: missed_renewals unchanged after rejected renew'
+  ]
+
+  classMethod: testWrongWorker: t [
+    | bbs server body resp respBody |
+    '--- TR3: wrong worker_id → 409 (renew after loss) ---' println.
+    bbs := TRHelper makeBBS.
+    server := TRHelper makeServerFor: bbs.
+    TRHelper seedClaimedTask: 'task-tr3' claimId: 'claim-ccc' workerId: 'worker:carol' onBBS: bbs.
+
+    "Same claim_id but different worker_id — must still 409."
+    body := TRHelper body: 'task-tr3' claimId: 'claim-ccc' workerId: 'worker:dave'.
+    resp := server handleTaskRenew: body actor: TRHelper anonCtx.
+    t assertEqual: resp status to: 409 message: 'TR3: wrong worker → 409'.
+
+    respBody := Json decode: resp body.
+    t assertEqual: (respBody at: 'worker_id' ifAbsent: [nil]) to: 'worker:carol'
+      message: 'TR3: 409 surfaces current worker_id'
+  ]
+
+  classMethod: testMaxRuntimeRespected: t [
+    | bbs server body resp respBody tuple payload before after lease |
+    '--- TR4: payload.max_runtime overrides default lease ---' println.
+    bbs := TRHelper makeBBS.
+    server := TRHelper makeServerFor: bbs.
+    TRHelper seedClaimedTask: 'task-tr4' claimId: 'claim-ddd' workerId: 'worker:erin' onBBS: bbs.
+    "Inject max_runtime onto the seeded task payload."
+    bbs update: 'task' scope: 'demo-scope' identity: 'task-tr4' do: [:p |
+      p at: 'max_runtime' put: 42
+    ].
+
+    body := TRHelper body: 'task-tr4' claimId: 'claim-ddd' workerId: 'worker:erin'.
+    before := DateTime now epochSeconds.
+    resp := server handleTaskRenew: body actor: TRHelper anonCtx.
+    after := DateTime now epochSeconds.
+    t assertEqual: resp status to: 200 message: 'TR4: returns 200'.
+    respBody := Json decode: resp body.
+    lease := respBody at: 'lease_seconds' ifAbsent: [nil].
+    t assertEqual: lease to: 42
+      message: 'TR4: lease_seconds == max_runtime'.
+    tuple := TRHelper findTask: 'task-tr4' in: bbs.
+    payload := tuple at: 'payload'.
+    "claim_expires_at should be roughly now + 42, within wall-clock bounds."
+    t assert: ((payload at: 'claim_expires_at') >= (before + 42))
+      message: 'TR4: claim_expires_at >= before + max_runtime'.
+    t assert: ((payload at: 'claim_expires_at') <= (after + 42))
+      message: 'TR4: claim_expires_at <= after + max_runtime'
+  ]
+
+"=== Main ==="
+TaskRenewMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TRTest new.
+    TestTaskRenew run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

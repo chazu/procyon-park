@@ -235,6 +235,9 @@ ApiServer subclass: Object
     self signedPost: '/api/tasks/complete' fields: #('task_id' 'worker_id' 'claim_id' 'status') do: [:body :actorCtx |
       self handleTaskComplete: body actor: actorCtx
     ].
+    self signedPost: '/api/tasks/renew' fields: #('task_id' 'worker_id' 'claim_id' 'scope') do: [:body :actorCtx |
+      self handleTaskRenew: body actor: actorCtx
+    ].
     self signedPost: '/api/signal' fields: #('scope' 'identity' 'payload') do: [:body :actorCtx |
       | id |
       id := bbs upsertSignal: (body at: 'scope') identity: (body at: 'identity') payload: (body at: 'payload') actor: (self actorOf: actorCtx).
@@ -871,6 +874,80 @@ ApiServer subclass: Object
     d at: 'status' put: 'ok'.
     d at: 'task_id' put: taskId.
     ^self okResponse: d
+  ]
+
+  method: handleTaskRenew: body actor: actorCtx [
+    "Handle POST /api/tasks/renew (D6.x lease renewal).
+
+     Body: {task_id, worker_id, claim_id, scope}. The (claim_id, worker_id)
+     pair is the per-claim capability stamped on /api/task/claim. We use
+     BBS>>update: to atomically inspect and (on match) extend the lease:
+
+       - Match: set claim_expires_at = now + lease, renewed_at = now,
+         missed_renewals = 0. Lease defaults to 600s; if the task payload
+         carries a positive numeric max_runtime, that value is used as the
+         lease window instead. retry_count is intentionally NOT modified.
+       - Mismatch (different claim_id and/or worker_id, including the
+         post-reap+reclaim case where a new worker now owns the task):
+         payload is left intact; respond 409 with the current executed_by.
+       - No tuple by (scope, task_id): 404."
+    | scope taskId workerId claimId existing mismatch newExpires now lease
+      maxRuntime updateId currentExecutedBy currentClaim currentWorker err result |
+    scope := body at: 'scope'.
+    taskId := body at: 'task_id'.
+    workerId := body at: 'worker_id'.
+    claimId := body at: 'claim_id'.
+
+    existing := bbs rdp: 'task' scope: scope identity: taskId.
+    existing isNil ifTrue: [
+      ^self errorResponse: 404 message: 'task not found: ', taskId printString
+    ].
+
+    mismatch := false.
+    newExpires := nil.
+    currentClaim := nil.
+    currentWorker := nil.
+    currentExecutedBy := existing at: 'executed_by' ifAbsent: [nil].
+    updateId := bbs update: 'task' scope: scope identity: taskId do: [:p |
+      currentClaim := p at: 'claim_id' ifAbsent: [nil].
+      currentWorker := p at: 'worker_id' ifAbsent: [nil].
+      (currentClaim = claimId and: [currentWorker = workerId])
+        ifTrue: [
+          lease := 600.
+          (p includesKey: 'max_runtime') ifTrue: [
+            maxRuntime := p at: 'max_runtime'.
+            (maxRuntime notNil and: [maxRuntime > 0])
+              ifTrue: [lease := maxRuntime]
+          ].
+          now := DateTime now epochSeconds.
+          newExpires := now + lease.
+          p at: 'claim_expires_at' put: newExpires.
+          p at: 'renewed_at' put: now.
+          p at: 'missed_renewals' put: 0
+        ]
+        ifFalse: [mismatch := true]
+    ].
+    updateId isNil ifTrue: [
+      ^self errorResponse: 404 message: 'task not found: ', taskId printString
+    ].
+
+    mismatch ifTrue: [
+      err := Dictionary new.
+      err at: 'error' put: 'claim mismatch'.
+      err at: 'task_id' put: taskId.
+      err at: 'executed_by' put: (currentExecutedBy isNil ifTrue: [currentWorker] ifFalse: [currentExecutedBy]).
+      err at: 'claim_id' put: currentClaim.
+      err at: 'worker_id' put: currentWorker.
+      ^self jsonResponse: 409 body: err
+    ].
+
+    result := Dictionary new.
+    result at: 'ok' put: true.
+    result at: 'task_id' put: taskId.
+    result at: 'claim_expires_at' put: newExpires.
+    result at: 'renewed_at' put: now.
+    result at: 'lease_seconds' put: lease.
+    ^self okResponse: result
   ]
 
   "--- Helpers ---"
