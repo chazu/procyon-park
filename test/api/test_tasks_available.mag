@@ -1,0 +1,215 @@
+"Tests for ApiServer>>handleTasksAvailable: — /api/tasks/available.
+
+ Invariants:
+   TA1  Worker with manifest {roles:[implementer], repos:[pp-main]} sees
+        only pending tasks whose role is implementer AND repo is pp-main.
+        Non-pending tasks, wrong-role tasks, wrong-repo tasks are all
+        filtered out.
+   TA2  Tasks with model specified are filtered against manifest.models.
+   TA3  Missing worker tuple → 410.
+"
+
+TARunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== /api/tasks/available Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TAHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedWorker: name roles: roles repos: repos models: models onBBS: bbs [
+    | manifest payload |
+    manifest := Dictionary new.
+    manifest at: 'slots' put: 1.
+    manifest at: 'models' put: models.
+    manifest at: 'repos' put: repos.
+    manifest at: 'roles' put: roles.
+    manifest at: 'operator' put: 'op'.
+    manifest at: 'accept_from' put: #('op').
+    payload := Dictionary new.
+    payload at: 'worker_pubkey' put: 'deadbeef'.
+    payload at: 'operator_pubkey' put: 'cafef00d'.
+    payload at: 'manifest' put: manifest.
+    payload at: 'drain' put: false.
+    payload at: 'registered_at' put: 1.
+    bbs outAffine: 'worker' scope: '/' identity: (Identity worker: name)
+        payload: payload ttl: 90 actor: (Identity worker: name)
+  ]
+
+  classMethod: seedTask: id scope: scope role: role repo: repo status: status onBBS: bbs [
+    | p |
+    p := Dictionary new.
+    p at: 'role' put: role.
+    p at: 'status' put: status.
+    p at: 'description' put: 'desc'.
+    p at: 'repo' put: repo.
+    bbs out: 'task' scope: scope identity: id payload: p actor: nil
+  ]
+
+  classMethod: seedTaskModel: id scope: scope role: role repo: repo model: model status: status onBBS: bbs [
+    | p |
+    p := Dictionary new.
+    p at: 'role' put: role.
+    p at: 'status' put: status.
+    p at: 'description' put: 'desc'.
+    p at: 'repo' put: repo.
+    p at: 'model' put: model.
+    bbs out: 'task' scope: scope identity: id payload: p actor: nil
+  ]
+
+TestTasksAvailable subclass: Object
+
+  classMethod: run: t [
+    self testRoleRepoFilter: t.
+    self testModelFilter: t.
+    self testMissingWorker: t
+  ]
+
+  classMethod: testRoleRepoFilter: t [
+    | bbs server ctx body resp d tasks ids |
+    '--- TA1: role + repo filter ---' println.
+    bbs := BBS withDataDir: TAHelper makeTempDir.
+    server := ApiServer on: 0 bbs: bbs.
+
+    TAHelper seedWorker: 'w1'
+             roles: #('implementer')
+             repos: #('pp-main')
+             models: #('sonnet')
+             onBBS: bbs.
+
+    "Three pending tasks; only the first should match."
+    TAHelper seedTask: 'task-a' scope: 'demo'
+             role: 'implementer' repo: 'pp-main' status: 'pending' onBBS: bbs.
+    TAHelper seedTask: 'task-b' scope: 'demo'
+             role: 'reviewer' repo: 'pp-main' status: 'pending' onBBS: bbs.
+    TAHelper seedTask: 'task-c' scope: 'demo'
+             role: 'implementer' repo: 'other-repo' status: 'pending' onBBS: bbs.
+    "Plus a claimed task matching role/repo — should be filtered by status."
+    TAHelper seedTask: 'task-d' scope: 'demo'
+             role: 'implementer' repo: 'pp-main' status: 'claimed' onBBS: bbs.
+
+    ctx := ActorContext actor: (Identity worker: 'w1')
+                        timestamp: 1 verified: true isAdmin: false.
+    body := Dictionary new. body at: 'worker_id' put: 'w1'.
+    resp := server handleTasksAvailable: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'TA1: 200 OK'.
+
+    d := Json decode: resp body.
+    tasks := d at: 'tasks' ifAbsent: [#()].
+    t assertEqual: tasks size to: 1 message: 'TA1: exactly one task matches'.
+    ids := tasks collect: [:x | x at: 'identity'].
+    t assert: (ids includes: 'task-a')
+      message: 'TA1: matching task included'.
+    t assert: ((ids includes: 'task-b') not)
+      message: 'TA1: wrong-role task excluded'.
+    t assert: ((ids includes: 'task-c') not)
+      message: 'TA1: wrong-repo task excluded'.
+    t assert: ((ids includes: 'task-d') not)
+      message: 'TA1: non-pending task excluded'
+  ]
+
+  classMethod: testModelFilter: t [
+    | bbs server ctx body resp d tasks ids |
+    '--- TA2: model filter ---' println.
+    bbs := BBS withDataDir: TAHelper makeTempDir.
+    server := ApiServer on: 0 bbs: bbs.
+
+    TAHelper seedWorker: 'w1'
+             roles: #('implementer')
+             repos: #('pp-main')
+             models: #('sonnet')
+             onBBS: bbs.
+
+    TAHelper seedTaskModel: 'mt-a' scope: 'demo'
+             role: 'implementer' repo: 'pp-main' model: 'sonnet' status: 'pending' onBBS: bbs.
+    TAHelper seedTaskModel: 'mt-b' scope: 'demo'
+             role: 'implementer' repo: 'pp-main' model: 'opus' status: 'pending' onBBS: bbs.
+    TAHelper seedTask: 'mt-c' scope: 'demo'
+             role: 'implementer' repo: 'pp-main' status: 'pending' onBBS: bbs.
+
+    ctx := ActorContext actor: (Identity worker: 'w1')
+                        timestamp: 1 verified: true isAdmin: false.
+    body := Dictionary new. body at: 'worker_id' put: 'w1'.
+    resp := server handleTasksAvailable: body actor: ctx.
+    d := Json decode: resp body.
+    tasks := d at: 'tasks' ifAbsent: [#()].
+    ids := tasks collect: [:x | x at: 'identity'].
+    t assert: (ids includes: 'mt-a')
+      message: 'TA2: sonnet task included'.
+    t assert: ((ids includes: 'mt-b') not)
+      message: 'TA2: opus task excluded (not in manifest.models)'.
+    t assert: (ids includes: 'mt-c')
+      message: 'TA2: model-unspecified task included'
+  ]
+
+  classMethod: testMissingWorker: t [
+    | bbs server ctx body resp |
+    '--- TA3: missing worker ---' println.
+    bbs := BBS withDataDir: TAHelper makeTempDir.
+    server := ApiServer on: 0 bbs: bbs.
+
+    ctx := ActorContext actor: (Identity worker: 'ghost')
+                        timestamp: 1 verified: true isAdmin: false.
+    body := Dictionary new. body at: 'worker_id' put: 'ghost'.
+    resp := server handleTasksAvailable: body actor: ctx.
+    t assertEqual: resp status to: 410 message: 'TA3: missing worker → 410'
+  ]
+
+TasksAvailableMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TARunner new.
+    TestTasksAvailable run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
