@@ -178,14 +178,10 @@ CliPP subclass: Object
 
   classMethod: performStatus: cfg [
     "GET /api/health, then render the result via Cli::Output dictText:."
-    | client response health dict |
-    client := HttpClient new.
+    | response health dict |
+    response := self unauthedGet: '/api/health' cfg: cfg.
     [
-      response := client get: cfg baseUrl, '/api/health'.
-      response isNil ifTrue: [
-        ('Error: no response from server at ', cfg baseUrl) println.
-        ^self
-      ].
+      response isNil ifTrue: [^self].
       (response isKindOf: String) ifFalse: [
         ('Error: server returned non-String response') println.
         ^self
@@ -548,19 +544,17 @@ CliPP subclass: Object
   classMethod: safeScanWorkflows: cfg scope: scopeFilter [
     "Like CLIBase>>safeScan: but a class-side helper that doesn't need
      a CLIBase instance. An empty scopeFilter (the Cli::Flag default)
-     means scan all scopes."
-    | client body response result |
-    client := HttpClient new.
+     means scan all scopes. /api/scan is read-only and intentionally
+     unsigned per F1.4/NF6."
+    | body response result |
     body := Dictionary new.
     body at: 'category' put: 'workflow'.
     (scopeFilter notNil and: [scopeFilter isEmpty not]) ifTrue: [
       body at: 'scope' put: scopeFilter
     ].
+    response := self unauthedPost: '/api/scan' body: body cfg: cfg.
+    response isNil ifTrue: [^Array new: 0].
     [
-      response := client post: cfg baseUrl, '/api/scan'
-                         body: (Json encode: body)
-                  contentType: 'application/json'.
-      response isNil ifTrue: [^Array new: 0].
       result := Json decode: response.
       ^result at: 'tuples' ifAbsent: [Array new: 0]
     ] on: Exception do: [:e | ^Array new: 0]
@@ -583,37 +577,32 @@ CliPP subclass: Object
 
   classMethod: safeScan: category cfg: cfg scope: aScope [
     "Generic scan helper used by runPrime: and runGc:. An empty/nil
-     aScope means scan every scope."
-    | client body response result |
-    client := HttpClient new.
+     aScope means scan every scope. Read-only — unsigned."
+    | body response result |
     body := Dictionary new.
     body at: 'category' put: category.
     (aScope notNil and: [aScope isEmpty not]) ifTrue: [
       body at: 'scope' put: aScope
     ].
+    response := self unauthedPost: '/api/scan' body: body cfg: cfg.
+    response isNil ifTrue: [^Array new: 0].
     [
-      response := client post: cfg baseUrl, '/api/scan'
-                         body: (Json encode: body)
-                  contentType: 'application/json'.
-      response isNil ifTrue: [^Array new: 0].
       result := Json decode: response.
       ^result at: 'tuples' ifAbsent: [Array new: 0]
     ] on: Exception do: [:e | ^Array new: 0]
   ]
 
   classMethod: silentInp: category cfg: cfg scope: aScope identity: anIdentity [
-    "Remove a tuple from the BBS silently."
-    | client body |
-    client := HttpClient new.
+    "Remove a tuple from the BBS silently. /api/inp is a mutating
+     endpoint; route through the signed POST helper so GC works under
+     enforce_signatures=true. Errors are swallowed (silent)."
+    | body |
     body := Dictionary new.
     body at: 'category' put: category.
     body at: 'scope' put: aScope.
     body at: 'identity' put: anIdentity.
-    [
-      client post: cfg baseUrl, '/api/inp'
-             body: (Json encode: body)
-      contentType: 'application/json'
-    ] on: Exception do: [:e | "ignore"]
+    [self signedPost: '/api/inp' body: body cfg: cfg]
+      on: Exception do: [:e | "ignore"]
   ]
 
   "--- Subcommand: log -----------------------------------------------------"
@@ -742,13 +731,13 @@ CliPP subclass: Object
 
     "Following mode: long-poll loop. This runs inside the Cli::Command's
      run block — cobra does not impose a timeout, so the loop is free to
-     run until the user interrupts."
-    client := HttpClient new.
+     run until the user interrupts. The notification-stream endpoint is
+     a read-only GET so it is intentionally unsigned."
     [true] whileTrue: [
       sinceEpochStr := since printString.
-      url := cfg baseUrl, '/api/notifications/stream?since=', sinceEpochStr, '&wait=1'.
+      url := '/api/notifications/stream?since=', sinceEpochStr, '&wait=1'.
       [
-        response := client get: url.
+        response := self unauthedGet: url cfg: cfg.
         (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
           result := Json decode: response.
           notifications := result at: 'notifications' ifAbsent: [#()].
@@ -994,15 +983,13 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     "Scan all workflows; remove the ones in terminal states (or every
      one when allFlag is set). Returns the number of workflows
      removed/previewed."
-    | client body response result workflows count |
-    client := HttpClient new.
+    | body response result workflows count |
     body := Dictionary new.
     body at: 'category' put: 'workflow'.
     count := 0.
+    response := self unauthedPost: '/api/scan' body: body cfg: cfg.
+    response isNil ifTrue: [^0].
     [
-      response := client post: cfg baseUrl, '/api/scan'
-                         body: (Json encode: body)
-                  contentType: 'application/json'.
       result := Json decode: response.
       workflows := result at: 'tuples' ifAbsent: [#()].
       workflows do: [:wf |
@@ -1097,32 +1084,81 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
 
   classMethod: postAndPrint: cfg path: path body: body [
     "POST a JSON body to the API, pretty-print the decoded response.
-     Shared by the six signal-writer ports (observe, decide, event,
-     notify, signal, dismiss) so they all render output identically to
-     the legacy CLIBase>>post:body: path."
-    | url jsonBody client response result |
-    url := cfg baseUrl, path.
-    jsonBody := Json encode: body.
-    client := HttpClient new.
-    [
-      response := client post: url body: jsonBody contentType: 'application/json'.
-      response isNil ifTrue: [
-        'Error: no response from server' println.
+     Mutating route — every send is ed25519-signed by the local identity
+     loaded via IdentityStore loadCurrent. Shared by the six
+     signal-writer ports (observe, decide, event, notify, signal,
+     dismiss) plus all workflow / workitem mutation sites."
+    ^self renderResponse: (self signedPost: path body: body cfg: cfg) path: path
+  ]
+
+  classMethod: unauthedPostAndPrint: cfg path: path body: body [
+    "POST a JSON body to a read-only endpoint (/api/rdp, /api/scan)
+     and pretty-print the decoded response. No signature is attached."
+    ^self renderResponse: (self unauthedPost: path body: body cfg: cfg) path: path
+  ]
+
+  classMethod: getAndPrint: cfg path: path [
+    "GET a JSON endpoint and pretty-print the response."
+    ^self renderResponse: (self unauthedGet: path cfg: cfg) path: path
+  ]
+
+  classMethod: signedPost: path body: body cfg: cfg [
+    "Thin shim onto CLIBase>>signedPost:body:baseUrl: so the only
+     HttpClient construction site in src/cli/ lives in CLIBase.mag.
+     The active identity is loaded lazily via IdentityStore loadCurrent."
+    ^CLIBase signedPost: path body: body baseUrl: cfg baseUrl
+  ]
+
+  classMethod: unauthedPost: path body: body cfg: cfg [
+    "Thin shim onto CLIBase>>unauthedPost:body:baseUrl: — for read-only
+     POST endpoints (/api/scan, /api/rdp, /api/health)."
+    ^CLIBase unauthedPost: path body: body baseUrl: cfg baseUrl
+  ]
+
+  classMethod: unauthedGet: path cfg: cfg [
+    "Thin shim onto CLIBase>>unauthedGet:baseUrl: — for read-only GETs."
+    ^CLIBase unauthedGet: path baseUrl: cfg baseUrl
+  ]
+
+  classMethod: renderResponse: response path: path [
+    "Decode and pretty-print a JSON response, surfacing 401 errors as
+     operator-friendly text rather than a raw JSON dump."
+    | result errMsg lower |
+    response isNil ifTrue: [^self].
+    (response isKindOf: String) ifFalse: [
+      'Error: server returned non-String response' println. ^self
+    ].
+    response isEmpty ifTrue: [
+      'Error: empty response from server' println. ^self
+    ].
+    result := nil.
+    [result := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      response println.
+      ^self
+    ].
+    (result isKindOf: Dictionary) ifTrue: [
+      errMsg := result at: 'error' ifAbsent: [nil].
+      errMsg notNil ifTrue: [
+        lower := errMsg asLowercase.
+        ('Request rejected: ', errMsg) println.
+        (lower includesSubstring: 'signature') ifTrue: [
+          'Hint: ensure your local identity is registered via `pp user add <name> --pubkey <hex>`' println.
+          '      and not revoked. A stale system clock can also trip the skew window.' println.
+          ^self
+        ].
+        (lower includesSubstring: 'admin') ifTrue: [
+          'Hint: this endpoint is admin-only — sign with the hex pubkey listed in' println.
+          '      ~/.config/pp/server.toml under [admin].admins.' println.
+          ^self
+        ].
+        (lower includesSubstring: 'revoked') ifTrue: [
+          'Hint: identity is revoked. Ask an admin to re-add or rotate.' println
+        ].
         ^self
-      ].
-      (response isKindOf: String) ifFalse: [
-        'Error: server returned non-String response' println.
-        ^self
-      ].
-      response isEmpty ifTrue: [
-        'Error: empty response from server' println.
-        ^self
-      ].
-      result := Json decode: response.
-      (Json encodePretty: result) println
-    ] on: Exception do: [:e |
-      ('Error: ', e messageText) println
-    ]
+      ]
+    ].
+    (Json encodePretty: result) println
   ]
 
   "--- Subcommand: observe -----------------------------------------------"
@@ -1760,20 +1796,15 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
 
   classMethod: safeRdp: cfg category: category scope: aScope identity: anIdentity [
     "Class-side analog of CLIBase>>safeRdp:scope:identity: — returns the
-     tuple dictionary or nil."
-    | client body response result |
-    client := HttpClient new.
+     tuple dictionary or nil. /api/rdp is read-only and unsigned."
+    | body response result |
     body := Dictionary new.
     body at: 'category' put: category.
     body at: 'scope' put: aScope.
     body at: 'identity' put: anIdentity.
+    response := self unauthedPost: '/api/rdp' body: body cfg: cfg.
+    (response isNil or: [(response isKindOf: String) not or: [response isEmpty]]) ifTrue: [^nil].
     [
-      response := client post: cfg baseUrl, '/api/rdp'
-                         body: (Json encode: body)
-                  contentType: 'application/json'.
-      response isNil ifTrue: [^nil].
-      (response isKindOf: String) ifFalse: [^nil].
-      response isEmpty ifTrue: [^nil].
       result := Json decode: response.
       ^result at: 'tuple' ifAbsent: [nil]
     ] on: Exception do: [:e | ^nil]
@@ -1862,12 +1893,12 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
           body at: 'category' put: category.
           body at: 'scope' put: rdScope.
           body at: 'identity' put: rdIdentity.
-          self postAndPrint: cfg path: '/api/rdp' body: body
+          self unauthedPostAndPrint: cfg path: '/api/rdp' body: body
         ] ifFalse: [
           body := Dictionary new.
           body at: 'category' put: category.
           body at: 'scope' put: rdScope.
-          self postAndPrint: cfg path: '/api/scan' body: body
+          self unauthedPostAndPrint: cfg path: '/api/scan' body: body
         ]
       ].
       exitCode
@@ -1962,14 +1993,10 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
   classMethod: performHistory: cfg url: urlPath [
     "GET the audit log, then render it via Cli::Output table:headers:keys:
      — that replaces the legacy single-line-per-entry println."
-    | client response result entries rows |
-    client := HttpClient new.
+    | response result entries rows |
+    response := self unauthedGet: urlPath cfg: cfg.
     [
-      response := client get: cfg baseUrl, urlPath.
-      response isNil ifTrue: [
-        'Error: no response from server' println.
-        ^self
-      ].
+      response isNil ifTrue: [^self].
       (response isKindOf: String) ifFalse: [
         'Error: server returned non-String response' println.
         ^self

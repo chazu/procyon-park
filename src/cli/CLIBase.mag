@@ -1,11 +1,98 @@
 "CLIBase — shared infrastructure for all PP CLI command classes.
- Provides HTTP client, env-var config, and common tuple-space helpers."
+ Provides HTTP client, env-var config, and common tuple-space helpers.
+
+ As of the multiplayer identity epic (wave 3), every mutating request is
+ ed25519-signed by the active local identity. The active identity is
+ resolved lazily on first POST via IdentityStore loadCurrent, so commands
+ that don't mutate (reads, identity-management) keep working even when no
+ keypair has been initialised yet."
 
 CLIBase subclass: Object
-  instanceVars: baseUrl client scope taskId
+  instanceVars: baseUrl client scope taskId identityRecord identityResolved
 
   classMethod: new [
     ^super new initialize
+  ]
+
+  "--- Class-side HTTP helpers ----------------------------------------
+
+   Centralised HTTP helpers used by class-method CLI dispatchers
+   (CliPP, CliUser, …) so that the only HttpClient new site in
+   src/cli/ lives here. Instance-side methods route through the same
+   underlying primitive via their own client ivar."
+
+  classMethod: httpClient [
+    "The single canonical HttpClient construction site for the entire
+     pp CLI. Every class- or instance-method that talks to the server
+     must obtain its client via this method."
+    ^HttpClient new
+  ]
+
+  classMethod: signedPost: path body: body baseUrl: baseUrl [
+    "Sign a request with the active identity (loaded via
+     IdentityStore loadCurrent, X-PP-Actor = identity name) and POST
+     it. Returns the response String, or nil on failure (after
+     printing a diagnostic)."
+    | rec |
+    rec := IdentityStore loadCurrent.
+    rec isNil ifTrue: [
+      'Error: no current identity. Run `pp identity init <name>` to create one,' println.
+      '       then have an admin register it with `pp user add <name> --pubkey <hex>`.' println.
+      ^nil
+    ].
+    ^self signedPost: path body: body baseUrl: baseUrl asActor: (rec at: 'name') signer: (rec at: 'identity')
+  ]
+
+  classMethod: signedPost: path body: body baseUrl: baseUrl asActor: actorHeader signer: anIdentity [
+    "Lower-level signing helper for the class side. actorHeader is
+     sent verbatim as X-PP-Actor."
+    | client url jsonBody ts canonical sig headers response |
+    client := self httpClient.
+    url := baseUrl, path.
+    jsonBody := Json encode: body.
+    ts := DateTime now epochSeconds printString.
+    canonical := 'POST', (String with: Character lf),
+                 path, (String with: Character lf),
+                 ts, (String with: Character lf),
+                 (Sha256 hash: jsonBody).
+    sig := nil.
+    [sig := anIdentity sign: canonical] on: Exception do: [:e |
+      ('Error signing request: ', e messageText) println.
+      ^nil
+    ].
+    headers := Dictionary new.
+    headers at: 'X-PP-Actor' put: actorHeader.
+    headers at: 'X-PP-Timestamp' put: ts.
+    headers at: 'X-PP-Signature' put: sig.
+    response := nil.
+    [response := client post: url body: jsonBody contentType: 'application/json' headers: headers]
+      on: Exception do: [:e |
+        ('Error: ', e messageText) println.
+        ^nil
+      ].
+    ^response
+  ]
+
+  classMethod: unauthedPost: path body: body baseUrl: baseUrl [
+    "Class-side POST without a signature — for read-only endpoints."
+    | client url jsonBody response |
+    client := self httpClient.
+    url := baseUrl, path.
+    jsonBody := Json encode: body.
+    response := nil.
+    [response := client post: url body: jsonBody contentType: 'application/json']
+      on: Exception do: [:e | ('Error: ', e messageText) println. ^nil].
+    ^response
+  ]
+
+  classMethod: unauthedGet: path baseUrl: baseUrl [
+    | client url response |
+    client := self httpClient.
+    url := baseUrl, path.
+    response := nil.
+    [response := client get: url]
+      on: Exception do: [:e | ('Error: ', e messageText) println. ^nil].
+    ^response
   ]
 
   method: initialize [
@@ -15,42 +102,158 @@ CLIBase subclass: Object
     (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default'].
     taskId := System env: 'PP_TASK'.
     taskId isNil ifTrue: [taskId := ''].
-    client := HttpClient new
+    client := self class httpClient.
+    identityRecord := nil.
+    identityResolved := false
+  ]
+
+  "--- Identity (lazy) -------------------------------------------------"
+
+  method: currentIdentity [
+    "Resolve the active local identity on first use. Returns the
+     IdentityStore Dictionary record (with keys: name/privHex/pubHex/identity)
+     or nil when no identity has been initialised. The resolution is
+     memoised so repeated POSTs from the same CLIBase instance share the
+     same load."
+    identityResolved ifFalse: [
+      identityResolved := true.
+      [identityRecord := IdentityStore loadCurrent]
+        on: Exception do: [:e | identityRecord := nil]
+    ].
+    ^identityRecord
   ]
 
   "--- HTTP Helpers ---"
 
   method: post: path body: dict [
-    "POST JSON to the API and print the response."
-    | url jsonBody response result |
+    "POST a mutating JSON request. Routes through signedPost:body: so
+     every mutation carries an ed25519 signature once the user has
+     initialised an identity. Reads (rdp/scan/health) should use
+     unauthedPost:body: or unauthedGet: instead."
+    ^self signedPost: path body: dict
+  ]
+
+  method: signedPost: path body: dict [
+    "POST a JSON body with X-PP-Actor / X-PP-Timestamp / X-PP-Signature
+     headers. Canonical bytes are method=POST || LF || path || LF || ts
+     || LF || sha256(body), matching SignatureVerifier."
+    | rec |
+    rec := self currentIdentity.
+    rec isNil ifTrue: [
+      'Error: no current identity. Run `pp identity init <name>` to create one,' println.
+      '       then have an admin register it with `pp user add <name> --pubkey <hex>`.' println.
+      ^self
+    ].
+    ^self signedPost: path body: dict asActor: (rec at: 'name') signer: (rec at: 'identity')
+  ]
+
+  method: signedPost: path body: dict asActor: actorHeader signer: anIdentity [
+    "Lower-level signing helper. actorHeader is sent verbatim as
+     X-PP-Actor; for ordinary users this is the local identity name,
+     for admin-only endpoints it is the hex pubkey."
+    | url jsonBody ts canonical sig headers response |
     url := baseUrl, path.
     jsonBody := Json encode: dict.
-
+    ts := DateTime now epochSeconds printString.
+    canonical := 'POST', (String with: Character lf),
+                 path, (String with: Character lf),
+                 ts, (String with: Character lf),
+                 (Sha256 hash: jsonBody).
+    sig := nil.
+    [sig := anIdentity sign: canonical] on: Exception do: [:e |
+      ('Error signing request: ', e messageText) println.
+      ^self
+    ].
+    headers := Dictionary new.
+    headers at: 'X-PP-Actor' put: actorHeader.
+    headers at: 'X-PP-Timestamp' put: ts.
+    headers at: 'X-PP-Signature' put: sig.
     [
-      response := client post: url body: jsonBody contentType: 'application/json'.
-      response isNil ifTrue: [
-        ('Error: no response from server') println.
-        ^self
-      ].
-      (response isKindOf: String) ifFalse: [
-        ('Error: server returned non-String response') println.
-        ^self
-      ].
-      response isEmpty ifTrue: [
-        ('Error: empty response from server') println.
-        ^self
-      ].
-      result := Json decode: response.
-      (Json encodePretty: result) println
+      response := client post: url body: jsonBody contentType: 'application/json' headers: headers.
+      self handleResponse: response path: path
     ] on: Exception do: [:e |
       ('Error: ', e messageText) println
+    ]
+  ]
+
+  method: unauthedPost: path body: dict [
+    "POST a JSON body without any signature headers — for read-only
+     POST endpoints (/api/scan, /api/rdp) that the server explicitly
+     leaves open per F1.4/NF6."
+    | url jsonBody response |
+    url := baseUrl, path.
+    jsonBody := Json encode: dict.
+    [
+      response := client post: url body: jsonBody contentType: 'application/json'.
+      self handleResponse: response path: path
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
+  ]
+
+  method: unauthedGet: path [
+    "GET a JSON endpoint — no signature required."
+    | url response |
+    url := baseUrl, path.
+    [
+      response := client get: url.
+      self handleResponse: response path: path
+    ] on: Exception do: [:e |
+      ('Error: ', e messageText) println
+    ]
+  ]
+
+  method: handleResponse: response path: path [
+    "Decode and pretty-print a JSON response. Surfaces server-side
+     auth failures as operator-friendly hints rather than dumping the
+     raw error JSON."
+    | result errMsg |
+    response isNil ifTrue: [('Error: no response from server') println. ^self].
+    (response isKindOf: String) ifFalse: [('Error: server returned non-String response') println. ^self].
+    response isEmpty ifTrue: [('Error: empty response from server') println. ^self].
+    result := nil.
+    [result := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      response println.
+      ^self
+    ].
+    (result isKindOf: Dictionary) ifTrue: [
+      errMsg := result at: 'error' ifAbsent: [nil].
+      errMsg notNil ifTrue: [
+        self printAuthHint: errMsg path: path.
+        ^self
+      ]
+    ].
+    (Json encodePretty: result) println
+  ]
+
+  method: printAuthHint: errMsg path: path [
+    "Convert server-side error strings (especially the 401 family) into
+     a clear single-line operator message plus a hint."
+    | lower |
+    lower := errMsg asLowercase.
+    ('Request rejected: ', errMsg) println.
+    (lower includesSubstring: 'signature') ifTrue: [
+      'Hint: ensure your local identity (`pp identity show <name>`) is registered' println.
+      '      via `pp user add <name> --pubkey <hex>` and has not been revoked.' println.
+      'Hint: a stale system clock can also trip the skew window — check `date -u`.' println.
+      ^self
+    ].
+    (lower includesSubstring: 'admin') ifTrue: [
+      'Hint: this endpoint is admin-only. Sign with the hex pubkey listed in' println.
+      '      ~/.config/pp/server.toml under [admin].admins.' println.
+      ^self
+    ].
+    (lower includesSubstring: 'revoked') ifTrue: [
+      'Hint: identity has been revoked. Ask an admin to re-add or rotate.' println
     ]
   ]
 
   "--- Tuple-Space Helpers ---"
 
   method: safeScan: category scope: aScope [
-    "Scan the server for tuples, returning an Array. Returns empty array on error."
+    "Scan the server for tuples, returning an Array. Returns empty array on error.
+     /api/scan is a read endpoint and is intentionally unsigned."
     | body response result |
     body := Dictionary new.
     body at: 'category' put: category.
@@ -64,7 +267,8 @@ CLIBase subclass: Object
   ]
 
   method: safeRdp: category scope: aScope identity: anIdentity [
-    "Read a specific tuple from the server. Returns the tuple dict or nil."
+    "Read a specific tuple from the server. Returns the tuple dict or nil.
+     /api/rdp is a read endpoint and is intentionally unsigned."
     | body response result |
     body := Dictionary new.
     body at: 'category' put: category.
@@ -86,15 +290,46 @@ CLIBase subclass: Object
   ]
 
   method: silentInp: category scope: aScope identity: anIdentity [
-    "Remove a tuple from the BBS silently (no output)."
-    | body |
+    "Remove a tuple from the BBS silently (no output). /api/inp is a
+     mutating endpoint, so this signs the request when an identity is
+     available; otherwise it silently drops to an unsigned send (which
+     the server rejects when enforce_signatures is on — silently, as
+     the helper's name promises)."
+    | body rec |
     body := Dictionary new.
     body at: 'category' put: category.
     body at: 'scope' put: aScope.
     body at: 'identity' put: anIdentity.
+    rec := self currentIdentity.
     [
-      client post: baseUrl, '/api/inp' body: (Json encode: body) contentType: 'application/json'
+      rec isNil
+        ifTrue: [
+          client post: baseUrl, '/api/inp' body: (Json encode: body) contentType: 'application/json'
+        ]
+        ifFalse: [
+          self silentSignedPost: '/api/inp' body: body asActor: (rec at: 'name') signer: (rec at: 'identity')
+        ]
     ] on: Exception do: [:e | "ignore" ]
+  ]
+
+  method: silentSignedPost: path body: dict asActor: actorHeader signer: anIdentity [
+    "As signedPost:body:asActor:signer:, but discards the response."
+    | url jsonBody ts canonical sig headers |
+    url := baseUrl, path.
+    jsonBody := Json encode: dict.
+    ts := DateTime now epochSeconds printString.
+    canonical := 'POST', (String with: Character lf),
+                 path, (String with: Character lf),
+                 ts, (String with: Character lf),
+                 (Sha256 hash: jsonBody).
+    sig := nil.
+    [sig := anIdentity sign: canonical] on: Exception do: [:e | ^self].
+    headers := Dictionary new.
+    headers at: 'X-PP-Actor' put: actorHeader.
+    headers at: 'X-PP-Timestamp' put: ts.
+    headers at: 'X-PP-Signature' put: sig.
+    [client post: url body: jsonBody contentType: 'application/json' headers: headers]
+      on: Exception do: [:e | "ignore"]
   ]
 
   "--- Argument Parsing ---"

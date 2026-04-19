@@ -8,7 +8,7 @@ Main subclass: Object
     "Commands that route to PP (thin HTTP client)."
     ^#('observe' 'decide' 'event' 'plan' 'read' 'notify' 'dismiss'
        'status' 'prime' 'task' 'workflow' 'signal' 'verdict' 'log' 'history' 'dashboard'
-       'workitem' 'gc' 'session' 'usage' 'identity')
+       'workitem' 'gc' 'session' 'usage' 'identity' 'user')
   ]
 
   classMethod: start [
@@ -114,6 +114,7 @@ Main subclass: Object
     '  workitem create|show|list|update|run|plan|review  Manage work items' println.
     '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
     '  identity <init|show|rotate|list> [args...]     Manage local keypairs' println.
+    '  user     <add|revoke> <name> [--pubkey <hex>]   Admin-gated user registry' println.
     '  session  [<taskId>]                              View Claude Code session logs' println.
     '  usage    [<taskId>] [--json]                     Report current session token consumption' println.
     '' println.
