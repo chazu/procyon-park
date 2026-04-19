@@ -4,6 +4,11 @@ description: "Scout mission: research a topic, write findings document"
 start_places: ["request"]
 terminal_places: ["done"]
 
+// Workflow-level affinity default (F4.2). Scouting is delegable to any
+// active team worker unless a transition narrows it. Shape matches
+// workflows/_affinity.cue #Affinity.
+affinity: {team: true}
+
 // Shared fragments for the create-worktree → merge-worktree → notify-head
 // bookend. Hidden fields are stripped by `cue export` so they never reach
 // the emitted template.

@@ -122,7 +122,7 @@ WorkflowEngine subclass: Object
 
   method: advanceInstance: wf [
     "Advance a single workflow instance."
-    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params maxCycles cycleSignal cycleCount verdictPayload launchedBy |
+    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params maxCycles cycleSignal cycleCount verdictPayload launchedBy wfAffinity |
 
     instanceId := wf at: 'identity'.
     scope := wf at: 'scope'.
@@ -203,9 +203,15 @@ WorkflowEngine subclass: Object
     "Track consumed tokens within this tick to prevent double-firing"
     consumedTokens := Array new: 0.
 
+    "Extract workflow-root affinity (F4.2) from the template payload if
+     present. This is the middle tier of the precedence chain used when
+     building per-task affinity; per-transition affinity wins over this,
+     and both win over the hard default."
+    wfAffinity := templatePayload at: 'affinity' ifAbsent: [nil].
+
     "Check each transition for enabled-ness"
     transitions do: [:tr |
-      consumedTokens := self tryFireTransition: tr instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy
+      consumedTokens := self tryFireTransition: tr instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity
     ]
   ]
 
@@ -280,15 +286,22 @@ WorkflowEngine subclass: Object
   "--- Transition Firing ---"
 
   method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens [
-    "Back-compat entry — no launched_by attribution."
-    ^self tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: nil
+    "Back-compat entry — no launched_by attribution, no workflow-root affinity."
+    ^self tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: nil wfAffinity: nil
   ]
 
   method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy [
-    "Try to fire a single transition. Checks input places, preconditions, then fires.
-     Returns updated consumedTokens array."
+    "Back-compat entry — no workflow-root affinity."
+    ^self tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: nil
+  ]
 
-    | inPlaces outPlaces preconditions role action taskPayload workdir resolvedDesc tokenStatus worktreeInfo descParams fixCtx |
+  method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity [
+    "Try to fire a single transition. Checks input places, preconditions, then fires.
+     Returns updated consumedTokens array.
+     wfAffinity is the workflow-root affinity dict (or nil) from the template payload —
+     used as the middle tier of the F4.1/F4.2 precedence chain when building task affinity."
+
+    | inPlaces outPlaces preconditions role action taskPayload workdir resolvedDesc tokenStatus worktreeInfo descParams fixCtx trAffinity affinity |
     inPlaces := transition at: 'in'.
     outPlaces := transition at: 'out'.
 
@@ -397,6 +410,16 @@ WorkflowEngine subclass: Object
       taskPayload := Dictionary new.
       taskPayload at: 'role' put: role.
       taskPayload at: 'status' put: 'pending'.
+      "Affinity (F4.1): write the effective routing preferences onto the
+       task payload. Precedence (highest wins):
+         1. Per-transition CUE affinity
+         2. Workflow-root CUE affinity (F4.2)
+         3. Hard default {team: true}
+       CLI-driven overrides are layered on top of this by the
+       multiplayer:affinity-cli code path before claim dispatch."
+      trAffinity := transition at: 'affinity' ifAbsent: [nil].
+      affinity := self buildAffinity: trAffinity wfAffinity: wfAffinity.
+      taskPayload at: 'affinity' put: affinity.
       "Per-transition timeout override (seconds). When absent the harness
        falls back to the role's defaultTimeout, then to a hard default."
       transitionTimeout := transition at: 'timeout' ifAbsent: [nil].
@@ -438,6 +461,66 @@ WorkflowEngine subclass: Object
     ].
 
     ^consumedTokens
+  ]
+
+  "--- Affinity Resolution (F4.1 / F4.2) ---"
+
+  method: buildAffinity: trAffinity wfAffinity: wfAffinity [
+    "Produce the effective affinity Dictionary for a task, applying the
+     precedence chain per-transition > workflow-root > hard default.
+
+     Read-site is tolerant: affinity may arrive as a Dictionary (the
+     normal CUE→Maggie round trip) or as nil (absent). Unknown shapes
+     are ignored and we fall back to the next tier.
+
+     Known keys (keep aligned with workflows/_affinity.cue #Affinity):
+       launcher_only : Boolean
+       workers       : Array of worker-id Strings
+       model         : String (e.g. 'opus', 'sonnet')
+       repo          : String (e.g. 'procyon-park@<sha>')
+       team          : Boolean
+     We do not enforce the schema here — that is a cue vet concern — but
+     we only copy through these known keys so a malformed CUE field
+     cannot smuggle arbitrary data onto a task tuple.
+
+     Dictionary iteration order is unstable in Maggie, so we build a
+     fresh Dictionary keyed by string literals rather than iterating."
+
+    | source result validKeys |
+    source := nil.
+    (trAffinity notNil and: [trAffinity isKindOf: Dictionary]) ifTrue: [
+      source := trAffinity
+    ] ifFalse: [
+      (wfAffinity notNil and: [wfAffinity isKindOf: Dictionary]) ifTrue: [
+        source := wfAffinity
+      ]
+    ].
+
+    result := Dictionary new.
+    source isNil ifTrue: [
+      "Hard default: any active team worker may claim."
+      result at: 'team' put: true.
+      ^result
+    ].
+
+    validKeys := Array new: 0.
+    validKeys := validKeys copyWith: 'launcher_only'.
+    validKeys := validKeys copyWith: 'workers'.
+    validKeys := validKeys copyWith: 'model'.
+    validKeys := validKeys copyWith: 'repo'.
+    validKeys := validKeys copyWith: 'team'.
+
+    validKeys do: [:k |
+      | v |
+      v := source at: k ifAbsent: [nil].
+      v notNil ifTrue: [result at: k put: v]
+    ].
+
+    "Guarantee a non-empty dictionary — if the CUE block was present but
+     stripped all known keys, fall back to the hard default so the
+     downstream offer-engine never sees an ambiguous empty affinity."
+    result isEmpty ifTrue: [result at: 'team' put: true].
+    ^result
   ]
 
   "--- Action Dispatch ---"
