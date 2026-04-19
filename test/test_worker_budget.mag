@@ -1,0 +1,219 @@
+"Tests for WorkerAgent D6.8 budget guardrails.
+
+ Invariants under test:
+   WB1  Hard-mode threshold breach → softDrained=true,
+        canClaim=false, urgent notification emitted with the
+        canonical payload fields.
+   WB2  Soft-mode threshold breach → softDrained=false (keeps
+        claiming), warning emitted on the breach itself AND per
+        subsequent claim-past-threshold.
+   WB3  In-flight task after threshold still completes (soft-drain
+        gates new claims but never yanks running work — worktree
+        corruption risk).
+   WB4  Midnight rollover clears the daily tally and clears
+        budget-induced soft-drain.
+   WB5  USD tally is independent of tokens tally — hitting the
+        tokens cap alone must NOT drain when tokens are under it
+        but USD is not, and vice versa.
+
+ WorkerAgent is exercised directly (no HTTP, no BBS). The
+ notifications array on the agent is the assertion target; when
+ a BBS is also wired in, notifications also flow through
+ bbs>>out:category:notification which is tested elsewhere."
+
+TWBTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Worker Budget Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TWBHelper subclass: Object
+
+  classMethod: agent: name [
+    ^WorkerAgent onName: name baseUrl: 'http://localhost:19999'
+  ]
+
+"=== TestWorkerBudget ==="
+TestWorkerBudget subclass: Object
+
+  classMethod: run: t [
+    self testHardThreshold: t.
+    self testSoftThreshold: t.
+    self testInflightStillCompletes: t.
+    self testMidnightRollover: t.
+    self testUsdIndependentFromTokens: t
+  ]
+
+  classMethod: testHardThreshold: t [
+    | agent notif |
+    '--- WB1: hard-mode threshold → soft-drain + urgent ---' println.
+    agent := TWBHelper agent: 'alice'.
+    agent maxTokensPerDay: 1000 maxUsdPerDay: 0 mode: 'hard'.
+    t assertEqual: agent canClaim to: true
+      message: 'WB1: canClaim true before breach'.
+    agent recordUsage: 500 usd: 0.
+    t assertEqual: agent softDrained to: false
+      message: 'WB1: below threshold → not drained'.
+    agent recordUsage: 600 usd: 0.
+    t assertEqual: agent softDrained to: true
+      message: 'WB1: at/over threshold → softDrained=true'.
+    t assertEqual: agent canClaim to: false
+      message: 'WB1: canClaim=false once soft-drained'.
+    t assertEqual: agent notifications size to: 1
+      message: 'WB1: exactly one notification emitted on breach'.
+    notif := agent notifications at: 0.
+    t assertEqual: (notif at: 'severity') to: 'urgent'
+      message: 'WB1: severity=urgent'.
+    t assertEqual: (notif at: 'reason') to: 'budget_hard_stop'
+      message: 'WB1: reason=budget_hard_stop'.
+    t assertEqual: (notif at: 'worker') to: 'alice'
+      message: 'WB1: worker name stamped'.
+    t assert: ((notif at: 'tokens') >= 1000)
+      message: 'WB1: tokens tally recorded in notification'.
+    "Further usage past breach should NOT re-emit (wasOver already true)"
+    agent recordUsage: 100 usd: 0.
+    t assertEqual: agent notifications size to: 1
+      message: 'WB1: no duplicate notification on further usage past breach'
+  ]
+
+  classMethod: testSoftThreshold: t [
+    | agent |
+    '--- WB2: soft-mode threshold → warning per claim ---' println.
+    agent := TWBHelper agent: 'bob'.
+    agent maxTokensPerDay: 1000 maxUsdPerDay: 0 mode: 'soft'.
+    agent recordUsage: 1100 usd: 0.
+    t assertEqual: agent softDrained to: false
+      message: 'WB2: soft mode never soft-drains on budget'.
+    t assertEqual: agent canClaim to: true
+      message: 'WB2: canClaim stays true in soft mode past threshold'.
+    t assertEqual: agent notifications size to: 1
+      message: 'WB2: one warning on initial breach'.
+    t assertEqual: ((agent notifications at: 0) at: 'severity') to: 'warning'
+      message: 'WB2: breach severity=warning'.
+    "Each claim-past-threshold fires a warning."
+    agent noteClaimPastThreshold.
+    agent noteClaimPastThreshold.
+    t assertEqual: agent notifications size to: 3
+      message: 'WB2: warning emitted per claim-past-threshold'.
+    t assertEqual: ((agent notifications at: 2) at: 'severity') to: 'warning'
+      message: 'WB2: per-claim severity=warning'
+  ]
+
+  classMethod: testInflightStillCompletes: t [
+    | agent |
+    '--- WB3: in-flight task after threshold still completes ---' println.
+    agent := TWBHelper agent: 'carol'.
+    agent maxTokensPerDay: 1000 maxUsdPerDay: 0 mode: 'hard'.
+    "Simulate claim + start."
+    agent taskStarted.
+    t assertEqual: agent inflight to: 1 message: 'WB3: inflight=1 after start'.
+    "Threshold breach happens mid-task."
+    agent recordUsage: 1500 usd: 0.
+    t assertEqual: agent softDrained to: true
+      message: 'WB3: soft-drain triggered mid-task'.
+    t assertEqual: agent inflight to: 1
+      message: 'WB3: in-flight count untouched by soft-drain'.
+    "Task completes normally."
+    agent taskFinished.
+    t assertEqual: agent inflight to: 0
+      message: 'WB3: inflight=0 after completion'.
+    t assertEqual: agent canClaim to: false
+      message: 'WB3: subsequent claims still blocked while drained'
+  ]
+
+  classMethod: testMidnightRollover: t [
+    | agent now |
+    '--- WB4: midnight rollover clears tally & budget soft-drain ---' println.
+    agent := TWBHelper agent: 'dan'.
+    agent maxTokensPerDay: 1000 maxUsdPerDay: 0 mode: 'hard'.
+    agent recordUsage: 1200 usd: 0.
+    t assertEqual: agent softDrained to: true
+      message: 'WB4: soft-drained before rollover'.
+    t assert: agent tokensToday >= 1200
+      message: 'WB4: tally accumulated before rollover'.
+    "Force budgetResetAt into the past so the next rollIfDue rolls."
+    now := DateTime now epochSeconds.
+    agent budgetResetAt: now - 10.
+    "A no-op usage triggers the rollIfDue branch."
+    agent recordUsage: 0 usd: 0.
+    t assertEqual: agent tokensToday to: 0
+      message: 'WB4: tokensToday reset on rollover'.
+    t assertEqual: agent usdToday to: 0.0
+      message: 'WB4: usdToday reset on rollover'.
+    t assertEqual: agent softDrained to: false
+      message: 'WB4: budget-induced soft-drain cleared on rollover'.
+    t assertEqual: agent canClaim to: true
+      message: 'WB4: canClaim restored after rollover'
+  ]
+
+  classMethod: testUsdIndependentFromTokens: t [
+    | agentA agentB |
+    '--- WB5: USD and tokens tallies are independent ---' println.
+    "A: only tokens cap — USD burn alone must not drain."
+    agentA := TWBHelper agent: 'eve'.
+    agentA maxTokensPerDay: 10000 maxUsdPerDay: 0 mode: 'hard'.
+    agentA recordUsage: 0 usd: 100.0.
+    t assertEqual: agentA softDrained to: false
+      message: 'WB5a: usd burn with no usd cap does not drain'.
+    agentA recordUsage: 10001 usd: 0.0.
+    t assertEqual: agentA softDrained to: true
+      message: 'WB5a: tokens cap alone still triggers drain'.
+    "B: only USD cap — token burn alone must not drain."
+    agentB := TWBHelper agent: 'frank'.
+    agentB maxTokensPerDay: 0 maxUsdPerDay: 50 mode: 'hard'.
+    agentB recordUsage: 1000000 usd: 0.0.
+    t assertEqual: agentB softDrained to: false
+      message: 'WB5b: token burn with no token cap does not drain'.
+    agentB recordUsage: 0 usd: 50.0.
+    t assertEqual: agentB softDrained to: true
+      message: 'WB5b: usd cap alone triggers drain'
+  ]
+
+"=== Main ==="
+TWBMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TWBTest new.
+    TestWorkerBudget run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

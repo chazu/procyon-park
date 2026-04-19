@@ -1,20 +1,23 @@
 "WorkerAgent — in-process agent that owns a worker's lifecycle
  once it is registered with the server.
 
- D6.6 wave 4 ships only the heartbeat loop. Subsequent stories
- (D6.7 claim, D6.8 budget, D6.9 drain) hook in here. The class is
- intentionally small: start forks a [block] heartbeat loop and
- stop flips a flag so the loop exits on its next tick.
+ D6.6 wave 4 ships the heartbeat loop. D6.8 layers budget
+ guardrails on top: per-day token and USD caps, hard/soft mode,
+ soft-drain on hard-mode breach. In-flight tasks are never yanked
+ (worktree corruption risk) — soft-drain only gates new claims.
 
  Usage:
      agent := WorkerAgent onName: 'alice' baseUrl: 'http://localhost:7777'.
+     agent maxTokensPerDay: 1000000 maxUsdPerDay: 50.0 mode: 'hard'.
      agent start.
+     ...
+     agent recordUsage: 250000 usd: 12.5.
      ...
      agent stop.
 "
 
 WorkerAgent subclass: Object
-  instanceVars: name baseUrl interval running identity
+  instanceVars: name baseUrl interval running identity maxTokensPerDay maxUsdPerDay budgetMode tokensToday usdToday budgetResetAt softDrained softDrainReason notifications bbs inflight
 
   classMethod: onName: aName baseUrl: aUrl [
     ^super new initName: aName baseUrl: aUrl interval: 30
@@ -29,13 +32,68 @@ WorkerAgent subclass: Object
     baseUrl := aUrl.
     interval := (secs isNil or: [secs < 1]) ifTrue: [30] ifFalse: [secs].
     running := false.
-    identity := nil
+    identity := nil.
+    maxTokensPerDay := 0.    "0 = no cap"
+    maxUsdPerDay := 0.0.     "0 = no cap"
+    budgetMode := 'hard'.
+    tokensToday := 0.
+    usdToday := 0.0.
+    budgetResetAt := WorkerAgent computeNextMidnight: (DateTime now epochSeconds).
+    softDrained := false.
+    softDrainReason := nil.
+    notifications := Array new: 0.
+    bbs := nil.
+    inflight := 0
   ]
 
-  method: name     [ ^name ]
-  method: baseUrl  [ ^baseUrl ]
-  method: interval [ ^interval ]
-  method: running  [ ^running ]
+  "--- Accessors -----------------------------------------------------"
+
+  method: name             [ ^name ]
+  method: baseUrl          [ ^baseUrl ]
+  method: interval         [ ^interval ]
+  method: running          [ ^running ]
+  method: maxTokensPerDay  [ ^maxTokensPerDay ]
+  method: maxUsdPerDay     [ ^maxUsdPerDay ]
+  method: budgetMode       [ ^budgetMode ]
+  method: tokensToday      [ ^tokensToday ]
+  method: usdToday         [ ^usdToday ]
+  method: budgetResetAt    [ ^budgetResetAt ]
+  method: softDrained      [ ^softDrained ]
+  method: softDrainReason  [ ^softDrainReason ]
+  method: notifications    [ ^notifications ]
+  method: inflight         [ ^inflight ]
+
+  "--- Budget configuration -----------------------------------------
+   Called once by CLI after parsing flags. Setting a cap to 0 means
+   no cap. Mode must be 'hard' (default) or 'soft'."
+
+  method: maxTokensPerDay: t maxUsdPerDay: u mode: m [
+    maxTokensPerDay := (t isNil or: [t < 0]) ifTrue: [0] ifFalse: [t].
+    "Store the USD cap as a Float so comparisons against usdToday
+     (also Float) never mix numeric types — Maggie panics on
+     Int >= Float comparisons."
+    "Coerce to Float via + 0.0 — Int * Float returns Int in Maggie, but
+     Int + Float returns Float. We need usdToday and maxUsdPerDay to be
+     the same numeric type so comparisons return true/false rather than
+     nil (Int > Float returns nil, which panics on ifTrue:)."
+    maxUsdPerDay := (u isNil or: [u < 0]) ifTrue: [0.0] ifFalse: [u + 0.0].
+    (m notNil and: [m = 'soft']) ifTrue: [budgetMode := 'soft']
+                                 ifFalse: [budgetMode := 'hard'].
+    ^self
+  ]
+
+  "BBS reference used for emitting notifications. Optional — when
+   unset, notifications are only appended to the local `notifications`
+   Array (handy for tests and for workers that have no in-process
+   BBS)."
+  method: bbs: aBBS [ bbs := aBBS. ^self ]
+
+  "Tests use these to force a specific rollover boundary."
+  method: budgetResetAt: ts [ budgetResetAt := ts. ^self ]
+  method: tokensToday: n    [ tokensToday := n. ^self ]
+  method: usdToday: v       [ usdToday := v. ^self ]
+
+  "--- Lifecycle -----------------------------------------------------"
 
   method: start [
     "Load the worker keypair, kick off a heartbeat loop in a forked
@@ -84,4 +142,151 @@ WorkerAgent subclass: Object
             baseUrl: baseUrl
             asActor: actorHeader
             signer: identity
+  ]
+
+  "--- Claim gating --------------------------------------------------
+   canClaim answers false when the agent has entered soft-drain.
+   Soft mode past threshold still claims (but emits warnings per
+   claim; call noteClaimPastThreshold to surface them)."
+
+  method: canClaim [
+    self rollIfDue: (DateTime now epochSeconds).
+    ^softDrained not
+  ]
+
+  method: noteClaimPastThreshold [
+    "Call from the claim path when soft mode is past its threshold.
+     Emits a warning notification. No-op if soft mode is not past
+     threshold."
+    budgetMode = 'soft' ifFalse: [^self].
+    self overThreshold ifFalse: [^self].
+    self emitNotification: 'warning' reason: 'budget_soft_over'
+  ]
+
+  method: overThreshold [
+    "True if either cap is non-zero and today's tally has reached it.
+     Expressed as `(tally < cap) not` rather than `tally >= cap` —
+     Maggie's Float >= is not wired up (returns nil, panicking on
+     ifTrue:) while Float > is fine."
+    (maxTokensPerDay > 0 and: [(tokensToday < maxTokensPerDay) not]) ifTrue: [^true].
+    (maxUsdPerDay > 0.0 and: [(usdToday < maxUsdPerDay) not]) ifTrue: [^true].
+    ^false
+  ]
+
+  "--- In-flight tracking -------------------------------------------
+   Soft-drain MUST NOT yank an in-flight task (worktree corruption
+   risk). These two helpers let the claim path register a task
+   start/finish so tests and callers can assert 'in-flight task still
+   completes after threshold breach'."
+
+  method: taskStarted [ inflight := inflight + 1. ^self ]
+
+  method: taskFinished [
+    inflight := inflight - 1.
+    inflight < 0 ifTrue: [inflight := 0].
+    ^self
+  ]
+
+  "--- Usage accounting ---------------------------------------------
+   Harness reports usage from Claude Code CLI logs at task
+   completion. See scout §6 Q3. If the harness doesn't yet surface
+   usage, we still ship this API so callers can stub-call it; the
+   follow-up multiplayer:harness-usage story wires up the real
+   figures."
+
+  method: recordUsage: tokens usd: usd [
+    | now wasOver |
+    now := DateTime now epochSeconds.
+    self rollIfDue: now.
+    wasOver := self overThreshold.
+    tokens isNil ifFalse: [tokensToday := tokensToday + tokens].
+    "The + 0.0 coerces Int to Float — recordUsage: callers may pass 0
+     (int) when the harness has no dollar figure to report. Mixed
+     Int/Float comparisons return nil in Maggie, which panics on
+     ifTrue:."
+    usd isNil ifFalse: [usdToday := usdToday + usd + 0.0].
+    self checkThreshold: wasOver.
+    ^self
+  ]
+
+  method: checkThreshold: wasOverBefore [
+    "If the caps were not previously exceeded but are now, react
+     according to mode. Hard mode → soft-drain + urgent notification.
+     Soft mode → warning notification (claim path emits per-claim
+     warnings via noteClaimPastThreshold; we emit one here for the
+     initial breach so it is always surfaced even if no further claim
+     is attempted)."
+    | nowOver |
+    nowOver := self overThreshold.
+    (wasOverBefore not and: [nowOver]) ifFalse: [^self].
+    budgetMode = 'hard'
+      ifTrue: [
+        softDrained := true.
+        softDrainReason := 'budget'.
+        self emitNotification: 'urgent' reason: 'budget_hard_stop'
+      ]
+      ifFalse: [
+        self emitNotification: 'warning' reason: 'budget_soft_over'
+      ]
+  ]
+
+  "--- Rollover ------------------------------------------------------"
+
+  method: rollIfDue: now [
+    "Roll the daily tally if wall-clock has crossed the reset boundary.
+     When soft-drain was triggered by the budget, clear it too — a new
+     day means a new quota. Soft-drain triggered by /api/worker/drain
+     (softDrainReason other than 'budget') is left alone."
+    [now >= budgetResetAt] whileTrue: [
+      tokensToday := 0.
+      usdToday := 0.0.
+      budgetResetAt := budgetResetAt + 86400.
+      (softDrained and: [softDrainReason = 'budget']) ifTrue: [
+        softDrained := false.
+        softDrainReason := nil
+      ]
+    ].
+    ^self
+  ]
+
+  classMethod: computeNextMidnight: now [
+    "Next UTC midnight after `now` (epoch seconds). Per-second
+     precision; good enough for a 24-hour budget window. The spec
+     says 'local midnight' but daylight-saving edge cases are out
+     of scope for this story; UTC is deterministic and tests can
+     pin budgetResetAt directly."
+    ^((now // 86400) + 1) * 86400
+  ]
+
+  "--- Notifications -------------------------------------------------
+   Append to the local notifications array (tests inspect it) AND
+   emit via bbs notify: when a BBS is wired in. The scope is '/' and
+   the category is 'notification', matching the existing convention
+   used by NotifyHeadAction and bbs>>notify:scope:severity:."
+
+  method: emitNotification: severity reason: reason [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'severity' put: severity.
+    payload at: 'worker' put: name.
+    payload at: 'reason' put: reason.
+    payload at: 'tokens' put: tokensToday.
+    payload at: 'usd' put: usdToday.
+    payload at: 'mode' put: budgetMode.
+    payload at: 'timestamp' put: (DateTime now epochSeconds).
+    notifications := notifications copyWith: payload.
+    bbs notNil ifTrue: [
+      [
+        bbs out: 'notification'
+            scope: '/'
+            identity: 'budget-', name, '-', reason, '-',
+                     (DateTime now epochSeconds printString), '-',
+                     (Object new identityHash printString)
+            payload: payload
+            actor: 'worker:', name
+      ] on: Exception do: [:e |
+        ('WorkerAgent: notification emit failed: ', e messageText) println
+      ]
+    ].
+    ^payload
   ]

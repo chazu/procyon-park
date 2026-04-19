@@ -136,7 +136,16 @@ ClaudeHarness subclass: Object
     ] ifFalse: [
       ('Harness failed: ', taskId, ' (exit ', process exitCode printString, ')') println.
       ('stderr: ', process stderr) println
-    ]
+    ].
+
+    "D6.8 stub: report usage back to any in-process WorkerAgent.
+     The Claude CLI stream-json output carries {usage:{input_tokens,
+     output_tokens, ...}} messages, but we don't parse them yet. This
+     is a stub caller — it logs that usage would be reported — so the
+     recordUsage:usd: API surface is exercised even before the
+     harness-usage story lands. See obstacle observation:
+     multiplayer:harness-usage-parsing."
+    ('Harness usage (stub): task ', taskId, ' — usage parsing not yet implemented; see obstacle:multiplayer:harness-usage-parsing') println
   ]
 
   method: gitDiffSummaryFor: aWorkDir [
