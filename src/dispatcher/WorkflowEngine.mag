@@ -31,10 +31,17 @@ WorkflowEngine subclass: Object
   "--- Workflow Instantiation ---"
 
   method: instantiate: templateIdentity scope: scope params: params [
+    "Back-compat entry point — no launched_by attribution."
+    ^self instantiate: templateIdentity scope: scope params: params launchedBy: nil
+  ]
+
+  method: instantiate: templateIdentity scope: scope params: params launchedBy: launchedBy [
     "Create a workflow instance from a template.
      1. Read template from BBS
      2. Write workflow tuple with status running
      3. Write initial tokens at start places
+     launchedBy is the verified signer string (e.g. user:alice) stamped on
+     the workflow tuple and every child task/token tuple for attribution.
      Returns the workflow instance ID."
 
     | template instanceId workflowPayload templatePayload startPlaces repoConfig reloadedPayload |
@@ -73,7 +80,7 @@ WorkflowEngine subclass: Object
     workflowPayload at: 'scope' put: scope.
     workflowPayload at: 'started_at' put: DateTime now epochSeconds.
 
-    bbs out: 'workflow' scope: scope identity: instanceId payload: workflowPayload.
+    bbs out: 'workflow' scope: scope identity: instanceId payload: workflowPayload actor: nil launchedBy: launchedBy executedBy: nil.
 
     "Write initial tokens at start places"
     templatePayload := template at: 'payload'.
@@ -87,7 +94,7 @@ WorkflowEngine subclass: Object
       tokenPayload at: 'status' put: 'positive'.
       tokenPayload at: 'transition_id' put: ''.
       tokenPayload at: 'modality' put: 'linear'.
-      bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
+      bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
     ].
 
     bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Workflow instantiated: ', instanceId).
@@ -115,12 +122,15 @@ WorkflowEngine subclass: Object
 
   method: advanceInstance: wf [
     "Advance a single workflow instance."
-    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params maxCycles cycleSignal cycleCount verdictPayload |
+    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params maxCycles cycleSignal cycleCount verdictPayload launchedBy |
 
     instanceId := wf at: 'identity'.
     scope := wf at: 'scope'.
     wfPayload := wf at: 'payload'.
     templateId := wfPayload at: 'template'.
+    "Recover launched_by stamped on the workflow tuple so child task tuples
+     spawned as this workflow advances inherit the original signer."
+    launchedBy := wf at: 'launched_by' ifAbsent: [nil].
 
     "Read the template for transition definitions"
     template := bbs rdp: 'template' scope: 'system' identity: templateId.
@@ -195,7 +205,7 @@ WorkflowEngine subclass: Object
 
     "Check each transition for enabled-ness"
     transitions do: [:tr |
-      consumedTokens := self tryFireTransition: tr instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens
+      consumedTokens := self tryFireTransition: tr instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy
     ]
   ]
 
@@ -270,6 +280,11 @@ WorkflowEngine subclass: Object
   "--- Transition Firing ---"
 
   method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens [
+    "Back-compat entry — no launched_by attribution."
+    ^self tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: nil
+  ]
+
+  method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy [
     "Try to fire a single transition. Checks input places, preconditions, then fires.
      Returns updated consumedTokens array."
 
@@ -314,7 +329,7 @@ WorkflowEngine subclass: Object
           tokenPayload at: 'status' put: 'waiting'.
           tokenPayload at: 'transition_id' put: (transition at: 'id').
           tokenPayload at: 'modality' put: 'linear'.
-          bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
+          bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
         ].
         [
           self executeAction: action transition: transition instance: instanceId params: params
@@ -345,7 +360,7 @@ WorkflowEngine subclass: Object
           tokenPayload at: 'status' put: 'positive'.
           tokenPayload at: 'transition_id' put: (transition at: 'id').
           tokenPayload at: 'modality' put: 'linear'.
-          bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
+          bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
         ]
       ].
       ^consumedTokens
@@ -361,7 +376,7 @@ WorkflowEngine subclass: Object
         tokenPayload at: 'status' put: 'waiting'.
         tokenPayload at: 'transition_id' put: (transition at: 'id').
         tokenPayload at: 'modality' put: 'linear'.
-        bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
+        bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
       ].
     ] ifFalse: [
       "No role, no action — produce positive tokens immediately"
@@ -373,7 +388,7 @@ WorkflowEngine subclass: Object
         tokenPayload at: 'status' put: 'positive'.
         tokenPayload at: 'transition_id' put: (transition at: 'id').
         tokenPayload at: 'modality' put: 'linear'.
-        bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload
+        bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
       ]
     ].
 
@@ -419,7 +434,7 @@ WorkflowEngine subclass: Object
         taskPayload at: 'workdir' put: ((worktreeInfo at: 'payload') at: 'workdir').
         taskPayload at: 'repo' put: ((worktreeInfo at: 'payload') at: 'repo_path')
       ].
-      bbs out: 'task' scope: scope identity: instanceId, ':task:', (transition at: 'id') payload: taskPayload
+      bbs out: 'task' scope: scope identity: instanceId, ':task:', (transition at: 'id') payload: taskPayload actor: nil launchedBy: launchedBy executedBy: nil
     ].
 
     ^consumedTokens
@@ -545,6 +560,13 @@ WorkflowEngine subclass: Object
     | wf |
     wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
     ^wf notNil ifTrue: [wf at: 'scope'] ifFalse: ['default']
+  ]
+
+  method: launchedByForInstance: instanceId [
+    "Look up the launched_by stamp for a workflow instance, or nil if absent."
+    | wf |
+    wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
+    ^wf notNil ifTrue: [wf at: 'launched_by' ifAbsent: [nil]] ifFalse: [nil]
   ]
 
   method: workflowStatus: instanceId [

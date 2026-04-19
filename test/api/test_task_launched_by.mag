@@ -1,0 +1,136 @@
+"Tests for /api/task/create launched_by attribution.
+
+ Invariants under test:
+   TL1  Task tuple created with signed ActorContext (user:alice) has
+        launched_by=user:alice.
+   TL2  Task tuple created with anonymous ActorContext has launched_by
+        key ABSENT (byte-compat — nil-absent, not nil-emitted).
+
+ The /api/task/create handler plumbs actorCtx.actor into BBS.out: as the
+ launchedBy: keyword. These tests exercise handleTaskCreate:actor: directly
+ and then inspect the resulting tuple via bbs scanAll."
+
+TLRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== /api/task/create launched_by Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helper ---"
+TLHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: makeBody: identity [
+    | body |
+    body := Dictionary new.
+    body at: 'scope' put: 'demo-scope'.
+    body at: 'identity' put: identity.
+    body at: 'role' put: 'implementer'.
+    body at: 'description' put: 'sample task'.
+    ^body
+  ]
+
+  classMethod: findTask: identity in: bbs [
+    ^(bbs scanAll: 'task') detect: [:t | (t at: 'identity') = identity] ifNone: [nil]
+  ]
+
+"=== TestTaskLaunchedBy ==="
+TestTaskLaunchedBy subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs server aliceCtx anonCtx signedTask anonTask |
+    '--- TestTaskLaunchedBy ---' println.
+
+    tempDir := TLHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    "Build an ApiServer but never start the HttpServer — we only invoke the
+     handler method directly."
+    server := ApiServer on: 0 bbs: bbs.
+
+    "TL1: Signed user:alice — launched_by stamped."
+    aliceCtx := ActorContext actor: 'user:alice' timestamp: 1 verified: true isAdmin: false.
+    server handleTaskCreate: (TLHelper makeBody: 'task-alice') actor: aliceCtx.
+
+    signedTask := TLHelper findTask: 'task-alice' in: bbs.
+    t assert: signedTask notNil
+      message: 'TL1: task tuple written for signed request'.
+    signedTask notNil ifTrue: [
+      t assert: (signedTask includesKey: 'launched_by')
+        message: 'TL1: signed task tuple includes launched_by key'.
+      t assertEqual: (signedTask at: 'launched_by' ifAbsent: [nil]) to: 'user:alice'
+        message: 'TL1: signed task tuple launched_by=user:alice'
+    ].
+
+    "TL2: Anonymous ActorContext — launched_by absent (byte-compat)."
+    anonCtx := ActorContext anonymous.
+    server handleTaskCreate: (TLHelper makeBody: 'task-anon') actor: anonCtx.
+
+    anonTask := TLHelper findTask: 'task-anon' in: bbs.
+    t assert: anonTask notNil
+      message: 'TL2: task tuple written for anonymous request'.
+    anonTask notNil ifTrue: [
+      t assert: (anonTask includesKey: 'launched_by') not
+        message: 'TL2: anonymous task tuple omits launched_by key entirely'
+    ]
+  ]
+
+"=== Main ==="
+TaskLaunchedByMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TLRunner new.
+    TestTaskLaunchedBy run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

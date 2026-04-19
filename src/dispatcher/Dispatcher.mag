@@ -124,6 +124,12 @@ Dispatcher subclass: Object
   "--- Direct Operations ---"
 
   method: instantiateWorkflow: templateId scope: scope params: params [
-    "Convenience: directly instantiate a workflow."
-    ^workflowEngine instantiate: templateId scope: scope params: params
+    "Convenience: directly instantiate a workflow. No launched_by attribution."
+    ^workflowEngine instantiate: templateId scope: scope params: params launchedBy: nil
+  ]
+
+  method: instantiateWorkflow: templateId scope: scope params: params launchedBy: launchedBy [
+    "Convenience: directly instantiate a workflow, stamping every tuple with
+     launchedBy (typically the verified user:<name> or admin:<hex> signer)."
+    ^workflowEngine instantiate: templateId scope: scope params: params launchedBy: launchedBy
   ]

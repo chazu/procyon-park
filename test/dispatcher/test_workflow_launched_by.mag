@@ -1,0 +1,161 @@
+"Tests for WorkflowEngine launched_by propagation.
+
+ Invariants under test:
+   WL1  Workflow tuple created via instantiate:scope:params:launchedBy:
+        carries launched_by on the tuple itself.
+   WL2  Every task tuple spawned by the workflow inherits launched_by from
+        the parent workflow.
+   WL3  Token tuples seeded at start places also carry launched_by.
+   WL4  A workflow instantiated without launchedBy (legacy path) does NOT
+        leak launched_by onto any spawned tuple."
+
+WLRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== WorkflowEngine launched_by Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helper ---"
+WLHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedTemplate: bbs [
+    "Minimal role-bearing template: start -> impl (role=implementer) -> end."
+    | transitions tr payload |
+    transitions := Array new: 0.
+    tr := Dictionary new.
+    tr at: 'id' put: 'impl'.
+    tr at: 'in' put: #('start').
+    tr at: 'out' put: #('end').
+    tr at: 'role' put: 'implementer'.
+    tr at: 'description' put: 'do the thing'.
+    transitions := transitions copyWith: tr.
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'tl-test-tmpl' payload: payload
+  ]
+
+"=== TestWorkflowLaunchedBy ==="
+TestWorkflowLaunchedBy subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs engine instanceId wf tasks task tokens tok anonInstance anonWf anonTasks |
+    '--- TestWorkflowLaunchedBy ---' println.
+
+    tempDir := WLHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    WLHelper seedTemplate: bbs.
+    engine := WorkflowEngine on: bbs.
+
+    "Instantiate as alice — workflow + start-token + advanced task all stamped."
+    instanceId := engine instantiate: 'tl-test-tmpl' scope: 'default' params: (Dictionary new) launchedBy: 'user:alice'.
+    engine advance.
+
+    "WL1 — workflow tuple carries launched_by."
+    wf := bbs rdp: 'workflow' scope: 'default' identity: instanceId.
+    t assert: wf notNil
+      message: 'WL1: workflow tuple exists'.
+    wf notNil ifTrue: [
+      t assertEqual: (wf at: 'launched_by' ifAbsent: [nil]) to: 'user:alice'
+        message: 'WL1: workflow launched_by=user:alice'
+    ].
+
+    "WL2 — spawned task tuple carries launched_by."
+    tasks := (bbs scanAll: 'task') select: [:tk |
+      ((tk at: 'payload') at: 'workflow_instance' ifAbsent: ['']) = instanceId
+    ].
+    t assert: tasks size > 0
+      message: 'WL2: workflow spawned at least one task tuple'.
+    tasks do: [:tsk |
+      t assertEqual: (tsk at: 'launched_by' ifAbsent: [nil]) to: 'user:alice'
+        message: ('WL2: task ', (tsk at: 'identity'), ' launched_by=user:alice')
+    ].
+
+    "WL3 — seed tokens carry launched_by."
+    tokens := (bbs scanAll: 'token') select: [:tk |
+      ((tk at: 'payload') at: 'workflow_instance' ifAbsent: ['']) = instanceId
+    ].
+    t assert: tokens size > 0
+      message: 'WL3: workflow has at least one token'.
+    tokens do: [:tk |
+      t assertEqual: (tk at: 'launched_by' ifAbsent: [nil]) to: 'user:alice'
+        message: ('WL3: token ', (tk at: 'identity'), ' launched_by=user:alice')
+    ].
+
+    "WL4 — instantiate without launchedBy: launched_by key must stay absent."
+    anonInstance := engine instantiate: 'tl-test-tmpl' scope: 'default' params: (Dictionary new).
+    engine advance.
+
+    anonWf := bbs rdp: 'workflow' scope: 'default' identity: anonInstance.
+    t assert: (anonWf includesKey: 'launched_by') not
+      message: 'WL4: legacy workflow tuple omits launched_by key'.
+    anonTasks := (bbs scanAll: 'task') select: [:tk |
+      ((tk at: 'payload') at: 'workflow_instance' ifAbsent: ['']) = anonInstance
+    ].
+    anonTasks do: [:tsk |
+      t assert: (tsk includesKey: 'launched_by') not
+        message: ('WL4: legacy task ', (tsk at: 'identity'), ' omits launched_by key')
+    ]
+  ]
+
+"=== Main ==="
+WorkflowLaunchedByMain subclass: Object
+  classMethod: start [
+    | t |
+    t := WLRunner new.
+    TestWorkflowLaunchedBy run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
