@@ -43,6 +43,7 @@ PP subclass: CLIBase
       ^Repo new runWith: wtArgs
     ].
     cmd = 'identity'  ifTrue: [^self cmdIdentity: args].
+    cmd = 'worker'    ifTrue: [^self cmdWorker: args].
     cmd = 'user'      ifTrue: [^self cmdUser: args].
     cmd = 'help'      ifTrue: [^self printUsage].
 
@@ -295,6 +296,20 @@ PP subclass: CLIBase
     'Usage: pp user <add|revoke> <name> [--pubkey <hex>]' println
   ]
 
+  method: cmdWorker: args [
+    "pp worker <init> <name> [--force]
+     Delegates to the CliWorker* classes."
+    | sub rest |
+    args size < 2 ifTrue: [
+      'Usage: pp worker <init> <name> [--force]' println.
+      ^self
+    ].
+    sub := args at: 1.
+    rest := args size > 2 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
+    sub = 'init' ifTrue: [^CliWorkerInit run: rest].
+    ('Unknown worker subcommand: ', sub) println
+  ]
+
   method: cmdIdentity: args [
     "pp identity <init|show|rotate|list> ...
      Delegates to the CliIdentity* classes regardless of PP_USE_CLI."
@@ -339,6 +354,7 @@ PP subclass: CLIBase
     '  session  [<taskId>]                              View Claude Code session logs' println.
     '  usage    [<taskId>]                              Report current session token consumption' println.
     '  identity <init|show|rotate|list> [args...]       Manage local keypairs' println.
+    '  worker   init <name> [--force]                  Create a local worker keypair' println.
     '  user     <add|revoke> <name> [--pubkey <hex>]    Admin-gated user registry' println.
     '  help                                             Show this help' println.
     '' println.
