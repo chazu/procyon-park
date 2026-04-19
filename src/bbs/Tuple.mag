@@ -1,10 +1,20 @@
 "Tuple — factory for BBS tuple dictionaries.
- Reduces 6-8 line Dictionary construction blocks to 1-2 lines."
+ Reduces 6-8 line Dictionary construction blocks to 1-2 lines.
+
+ Optional actor field: every factory has a parallel `actor:` variant.
+ Variants without `actor:` delegate to the actor: form passing nil.
+ The actor key is only emitted in the produced Dictionary when non-nil,
+ so existing on-disk tuples remain byte-identical."
 
 Tuple subclass: Object
 
   classMethod: category: cat scope: scope identity: identity payload: payload id: anId [
     "Core factory: builds a standard tuple Dictionary with all required fields."
+    ^self category: cat scope: scope identity: identity payload: payload id: anId actor: nil
+  ]
+
+  classMethod: category: cat scope: scope identity: identity payload: payload id: anId actor: actor [
+    "Core factory with optional actor stamp. Actor key is only set when non-nil."
     | d |
     d := Dictionary new.
     d at: 'id' put: anId.
@@ -13,13 +23,18 @@ Tuple subclass: Object
     d at: 'identity' put: identity.
     d at: 'payload' put: payload.
     d at: 'created_at' put: DateTime now epochSeconds.
+    actor notNil ifTrue: [d at: 'actor' put: actor].
     ^d
   ]
 
   classMethod: linear: cat scope: scope identity: identity payload: payload id: anId [
     "Build a linear (non-pinned) tuple."
+    ^self linear: cat scope: scope identity: identity payload: payload id: anId actor: nil
+  ]
+
+  classMethod: linear: cat scope: scope identity: identity payload: payload id: anId actor: actor [
     | d |
-    d := self category: cat scope: scope identity: identity payload: payload id: anId.
+    d := self category: cat scope: scope identity: identity payload: payload id: anId actor: actor.
     d at: 'pinned' put: false.
     d at: 'modality' put: 'linear'.
     ^d
@@ -27,8 +42,12 @@ Tuple subclass: Object
 
   classMethod: pinned: cat scope: scope identity: identity payload: payload id: anId [
     "Build a pinned (persistent) tuple."
+    ^self pinned: cat scope: scope identity: identity payload: payload id: anId actor: nil
+  ]
+
+  classMethod: pinned: cat scope: scope identity: identity payload: payload id: anId actor: actor [
     | d |
-    d := self category: cat scope: scope identity: identity payload: payload id: anId.
+    d := self category: cat scope: scope identity: identity payload: payload id: anId actor: actor.
     d at: 'pinned' put: true.
     d at: 'modality' put: 'persistent'.
     ^d
@@ -36,8 +55,12 @@ Tuple subclass: Object
 
   classMethod: affine: cat scope: scope identity: identity payload: payload id: anId ttl: ttlSeconds [
     "Build an affine (TTL-bounded) tuple."
+    ^self affine: cat scope: scope identity: identity payload: payload id: anId ttl: ttlSeconds actor: nil
+  ]
+
+  classMethod: affine: cat scope: scope identity: identity payload: payload id: anId ttl: ttlSeconds actor: actor [
     | d |
-    d := self category: cat scope: scope identity: identity payload: payload id: anId.
+    d := self category: cat scope: scope identity: identity payload: payload id: anId actor: actor.
     d at: 'pinned' put: false.
     d at: 'modality' put: 'affine'.
     d at: 'ttl' put: ttlSeconds.

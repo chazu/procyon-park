@@ -6,7 +6,7 @@ Categories subclass: Object
     ^#('fact' 'convention' 'observation' 'decision' 'signal'
        'task' 'template' 'workflow' 'token' 'rule' 'ingestion'
        'event' 'obstacle' 'session' 'artifact' 'link' 'notification'
-       'workitem')
+       'workitem' 'identity')
   ]
 
   classMethod: isValid: aString [
@@ -22,7 +22,7 @@ Categories subclass: Object
 
   classMethod: pinned [
     "Categories that are always persistent (never consumed by in:)."
-    ^#('fact' 'convention' 'template' 'rule' 'ingestion' 'artifact' 'link' 'decision')
+    ^#('fact' 'convention' 'template' 'rule' 'ingestion' 'artifact' 'link' 'decision' 'identity')
   ]
 
   classMethod: isPinned: aString [
