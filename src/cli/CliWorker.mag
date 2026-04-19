@@ -396,3 +396,109 @@ CliWorkerRegister subclass: Object
       ifFalse: [(Json encodePretty: result) println].
     ^true
   ]
+
+
+CliWorkerDrain subclass: Object
+
+  "pp worker drain <name> [--server <url>]
+
+   Flips the affine worker tuple's payload.drain to true by POSTing a
+   request signed with the worker's own keypair. Does NOT kill the
+   local WorkerAgent — the long-running loop observes the flag on its
+   next heartbeat and stops accepting new claims while finishing any
+   in-flight task, exiting 0 only once drained."
+
+  classMethod: run: args [
+    | cmd rest |
+    cmd := Cli::Command named: 'drain' doc: 'Mark a worker for drain (stop taking new claims).'.
+    cmd flag: (Cli::Flag
+      name: 'server'
+      type: #string
+      default: ''
+      doc: 'Override server URL (precedence: --server > PP_URL > default)').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+
+    cmd run: [:runArgs |
+      | cfg name exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp worker drain <name> [--server <url>]' println.
+        exitCode := 1
+      ] ifFalse: [
+        cfg := PPCliConfig new.
+        cmd applyEnvBindings: cfg.
+        name := runArgs at: 0.
+        (self performDrain: name cmd: cmd cfg: cfg) ifFalse: [exitCode := 1]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: performDrain: name cmd: cmd cfg: cfg [
+    "Load the local worker keypair, sign a drain request with it, and
+     POST /api/worker/drain. Returns true on 200/ok, false otherwise."
+    | workerRec workerIdent body serverFlag baseUrl response |
+    workerRec := WorkerStore load: name.
+    workerRec isNil ifTrue: [
+      ('Hint: run `pp worker init ', name, '` first.') println.
+      ^false
+    ].
+    workerIdent := workerRec at: 'identity'.
+
+    body := Dictionary new.
+    body at: 'name' put: name.
+
+    serverFlag := cmd flagValue: 'server'.
+    baseUrl := (serverFlag notNil and: [serverFlag isEmpty not])
+                 ifTrue: [serverFlag]
+                 ifFalse: [cfg baseUrl].
+
+    response := CLIBase
+                  signedPost: '/api/worker/drain'
+                  body: body
+                  baseUrl: baseUrl
+                  asActor: 'worker:', name
+                  signer: workerIdent.
+
+    "Drop the worker-identity reference; keys go out of scope."
+    workerIdent := nil.
+    workerRec := nil.
+
+    ^self renderResponse: response name: name
+  ]
+
+  classMethod: renderResponse: response name: name [
+    | result errMsg ok |
+    (response isNil or: [(response isKindOf: String) not or: [response isEmpty]]) ifTrue: [
+      'Error: empty or invalid response from server.' println.
+      ^false
+    ].
+    result := nil.
+    [result := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      response println.
+      ^false
+    ].
+    (result isKindOf: Dictionary) ifFalse: [
+      response println.
+      ^false
+    ].
+    errMsg := result at: 'error' ifAbsent: [nil].
+    errMsg notNil ifTrue: [
+      ('Worker drain rejected: ', errMsg) println.
+      ^false
+    ].
+    ok := result at: 'ok' ifAbsent: [false].
+    ok = true
+      ifTrue: [('Worker draining: ', (result at: 'identity' ifAbsent: ['worker:', name])) println]
+      ifFalse: [(Json encodePretty: result) println].
+    ^true
+  ]

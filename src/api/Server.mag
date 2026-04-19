@@ -282,7 +282,78 @@ ApiServer subclass: Object
      sha256(body) check binds the attestation to the operator's key."
     self signedPost: '/api/worker/register'
          fields: #('worker_pubkey' 'operator_pubkey' 'nonce' 'manifest' 'name')
-         do: [:body :actorCtx | self handleWorkerRegister: body actor: actorCtx]
+         do: [:body :actorCtx | self handleWorkerRegister: body actor: actorCtx].
+    self signedPost: '/api/worker/drain'
+         fields: #('name')
+         do: [:body :actorCtx | self handleWorkerDrain: body actor: actorCtx]
+  ]
+
+  method: handleWorkerDrain: body actor: actorCtx [
+    "Handle POST /api/worker/drain.
+
+     Body: {name}. Request must be signed by the worker keypair whose
+     actor header is 'worker:<name>' where <name> matches body.name.
+     Flips payload.drain to true on the affine worker tuple while
+     preserving all other payload fields and refreshes the TTL so the
+     tuple survives its natural expiry long enough for the in-flight
+     task to complete.
+
+     Gates:
+       - actorCtx verified=false       → 401 (or 503 when enforcement off)
+       - actorCtx.actor != worker:name → 403 (cross-worker drain refused)
+       - worker tuple missing/expired  → 410 (nothing to drain)
+
+     Idempotent: invoking drain twice on an already-drained worker
+     returns 200 and leaves drain=true. Note: once drain=true is
+     visible on the tuple, SignatureVerifier refuses further signed
+     requests from that worker, so the public idempotency window is
+     bounded by the first successful call at the HTTP layer. The
+     handler itself, invoked directly (as in tests), remains pure
+     idempotent."
+    | name identity existing payload newPayload ttl heartbeat actorHeader d |
+
+    actorCtx verified ifFalse: [
+      enforceSignatures
+        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
+        ifFalse: [^self errorResponse: 503
+                         message: 'enforce_signatures must be true for worker drain']
+    ].
+
+    name := body at: 'name'.
+    (name isString and: [name isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'name must be a non-empty string'
+    ].
+
+    identity := Identity worker: name.
+
+    "Require the caller's actor header to name the same worker. A verified
+     user: or admin: actor cannot drain a worker they don't own."
+    actorHeader := actorCtx actor.
+    actorHeader = identity ifFalse: [
+      ^self errorResponse: 403 message: 'drain requires worker:', name, ' signer (got ', actorHeader printString, ')'
+    ].
+
+    existing := bbs rdp: 'worker' scope: '/' identity: identity.
+    existing isNil ifTrue: [
+      ^self errorResponse: 410 message: 'worker tuple not found (expired or never registered): ', identity
+    ].
+
+    payload := existing at: 'payload' ifAbsent: [Dictionary new].
+    newPayload := Dictionary new.
+    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
+    newPayload at: 'drain' put: true.
+    newPayload at: 'drain_requested_at' put: DateTime now epochSeconds.
+
+    heartbeat := self workerHeartbeatInterval.
+    ttl := heartbeat * 3.
+
+    bbs outAffine: 'worker' scope: '/' identity: identity
+        payload: newPayload ttl: ttl actor: identity.
+
+    d := Dictionary new.
+    d at: 'ok' put: true.
+    d at: 'identity' put: identity.
+    ^self okResponse: d
   ]
 
   method: handleWorkerRegister: body actor: actorCtx [

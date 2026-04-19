@@ -1,0 +1,227 @@
+"Tests for ApiServer>>handleWorkerDrain: — soft-drain endpoint.
+
+ Invariants under test:
+   WD1  Happy path: a verified worker drain flips payload.drain to true
+        on the existing affine worker tuple, preserving all other
+        payload fields and stamping drain_requested_at.
+   WD2  Idempotent: drain invoked twice leaves drain=true and returns 200
+        on both calls (direct handler invocation bypasses the
+        SignatureVerifier drain-gate so we can assert pure handler
+        behavior).
+   WD3  Unsigned caller rejected: an anonymous / unverified context
+        returns 401 under enforcement.
+   WD4  Cross-worker drain rejected: actorCtx.actor = worker:bob must not
+        be able to drain worker:alice — handler returns 403.
+   WD5  Missing worker tuple → 410 (nothing to drain)."
+
+TWDTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Worker Drain Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TWDHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | ts |
+    ts := DateTime now epochSeconds printString.
+    ^'/tmp/pp-test-bbs-drain-', ts, '-', (Object new identityHash printString)
+  ]
+
+  classMethod: makeBBS [
+    ^BBS withDataDir: self makeTempDir
+  ]
+
+  classMethod: makeServerFor: bbs [
+    ^ApiServer on: 19992 bbs: bbs
+  ]
+
+  classMethod: seedWorker: name workerPub: pub operatorPub: opPub onBBS: bbs [
+    "Install an affine worker tuple so handleWorkerDrain can find it."
+    | payload manifest |
+    manifest := Dictionary new.
+    manifest at: 'slots' put: 1.
+    manifest at: 'models' put: #('sonnet').
+    manifest at: 'repos' put: #('procyon-park').
+    manifest at: 'roles' put: #('implementer').
+    manifest at: 'operator' put: 'alice'.
+    manifest at: 'accept_from' put: #('alice').
+    payload := Dictionary new.
+    payload at: 'worker_pubkey' put: pub.
+    payload at: 'operator_pubkey' put: opPub.
+    payload at: 'manifest' put: manifest.
+    payload at: 'drain' put: false.
+    payload at: 'registered_at' put: 1234567890.
+    bbs outAffine: 'worker' scope: '/' identity: 'worker:', name
+        payload: payload ttl: 90 actor: 'worker:', name
+  ]
+
+  classMethod: body: name [
+    | b |
+    b := Dictionary new.
+    b at: 'name' put: name.
+    ^b
+  ]
+
+  classMethod: workerCtx: name verified: v [
+    ^ActorContext actor: 'worker:', name timestamp: 1234567890
+                  verified: v isAdmin: false
+  ]
+
+  classMethod: anonymousCtx [
+    ^ActorContext anonymous
+  ]
+
+"=== TestWorkerDrain ==="
+TestWorkerDrain subclass: Object
+
+  classMethod: run: t [
+    self testHappyPath: t.
+    self testIdempotent: t.
+    self testUnsignedRejected: t.
+    self testCrossWorkerRejected: t.
+    self testMissingTuple: t
+  ]
+
+  classMethod: testHappyPath: t [
+    | bbs server body ctx resp tuple payload |
+    '--- WD1: drain flips drain:true ---' println.
+    bbs := TWDHelper makeBBS.
+    server := TWDHelper makeServerFor: bbs.
+    TWDHelper seedWorker: 'alice' workerPub: 'wwww' operatorPub: 'oooo' onBBS: bbs.
+
+    body := TWDHelper body: 'alice'.
+    ctx := TWDHelper workerCtx: 'alice' verified: true.
+    resp := server handleWorkerDrain: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WD1: returns 200'.
+
+    tuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice'.
+    t assert: tuple notNil message: 'WD1: worker tuple still present'.
+    tuple notNil ifTrue: [
+      payload := tuple at: 'payload'.
+      t assertEqual: (payload at: 'drain') to: true
+        message: 'WD1: payload.drain flipped to true'.
+      t assertEqual: (payload at: 'worker_pubkey') to: 'wwww'
+        message: 'WD1: preserved worker_pubkey'.
+      t assertEqual: (payload at: 'operator_pubkey') to: 'oooo'
+        message: 'WD1: preserved operator_pubkey'.
+      t assert: (payload at: 'manifest') notNil
+        message: 'WD1: preserved manifest dict'.
+      t assert: ((payload at: 'drain_requested_at' ifAbsent: [nil]) notNil)
+        message: 'WD1: drain_requested_at stamped'
+    ]
+  ]
+
+  classMethod: testIdempotent: t [
+    | bbs server body ctx resp1 resp2 payload |
+    '--- WD2: drain is idempotent ---' println.
+    bbs := TWDHelper makeBBS.
+    server := TWDHelper makeServerFor: bbs.
+    TWDHelper seedWorker: 'alice' workerPub: 'wwww' operatorPub: 'oooo' onBBS: bbs.
+
+    body := TWDHelper body: 'alice'.
+    ctx := TWDHelper workerCtx: 'alice' verified: true.
+    resp1 := server handleWorkerDrain: body actor: ctx.
+    resp2 := server handleWorkerDrain: body actor: ctx.
+    t assertEqual: resp1 status to: 200 message: 'WD2: first drain returns 200'.
+    t assertEqual: resp2 status to: 200 message: 'WD2: second drain returns 200'.
+    payload := (bbs rdp: 'worker' scope: '/' identity: 'worker:alice') at: 'payload'.
+    t assertEqual: (payload at: 'drain') to: true
+      message: 'WD2: payload.drain remains true after idempotent second call'
+  ]
+
+  classMethod: testUnsignedRejected: t [
+    | bbs server body ctx resp ctx2 resp2 |
+    '--- WD3: unsigned / unverified caller → 401 ---' println.
+    bbs := TWDHelper makeBBS.
+    server := TWDHelper makeServerFor: bbs.
+    TWDHelper seedWorker: 'alice' workerPub: 'wwww' operatorPub: 'oooo' onBBS: bbs.
+
+    body := TWDHelper body: 'alice'.
+    ctx := TWDHelper anonymousCtx.
+    resp := server handleWorkerDrain: body actor: ctx.
+    t assertEqual: resp status to: 401 message: 'WD3: anonymous → 401'.
+
+    ctx2 := TWDHelper workerCtx: 'alice' verified: false.
+    resp2 := server handleWorkerDrain: body actor: ctx2.
+    t assertEqual: resp2 status to: 401 message: 'WD3: verified=false → 401'
+  ]
+
+  classMethod: testCrossWorkerRejected: t [
+    | bbs server body ctx resp payload |
+    '--- WD4: cross-worker drain → 403 ---' println.
+    bbs := TWDHelper makeBBS.
+    server := TWDHelper makeServerFor: bbs.
+    TWDHelper seedWorker: 'alice' workerPub: 'aaaa' operatorPub: 'oooo' onBBS: bbs.
+    TWDHelper seedWorker: 'bob'   workerPub: 'bbbb' operatorPub: 'oooo' onBBS: bbs.
+
+    "Bob tries to drain alice."
+    body := TWDHelper body: 'alice'.
+    ctx := TWDHelper workerCtx: 'bob' verified: true.
+    resp := server handleWorkerDrain: body actor: ctx.
+    t assertEqual: resp status to: 403 message: 'WD4: bob draining alice → 403'.
+    payload := (bbs rdp: 'worker' scope: '/' identity: 'worker:alice') at: 'payload'.
+    t assertEqual: (payload at: 'drain') to: false
+      message: 'WD4: alice.drain unchanged after cross-worker attempt'
+  ]
+
+  classMethod: testMissingTuple: t [
+    | bbs server body ctx resp |
+    '--- WD5: missing worker tuple → 410 ---' println.
+    bbs := TWDHelper makeBBS.
+    server := TWDHelper makeServerFor: bbs.
+
+    body := TWDHelper body: 'ghost'.
+    ctx := TWDHelper workerCtx: 'ghost' verified: true.
+    resp := server handleWorkerDrain: body actor: ctx.
+    t assertEqual: resp status to: 410 message: 'WD5: no tuple → 410'
+  ]
+
+"=== Main ==="
+TWDMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TWDTest new.
+    TestWorkerDrain run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
