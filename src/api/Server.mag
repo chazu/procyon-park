@@ -303,7 +303,10 @@ ApiServer subclass: Object
      Split from registerWorkerRoutes to stay under the method-size limit."
     self signedPost: '/api/tasks/claim'
          fields: #('task_id' 'worker_id' 'claim_id')
-         do: [:body :actorCtx | self handleTaskClaim: body actor: actorCtx]
+         do: [:body :actorCtx | self handleTaskClaim: body actor: actorCtx].
+    self signedPost: '/api/tasks/available'
+         fields: #('worker_id')
+         do: [:body :actorCtx | self handleTasksAvailable: body actor: actorCtx]
   ]
 
   method: handleWorkerDrain: body actor: actorCtx [
@@ -761,6 +764,74 @@ ApiServer subclass: Object
     d at: 'status' put: 'ok'.
     d at: 'claim_expires_at' put: (outcome at: 1).
     d at: 'retry_count' put: (outcome at: 2).
+    ^self okResponse: d
+  ]
+
+  method: handleTasksAvailable: body actor: actorCtx [
+    "Handle POST /api/tasks/available.
+
+     Body: {worker_id}. Worker-signed (X-PP-Actor must resolve to
+     worker:<worker_id>). Server scans pending task tuples and returns
+     the subset that match the worker's manifest:
+       - task.role must appear in manifest.roles
+       - task.repo (required) must appear in manifest.repos
+       - task.model (optional) must appear in manifest.models when set
+     Affinity (§4.4) is deferred to a separate epic. Response is capped
+     at ~20 tasks and returned synchronously (no long-poll for v1)."
+    | workerId expectedActor actorHeader workerTuple payload manifest
+      roles repos models allTasks cap out d tp status role repo model |
+
+    actorCtx verified ifFalse: [
+      enforceSignatures
+        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
+        ifFalse: [^self errorResponse: 503
+                         message: 'enforce_signatures must be true for tasks/available']
+    ].
+
+    workerId := body at: 'worker_id'.
+    ((workerId isKindOf: String) and: [workerId isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'worker_id must be a non-empty string'
+    ].
+
+    expectedActor := Identity worker: workerId.
+    actorHeader := actorCtx actor.
+    actorHeader = expectedActor ifFalse: [
+      ^self errorResponse: 403
+             message: 'tasks/available requires ', expectedActor, ' signer (got ', actorHeader printString, ')'
+    ].
+
+    workerTuple := bbs rdp: 'worker' scope: '/' identity: expectedActor.
+    workerTuple isNil ifTrue: [
+      ^self errorResponse: 410 message: 'worker tuple missing or expired — re-register'
+    ].
+
+    payload := workerTuple at: 'payload' ifAbsent: [Dictionary new].
+    manifest := payload at: 'manifest' ifAbsent: [Dictionary new].
+    roles := manifest at: 'roles' ifAbsent: [#()].
+    repos := manifest at: 'repos' ifAbsent: [#()].
+    models := manifest at: 'models' ifAbsent: [#()].
+
+    allTasks := bbs scanAll: 'task'.
+    cap := 20.
+    out := Array new: 0.
+    allTasks do: [:t |
+      out size < cap ifTrue: [
+        tp := t at: 'payload' ifAbsent: [Dictionary new].
+        status := tp at: 'status' ifAbsent: [''].
+        role := tp at: 'role' ifAbsent: [nil].
+        repo := tp at: 'repo' ifAbsent: [nil].
+        model := tp at: 'model' ifAbsent: [nil].
+        ((status = 'pending')
+          and: [(role notNil and: [roles includes: role])
+          and: [(repo notNil and: [repos includes: repo])
+          and: [model isNil or: [models includes: model]]]])
+          ifTrue: [out := out copyWith: t]
+      ]
+    ].
+
+    d := Dictionary new.
+    d at: 'tasks' put: out.
+    d at: 'count' put: out size.
     ^self okResponse: d
   ]
 
