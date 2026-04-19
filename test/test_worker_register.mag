@@ -1,0 +1,272 @@
+"Tests for ApiServer>>handleWorkerRegister: — D6.13 worker birth certificate.
+
+ Invariants under test:
+   WR1  Happy path: a valid signed registration writes an affine 'worker'
+        tuple with payload {worker_pubkey, operator_pubkey, manifest,
+        drain:false, registered_at} and identity 'worker:<name>'.
+   WR2  Unverified caller → 401 when enforcement is on, 503 when off.
+        Mirrors SignatureVerifier review-issue-1: the endpoint refuses
+        to register workers under an anonymous context.
+   WR3  operator_pubkey that does not map to the authenticated actor's
+        registered pubkey → 403 (unknown operator).
+   WR4  Duplicate worker name claimed by a different operator → 409.
+
+ The handler is invoked directly (no HTTP round-trip) with synthetic
+ ActorContext instances so that signature verification is factored out
+ and we isolate the handler's business logic."
+
+TWRTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Worker Register Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TWRHelper subclass: Object
+
+  classMethod: makeTempDir [
+    "Generate a unique temp dir path under /tmp; rely on BBS's ensureDataDir
+     to create it. Uses the current epoch-nanoseconds to avoid collision
+     across multiple tests in the same run, without shelling out."
+    | ts |
+    ts := DateTime now epochSeconds printString.
+    ^'/tmp/pp-test-bbs-', ts, '-', (Object new identityHash printString)
+  ]
+
+  classMethod: makeBBS [
+    ^BBS withDataDir: self makeTempDir
+  ]
+
+  classMethod: makeServerFor: bbs [
+    "ApiServer bound to an unused port; we never call start so no socket is
+     opened. loadSecurityConfig runs; default enforceSignatures=true."
+    ^ApiServer on: 19991 bbs: bbs
+  ]
+
+  classMethod: sampleManifest [
+    | m |
+    m := Dictionary new.
+    m at: 'slots' put: 2.
+    m at: 'models' put: #('sonnet' 'opus').
+    m at: 'repos' put: #('procyon-park').
+    m at: 'roles' put: #('implementer').
+    m at: 'operator' put: 'alice'.
+    m at: 'accept_from' put: #('alice').
+    ^m
+  ]
+
+  classMethod: sampleWorkerPubkey [
+    "64-char hex string (32 bytes)."
+    ^'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899'
+  ]
+
+  classMethod: altWorkerPubkey [
+    ^'1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff'
+  ]
+
+  classMethod: registerUser: name pubkey: pubHex onBBS: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'pubkey' put: pubHex.
+    payload at: 'status' put: 'active'.
+    payload at: 'created_at' put: 1234567890.
+    bbs upsertPinned: 'identity' scope: '/' identity: 'user:', name
+        payload: payload actor: 'test-admin'
+  ]
+
+  classMethod: makeBody: name workerPub: wp operatorPub: op nonce: n [
+    | body |
+    body := Dictionary new.
+    body at: 'worker_pubkey' put: wp.
+    body at: 'operator_pubkey' put: op.
+    body at: 'nonce' put: n.
+    body at: 'manifest' put: self sampleManifest.
+    body at: 'name' put: name.
+    ^body
+  ]
+
+  classMethod: ctxFor: userName verified: v [
+    ^ActorContext actor: 'user:', userName timestamp: 1234567890
+                  verified: v isAdmin: false
+  ]
+
+  classMethod: anonymousCtx [
+    ^ActorContext anonymous
+  ]
+
+"=== TestWorkerRegister ==="
+TestWorkerRegister subclass: Object
+
+  classMethod: run: t [
+    self testHappyPath: t.
+    self testBadSignature: t.
+    self testUnknownOperator: t.
+    self testDuplicateNameDifferentOperator: t
+  ]
+
+  classMethod: testHappyPath: t [
+    | bbs server body ctx resp tuple payload aliceHex |
+    '--- WR1: happy path writes tuple ---' println.
+    bbs := TWRHelper makeBBS.
+    server := TWRHelper makeServerFor: bbs.
+    aliceHex := 'ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100'.
+    TWRHelper registerUser: 'alice' pubkey: aliceHex onBBS: bbs.
+
+    body := TWRHelper makeBody: 'alice-w1'
+                      workerPub: TWRHelper sampleWorkerPubkey
+                      operatorPub: aliceHex
+                      nonce: 'nonce-happy'.
+    ctx := TWRHelper ctxFor: 'alice' verified: true.
+    resp := server handleWorkerRegister: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WR1: returns 200'.
+
+    tuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-w1'.
+    t assert: tuple notNil message: 'WR1: worker tuple was written'.
+    tuple notNil ifTrue: [
+      t assertEqual: (tuple at: 'category') to: 'worker'
+        message: 'WR1: tuple category is worker'.
+      t assertEqual: (tuple at: 'modality') to: 'affine'
+        message: 'WR1: tuple modality is affine'.
+      payload := tuple at: 'payload'.
+      t assertEqual: (payload at: 'worker_pubkey') to: TWRHelper sampleWorkerPubkey
+        message: 'WR1: payload carries worker_pubkey'.
+      t assertEqual: (payload at: 'operator_pubkey') to: aliceHex
+        message: 'WR1: payload carries operator_pubkey'.
+      t assertEqual: (payload at: 'drain') to: false
+        message: 'WR1: payload drain flag is false'.
+      t assert: (payload at: 'manifest') notNil
+        message: 'WR1: payload includes manifest dict'
+    ]
+  ]
+
+  classMethod: testBadSignature: t [
+    | bbs server body ctx resp |
+    '--- WR2: bad signature / anonymous caller ---' println.
+    bbs := TWRHelper makeBBS.
+    server := TWRHelper makeServerFor: bbs.
+    TWRHelper registerUser: 'alice' pubkey: 'deadbeef' onBBS: bbs.
+
+    body := TWRHelper makeBody: 'alice-w1'
+                      workerPub: TWRHelper sampleWorkerPubkey
+                      operatorPub: 'deadbeef'
+                      nonce: 'n1'.
+
+    "Under enforcement (default), an unverified actor is rejected 401."
+    ctx := TWRHelper anonymousCtx.
+    resp := server handleWorkerRegister: body actor: ctx.
+    t assertEqual: resp status to: 401
+      message: 'WR2: unverified caller under enforce_signatures → 401'.
+
+    "Additionally, an actorCtx with verified=false should also 401
+     (guards against a caller forging a context with a missing sig)."
+    ctx := TWRHelper ctxFor: 'alice' verified: false.
+    resp := server handleWorkerRegister: body actor: ctx.
+    t assertEqual: resp status to: 401
+      message: 'WR2: verified=false actor → 401'
+  ]
+
+  classMethod: testUnknownOperator: t [
+    | bbs server body ctx resp |
+    '--- WR3: operator_pubkey does not map to user ---' println.
+    bbs := TWRHelper makeBBS.
+    server := TWRHelper makeServerFor: bbs.
+    TWRHelper registerUser: 'alice' pubkey: 'aliceeeee' onBBS: bbs.
+
+    "body claims operator_pubkey='bogus' but the authenticated actor is
+     alice whose registered pubkey is 'aliceeeee'. The attestation
+     binding fails — handler must return 403 unknown operator."
+    body := TWRHelper makeBody: 'alice-w1'
+                      workerPub: TWRHelper sampleWorkerPubkey
+                      operatorPub: 'bogus-no-such-key'
+                      nonce: 'n1'.
+    ctx := TWRHelper ctxFor: 'alice' verified: true.
+    resp := server handleWorkerRegister: body actor: ctx.
+    t assertEqual: resp status to: 403
+      message: 'WR3: operator_pubkey mismatch → 403'.
+
+    "Likewise, a verified actor whose user: identity is missing from BBS
+     (e.g. deleted between auth and handler) → 403."
+    ctx := TWRHelper ctxFor: 'ghost' verified: true.
+    resp := server handleWorkerRegister: body actor: ctx.
+    t assertEqual: resp status to: 403
+      message: 'WR3: missing operator identity tuple → 403'
+  ]
+
+  classMethod: testDuplicateNameDifferentOperator: t [
+    | bbs server body1 body2 ctx1 ctx2 resp aliceHex bobHex |
+    '--- WR4: duplicate name claimed by different operator ---' println.
+    bbs := TWRHelper makeBBS.
+    server := TWRHelper makeServerFor: bbs.
+    aliceHex := 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'.
+    bobHex := 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'.
+    TWRHelper registerUser: 'alice' pubkey: aliceHex onBBS: bbs.
+    TWRHelper registerUser: 'bob' pubkey: bobHex onBBS: bbs.
+
+    "Alice registers worker:shared."
+    body1 := TWRHelper makeBody: 'shared'
+                       workerPub: TWRHelper sampleWorkerPubkey
+                       operatorPub: aliceHex
+                       nonce: 'n1'.
+    ctx1 := TWRHelper ctxFor: 'alice' verified: true.
+    resp := server handleWorkerRegister: body1 actor: ctx1.
+    t assertEqual: resp status to: 200
+      message: 'WR4: first registration succeeds'.
+
+    "Bob tries to reuse the same worker name."
+    body2 := TWRHelper makeBody: 'shared'
+                       workerPub: TWRHelper altWorkerPubkey
+                       operatorPub: bobHex
+                       nonce: 'n2'.
+    ctx2 := TWRHelper ctxFor: 'bob' verified: true.
+    resp := server handleWorkerRegister: body2 actor: ctx2.
+    t assertEqual: resp status to: 409
+      message: 'WR4: duplicate name for different operator → 409'
+  ]
+
+"=== Main ==="
+TWRMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TWRTest new.
+    TestWorkerRegister run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
