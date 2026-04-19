@@ -114,8 +114,11 @@ SignatureVerifier subclass: Object
       pubkey := oldPub
     ].
 
-    "3. Verify ed25519 signature against canonical bytes."
-    (Identity verify: sigHeader data: canonical pub: pubkey) ifFalse: [^nil].
+    "3. Verify ed25519 signature against canonical bytes.
+     sigHeader and pubkey arrive as hex (ASCII-safe for HTTP headers
+     and TOML config); Ed25519 verify takes raw bytes."
+    (Identity verify: sigHeader fromHex data: canonical pub: pubkey fromHex)
+      ifFalse: [^nil].
 
     ^ActorContext actor: resolvedActor timestamp: ts verified: true isAdmin: isAdmin
   ]

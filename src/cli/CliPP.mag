@@ -1297,17 +1297,17 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       errMsg notNil ifTrue: [
         lower := errMsg asLowercase.
         ('Request rejected: ', errMsg) println.
-        (lower includesSubstring: 'signature') ifTrue: [
+        (lower includes: 'signature') ifTrue: [
           'Hint: ensure your local identity is registered via `pp user add <name> --pubkey <hex>`' println.
           '      and not revoked. A stale system clock can also trip the skew window.' println.
           ^self
         ].
-        (lower includesSubstring: 'admin') ifTrue: [
+        (lower includes: 'admin') ifTrue: [
           'Hint: this endpoint is admin-only — sign with the hex pubkey listed in' println.
           '      ~/.config/pp/server.toml under [admin].admins.' println.
           ^self
         ].
-        (lower includesSubstring: 'revoked') ifTrue: [
+        (lower includes: 'revoked') ifTrue: [
           'Hint: identity is revoked. Ask an admin to re-add or rotate.' println
         ].
         ^self

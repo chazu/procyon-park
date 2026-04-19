@@ -143,15 +143,15 @@ TestCliWorkerRegister subclass: Object
       message: 'WRC4: attestation is a String'.
     "Canonical layout: attestation must start with the 'manifest'
      key and contain the other three keys in ASCII order. We test
-     with startsWith: + includesSubstring: to avoid relying on a
+     with startsWith: + includes: to avoid relying on a
      substring-index primitive that Maggie strings don't expose."
     t assert: (attest startsWith: '{"manifest":')
       message: 'WRC4: attestation starts with manifest key'.
-    t assert: (attest includesSubstring: ',"nonce":')
+    t assert: (attest includes: ',"nonce":')
       message: 'WRC4: nonce key present after manifest'.
-    t assert: (attest includesSubstring: ',"operator_pubkey":')
+    t assert: (attest includes: ',"operator_pubkey":')
       message: 'WRC4: operator_pubkey key present'.
-    t assert: (attest includesSubstring: ',"worker_pubkey":')
+    t assert: (attest includes: ',"worker_pubkey":')
       message: 'WRC4: worker_pubkey key present'.
     t assert: (attest endsWith: '}')
       message: 'WRC4: attestation is a valid JSON object'.

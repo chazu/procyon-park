@@ -146,8 +146,8 @@ CliUserHelper subclass: Object
     errMsg := result at: 'error' ifAbsent: [nil].
     errMsg notNil ifTrue: [
       ('Request rejected: ', errMsg) println.
-      ((errMsg asLowercase includesSubstring: 'admin')
-        or: [errMsg asLowercase includesSubstring: 'signature']) ifTrue: [
+      ((errMsg asLowercase includes: 'admin')
+        or: [errMsg asLowercase includes: 'signature']) ifTrue: [
         'Hint: this endpoint is admin-only. Your local identity must have its' println.
         '      hex pubkey listed in ~/.config/pp/server.toml under [admin].admins,' println.
         '      and your system clock must be within the configured skew window.' println

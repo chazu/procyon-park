@@ -659,7 +659,7 @@ ApiServer subclass: Object
     "If spawned by another task (workflow_instance contains :task:), record parent-child link"
     (body includesKey: 'workflow_instance') ifTrue: [
       wfInst := body at: 'workflow_instance'.
-      (wfInst includesSubstring: ':task:') ifTrue: [
+      (wfInst includes: ':task:') ifTrue: [
         parts := wfInst split: ':task:'.
         instanceId := parts at: 0.
         transId := parts at: 1.

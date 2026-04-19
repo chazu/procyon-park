@@ -189,7 +189,7 @@ TemplateLoader subclass: Object
       "Skip files starting with '_' — convention for schema-only siblings
        (e.g. _affinity.cue) that should participate in `cue vet` but are
        not runnable workflow templates."
-      (fname isEmpty not and: [fname size > 4] and: [(fname startsWith: '_') not]) ifTrue: [
+      (fname isEmpty not and: [fname size > 4 and: [(fname startsWith: '_') not]]) ifTrue: [
         result := result copyWith: fname
       ]
     ].

@@ -63,7 +63,7 @@ CLIBase subclass: Object
     headers := Dictionary new.
     headers at: 'X-PP-Actor' put: actorHeader.
     headers at: 'X-PP-Timestamp' put: ts.
-    headers at: 'X-PP-Signature' put: sig.
+    headers at: 'X-PP-Signature' put: sig asHex.
     response := nil.
     [response := client post: url body: jsonBody contentType: 'application/json' headers: headers]
       on: Exception do: [:e |
@@ -167,7 +167,7 @@ CLIBase subclass: Object
     headers := Dictionary new.
     headers at: 'X-PP-Actor' put: actorHeader.
     headers at: 'X-PP-Timestamp' put: ts.
-    headers at: 'X-PP-Signature' put: sig.
+    headers at: 'X-PP-Signature' put: sig asHex.
     [
       response := client post: url body: jsonBody contentType: 'application/json' headers: headers.
       self handleResponse: response path: path
@@ -233,18 +233,18 @@ CLIBase subclass: Object
     | lower |
     lower := errMsg asLowercase.
     ('Request rejected: ', errMsg) println.
-    (lower includesSubstring: 'signature') ifTrue: [
+    (lower includes: 'signature') ifTrue: [
       'Hint: ensure your local identity (`pp identity show <name>`) is registered' println.
       '      via `pp user add <name> --pubkey <hex>` and has not been revoked.' println.
       'Hint: a stale system clock can also trip the skew window — check `date -u`.' println.
       ^self
     ].
-    (lower includesSubstring: 'admin') ifTrue: [
+    (lower includes: 'admin') ifTrue: [
       'Hint: this endpoint is admin-only. Sign with the hex pubkey listed in' println.
       '      ~/.config/pp/server.toml under [admin].admins.' println.
       ^self
     ].
-    (lower includesSubstring: 'revoked') ifTrue: [
+    (lower includes: 'revoked') ifTrue: [
       'Hint: identity has been revoked. Ask an admin to re-add or rotate.' println
     ]
   ]
