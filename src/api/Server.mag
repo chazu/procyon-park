@@ -288,7 +288,16 @@ ApiServer subclass: Object
          do: [:body :actorCtx | self handleWorkerHeartbeat: body actor: actorCtx].
     self signedPost: '/api/worker/drain'
          fields: #('name')
-         do: [:body :actorCtx | self handleWorkerDrain: body actor: actorCtx]
+         do: [:body :actorCtx | self handleWorkerDrain: body actor: actorCtx].
+    self registerTaskClaimRoutes
+  ]
+
+  method: registerTaskClaimRoutes [
+    "Task lifecycle routes invoked by workers: claim, renew, complete.
+     Split from registerWorkerRoutes to stay under the method-size limit."
+    self signedPost: '/api/tasks/claim'
+         fields: #('task_id' 'worker_id' 'claim_id')
+         do: [:body :actorCtx | self handleTaskClaim: body actor: actorCtx]
   ]
 
   method: handleWorkerDrain: body actor: actorCtx [
@@ -617,6 +626,136 @@ ApiServer subclass: Object
       ]
     ].
     self okResponse: (self okWithId: id)
+  ]
+
+  method: handleTaskClaim: body actor: actorCtx [
+    "Handle POST /api/tasks/claim.
+
+     Body: {task_id, worker_id, claim_id, lease_seconds?}. Must be signed by
+     the worker keypair whose actor header is 'worker:<worker_id>'. Flips
+     task status from 'pending' to 'claimed' atomically via BBS>>update:
+     (BBS.mag:289, pattern from Scheduler.mag:58).
+
+     D6.12 idempotency:
+       - matching (task_id, claim_id, worker_id) already claimed → 200 no-op
+       - status != pending with different claim/worker           → 409 conflict
+       - pending → stamp claim and return 200 {claim_expires_at, retry_count}
+
+     Lease: task.max_runtime overrides body.lease_seconds, which defaults to
+     600s (D6.2). Emits a 'claim' event tuple on success."
+    | taskId workerId claimId leaseSeconds actorHeader tasks task scope
+      outcome now result expectedActor d |
+
+    actorCtx verified ifFalse: [
+      enforceSignatures
+        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
+        ifFalse: [^self errorResponse: 503
+                         message: 'enforce_signatures must be true for task claim']
+    ].
+
+    taskId := body at: 'task_id'.
+    workerId := body at: 'worker_id'.
+    claimId := body at: 'claim_id'.
+    leaseSeconds := body at: 'lease_seconds' ifAbsent: [600].
+
+    (taskId isString and: [taskId isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'task_id must be a non-empty string'
+    ].
+    (workerId isString and: [workerId isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'worker_id must be a non-empty string'
+    ].
+    (claimId isString and: [claimId isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'claim_id must be a non-empty string'
+    ].
+
+    expectedActor := Identity worker: workerId.
+    actorHeader := actorCtx actor.
+    actorHeader = expectedActor ifFalse: [
+      ^self errorResponse: 403
+             message: 'claim requires ', expectedActor, ' signer (got ', actorHeader printString, ')'
+    ].
+
+    "Locate the task tuple — body carries no scope, so scan and match identity."
+    tasks := bbs scanAll: 'task'.
+    task := tasks detect: [:t | (t at: 'identity') = taskId] ifNone: [nil].
+    task isNil ifTrue: [
+      ^self errorResponse: 404 message: 'task not found: ', taskId
+    ].
+    scope := task at: 'scope'.
+
+    "Capture outcome from inside the atomic block. outcome at: 0 = action,
+     at: 1/2 = action-specific payload (expires/executed_by, retry/status)."
+    outcome := Array new: 3.
+    outcome at: 0 put: 'unknown'.
+    now := DateTime now epochSeconds.
+
+    result := bbs update: 'task' scope: scope identity: taskId do: [:p |
+      | curStatus curClaim curWorker maxRt effectiveLease expiresAt |
+      curStatus := p at: 'status' ifAbsent: [''].
+      curClaim := p at: 'claim_id' ifAbsent: [nil].
+      curWorker := p at: 'worker_id' ifAbsent: [nil].
+
+      (curStatus = 'claimed' and: [curClaim = claimId and: [curWorker = workerId]])
+        ifTrue: [
+          "D6.12: matching (task, claim, worker) → idempotent replay."
+          outcome at: 0 put: 'replay'.
+          outcome at: 1 put: (p at: 'claim_expires_at' ifAbsent: [nil]).
+          outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+        ]
+        ifFalse: [
+          curStatus = 'pending'
+            ifTrue: [
+              "Winner: stamp claim fields atomically."
+              maxRt := p at: 'max_runtime' ifAbsent: [nil].
+              effectiveLease := maxRt isNil
+                ifTrue: [leaseSeconds]
+                ifFalse: [maxRt].
+              expiresAt := now + effectiveLease.
+              p at: 'status' put: 'claimed'.
+              p at: 'worker_id' put: workerId.
+              p at: 'claim_id' put: claimId.
+              p at: 'executed_by' put: expectedActor.
+              p at: 'claim_expires_at' put: expiresAt.
+              p at: 'renewed_at' put: now.
+              p at: 'missed_renewals' put: 0.
+              outcome at: 0 put: 'claimed'.
+              outcome at: 1 put: expiresAt.
+              outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+            ]
+            ifFalse: [
+              "D6.12: non-pending with non-matching identity → 409 conflict."
+              outcome at: 0 put: 'conflict'.
+              outcome at: 1 put: (p at: 'executed_by' ifAbsent: [nil]).
+              outcome at: 2 put: curStatus
+            ]
+        ]
+    ].
+
+    result isNil ifTrue: [
+      ^self errorResponse: 404 message: 'task not found: ', taskId
+    ].
+
+    (outcome at: 0) = 'conflict' ifTrue: [
+      d := Dictionary new.
+      d at: 'error' put: 'task already claimed'.
+      d at: 'executed_by' put: (outcome at: 1).
+      d at: 'status' put: (outcome at: 2).
+      ^self jsonResponse: 409 body: d
+    ].
+
+    (outcome at: 0) = 'claimed' ifTrue: [
+      bbs emitEvent: scope
+          identity: 'claim:', taskId
+          type: 'claim'
+          summary: expectedActor, ' claimed ', taskId
+          actor: expectedActor
+    ].
+
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'claim_expires_at' put: (outcome at: 1).
+    d at: 'retry_count' put: (outcome at: 2).
+    ^self okResponse: d
   ]
 
   "--- Helpers ---"
