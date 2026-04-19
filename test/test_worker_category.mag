@@ -1,0 +1,209 @@
+"Tests for the 'worker' tuple category.
+
+ Invariants under test:
+   WC1  Categories>>valid includes 'worker'.
+   WC2  'worker' is NOT pinned (affine-only).
+   WC3  BBS>>outAffine: category:'worker' scope:'/' identity:(Identity worker:'alice')
+        payload:(sample manifest) ttl:90 round-trips via BBS>>rdp:.
+   WC4  Identity>>worker: produces 'worker:<name>'.
+   WC5  Re-writing the same (category, scope, identity) — behavior of
+        current BBS>>outAffine. outAffine is append-only (assigns a fresh
+        id per call, appends to index, does NOT de-duplicate). This test
+        documents that behavior; the worker-heartbeat story will need an
+        upsert-style path if replace-on-rewrite is desired.
+
+ Standalone runner at bottom (TWCMain start)."
+
+TWCTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Worker Category Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TWCHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: makeBBS [
+    ^BBS withDataDir: self makeTempDir
+  ]
+
+  classMethod: sampleManifest [
+    "Canonical worker manifest payload (slots/models/repos/roles/operator/accept_from)."
+    | m |
+    m := Dictionary new.
+    m at: 'slots' put: 2.
+    m at: 'models' put: #('sonnet' 'opus').
+    m at: 'repos' put: #('procyon-park' 'maggie').
+    m at: 'roles' put: #('implementer' 'reviewer').
+    m at: 'operator' put: 'chazu'.
+    m at: 'accept_from' put: #('chazu').
+    ^m
+  ]
+
+  classMethod: samplePayload [
+    | p |
+    p := Dictionary new.
+    p at: 'worker_pubkey' put: 'deadbeef01'.
+    p at: 'operator_pubkey' put: 'cafebabe02'.
+    p at: 'manifest' put: self sampleManifest.
+    p at: 'drain' put: false.
+    p at: 'registered_at' put: '2026-04-19T12:00:00Z'.
+    ^p
+  ]
+
+"=== TestWorkerCategory ==="
+TestWorkerCategory subclass: Object
+
+  classMethod: run: t [
+    | bbs payload payload2 firstId secondId tuple manifest scope identity ttl workerTuples |
+    '--- TestWorkerCategory ---' println.
+
+    "WC1: Categories>>valid includes 'worker'."
+    t assert: (Categories valid includes: 'worker')
+      message: 'WC1: Categories valid includes worker'.
+    t assert: (Categories isValid: 'worker')
+      message: 'WC1: Categories isValid: worker is true'.
+
+    "WC2: 'worker' is NOT pinned."
+    t assert: (Categories isPinned: 'worker') not
+      message: 'WC2: worker is not pinned (affine-only)'.
+
+    "WC4: Identity>>worker: produces the canonical identity string."
+    t assertEqual: (Identity worker: 'alice') to: 'worker:alice'
+      message: 'WC4: Identity worker: produces worker:<name>'.
+
+    "WC3: outAffine + rdp round-trip."
+    bbs := TWCHelper makeBBS.
+    scope := '/'.
+    identity := Identity worker: 'alice'.
+    ttl := 90.
+    payload := TWCHelper samplePayload.
+
+    firstId := bbs
+      outAffine: 'worker'
+      scope: scope
+      identity: identity
+      payload: payload
+      ttl: ttl.
+    t assert: firstId notNil
+      message: 'WC3: outAffine returns an assigned id'.
+
+    tuple := bbs rdp: 'worker' scope: scope identity: identity.
+    t assert: tuple notNil
+      message: 'WC3: rdp: reads back the worker tuple'.
+    tuple notNil ifTrue: [
+      t assertEqual: (tuple at: 'category') to: 'worker'
+        message: 'WC3: round-trip preserves category'.
+      t assertEqual: (tuple at: 'scope') to: scope
+        message: 'WC3: round-trip preserves scope'.
+      t assertEqual: (tuple at: 'identity') to: identity
+        message: 'WC3: round-trip preserves identity'.
+      t assertEqual: (tuple at: 'modality') to: 'affine'
+        message: 'WC3: round-trip modality is affine'.
+
+      "Payload schema fields."
+      t assertEqual: ((tuple at: 'payload') at: 'worker_pubkey') to: 'deadbeef01'
+        message: 'WC3: payload round-trips worker_pubkey'.
+      t assertEqual: ((tuple at: 'payload') at: 'operator_pubkey') to: 'cafebabe02'
+        message: 'WC3: payload round-trips operator_pubkey'.
+      t assertEqual: ((tuple at: 'payload') at: 'drain') to: false
+        message: 'WC3: payload round-trips drain flag'.
+      t assertEqual: ((tuple at: 'payload') at: 'registered_at') to: '2026-04-19T12:00:00Z'
+        message: 'WC3: payload round-trips registered_at ISO-8601 string'.
+
+      manifest := (tuple at: 'payload') at: 'manifest'.
+      t assert: manifest notNil
+        message: 'WC3: payload includes manifest dict'.
+      manifest notNil ifTrue: [
+        t assertEqual: (manifest at: 'slots') to: 2
+          message: 'WC3: manifest round-trips slots'.
+        t assertEqual: (manifest at: 'operator') to: 'chazu'
+          message: 'WC3: manifest round-trips operator'
+      ]
+    ].
+
+    "WC5: Re-write semantics. BBS>>outAffine is append-only — each call
+     assigns a fresh id and appends. This is documented behavior, not
+     replace-on-rewrite. The heartbeat story will decide how to evolve
+     this (e.g. an upsertAffine variant)."
+    payload2 := TWCHelper samplePayload.
+    payload2 at: 'drain' put: true.
+    payload2 at: 'registered_at' put: '2026-04-19T12:05:00Z'.
+    secondId := bbs
+      outAffine: 'worker'
+      scope: scope
+      identity: identity
+      payload: payload2
+      ttl: ttl.
+    t assert: secondId notNil
+      message: 'WC5: second outAffine returns an id'.
+    t assert: (secondId = firstId) not
+      message: 'WC5: second outAffine assigns a NEW id (append-only — no replace)'.
+
+    "Document the index shape: both writes live in the index. If this
+     assertion ever changes to 1, outAffine has become replace-on-rewrite
+     and the worker-heartbeat code path can rely on it."
+    workerTuples := bbs scan: 'worker' scope: scope.
+    t assertEqual: workerTuples size to: 2
+      message: 'WC5: outAffine is append-only — two writes leave two tuples in the index'
+  ]
+
+"=== Main ==="
+TWCMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TWCTest new.
+    TestWorkerCategory run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

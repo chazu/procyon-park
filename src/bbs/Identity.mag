@@ -55,3 +55,8 @@ Identity subclass: Object
   classMethod: verdict: instanceId [
     ^'verdict:', instanceId
   ]
+
+  classMethod: worker: aName [
+    "Canonical identity string for a worker tuple."
+    ^'worker:', aName
+  ]
