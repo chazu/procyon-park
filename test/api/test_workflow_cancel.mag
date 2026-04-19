@@ -1,0 +1,361 @@
+"Tests for /api/workflow/cancel — D6.15 cancellation semantics (§4.12).
+
+ Invariants:
+   WC1  Missing --reason (or whitespace-only) → 400.
+   WC2  Unauthorized caller (not launcher, not operator, not admin) → 403.
+   WC3  Launcher (launched-by of the workflow) can cancel.
+   WC4  Operator of a worker holding an active claim on a task in the
+        workflow can cancel. Operator is resolved by
+        task.worker_id → worker tuple at scope=/ → operator_pubkey →
+        identity tuple whose pubkey matches.
+   WC5  Admin (actorCtx isAdmin) can always cancel.
+   WC6  Recursive child workflow cancellation also emits an urgent
+        notification carrying the same reason and cancelling actor."
+
+WCRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg,
+                            ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Workflow Cancel (D6.15) Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+WCHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: newServer: bbs [
+    "ApiServer with attached Dispatcher (needed for workflowEngine)."
+    | dispatcher server |
+    dispatcher := Dispatcher on: bbs harnessFactory: nil.
+    server := ApiServer on: 0 bbs: bbs dispatcher: dispatcher.
+    ^server
+  ]
+
+  classMethod: seedUser: name pubkey: pubkey in: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'pubkey' put: pubkey.
+    payload at: 'status' put: 'active'.
+    bbs outPinned: 'identity' scope: '/' identity: 'user:', name payload: payload actor: nil
+  ]
+
+  classMethod: seedWorker: name operatorPub: opPub in: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'worker_pubkey' put: '00'.
+    payload at: 'operator_pubkey' put: opPub.
+    payload at: 'manifest' put: Dictionary new.
+    payload at: 'drain' put: false.
+    payload at: 'registered_at' put: 1.
+    bbs outAffine: 'worker' scope: '/' identity: 'worker:', name payload: payload ttl: 3600 actor: nil
+  ]
+
+  classMethod: seedWorkflow: wfId scope: scope launchedBy: launcher in: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'template' put: 'test-template'.
+    payload at: 'status' put: 'running'.
+    payload at: 'params' put: Dictionary new.
+    payload at: 'scope' put: scope.
+    payload at: 'started_at' put: DateTime now epochSeconds.
+    bbs out: 'workflow' scope: scope identity: wfId payload: payload actor: nil launchedBy: launcher executedBy: nil
+  ]
+
+  classMethod: seedTask: taskId scope: scope workflow: wfId worker: workerId status: status in: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: status.
+    payload at: 'description' put: 'seed task'.
+    payload at: 'workflow_instance' put: wfId.
+    payload at: 'worker_id' put: workerId.
+    payload at: 'claim_id' put: 'claim-x'.
+    bbs out: 'task' scope: scope identity: taskId payload: payload actor: nil
+  ]
+
+  classMethod: seedChildLink: parentId child: childId childScope: childScope in: bbs [
+    "Seed a wave-child: signal scoped to parentId so cancelWorkflow
+     recurses into the child workflow."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'child_instance' put: childId.
+    payload at: 'child_scope' put: childScope.
+    bbs out: 'signal' scope: parentId identity: 'wave-child:', childId payload: payload actor: nil
+  ]
+
+  classMethod: makeBody: wfId scope: scope reason: reason [
+    | body |
+    body := Dictionary new.
+    body at: 'workflow_id' put: wfId.
+    body at: 'scope' put: scope.
+    reason notNil ifTrue: [body at: 'reason' put: reason].
+    ^body
+  ]
+
+  classMethod: findCancelNotification: wfId in: bbs [
+    "Find the urgent workflow-cancelled notification for wfId."
+    ^(bbs scanAll: 'notification') detect: [:n |
+      | p |
+      p := n at: 'payload' ifAbsent: [Dictionary new].
+      (p at: 'workflow_id' ifAbsent: [nil]) = wfId
+    ] ifNone: [nil]
+  ]
+
+"=== WC1: missing reason → 400 ==="
+TestMissingReason subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server ctx body resp |
+    '--- WC1: missing reason → 400 ---' println.
+    tempDir := WCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WCHelper newServer: bbs.
+    WCHelper seedWorkflow: 'wf-1' scope: 'demo' launchedBy: 'user:alice' in: bbs.
+    ctx := ActorContext actor: 'user:alice' timestamp: 1 verified: true isAdmin: false.
+
+    "(a) absent reason field"
+    body := WCHelper makeBody: 'wf-1' scope: 'demo' reason: nil.
+    resp := server handleWorkflowCancelBody: body actor: ctx.
+    t assertEqual: resp status to: 400 message: 'WC1a: absent reason → 400'.
+
+    "(b) whitespace-only reason"
+    body := WCHelper makeBody: 'wf-1' scope: 'demo' reason: '   '.
+    resp := server handleWorkflowCancelBody: body actor: ctx.
+    t assertEqual: resp status to: 400 message: 'WC1b: whitespace-only reason → 400'.
+
+    "(c) empty string"
+    body := WCHelper makeBody: 'wf-1' scope: 'demo' reason: ''.
+    resp := server handleWorkflowCancelBody: body actor: ctx.
+    t assertEqual: resp status to: 400 message: 'WC1c: empty reason → 400'
+  ]
+
+"=== WC2: unauthorized caller → 403 ==="
+TestUnauthorized subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server ctx body resp |
+    '--- WC2: unauthorized → 403 ---' println.
+    tempDir := WCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WCHelper newServer: bbs.
+    WCHelper seedUser: 'alice' pubkey: 'aaaa' in: bbs.
+    WCHelper seedUser: 'bob' pubkey: 'bbbb' in: bbs.
+    WCHelper seedWorkflow: 'wf-2' scope: 'demo' launchedBy: 'user:alice' in: bbs.
+
+    ctx := ActorContext actor: 'user:bob' timestamp: 1 verified: true isAdmin: false.
+    body := WCHelper makeBody: 'wf-2' scope: 'demo' reason: 'nope'.
+    resp := server handleWorkflowCancelBody: body actor: ctx.
+    t assertEqual: resp status to: 403 message: 'WC2: non-launcher non-operator non-admin → 403'
+  ]
+
+"=== WC3: launcher can cancel ==="
+TestLauncherCanCancel subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server ctx body resp wf wfPayload notif notifPayload |
+    '--- WC3: launcher cancels ---' println.
+    tempDir := WCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WCHelper newServer: bbs.
+    WCHelper seedUser: 'alice' pubkey: 'aaaa' in: bbs.
+    WCHelper seedWorkflow: 'wf-3' scope: 'demo' launchedBy: 'user:alice' in: bbs.
+
+    ctx := ActorContext actor: 'user:alice' timestamp: 1 verified: true isAdmin: false.
+    body := WCHelper makeBody: 'wf-3' scope: 'demo' reason: '  need to stop  '.
+    resp := server handleWorkflowCancelBody: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WC3: launcher allowed → 200'.
+
+    wf := bbs rdp: 'workflow' scope: 'demo' identity: 'wf-3'.
+    wfPayload := wf at: 'payload'.
+    t assertEqual: (wfPayload at: 'status') to: 'cancelled'
+      message: 'WC3: workflow flipped to cancelled'.
+    t assertEqual: (wfPayload at: 'cancelled_by' ifAbsent: [nil]) to: 'user:alice'
+      message: 'WC3: cancelled_by stamped'.
+    t assertEqual: (wfPayload at: 'cancel_reason' ifAbsent: [nil]) to: 'need to stop'
+      message: 'WC3: cancel_reason stripped + stamped'.
+
+    notif := WCHelper findCancelNotification: 'wf-3' in: bbs.
+    t assert: notif notNil message: 'WC3: notification emitted'.
+    notif notNil ifTrue: [
+      notifPayload := notif at: 'payload'.
+      t assertEqual: (notifPayload at: 'severity') to: 'urgent'
+        message: 'WC3: notification severity=urgent'.
+      t assertEqual: (notifPayload at: 'cancelled_by') to: 'user:alice'
+        message: 'WC3: notification carries actor'.
+      t assertEqual: (notifPayload at: 'reason') to: 'need to stop'
+        message: 'WC3: notification carries reason'.
+      t assertEqual: (notif at: 'scope') to: 'user:alice'
+        message: 'WC3: notification scoped to launched-by identity'
+    ]
+  ]
+
+"=== WC4: operator of executing worker can cancel ==="
+TestOperatorCanCancel subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server ctx body resp wf |
+    '--- WC4: operator cancels ---' println.
+    tempDir := WCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WCHelper newServer: bbs.
+    WCHelper seedUser: 'alice' pubkey: 'aaaa' in: bbs.
+    WCHelper seedUser: 'opop' pubkey: 'eeee' in: bbs.
+    WCHelper seedWorker: 'w1' operatorPub: 'eeee' in: bbs.
+    WCHelper seedWorkflow: 'wf-4' scope: 'demo' launchedBy: 'user:alice' in: bbs.
+    WCHelper seedTask: 'task-4' scope: 'demo' workflow: 'wf-4'
+             worker: 'worker:w1' status: 'dispatched' in: bbs.
+
+    ctx := ActorContext actor: 'user:opop' timestamp: 1 verified: true isAdmin: false.
+    body := WCHelper makeBody: 'wf-4' scope: 'demo' reason: 'operator pulls the plug'.
+    resp := server handleWorkflowCancelBody: body actor: ctx.
+    t assertEqual: resp status to: 200
+      message: 'WC4: operator of executing worker → 200'.
+
+    wf := bbs rdp: 'workflow' scope: 'demo' identity: 'wf-4'.
+    t assertEqual: ((wf at: 'payload') at: 'status') to: 'cancelled'
+      message: 'WC4: workflow cancelled'
+  ]
+
+"=== WC5: admin can cancel ==="
+TestAdminCanCancel subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server ctx body resp |
+    '--- WC5: admin cancels ---' println.
+    tempDir := WCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WCHelper newServer: bbs.
+    WCHelper seedUser: 'alice' pubkey: 'aaaa' in: bbs.
+    WCHelper seedWorkflow: 'wf-5' scope: 'demo' launchedBy: 'user:alice' in: bbs.
+
+    ctx := ActorContext actor: 'admin:deadbeef' timestamp: 1 verified: true isAdmin: true.
+    body := WCHelper makeBody: 'wf-5' scope: 'demo' reason: 'admin override'.
+    resp := server handleWorkflowCancelBody: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WC5: admin → 200'
+  ]
+
+"=== WC6: recursive child gets urgent notification with same reason ==="
+TestRecursiveChildNotified subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server ctx body resp parentNotif childNotif parentPayload childPayload |
+    '--- WC6: recursive child notified ---' println.
+    tempDir := WCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WCHelper newServer: bbs.
+    WCHelper seedUser: 'alice' pubkey: 'aaaa' in: bbs.
+    WCHelper seedUser: 'carol' pubkey: 'cccc' in: bbs.
+
+    WCHelper seedWorkflow: 'wf-parent' scope: 'demo' launchedBy: 'user:alice' in: bbs.
+    WCHelper seedWorkflow: 'wf-child' scope: 'demo' launchedBy: 'user:carol' in: bbs.
+    WCHelper seedChildLink: 'wf-parent' child: 'wf-child' childScope: 'demo' in: bbs.
+
+    ctx := ActorContext actor: 'user:alice' timestamp: 1 verified: true isAdmin: false.
+    body := WCHelper makeBody: 'wf-parent' scope: 'demo' reason: 'stop the world'.
+    resp := server handleWorkflowCancelBody: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WC6: parent cancel → 200'.
+
+    parentNotif := WCHelper findCancelNotification: 'wf-parent' in: bbs.
+    childNotif := WCHelper findCancelNotification: 'wf-child' in: bbs.
+
+    t assert: parentNotif notNil message: 'WC6: parent notification present'.
+    t assert: childNotif notNil message: 'WC6: child notification present'.
+
+    parentNotif notNil ifTrue: [
+      parentPayload := parentNotif at: 'payload'.
+      t assertEqual: (parentPayload at: 'severity') to: 'urgent'
+        message: 'WC6: parent notif severity=urgent'.
+      t assertEqual: (parentPayload at: 'reason') to: 'stop the world'
+        message: 'WC6: parent notif reason matches'
+    ].
+
+    childNotif notNil ifTrue: [
+      childPayload := childNotif at: 'payload'.
+      t assertEqual: (childPayload at: 'severity') to: 'urgent'
+        message: 'WC6: child notif severity=urgent'.
+      t assertEqual: (childPayload at: 'reason') to: 'stop the world'
+        message: 'WC6: child notif reason propagated from parent'.
+      t assertEqual: (childPayload at: 'cancelled_by') to: 'user:alice'
+        message: 'WC6: child notif cancelling actor propagated'.
+      t assertEqual: (childNotif at: 'scope') to: 'user:carol'
+        message: 'WC6: child notif scoped to child launched-by identity'
+    ]
+  ]
+
+"=== Main ==="
+TestWorkflowCancelMain subclass: Object
+  classMethod: start [
+    | t |
+    t := WCRunner new.
+    [TestMissingReason run: t] on: Exception do: [:e |
+      ('TestMissingReason CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissingReason crashed'
+    ].
+    [TestUnauthorized run: t] on: Exception do: [:e |
+      ('TestUnauthorized CRASHED: ', e messageText) println.
+      t assert: false message: 'TestUnauthorized crashed'
+    ].
+    [TestLauncherCanCancel run: t] on: Exception do: [:e |
+      ('TestLauncherCanCancel CRASHED: ', e messageText) println.
+      t assert: false message: 'TestLauncherCanCancel crashed'
+    ].
+    [TestOperatorCanCancel run: t] on: Exception do: [:e |
+      ('TestOperatorCanCancel CRASHED: ', e messageText) println.
+      t assert: false message: 'TestOperatorCanCancel crashed'
+    ].
+    [TestAdminCanCancel run: t] on: Exception do: [:e |
+      ('TestAdminCanCancel CRASHED: ', e messageText) println.
+      t assert: false message: 'TestAdminCanCancel crashed'
+    ].
+    [TestRecursiveChildNotified run: t] on: Exception do: [:e |
+      ('TestRecursiveChildNotified CRASHED: ', e messageText) println.
+      t assert: false message: 'TestRecursiveChildNotified crashed'
+    ].
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
+
+TestWorkflowCancelMain start

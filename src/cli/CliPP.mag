@@ -443,28 +443,41 @@ CliPP subclass: Object
       0
     ].
 
-    "--- Child: cancel <id> [--scope]"
+    "--- Child: cancel <id> --reason <text> [--scope]"
     cancel := Cli::Command named: 'cancel' doc: 'Cancel a running workflow'.
     cancel flag: (Cli::Flag
       name: 'scope'
       type: #string
       default: ''
       doc: 'Scope of the workflow (defaults to PP_SCOPE)').
+    cancel flag: (Cli::Flag
+      name: 'reason'
+      type: #string
+      default: ''
+      doc: 'Required human-readable cancellation reason (D6.15)').
     cancel run: [:runArgs |
-      | scopeArg theScope body exitCode |
+      | scopeArg theScope reasonArg reasonStripped body exitCode |
       exitCode := 0.
       runArgs size < 1 ifTrue: [
-        'Usage: pp workflow cancel <workflow-id> [--scope <scope>]' println.
+        'Usage: pp workflow cancel <workflow-id> --reason <text> [--scope <scope>]' println.
         exitCode := 1
       ] ifFalse: [
-        scopeArg := cancel flagValue: 'scope'.
-        theScope := (scopeArg notNil and: [scopeArg isEmpty not])
-          ifTrue: [scopeArg]
-          ifFalse: [cfg scope].
-        body := Dictionary new.
-        body at: 'workflow_id' put: (runArgs at: 0).
-        body at: 'scope' put: theScope.
-        self postAndPrint: cfg path: '/api/workflow/cancel' body: body
+        reasonArg := cancel flagValue: 'reason'.
+        reasonStripped := (reasonArg isNil) ifTrue: [''] ifFalse: [reasonArg trimBoth].
+        reasonStripped isEmpty ifTrue: [
+          'Error: --reason <text> is required and must be non-empty (D6.15).' println.
+          exitCode := 1
+        ] ifFalse: [
+          scopeArg := cancel flagValue: 'scope'.
+          theScope := (scopeArg notNil and: [scopeArg isEmpty not])
+            ifTrue: [scopeArg]
+            ifFalse: [cfg scope].
+          body := Dictionary new.
+          body at: 'workflow_id' put: (runArgs at: 0).
+          body at: 'scope' put: theScope.
+          body at: 'reason' put: reasonStripped.
+          self postAndPrint: cfg path: '/api/workflow/cancel' body: body
+        ]
       ].
       exitCode
     ].
