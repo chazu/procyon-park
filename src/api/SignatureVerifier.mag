@@ -45,7 +45,7 @@ SignatureVerifier subclass: Object
   ]
 
   method: doVerify: req adminList: admins skewSeconds: skew requireOldPub: oldPub [
-    | actorHeader tsHeader sigHeader ts now delta body canonical pubkey isAdmin resolvedActor idTuple payload status method path |
+    | actorHeader tsHeader sigHeader ts now delta body canonical pubkey isAdmin resolvedActor idTuple payload status method path drainFlag |
     actorHeader := req header: 'X-PP-Actor'.
     tsHeader := req header: 'X-PP-Timestamp'.
     sigHeader := req header: 'X-PP-Signature'.
@@ -80,15 +80,30 @@ SignatureVerifier subclass: Object
       isAdmin := true.
       resolvedActor := 'admin:', actorHeader
     ] ifFalse: [
-      "2. Else treat actorHeader as a user name and look up identity tuple."
-      idTuple := bbs rdp: 'identity' scope: '/' identity: 'user:', actorHeader.
-      idTuple isNil ifTrue: [^nil].
-      payload := idTuple at: 'payload' ifAbsent: [Dictionary new].
-      status := payload at: 'status' ifAbsent: ['active'].
-      status = 'active' ifFalse: [^nil].
-      pubkey := payload at: 'pubkey' ifAbsent: [nil].
-      pubkey isNil ifTrue: [^nil].
-      resolvedActor := 'user:', actorHeader
+      (actorHeader startsWith: 'worker:') ifTrue: [
+        "2a. Worker actor — resolve against the affine worker category.
+         TTL-expired or missing tuples come back nil from rdp:, which
+         means the worker is offline and cannot sign new writes.
+         A drained worker is likewise refused."
+        idTuple := bbs rdp: 'worker' scope: '/' identity: actorHeader.
+        idTuple isNil ifTrue: [^nil].
+        payload := idTuple at: 'payload' ifAbsent: [Dictionary new].
+        drainFlag := payload at: 'drain' ifAbsent: [false].
+        drainFlag = true ifTrue: [^nil].
+        pubkey := payload at: 'worker_pubkey' ifAbsent: [nil].
+        pubkey isNil ifTrue: [^nil].
+        resolvedActor := actorHeader
+      ] ifFalse: [
+        "2b. Else treat actorHeader as a user name and look up identity tuple."
+        idTuple := bbs rdp: 'identity' scope: '/' identity: 'user:', actorHeader.
+        idTuple isNil ifTrue: [^nil].
+        payload := idTuple at: 'payload' ifAbsent: [Dictionary new].
+        status := payload at: 'status' ifAbsent: ['active'].
+        status = 'active' ifFalse: [^nil].
+        pubkey := payload at: 'pubkey' ifAbsent: [nil].
+        pubkey isNil ifTrue: [^nil].
+        resolvedActor := 'user:', actorHeader
+      ]
     ].
 
     "Rotation gate: signature must be produced with oldPub AND match the
