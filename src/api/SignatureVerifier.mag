@@ -123,3 +123,69 @@ SignatureVerifier subclass: Object
   method: isMissing: aString [
     ^aString isNil or: [aString isEmpty]
   ]
+
+  method: verifySSE: req adminList: admins skewSeconds: skew [
+    "SSE upgrade verifier. EventSource cannot send custom headers, so the
+     dashboard upgrades with query-string credentials:
+       ?actor=<name-or-hex>&ts=<unix>&sig=<hex>
+     Canonical signed bytes: 'sse' LF actor LF ts. On success returns an
+     ActorContext. Any failure (missing/invalid params, skew, unknown actor,
+     bad signature, revoked identity) returns nil so the caller can fall back
+     to an anonymous subscription when enforcement is off."
+    ^[self doVerifySSE: req adminList: admins skewSeconds: skew]
+        on: Exception do: [:e | nil]
+  ]
+
+  method: doVerifySSE: req adminList: admins skewSeconds: skew [
+    | actorParam tsParam sigParam ts now delta canonical pubkey resolvedActor isAdmin idTuple payload status drainFlag |
+    actorParam := req queryParam: 'actor'.
+    tsParam := req queryParam: 'ts'.
+    sigParam := req queryParam: 'sig'.
+    (self isMissing: actorParam) ifTrue: [^nil].
+    (self isMissing: tsParam) ifTrue: [^nil].
+    (self isMissing: sigParam) ifTrue: [^nil].
+
+    ts := tsParam asInteger.
+    now := DateTime now epochSeconds.
+    delta := now - ts.
+    delta < 0 ifTrue: [delta := delta negated].
+    delta > skew ifTrue: [^nil].
+
+    canonical := 'sse', (String with: Character lf),
+                 actorParam, (String with: Character lf),
+                 tsParam.
+
+    isAdmin := false.
+    resolvedActor := nil.
+    pubkey := nil.
+
+    (admins notNil and: [admins includes: actorParam]) ifTrue: [
+      pubkey := actorParam.
+      isAdmin := true.
+      resolvedActor := 'admin:', actorParam
+    ] ifFalse: [
+      (actorParam startsWith: 'worker:') ifTrue: [
+        idTuple := bbs rdp: 'worker' scope: '/' identity: actorParam.
+        idTuple isNil ifTrue: [^nil].
+        payload := idTuple at: 'payload' ifAbsent: [Dictionary new].
+        drainFlag := payload at: 'drain' ifAbsent: [false].
+        drainFlag = true ifTrue: [^nil].
+        pubkey := payload at: 'worker_pubkey' ifAbsent: [nil].
+        pubkey isNil ifTrue: [^nil].
+        resolvedActor := actorParam
+      ] ifFalse: [
+        idTuple := bbs rdp: 'identity' scope: '/' identity: 'user:', actorParam.
+        idTuple isNil ifTrue: [^nil].
+        payload := idTuple at: 'payload' ifAbsent: [Dictionary new].
+        status := payload at: 'status' ifAbsent: ['active'].
+        status = 'active' ifFalse: [^nil].
+        pubkey := payload at: 'pubkey' ifAbsent: [nil].
+        pubkey isNil ifTrue: [^nil].
+        resolvedActor := 'user:', actorParam
+      ]
+    ].
+
+    (Identity verify: sigParam data: canonical pub: pubkey) ifFalse: [^nil].
+
+    ^ActorContext actor: resolvedActor timestamp: ts verified: true isAdmin: isAdmin
+  ]
