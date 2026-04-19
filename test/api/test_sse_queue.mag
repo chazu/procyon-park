@@ -1,0 +1,195 @@
+"Tests for SSEQueue — the bounded per-connection FIFO that isolates
+ slow SSE dashboard consumers from the tick loop (§4.11, D6.14).
+
+ Invariants under test:
+   SQ1  New queue is empty, default capacity 256, not closed.
+   SQ2  enqueue: on a fresh queue returns true; size increments.
+   SQ3  dequeue on an empty queue returns nil (does not block).
+   SQ4  enqueue/dequeue are FIFO (events emerge in insertion order).
+   SQ5  enqueue: returns false at capacity without mutating the queue;
+        droppedCount reflects overflow attempts.
+   SQ6  close: causes subsequent enqueue: to return false; already-
+        queued events remain dequeueable (drainer can flush residue).
+   SQ7  Custom capacity via new: flows through to capacity accessor
+        and to overflow detection."
+
+SSEQueueTestRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString,
+        ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== SSEQueue Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TestSSEQueue subclass: Object
+
+  classMethod: run: t [
+    self testFresh: t.
+    self testFifo: t.
+    self testOverflow: t.
+    self testClose: t.
+    self testCustomCapacity: t
+  ]
+
+  classMethod: testFresh: t [
+    "SQ1 + SQ3: a fresh queue is empty, default-capped, and dequeue
+     on an empty queue returns nil."
+    | q |
+    q := SSEQueue new.
+    t assertEqual: q size to: 0
+      message: 'SQ1: fresh queue size=0'.
+    t assertEqual: q capacity to: 256
+      message: 'SQ1: default capacity is 256'.
+    t assert: q isEmpty message: 'SQ1: fresh queue isEmpty'.
+    t assert: (q isClosed) not message: 'SQ1: fresh queue not closed'.
+    t assert: (q isFull) not message: 'SQ1: fresh queue not full'.
+    t assertEqual: q dequeue to: nil
+      message: 'SQ3: dequeue on empty returns nil'.
+    t assertEqual: q droppedCount to: 0
+      message: 'SQ1: fresh droppedCount=0'
+  ]
+
+  classMethod: testFifo: t [
+    "SQ2 + SQ4: enqueue returns true; items emerge in FIFO order."
+    | q a b c r1 r2 r3 |
+    q := SSEQueue new.
+    a := Dictionary new. a at: 'data' put: 'A'.
+    b := Dictionary new. b at: 'data' put: 'B'.
+    c := Dictionary new. c at: 'data' put: 'C'.
+    t assert: (q enqueue: a) message: 'SQ2: enqueue A returns true'.
+    t assert: (q enqueue: b) message: 'SQ2: enqueue B returns true'.
+    t assert: (q enqueue: c) message: 'SQ2: enqueue C returns true'.
+    t assertEqual: q size to: 3 message: 'SQ2: size=3 after 3 enqueues'.
+    r1 := q dequeue.
+    r2 := q dequeue.
+    r3 := q dequeue.
+    t assertEqual: (r1 at: 'data') to: 'A' message: 'SQ4: FIFO first=A'.
+    t assertEqual: (r2 at: 'data') to: 'B' message: 'SQ4: FIFO second=B'.
+    t assertEqual: (r3 at: 'data') to: 'C' message: 'SQ4: FIFO third=C'.
+    t assert: q isEmpty message: 'SQ4: empty after draining'.
+    t assertEqual: q dequeue to: nil
+      message: 'SQ4: dequeue past end returns nil'
+  ]
+
+  classMethod: testOverflow: t [
+    "SQ5: fill to capacity; next enqueue returns false; size unchanged;
+     droppedCount increments."
+    | q cap i evt r1 r2 |
+    cap := 4.
+    q := SSEQueue new: cap.
+    i := 0.
+    [i < cap] whileTrue: [
+      evt := Dictionary new. evt at: 'n' put: i.
+      t assert: (q enqueue: evt) message: 'SQ5: fill step ok'.
+      i := i + 1
+    ].
+    t assert: q isFull message: 'SQ5: queue is full at cap'.
+    t assertEqual: q size to: cap message: 'SQ5: size=cap when full'.
+    evt := Dictionary new. evt at: 'n' put: 99.
+    r1 := q enqueue: evt.
+    t assert: r1 not message: 'SQ5: overflow enqueue returns false'.
+    t assertEqual: q size to: cap
+      message: 'SQ5: size unchanged after overflow'.
+    t assertEqual: q droppedCount to: 1
+      message: 'SQ5: droppedCount=1 after one overflow'.
+    "A second overflow increments drops again."
+    r2 := q enqueue: evt.
+    t assert: r2 not message: 'SQ5: second overflow still false'.
+    t assertEqual: q droppedCount to: 2
+      message: 'SQ5: droppedCount=2 after two overflows'.
+    "Draining restores headroom — enqueue succeeds again."
+    q dequeue.
+    t assert: q isFull not message: 'SQ5: not full after one drain'.
+    evt := Dictionary new. evt at: 'n' put: 100.
+    t assert: (q enqueue: evt)
+      message: 'SQ5: enqueue after drain succeeds'
+  ]
+
+  classMethod: testClose: t [
+    "SQ6: close prevents new enqueue but lets the drainer flush
+     pending events."
+    | q a b r |
+    q := SSEQueue new.
+    a := Dictionary new. a at: 'data' put: 'A'.
+    b := Dictionary new. b at: 'data' put: 'B'.
+    q enqueue: a.
+    q enqueue: b.
+    q close.
+    t assert: q isClosed message: 'SQ6: queue is closed after close'.
+    "New enqueues rejected."
+    r := q enqueue: (Dictionary new).
+    t assert: r not message: 'SQ6: enqueue on closed queue returns false'.
+    "Dropped count not incremented on close-reject (distinct from overflow)."
+    t assertEqual: q droppedCount to: 0
+      message: 'SQ6: close-reject does not count as drop'.
+    "Residue is still dequeueable."
+    t assertEqual: ((q dequeue) at: 'data') to: 'A'
+      message: 'SQ6: drainer can flush A after close'.
+    t assertEqual: ((q dequeue) at: 'data') to: 'B'
+      message: 'SQ6: drainer can flush B after close'.
+    t assertEqual: q dequeue to: nil
+      message: 'SQ6: dequeue past residue returns nil'
+  ]
+
+  classMethod: testCustomCapacity: t [
+    "SQ7: capacity argument flows through."
+    | q |
+    q := SSEQueue new: 2.
+    t assertEqual: q capacity to: 2 message: 'SQ7: capacity=2'.
+    t assert: (q enqueue: (Dictionary new))
+      message: 'SQ7: first enqueue ok'.
+    t assert: (q enqueue: (Dictionary new))
+      message: 'SQ7: second enqueue ok'.
+    t assert: q isFull message: 'SQ7: full at 2'.
+    t assert: (q enqueue: (Dictionary new)) not
+      message: 'SQ7: third enqueue overflows'
+  ]
+
+"=== Main ==="
+SSEQueueTestMain subclass: Object
+  classMethod: start [
+    | t |
+    t := SSEQueueTestRunner new.
+    TestSSEQueue run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

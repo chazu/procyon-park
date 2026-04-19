@@ -1,0 +1,91 @@
+"SSEQueue — bounded FIFO of pending SSE events for a single dashboard
+ connection. Isolates slow consumers so one stalled browser tab cannot
+ block the tick loop from serving every other subscriber. §4.11, D6.14.
+
+ Capacity is fixed at 256 events. `enqueue:` returns false once the
+ queue is full (or closed), at which point DashboardSSE drops the
+ subscriber and closes the underlying HTTP connection. A dedicated
+ [block] fork drainer per connection pulls events off the queue and
+ invokes `conn send:event:` — so even if that call blocks on a slow
+ client the tick loop is unaffected.
+
+ This class is intentionally minimal: no internal signalling primitive
+ (Maggie lacks Channel), so the drainer polls with a short sleep when
+ the queue is empty. In practice the tick cadence (≈2s) dwarfs the
+ poll interval (50ms) so latency is dominated by enqueue frequency."
+
+SSEQueue subclass: Object
+  instanceVars: items cap closed droppedCount
+
+  classMethod: new [
+    ^super new init
+  ]
+
+  classMethod: new: capacity [
+    ^super new initCap: capacity
+  ]
+
+  method: init [
+    ^self initCap: 256
+  ]
+
+  method: initCap: capacity [
+    items := Array new: 0.
+    cap := capacity.
+    closed := false.
+    droppedCount := 0.
+    ^self
+  ]
+
+  method: size [
+    ^items size
+  ]
+
+  method: capacity [
+    ^cap
+  ]
+
+  method: isEmpty [
+    ^items size = 0
+  ]
+
+  method: isFull [
+    ^items size >= cap
+  ]
+
+  method: isClosed [
+    ^closed
+  ]
+
+  method: droppedCount [
+    ^droppedCount
+  ]
+
+  method: close [
+    "Mark the queue closed. Subsequent enqueues return false; the
+     drainer loop observes closure and exits once empty."
+    closed := true.
+    ^self
+  ]
+
+  method: enqueue: event [
+    "Append event to the queue. Returns true on success, false if the
+     queue is closed or at capacity. On overflow we also track a dropped
+     count so DashboardSSE can log per-connection loss."
+    closed ifTrue: [^false].
+    self isFull ifTrue: [
+      droppedCount := droppedCount + 1.
+      ^false
+    ].
+    items := items copyWith: event.
+    ^true
+  ]
+
+  method: dequeue [
+    "Pop the head of the queue, or nil if empty. Does not block."
+    | head |
+    items isEmpty ifTrue: [^nil].
+    head := items at: 0.
+    items := items copyFrom: 1 to: items size.
+    ^head
+  ]
