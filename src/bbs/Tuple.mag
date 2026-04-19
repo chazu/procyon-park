@@ -82,6 +82,19 @@ Tuple subclass: Object
     ^d
   ]
 
+  classMethod: observationPayload: detail tags: tags task: taskId witnessedBy: witnessedBy [
+    "Build a payload Dictionary for an observation tuple. witnessed_by is
+     only stamped when non-nil, preserving byte-compat with tuples that
+     omit the key entirely."
+    | p |
+    p := Dictionary new.
+    p at: 'detail' put: detail.
+    p at: 'tags' put: tags.
+    (taskId notNil and: [taskId isEmpty not]) ifTrue: [p at: 'task' put: taskId].
+    witnessedBy notNil ifTrue: [p at: 'witnessed_by' put: witnessedBy].
+    ^p
+  ]
+
   classMethod: affine: cat scope: scope identity: identity payload: payload id: anId ttl: ttlSeconds [
     "Build an affine (TTL-bounded) tuple."
     ^self affine: cat scope: scope identity: identity payload: payload id: anId ttl: ttlSeconds actor: nil

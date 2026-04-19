@@ -126,14 +126,21 @@ ApiServer subclass: Object
 
     "Convenience endpoints"
     self signedPost: '/api/observe' fields: #('scope' 'identity' 'detail') do: [:body :actorCtx |
-      | id |
-      id := bbs observe: (body at: 'scope')
-               identity: (body at: 'identity')
-               detail: (body at: 'detail')
-               tags: (body at: 'tags' ifAbsent: [#()])
-               task: (body at: 'task' ifAbsent: [''])
-               actor: (self actorOf: actorCtx).
-      self okResponse: (self okWithId: id)
+      | id witnessedBy witnessErr |
+      witnessedBy := body at: 'witnessed_by' ifAbsent: [nil].
+      witnessErr := self validateWitness: witnessedBy.
+      witnessErr notNil ifTrue: [
+        self errorResponse: 400 message: witnessErr
+      ] ifFalse: [
+        id := bbs observe: (body at: 'scope')
+                 identity: (body at: 'identity')
+                 detail: (body at: 'detail')
+                 tags: (body at: 'tags' ifAbsent: [#()])
+                 task: (body at: 'task' ifAbsent: [''])
+                 actor: (self actorOf: actorCtx)
+                 witnessedBy: witnessedBy.
+        self okResponse: (self okWithId: id)
+      ]
     ].
     self signedPost: '/api/decide' fields: #('scope' 'identity' 'detail') do: [:body :actorCtx |
       | id |
@@ -501,6 +508,30 @@ ApiServer subclass: Object
           aBlock value: req value: actorCtx
         ]
     ]
+  ]
+
+  method: validateWitness: witnessedBy [
+    "Validate a client-supplied witnessed_by field (D6.1).
+     nil is valid (witness omitted). Otherwise, witnessedBy must name an
+     existing identity tuple (category=identity, scope='/', identity=<value>)
+     whose status is not 'revoked'. Returns an error message string on
+     failure, or nil on success. Uses the same lookup path as
+     SignatureVerifier>>verify:... to guarantee a single source of truth."
+    | idTuple payload status |
+    witnessedBy isNil ifTrue: [^nil].
+    (witnessedBy isString and: [witnessedBy isEmpty not]) ifFalse: [
+      ^'Invalid witnessed_by: must be a non-empty string'
+    ].
+    idTuple := bbs rdp: 'identity' scope: '/' identity: witnessedBy.
+    idTuple isNil ifTrue: [
+      ^'Invalid witnessed_by: no identity registered for ', witnessedBy
+    ].
+    payload := idTuple at: 'payload' ifAbsent: [Dictionary new].
+    status := payload at: 'status' ifAbsent: ['active'].
+    status = 'revoked' ifTrue: [
+      ^'Invalid witnessed_by: identity ', witnessedBy, ' is revoked'
+    ].
+    ^nil
   ]
 
   method: actorOf: actorCtx [
