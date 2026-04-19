@@ -209,12 +209,25 @@ ApiServer subclass: Object
       self okResponse: d
     ].
     self signedPost: '/api/workflow/start' fields: #('template' 'scope') do: [:body :actorCtx |
-      | instanceId d |
+      | instanceId d overrideAffinity |
       dispatcher isNil ifTrue: [
         self errorResponse: 500 message: 'No dispatcher configured'
       ] ifFalse: [
         [
-          instanceId := dispatcher instantiateWorkflow: (body at: 'template') scope: (body at: 'scope') params: (body at: 'params' ifAbsent: [Dictionary new]) launchedBy: (self actorOf: actorCtx).
+          "F4.3: optional affinity override in the request body takes precedence
+           over CUE per-transition and workflow-root defaults. Only pass through
+           when the caller supplied a Dictionary — silently ignore malformed
+           shapes so the server remains strict-by-default."
+          overrideAffinity := body at: 'affinity' ifAbsent: [nil].
+          (overrideAffinity notNil and: [overrideAffinity isKindOf: Dictionary]) ifFalse: [
+            overrideAffinity := nil
+          ].
+          instanceId := dispatcher
+            instantiateWorkflow: (body at: 'template')
+            scope: (body at: 'scope')
+            params: (body at: 'params' ifAbsent: [Dictionary new])
+            launchedBy: (self actorOf: actorCtx)
+            overrideAffinity: overrideAffinity.
           d := Dictionary new. d at: 'status' put: 'ok'. d at: 'workflow_id' put: instanceId.
           self okResponse: d
         ] on: Exception do: [:e |

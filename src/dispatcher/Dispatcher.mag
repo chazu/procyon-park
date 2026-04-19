@@ -237,3 +237,10 @@ Dispatcher subclass: Object
      launchedBy (typically the verified user:<name> or admin:<hex> signer)."
     ^workflowEngine instantiate: templateId scope: scope params: params launchedBy: launchedBy
   ]
+
+  method: instantiateWorkflow: templateId scope: scope params: params launchedBy: launchedBy overrideAffinity: overrideAffinity [
+    "F4.3: instantiate a workflow with a CLI-provided affinity override that
+     wins over per-transition and workflow-root CUE affinity for every task
+     spawned under the returned instance."
+    ^workflowEngine instantiate: templateId scope: scope params: params launchedBy: launchedBy overrideAffinity: overrideAffinity
+  ]
