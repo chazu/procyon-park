@@ -335,6 +335,10 @@ BBS subclass: Object
   ]
 
   method: upsertPinned: category scope: scope identity: identity payload: payload [
+    ^self upsertPinned: category scope: scope identity: identity payload: payload actor: nil
+  ]
+
+  method: upsertPinned: category scope: scope identity: identity payload: payload actor: actor [
     "Atomically replace a pinned tuple. Removes ALL existing tuples matching
      category/scope/identity from the index, then writes a new pinned tuple.
      The index is authoritative for scan/list operations."
@@ -351,7 +355,7 @@ BBS subclass: Object
     ].
 
     "Write new pinned tuple"
-    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId.
+    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor.
     space outPersistent: d.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'upsert-pinned' tuple: d.
