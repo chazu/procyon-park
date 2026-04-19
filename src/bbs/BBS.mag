@@ -75,9 +75,13 @@ BBS subclass: Object
   "--- Core Write Operations ---"
 
   method: out: category scope: scope identity: identity payload: payload [
+    ^self out: category scope: scope identity: identity payload: payload actor: nil
+  ]
+
+  method: out: category scope: scope identity: identity payload: payload actor: actor [
     | d |
     Categories validate: category.
-    d := Tuple linear: category scope: scope identity: identity payload: payload id: self assignId.
+    d := Tuple linear: category scope: scope identity: identity payload: payload id: self assignId actor: actor.
     space out: d.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'out' tuple: d.
@@ -86,9 +90,13 @@ BBS subclass: Object
   ]
 
   method: outPinned: category scope: scope identity: identity payload: payload [
+    ^self outPinned: category scope: scope identity: identity payload: payload actor: nil
+  ]
+
+  method: outPinned: category scope: scope identity: identity payload: payload actor: actor [
     | d |
     Categories validate: category.
-    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId.
+    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor.
     space outPersistent: d.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'out-pinned' tuple: d.
@@ -97,9 +105,13 @@ BBS subclass: Object
   ]
 
   method: outAffine: category scope: scope identity: identity payload: payload ttl: ttlSeconds [
+    ^self outAffine: category scope: scope identity: identity payload: payload ttl: ttlSeconds actor: nil
+  ]
+
+  method: outAffine: category scope: scope identity: identity payload: payload ttl: ttlSeconds actor: actor [
     | d |
     Categories validate: category.
-    d := Tuple affine: category scope: scope identity: identity payload: payload id: self assignId ttl: ttlSeconds.
+    d := Tuple affine: category scope: scope identity: identity payload: payload id: self assignId ttl: ttlSeconds actor: actor.
     space outAffine: d ttl: ttlSeconds.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'out-affine' tuple: d.
@@ -312,10 +324,14 @@ BBS subclass: Object
   "--- Signal Operations ---"
 
   method: upsertSignal: scope identity: identity payload: payload [
+    ^self upsertSignal: scope identity: identity payload: payload actor: nil
+  ]
+
+  method: upsertSignal: scope identity: identity payload: payload actor: actor [
     "Remove any existing signal with this identity, then write a new one.
      Uses linear (not pinned) tuples so inp: can consume them properly."
     self inp: 'signal' scope: scope identity: identity.
-    ^self out: 'signal' scope: scope identity: identity payload: payload
+    ^self out: 'signal' scope: scope identity: identity payload: payload actor: actor
   ]
 
   method: upsertPinned: category scope: scope identity: identity payload: payload [
@@ -346,42 +362,58 @@ BBS subclass: Object
   "--- Convenience Operations ---"
 
   method: observe: scope identity: identity detail: detail [
-    ^self observe: scope identity: identity detail: detail tags: #() task: ''
+    ^self observe: scope identity: identity detail: detail tags: #() task: '' actor: nil
   ]
 
   method: observe: scope identity: identity detail: detail tags: tags task: taskId [
+    ^self observe: scope identity: identity detail: detail tags: tags task: taskId actor: nil
+  ]
+
+  method: observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor [
     | payload |
     payload := Dictionary new.
     payload at: 'detail' put: detail.
     payload at: 'tags' put: tags.
     taskId isEmpty ifFalse: [payload at: 'task' put: taskId].
-    ^self out: 'observation' scope: scope identity: identity payload: payload
+    ^self out: 'observation' scope: scope identity: identity payload: payload actor: actor
   ]
 
   method: decide: scope identity: identity detail: detail rationale: rationale task: taskId [
+    ^self decide: scope identity: identity detail: detail rationale: rationale task: taskId actor: nil
+  ]
+
+  method: decide: scope identity: identity detail: detail rationale: rationale task: taskId actor: actor [
     | payload |
     payload := Dictionary new.
     payload at: 'detail' put: detail.
     rationale isEmpty ifFalse: [payload at: 'rationale' put: rationale].
     taskId isEmpty ifFalse: [payload at: 'task' put: taskId].
-    ^self outPinned: 'decision' scope: scope identity: identity payload: payload
+    ^self outPinned: 'decision' scope: scope identity: identity payload: payload actor: actor
   ]
 
   method: emitEvent: scope identity: identity type: type summary: summary [
+    ^self emitEvent: scope identity: identity type: type summary: summary actor: nil
+  ]
+
+  method: emitEvent: scope identity: identity type: type summary: summary actor: actor [
     | payload |
     payload := Dictionary new.
     payload at: 'type' put: type.
     summary isEmpty ifFalse: [payload at: 'summary' put: summary].
-    ^self out: 'event' scope: scope identity: identity payload: payload
+    ^self out: 'event' scope: scope identity: identity payload: payload actor: actor
   ]
 
   method: notify: message scope: scope severity: severity [
+    ^self notify: message scope: scope severity: severity actor: nil
+  ]
+
+  method: notify: message scope: scope severity: severity actor: actor [
     | payload |
     payload := Dictionary new.
     payload at: 'message' put: message.
     payload at: 'severity' put: severity.
     payload at: 'read' put: false.
-    ^self out: 'notification' scope: scope identity: 'notify-', DateTime now epochSeconds printString payload: payload
+    ^self out: 'notification' scope: scope identity: 'notify-', DateTime now epochSeconds printString payload: payload actor: actor
   ]
 
   "--- Persistence ---"
