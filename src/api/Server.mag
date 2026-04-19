@@ -589,6 +589,17 @@ ApiServer subclass: Object
     (body includesKey: 'agent_identity') ifTrue: [
       taskPayload at: 'agent_identity' put: (body at: 'agent_identity')
     ].
+    "D6.5 multiplayer/claim vocabulary: lease + retry bookkeeping. Stamped
+     with nil/0 defaults at creation; updated by /api/task/claim,
+     /api/task/renew, and the dispatcher's failure path."
+    taskPayload at: 'claim_id' put: nil.
+    taskPayload at: 'worker_id' put: nil.
+    taskPayload at: 'claim_expires_at' put: nil.
+    taskPayload at: 'renewed_at' put: nil.
+    taskPayload at: 'missed_renewals' put: 0.
+    taskPayload at: 'retry_count' put: 0.
+    taskPayload at: 'max_retries' put: 3.
+    taskPayload at: 'last_failure_reason' put: nil.
     "Stamp launched_by with the verified signer (nil when anonymous so the
      key stays absent, preserving byte-compat)."
     id := bbs out: 'task' scope: (body at: 'scope') identity: (body at: 'identity') payload: taskPayload actor: actor launchedBy: actor executedBy: nil.

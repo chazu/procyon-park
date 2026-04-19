@@ -1,0 +1,174 @@
+"Tests for /api/task/create D6.5 multiplayer:claim payload defaults.
+
+ Invariants under test:
+   CF1  handleTaskCreate stamps the new claim/retry vocabulary onto the
+        task payload with the documented nil/0 defaults
+        (claim_id=nil, worker_id=nil, claim_expires_at=nil,
+         renewed_at=nil, missed_renewals=0, retry_count=0,
+         max_retries=3, last_failure_reason=nil).
+   CF2  Those keys round-trip through BBS persistence — i.e. after
+        persistAfterChange + loadFromDisk a fresh BBS reading the same
+        data dir sees the same payload keys with the same defaults."
+
+CFRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== /api/task/create claim-fields Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helper ---"
+CFHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: makeBody: identity [
+    | body |
+    body := Dictionary new.
+    body at: 'scope' put: 'demo-scope'.
+    body at: 'identity' put: identity.
+    body at: 'role' put: 'implementer'.
+    body at: 'description' put: 'sample task'.
+    ^body
+  ]
+
+  classMethod: findTask: identity in: bbs [
+    ^(bbs scanAll: 'task') detect: [:t | (t at: 'identity') = identity] ifNone: [nil]
+  ]
+
+  classMethod: assertClaimDefaults: payload using: t label: label [
+    "Assert the eight D6.5 claim/retry payload keys hold their documented
+     nil/0 defaults. Run from both CF1 (in-memory) and CF2 (post-reload)."
+    t assert: (payload includesKey: 'claim_id')
+      message: label, ': payload has claim_id key'.
+    t assertEqual: (payload at: 'claim_id' ifAbsent: ['MISSING']) to: nil
+      message: label, ': claim_id default = nil'.
+
+    t assert: (payload includesKey: 'worker_id')
+      message: label, ': payload has worker_id key'.
+    t assertEqual: (payload at: 'worker_id' ifAbsent: ['MISSING']) to: nil
+      message: label, ': worker_id default = nil'.
+
+    t assert: (payload includesKey: 'claim_expires_at')
+      message: label, ': payload has claim_expires_at key'.
+    t assertEqual: (payload at: 'claim_expires_at' ifAbsent: ['MISSING']) to: nil
+      message: label, ': claim_expires_at default = nil'.
+
+    t assert: (payload includesKey: 'renewed_at')
+      message: label, ': payload has renewed_at key'.
+    t assertEqual: (payload at: 'renewed_at' ifAbsent: ['MISSING']) to: nil
+      message: label, ': renewed_at default = nil'.
+
+    t assert: (payload includesKey: 'missed_renewals')
+      message: label, ': payload has missed_renewals key'.
+    t assertEqual: (payload at: 'missed_renewals' ifAbsent: [-1]) to: 0
+      message: label, ': missed_renewals default = 0'.
+
+    t assert: (payload includesKey: 'retry_count')
+      message: label, ': payload has retry_count key'.
+    t assertEqual: (payload at: 'retry_count' ifAbsent: [-1]) to: 0
+      message: label, ': retry_count default = 0'.
+
+    t assert: (payload includesKey: 'max_retries')
+      message: label, ': payload has max_retries key'.
+    t assertEqual: (payload at: 'max_retries' ifAbsent: [-1]) to: 3
+      message: label, ': max_retries default = 3'.
+
+    t assert: (payload includesKey: 'last_failure_reason')
+      message: label, ': payload has last_failure_reason key'.
+    t assertEqual: (payload at: 'last_failure_reason' ifAbsent: ['MISSING']) to: nil
+      message: label, ': last_failure_reason default = nil'
+  ]
+
+"=== TestTaskCreateClaimFields ==="
+TestTaskCreateClaimFields subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs server ctx task payload bbs2 task2 payload2 |
+    '--- TestTaskCreateClaimFields ---' println.
+
+    tempDir := CFHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := ApiServer on: 0 bbs: bbs.
+
+    "CF1: handleTaskCreate stamps defaults onto the in-memory tuple."
+    ctx := ActorContext actor: 'user:alice' timestamp: 1 verified: true isAdmin: false.
+    server handleTaskCreate: (CFHelper makeBody: 'task-claim-fields') actor: ctx.
+
+    task := CFHelper findTask: 'task-claim-fields' in: bbs.
+    t assert: task notNil
+      message: 'CF1: task tuple created'.
+    task notNil ifTrue: [
+      payload := task at: 'payload' ifAbsent: [Dictionary new].
+      CFHelper assertClaimDefaults: payload using: t label: 'CF1'
+    ].
+
+    "CF2: round-trip through persistence — open a fresh BBS on the same
+     data dir and confirm the keys survive Json encode/decode intact."
+    bbs2 := BBS withDataDir: tempDir.
+    task2 := CFHelper findTask: 'task-claim-fields' in: bbs2.
+    t assert: task2 notNil
+      message: 'CF2: task tuple reloaded from disk'.
+    task2 notNil ifTrue: [
+      payload2 := task2 at: 'payload' ifAbsent: [Dictionary new].
+      CFHelper assertClaimDefaults: payload2 using: t label: 'CF2'
+    ]
+  ]
+
+"=== Main ==="
+TaskCreateClaimFieldsMain subclass: Object
+  classMethod: start [
+    | t |
+    t := CFRunner new.
+    TestTaskCreateClaimFields run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
