@@ -31,6 +31,7 @@ PP subclass: CLIBase
     cmd = 'task'      ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'log'       ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'history'   ifTrue: [^SystemCommands new runCommand: cmd args: args].
+    cmd = 'audit'     ifTrue: [^CliPP runAudit: args].
     cmd = 'dashboard' ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'session'   ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'usage'     ifTrue: [^SystemCommands new runCommand: cmd args: args].
@@ -349,6 +350,7 @@ PP subclass: CLIBase
     '  workflow wait <id> [--timeout <secs>]            Block until workflow completes' println.
     '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
     '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
+    '  audit    (--actor <n> | --worker <id> | --workflow <id>) Roll up provenance by actor/worker/workflow' println.
     '  dashboard                                        Open web dashboard in browser' println.
     '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
     '  session  [<taskId>]                              View Claude Code session logs' println.
