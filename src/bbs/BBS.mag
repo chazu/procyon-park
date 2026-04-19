@@ -389,11 +389,16 @@ BBS subclass: Object
   ]
 
   method: observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor [
+    ^self observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor witnessedBy: nil
+  ]
+
+  method: observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor witnessedBy: witnessedBy [
+    "Write an observation tuple. witnessed_by, when non-nil, is stamped into
+     the payload as a single-identity attestation (D6.1). Callers are
+     responsible for validating witnessedBy against the identity registry
+     before calling this method."
     | payload |
-    payload := Dictionary new.
-    payload at: 'detail' put: detail.
-    payload at: 'tags' put: tags.
-    taskId isEmpty ifFalse: [payload at: 'task' put: taskId].
+    payload := Tuple observationPayload: detail tags: tags task: taskId witnessedBy: witnessedBy.
     ^self out: 'observation' scope: scope identity: identity payload: payload actor: actor
   ]
 

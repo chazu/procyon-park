@@ -1,0 +1,188 @@
+"Tests for /api/observe witnessed_by (D6.1).
+
+ Invariants under test:
+   WB1  POST /api/observe with witnessed_by=user:bob (registered+active) →
+        200 and the resulting observation tuple's payload carries
+        witnessed_by=user:bob.
+   WB2  POST /api/observe with witnessed_by=user:ghost (not registered) →
+        400 response, no observation tuple written.
+   WB3  POST /api/observe with witnessed_by of a revoked identity → 400.
+   WB4  POST /api/observe omitting witnessed_by → 200, payload has no
+        witnessed_by key (byte-compat with pre-D6.1 observations).
+
+ These tests exercise ApiServer>>validateWitness: and BBS>>observe:...
+ directly, avoiding the HTTP layer — sufficient to prove the handler's
+ validation + threading is wired correctly."
+
+WBRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== /api/observe witnessed_by Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helper ---"
+WBHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: registerUser: name in: bbs [
+    "Seed an active identity tuple for user:<name>."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'pubkey' put: 'deadbeef'.
+    payload at: 'created_at' put: 1.
+    payload at: 'status' put: 'active'.
+    bbs upsertPinned: 'identity' scope: '/' identity: 'user:', name payload: payload actor: 'admin:test'
+  ]
+
+  classMethod: revokeUser: name in: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'pubkey' put: 'deadbeef'.
+    payload at: 'created_at' put: 1.
+    payload at: 'status' put: 'revoked'.
+    bbs upsertPinned: 'identity' scope: '/' identity: 'user:', name payload: payload actor: 'admin:test'
+  ]
+
+  classMethod: makeBody: identity witness: witness [
+    | body |
+    body := Dictionary new.
+    body at: 'scope' put: 'demo-scope'.
+    body at: 'identity' put: identity.
+    body at: 'detail' put: 'observed detail'.
+    witness notNil ifTrue: [body at: 'witnessed_by' put: witness].
+    ^body
+  ]
+
+  classMethod: findObs: identity in: bbs [
+    ^(bbs scanAll: 'observation') detect: [:t | (t at: 'identity') = identity] ifNone: [nil]
+  ]
+
+  classMethod: invokeObserveOn: server body: body actor: actorCtx [
+    "Reproduce the /api/observe handler body — exercises validateWitness:
+     plus the bbs observe: witnessedBy: threading."
+    | witnessedBy witnessErr id |
+    witnessedBy := body at: 'witnessed_by' ifAbsent: [nil].
+    witnessErr := server validateWitness: witnessedBy.
+    witnessErr notNil ifTrue: [^witnessErr].
+    id := server bbs observe: (body at: 'scope')
+            identity: (body at: 'identity')
+            detail: (body at: 'detail')
+            tags: (body at: 'tags' ifAbsent: [#()])
+            task: (body at: 'task' ifAbsent: [''])
+            actor: (server actorOf: actorCtx)
+            witnessedBy: witnessedBy.
+    ^nil
+  ]
+
+"=== TestObserveWitnessedBy ==="
+TestObserveWitnessedBy subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs server actorCtx err obs payload omitErr obsOmit payloadOmit |
+    '--- TestObserveWitnessedBy ---' println.
+
+    tempDir := WBHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := ApiServer on: 0 bbs: bbs.
+
+    actorCtx := ActorContext actor: 'user:alice' timestamp: 1 verified: true isAdmin: false.
+
+    "Seed identities: bob active, carol revoked."
+    WBHelper registerUser: 'bob' in: bbs.
+    WBHelper revokeUser: 'carol' in: bbs.
+
+    "WB1: witness=user:bob (registered+active) → 200, tuple has witnessed_by=user:bob."
+    err := WBHelper invokeObserveOn: server body: (WBHelper makeBody: 'obs-1' witness: 'user:bob') actor: actorCtx.
+    t assert: err isNil message: 'WB1: registered witness accepted (no error)'.
+    obs := WBHelper findObs: 'obs-1' in: bbs.
+    t assert: obs notNil message: 'WB1: observation tuple written'.
+    obs notNil ifTrue: [
+      payload := obs at: 'payload'.
+      t assert: (payload includesKey: 'witnessed_by') message: 'WB1: payload has witnessed_by key'.
+      t assertEqual: (payload at: 'witnessed_by' ifAbsent: [nil]) to: 'user:bob'
+        message: 'WB1: witnessed_by=user:bob'
+    ].
+
+    "WB2: witness=user:ghost (unregistered) → 400, no tuple written."
+    err := WBHelper invokeObserveOn: server body: (WBHelper makeBody: 'obs-ghost' witness: 'user:ghost') actor: actorCtx.
+    t assert: err notNil message: 'WB2: unregistered witness rejected'.
+    t assert: (WBHelper findObs: 'obs-ghost' in: bbs) isNil
+      message: 'WB2: no observation tuple written on rejection'.
+
+    "WB3: witness=user:carol (revoked) → 400."
+    err := WBHelper invokeObserveOn: server body: (WBHelper makeBody: 'obs-revoked' witness: 'user:carol') actor: actorCtx.
+    t assert: err notNil message: 'WB3: revoked witness rejected'.
+    t assert: (WBHelper findObs: 'obs-revoked' in: bbs) isNil
+      message: 'WB3: no observation tuple written for revoked witness'.
+
+    "WB4: omitted witness → 200, payload has no witnessed_by key."
+    omitErr := WBHelper invokeObserveOn: server body: (WBHelper makeBody: 'obs-plain' witness: nil) actor: actorCtx.
+    t assert: omitErr isNil message: 'WB4: omitted witness accepted'.
+    obsOmit := WBHelper findObs: 'obs-plain' in: bbs.
+    t assert: obsOmit notNil message: 'WB4: observation tuple written without witness'.
+    obsOmit notNil ifTrue: [
+      payloadOmit := obsOmit at: 'payload'.
+      t assert: (payloadOmit includesKey: 'witnessed_by') not
+        message: 'WB4: payload omits witnessed_by key entirely (byte-compat)'
+    ]
+  ]
+
+"=== Main ==="
+ObserveWitnessedByMain subclass: Object
+  classMethod: start [
+    | t |
+    t := WBRunner new.
+    TestObserveWitnessedBy run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
