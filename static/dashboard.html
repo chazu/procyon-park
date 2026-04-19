@@ -101,6 +101,40 @@
       color: var(--cream-dim);
     }
 
+    .hero-metrics{
+      display: inline-flex; align-items: center; gap: 10px;
+    }
+    .queue-badge{
+      display: inline-flex; align-items: baseline; gap: 8px;
+      padding: 6px 11px;
+      font-family: var(--f-mono);
+      font-size: 10.5px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--cream);
+      border: 1px solid var(--rule-hi);
+      background: var(--surface);
+      white-space: nowrap;
+      transition: background 0.2s, color 0.2s, border-color 0.2s;
+    }
+    .queue-badge .qb-label{ color: var(--cream-dim); }
+    .queue-badge .qb-value{
+      font-family: var(--f-slab);
+      font-weight: 800;
+      font-size: 14px;
+      letter-spacing: 0.04em;
+    }
+    .queue-badge.is-hot{
+      background: var(--terra-deep);
+      border-color: var(--terra);
+      color: var(--cream-hi);
+      animation: qb-pulse 1.2s ease-in-out infinite;
+    }
+    .queue-badge.is-hot .qb-label{ color: var(--cream-hi); }
+    @keyframes qb-pulse{
+      0%, 100% { box-shadow: 0 0 0 0 rgba(224,90,36,.55); }
+      50%      { box-shadow: 0 0 0 6px rgba(224,90,36,0); }
+    }
     .conn{
       display:inline-flex; align-items:center; gap: 8px;
       padding: 6px 11px;
@@ -796,10 +830,16 @@
       <div class="hero-title">Procyon Park</div>
       <div class="hero-sub">Swarm Dispatch</div>
     </div>
-    <div class="conn" id="conn">
-      <span class="dot" id="conn-dot"></span>
-      <span class="on">Live</span>
-      <span class="off">Reconnect</span>
+    <div class="hero-metrics">
+      <div class="queue-badge" id="queue-badge" title="Pending tasks / worker slot capacity (D6.11)">
+        <span class="qb-label">pending</span>
+        <span class="qb-value" id="queue-badge-value">–</span>
+      </div>
+      <div class="conn" id="conn">
+        <span class="dot" id="conn-dot"></span>
+        <span class="on">Live</span>
+        <span class="off">Reconnect</span>
+      </div>
     </div>
   </header>
   <div class="ink-rule" aria-hidden="true">
@@ -1171,6 +1211,32 @@
     [histScopeEl, histIdentity, histSince, histLimit].forEach(el => {
       el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') histQuery(); });
     });
+
+    // --- Queue depth badge (D6.11 / §4.10) ---------------------------------
+    // Poll /api/dashboard for pending_tasks + worker_slots; turn red when
+    // pending exceeds 3x total worker slot capacity. When slot sum is 0,
+    // fall back to queue_max_pending (any positive depth is "hot").
+    const queueBadge      = document.getElementById('queue-badge');
+    const queueBadgeValue = document.getElementById('queue-badge-value');
+    async function refreshQueueBadge() {
+      try {
+        const resp = await fetch('/api/dashboard');
+        if (!resp.ok) return;
+        const data  = await resp.json();
+        const depth = Number(data.pending_tasks || 0);
+        const slots = Number(data.worker_slots  || 0);
+        const cap   = Number(data.queue_max_pending || 0);
+        let label = String(depth);
+        if (cap > 0)        label += ' / ' + cap;
+        else if (slots > 0) label += ' (' + slots + ' slots)';
+        queueBadgeValue.textContent = label;
+        const threshold = slots > 0 ? 3 * slots : (cap > 0 ? cap - 1 : Infinity);
+        const hot = depth > threshold;
+        queueBadge.classList.toggle('is-hot', hot);
+      } catch (_) { /* leave last-known state */ }
+    }
+    refreshQueueBadge();
+    setInterval(refreshQueueBadge, 5000);
   </script>
 </body>
 </html>

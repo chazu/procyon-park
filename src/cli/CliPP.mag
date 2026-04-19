@@ -322,7 +322,7 @@ CliPP subclass: Object
         affinityDict notNil ifTrue: [
           body at: 'affinity' put: affinityDict
         ].
-        self postAndPrint: cfg path: '/api/workflow/start' body: body
+        exitCode := self postWorkflowStart: cfg path: '/api/workflow/start' body: body
       ].
       exitCode
     ].
@@ -1192,6 +1192,41 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
      signal-writer ports (observe, decide, event, notify, signal,
      dismiss) plus all workflow / workitem mutation sites."
     ^self renderResponse: (self signedPost: path body: body cfg: cfg) path: path
+  ]
+
+  classMethod: postWorkflowStart: cfg path: path body: body [
+    "Like postAndPrint:, but returns an integer exit code so the caller
+     can propagate failures. Specifically detects D6.11 queue-backpressure
+     429 responses carrying {code: 'queue_full', depth, max_pending} and
+     prints a single-line operator-friendly message in that case.
+     Returns 0 on success, 1 on queue_full or any other error payload."
+    | response parsed code depth maxP |
+    response := self signedPost: path body: body cfg: cfg.
+    (response isNil or: [(response isKindOf: String) not or: [response isEmpty]]) ifTrue: [
+      ^1
+    ].
+    parsed := nil.
+    [parsed := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      response println.
+      ^1
+    ].
+    (parsed isKindOf: Dictionary) ifTrue: [
+      code := parsed at: 'code' ifAbsent: [nil].
+      code = 'queue_full' ifTrue: [
+        depth := parsed at: 'depth' ifAbsent: [0].
+        maxP  := parsed at: 'max_pending' ifAbsent: [0].
+        ('queue full (depth=', depth printString,
+         '/max_pending=', maxP printString, ')') println.
+        ^1
+      ].
+      (parsed at: 'error' ifAbsent: [nil]) notNil ifTrue: [
+        self renderResponse: response path: path.
+        ^1
+      ]
+    ].
+    self renderResponse: response path: path.
+    ^0
   ]
 
   classMethod: unauthedPostAndPrint: cfg path: path body: body [
@@ -2796,7 +2831,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         body at: 'template' put: templateId.
         body at: 'scope' put: theScope.
         body at: 'params' put: wfParams.
-        self postAndPrint: cfg path: '/api/workflow/start' body: body
+        exitCode := self postWorkflowStart: cfg path: '/api/workflow/start' body: body
       ].
       exitCode
     ].
