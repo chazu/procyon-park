@@ -653,7 +653,8 @@ ApiServer subclass: Object
      Lease: task.max_runtime overrides body.lease_seconds, which defaults to
      600s (D6.2). Emits a 'claim' event tuple on success."
     | taskId workerId claimId leaseSeconds actorHeader tasks task scope
-      outcome now result expectedActor d |
+      outcome now result expectedActor d workerTuple wPayload wManifest
+      acceptFrom launchedBy |
 
     actorCtx verified ifFalse: [
       enforceSignatures
@@ -666,14 +667,15 @@ ApiServer subclass: Object
     workerId := body at: 'worker_id'.
     claimId := body at: 'claim_id'.
     leaseSeconds := body at: 'lease_seconds' ifAbsent: [600].
-
-    (taskId isString and: [taskId isEmpty not]) ifFalse: [
+    "Validate string fields. `isString` is not defined on String in
+     Maggie (latent bug in the pre-existing checks); use isKindOf: instead."
+    ((taskId isKindOf: String) and: [taskId isEmpty not]) ifFalse: [
       ^self errorResponse: 400 message: 'task_id must be a non-empty string'
     ].
-    (workerId isString and: [workerId isEmpty not]) ifFalse: [
+    ((workerId isKindOf: String) and: [workerId isEmpty not]) ifFalse: [
       ^self errorResponse: 400 message: 'worker_id must be a non-empty string'
     ].
-    (claimId isString and: [claimId isEmpty not]) ifFalse: [
+    ((claimId isKindOf: String) and: [claimId isEmpty not]) ifFalse: [
       ^self errorResponse: 400 message: 'claim_id must be a non-empty string'
     ].
 
@@ -691,6 +693,31 @@ ApiServer subclass: Object
       ^self errorResponse: 404 message: 'task not found: ', taskId
     ].
     scope := task at: 'scope'.
+
+    "F3.1/F2.7 authoritative gate: re-check affinity + accept_from against
+     the REGISTERED worker manifest. The /api/tasks/available offer is a
+     hint; between offer and claim the manifest may have refreshed or the
+     task's launched_by/affinity may differ from what was offered. Never
+     trust claim-body declared fields here — always read from the stored
+     worker tuple."
+    workerTuple := bbs rdp: 'worker' scope: '/' identity: expectedActor.
+    workerTuple isNil ifTrue: [
+      ^self errorResponse: 410 message: 'worker tuple missing or expired — re-register'
+    ].
+    wPayload := workerTuple at: 'payload' ifAbsent: [Dictionary new].
+    wManifest := wPayload at: 'manifest' ifAbsent: [Dictionary new].
+    acceptFrom := wManifest at: 'accept_from' ifAbsent: [#()].
+    launchedBy := task at: 'launched_by' ifAbsent: [nil].
+    (self affinityMatchesTask: task manifest: wManifest workerId: workerId) ifFalse: [
+      d := Dictionary new.
+      d at: 'error' put: 'affinity mismatch: worker ineligible for this task'.
+      ^self jsonResponse: 403 body: d
+    ].
+    (self acceptFromAllows: acceptFrom launchedBy: launchedBy) ifFalse: [
+      d := Dictionary new.
+      d at: 'error' put: 'accept_from refuses launched_by: ', launchedBy printString.
+      ^self jsonResponse: 403 body: d
+    ].
 
     "Capture outcome from inside the atomic block. outcome at: 0 = action,
      at: 1/2 = action-specific payload (expires/executed_by, retry/status)."
@@ -767,6 +794,89 @@ ApiServer subclass: Object
     ^self okResponse: d
   ]
 
+  method: repoNameMatches: name inRepos: repos [
+    "Return true iff any entry in the manifest.repos array refers to
+     the named repo. Supports both the canonical Dictionary form
+     {name, path, head} (CliWorker parseRepos:) and legacy flat-string
+     entries used in older tests."
+    repos do: [:r |
+      | rname |
+      (r isKindOf: Dictionary)
+        ifTrue: [rname := r at: 'name' ifAbsent: [nil]]
+        ifFalse: [rname := r].
+      rname = name ifTrue: [^true]
+    ].
+    ^false
+  ]
+
+  method: affinityMatchesTask: t manifest: mfst workerId: wid [
+    "F3.1 affinity match. Returns true when task t's payload.affinity
+     is compatible with the worker described by (mfst, wid). Supported
+     affinity shapes (all keys AND together when multiple are present):
+       - absent / nil / {team: true} → any worker (default broadcast).
+       - {launcher_only: true}       → task.launched_by == manifest.operator.
+       - {workers: [...]}            → 'worker:<wid>' ∈ list.
+       - {model: m}                  → manifest.models includes m.
+       - {repo: name@commit}         → manifest.repos has entry named
+                                       <name>. The @commit portion is
+                                       ADVISORY per requirements §6.5
+                                       (commit drift logs a warning but
+                                       does not fail the match)."
+    | affinity tp launchedBy op models repos workers repoSpec repoParts repoName repoCommit |
+    tp := t at: 'payload' ifAbsent: [Dictionary new].
+    affinity := tp at: 'affinity' ifAbsent: [nil].
+    affinity isNil ifTrue: [^true].
+    (affinity isKindOf: Dictionary) ifFalse: [^true].
+    (affinity at: 'team' ifAbsent: [false]) = true ifTrue: [^true].
+
+    (affinity at: 'launcher_only' ifAbsent: [false]) = true ifTrue: [
+      launchedBy := t at: 'launched_by' ifAbsent: [nil].
+      op := mfst at: 'operator' ifAbsent: [nil].
+      (launchedBy isNil or: [op isNil or: [(launchedBy = op) not]]) ifTrue: [^false]
+    ].
+
+    workers := affinity at: 'workers' ifAbsent: [nil].
+    workers notNil ifTrue: [
+      (workers includes: ('worker:', wid)) ifFalse: [^false]
+    ].
+
+    (affinity includesKey: 'model') ifTrue: [
+      models := mfst at: 'models' ifAbsent: [#()].
+      (models includes: (affinity at: 'model')) ifFalse: [^false]
+    ].
+
+    (affinity includesKey: 'repo') ifTrue: [
+      repoSpec := affinity at: 'repo'.
+      repoParts := repoSpec split: '@'.
+      repoName := repoParts at: 0.
+      repoCommit := repoParts size > 1 ifTrue: [repoParts at: 1] ifFalse: [nil].
+      repos := mfst at: 'repos' ifAbsent: [#()].
+      (self repoNameMatches: repoName inRepos: repos) ifFalse: [^false].
+      "Advisory commit check (requirements §6.5 unresolved): log drift,
+       still treat as a match."
+      repoCommit notNil ifTrue: [
+        ('Note: affinity commit check is advisory (', repoSpec, ')') println
+      ]
+    ].
+
+    ^true
+  ]
+
+  method: acceptFromAllows: acceptFrom launchedBy: actor [
+    "F2.7 accept_from enforcement. acceptFrom MUST be sourced from the
+     REGISTERED worker manifest tuple — never from the claim request
+     body. Semantics:
+       - nil or empty list → permissive (CLI default today is #('*') so
+         the empty case only arises in synthesized tests).
+       - contains '*'      → wildcard, allow any launched_by.
+       - otherwise         → require actor ∈ acceptFrom (string equality
+         on the full identity, e.g. 'user:alice')."
+    (acceptFrom isNil or: [acceptFrom isEmpty]) ifTrue: [^true].
+    (acceptFrom includes: '*') ifTrue: [^true].
+    actor isNil ifTrue: [^false].
+    ^acceptFrom includes: actor
+  ]
+
   method: handleTasksAvailable: body actor: actorCtx [
     "Handle POST /api/tasks/available.
 
@@ -776,10 +886,12 @@ ApiServer subclass: Object
        - task.role must appear in manifest.roles
        - task.repo (required) must appear in manifest.repos
        - task.model (optional) must appear in manifest.models when set
-     Affinity (§4.4) is deferred to a separate epic. Response is capped
-     at ~20 tasks and returned synchronously (no long-poll for v1)."
+     Affinity (§4.4, F3.1) and accept_from (F2.7) are also enforced here
+     as filtering hints; /api/tasks/claim re-checks authoritatively since
+     the offer→claim gap is a race window. Response is capped at ~20 tasks
+     and returned synchronously (no long-poll for v1)."
     | workerId expectedActor actorHeader workerTuple payload manifest
-      roles repos models allTasks cap out d tp status role repo model |
+      roles repos models acceptFrom allTasks cap out d tp status role repo model |
 
     actorCtx verified ifFalse: [
       enforceSignatures
@@ -810,6 +922,7 @@ ApiServer subclass: Object
     roles := manifest at: 'roles' ifAbsent: [#()].
     repos := manifest at: 'repos' ifAbsent: [#()].
     models := manifest at: 'models' ifAbsent: [#()].
+    acceptFrom := manifest at: 'accept_from' ifAbsent: [#()].
 
     allTasks := bbs scanAll: 'task'.
     cap := 20.
@@ -824,7 +937,9 @@ ApiServer subclass: Object
         ((status = 'pending')
           and: [(role notNil and: [roles includes: role])
           and: [(repo notNil and: [repos includes: repo])
-          and: [model isNil or: [models includes: model]]]])
+          and: [(model isNil or: [models includes: model])
+          and: [(self affinityMatchesTask: t manifest: manifest workerId: workerId)
+          and: [self acceptFromAllows: acceptFrom launchedBy: (t at: 'launched_by' ifAbsent: [nil])]]]]])
           ifTrue: [out := out copyWith: t]
       ]
     ].

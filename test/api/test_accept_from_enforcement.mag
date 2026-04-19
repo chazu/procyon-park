@@ -1,0 +1,207 @@
+"Tests for F2.7 accept_from enforcement. The stored worker manifest's
+ accept_from list gates both /api/tasks/available offers and /api/tasks/claim
+ acceptance. This covers:
+   AF1  accept_from=['user:alice'] — allows user:alice, blocks user:bob.
+   AF2  accept_from=['*']         — wildcard allows any launched_by.
+   AF3  empty accept_from         — permissive default.
+   AF4  /api/tasks/claim re-checks after the offer (defense-in-depth)."
+
+ACFRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== accept_from enforcement Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+ACFHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedWorker: name acceptFrom: acceptFrom onBBS: bbs [
+    | manifest payload |
+    manifest := Dictionary new.
+    manifest at: 'slots' put: 1.
+    manifest at: 'models' put: #('sonnet').
+    manifest at: 'repos' put: #('pp-main').
+    manifest at: 'roles' put: #('implementer').
+    manifest at: 'operator' put: 'user:op'.
+    manifest at: 'accept_from' put: acceptFrom.
+    payload := Dictionary new.
+    payload at: 'worker_pubkey' put: 'deadbeef'.
+    payload at: 'operator_pubkey' put: 'cafef00d'.
+    payload at: 'manifest' put: manifest.
+    payload at: 'drain' put: false.
+    payload at: 'registered_at' put: 1.
+    bbs outAffine: 'worker' scope: '/' identity: (Identity worker: name)
+        payload: payload ttl: 90 actor: (Identity worker: name)
+  ]
+
+  classMethod: seedTask: id launchedBy: launchedBy onBBS: bbs [
+    | p |
+    p := Dictionary new.
+    p at: 'role' put: 'implementer'.
+    p at: 'status' put: 'pending'.
+    p at: 'description' put: 'task'.
+    p at: 'repo' put: 'pp-main'.
+    bbs out: 'task' scope: 'demo' identity: id payload: p
+        actor: launchedBy launchedBy: launchedBy executedBy: nil
+  ]
+
+  classMethod: ctxFor: name [
+    ^ActorContext actor: (Identity worker: name)
+                   timestamp: 1 verified: true isAdmin: false
+  ]
+
+  classMethod: availableFor: name on: server [
+    | body |
+    body := Dictionary new. body at: 'worker_id' put: name.
+    ^server handleTasksAvailable: body actor: (self ctxFor: name)
+  ]
+
+  classMethod: idsFrom: resp [
+    | d tasks |
+    d := Json decode: resp body.
+    tasks := d at: 'tasks' ifAbsent: [#()].
+    ^tasks collect: [:x | x at: 'identity']
+  ]
+
+  classMethod: claim: taskId by: workerName on: server [
+    | body |
+    body := Dictionary new.
+    body at: 'task_id' put: taskId.
+    body at: 'worker_id' put: workerName.
+    body at: 'claim_id' put: workerName, '-claim-', taskId.
+    ^server handleTaskClaim: body actor: (self ctxFor: workerName)
+  ]
+
+TestAcceptFrom subclass: Object
+
+  classMethod: run: t [
+    self testExplicitListAllowsAliceBlocksBob: t.
+    self testWildcardAllowsAny: t.
+    self testEmptyIsPermissive: t.
+    self testClaimGateRechecksBody: t
+  ]
+
+  classMethod: testExplicitListAllowsAliceBlocksBob: t [
+    | bbs server idsAlice claimAlice claimBob |
+    '--- ACF1: accept_from=[user:alice] ---' println.
+    bbs := BBS withDataDir: ACFHelper makeTempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    ACFHelper seedWorker: 'w' acceptFrom: #('user:alice') onBBS: bbs.
+    ACFHelper seedTask: 'ta' launchedBy: 'user:alice' onBBS: bbs.
+    ACFHelper seedTask: 'tb' launchedBy: 'user:bob' onBBS: bbs.
+
+    idsAlice := ACFHelper idsFrom: (ACFHelper availableFor: 'w' on: server).
+    t assert: (idsAlice includes: 'ta') message: 'ACF1: alice task offered'.
+    t assert: ((idsAlice includes: 'tb') not) message: 'ACF1: bob task NOT offered'.
+
+    claimAlice := ACFHelper claim: 'ta' by: 'w' on: server.
+    t assertEqual: claimAlice status to: 200 message: 'ACF1: alice claim 200'.
+    claimBob := ACFHelper claim: 'tb' by: 'w' on: server.
+    t assertEqual: claimBob status to: 403 message: 'ACF1: bob claim rejected (403)'
+  ]
+
+  classMethod: testWildcardAllowsAny: t [
+    | bbs server ids claimAlice claimBob |
+    '--- ACF2: accept_from=[*] ---' println.
+    bbs := BBS withDataDir: ACFHelper makeTempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    ACFHelper seedWorker: 'w' acceptFrom: #('*') onBBS: bbs.
+    ACFHelper seedTask: 'ta' launchedBy: 'user:alice' onBBS: bbs.
+    ACFHelper seedTask: 'tb' launchedBy: 'user:bob' onBBS: bbs.
+
+    ids := ACFHelper idsFrom: (ACFHelper availableFor: 'w' on: server).
+    t assert: (ids includes: 'ta') message: 'ACF2: alice task offered'.
+    t assert: (ids includes: 'tb') message: 'ACF2: bob task offered'.
+
+    claimAlice := ACFHelper claim: 'ta' by: 'w' on: server.
+    t assertEqual: claimAlice status to: 200 message: 'ACF2: alice claim 200'.
+    claimBob := ACFHelper claim: 'tb' by: 'w' on: server.
+    t assertEqual: claimBob status to: 200 message: 'ACF2: bob claim 200'
+  ]
+
+  classMethod: testEmptyIsPermissive: t [
+    | bbs server ids |
+    '--- ACF3: accept_from=[] (empty = permissive default) ---' println.
+    bbs := BBS withDataDir: ACFHelper makeTempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    ACFHelper seedWorker: 'w' acceptFrom: #() onBBS: bbs.
+    ACFHelper seedTask: 'ta' launchedBy: 'user:alice' onBBS: bbs.
+    ACFHelper seedTask: 'tb' launchedBy: 'user:bob' onBBS: bbs.
+
+    ids := ACFHelper idsFrom: (ACFHelper availableFor: 'w' on: server).
+    t assert: (ids includes: 'ta') message: 'ACF3: alice task offered (empty list)'.
+    t assert: (ids includes: 'tb') message: 'ACF3: bob task offered (empty list)'
+  ]
+
+  classMethod: testClaimGateRechecksBody: t [
+    "Defense-in-depth: a client that forges a direct /api/tasks/claim call
+     (bypassing /api/tasks/available) must still be refused when the stored
+     manifest's accept_from excludes the task.launched_by."
+    | bbs server claim |
+    '--- ACF4: /claim re-checks stored manifest ---' println.
+    bbs := BBS withDataDir: ACFHelper makeTempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    ACFHelper seedWorker: 'w' acceptFrom: #('user:alice') onBBS: bbs.
+    ACFHelper seedTask: 'tb' launchedBy: 'user:bob' onBBS: bbs.
+
+    claim := ACFHelper claim: 'tb' by: 'w' on: server.
+    t assertEqual: claim status to: 403 message: 'ACF4: claim refused at authoritative gate'
+  ]
+
+AcceptFromMain subclass: Object
+  classMethod: start [
+    | t |
+    t := ACFRunner new.
+    TestAcceptFrom run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
