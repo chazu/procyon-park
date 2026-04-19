@@ -252,6 +252,8 @@ ApiServer subclass: Object
     ].
     self signedRouteOnly: '/api/workflow/status' do: [:req :actorCtx | self handleWorkflowStatus: req].
     self signedRouteOnly: '/api/workflow/cancel' do: [:req :actorCtx | self handleWorkflowCancel: req].
+    self signedRouteOnly: '/api/workflow/watch' do: [:req :actorCtx | self handleWorkflowWatch: req actor: actorCtx].
+    self signedRouteOnly: '/api/workflow/unwatch' do: [:req :actorCtx | self handleWorkflowUnwatch: req actor: actorCtx].
     self registerTaskRoutes
   ]
 
@@ -1655,6 +1657,73 @@ ApiServer subclass: Object
     d at: 'status' put: 'ok'.
     d at: 'workflow_id' put: wfId.
     d at: 'tasks_cancelled' put: cancelledCount.
+    ^self okResponse: d
+  ]
+
+  "--- Workflow Watch / Unwatch (F8.2) ---"
+
+  method: handleWorkflowWatch: req actor: actorCtx [
+    "POST /api/workflow/watch — subscribe the calling user to a workflow's
+     lifecycle events. Body: {workflow_id}. Tuple is affine with an
+     hours-long TTL so crashed clients do not leak subscriptions.
+     Repeat calls with the same (user, workflow_id) refresh the TTL and
+     remain idempotent."
+    | body wfId user payload identity d ttl |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+    wfId := body at: 'workflow_id' ifAbsent: [nil].
+    (wfId isNil or: [wfId isEmpty]) ifTrue: [
+      ^self errorResponse: 400 message: 'workflow_id required'
+    ].
+    user := self actorOf: actorCtx.
+    (user isNil or: [user isEmpty]) ifTrue: [
+      ^self errorResponse: 401 message: 'authenticated actor required'
+    ].
+
+    identity := user, ':', wfId.
+    "Idempotent: drop any existing subscription for this (user, wfId)
+     pair before re-inserting with a fresh TTL."
+    bbs inp: 'watch' scope: '/' identity: identity.
+
+    payload := Dictionary new.
+    payload at: 'user' put: user.
+    payload at: 'workflow_id' put: wfId.
+    payload at: 'created_at' put: DateTime now epochSeconds.
+
+    ttl := 21600. "6 hours — hours-long so crashed clients do not leak"
+    bbs outAffine: 'watch' scope: '/' identity: identity payload: payload ttl: ttl actor: user.
+
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'workflow_id' put: wfId.
+    d at: 'user' put: user.
+    ^self okResponse: d
+  ]
+
+  method: handleWorkflowUnwatch: req actor: actorCtx [
+    "POST /api/workflow/unwatch — remove the caller's subscription to a
+     workflow. Body: {workflow_id}. Deletes the tuple matching the
+     (user, workflow_id) pair. Missing subscription is not an error."
+    | body wfId user identity existing d |
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+    wfId := body at: 'workflow_id' ifAbsent: [nil].
+    (wfId isNil or: [wfId isEmpty]) ifTrue: [
+      ^self errorResponse: 400 message: 'workflow_id required'
+    ].
+    user := self actorOf: actorCtx.
+    (user isNil or: [user isEmpty]) ifTrue: [
+      ^self errorResponse: 401 message: 'authenticated actor required'
+    ].
+
+    identity := user, ':', wfId.
+    existing := bbs inp: 'watch' scope: '/' identity: identity.
+
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'workflow_id' put: wfId.
+    d at: 'user' put: user.
+    d at: 'removed' put: (existing notNil).
     ^self okResponse: d
   ]
 

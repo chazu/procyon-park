@@ -21,6 +21,8 @@ PP subclass: CLIBase
     cmd = 'notify'    ifTrue: [^self cmdNotify: args].
     cmd = 'dismiss'   ifTrue: [^self cmdDismiss: args].
     cmd = 'workflow'  ifTrue: [^WorkflowCommands new runWith: args].
+    cmd = 'watch'     ifTrue: [^WorkflowCommands new cmdWatch: args].
+    cmd = 'unwatch'   ifTrue: [^WorkflowCommands new cmdUnwatch: args].
     cmd = 'signal'    ifTrue: [^self cmdSignal: args].
     cmd = 'verdict'   ifTrue: [^self cmdVerdict: args].
 
@@ -351,6 +353,8 @@ PP subclass: CLIBase
     '  workflow list [--status running|completed|failed] Tabular listing of workflows' println.
     '  workflow cancel <id> [--scope <scope>]           Cancel a running workflow' println.
     '  workflow wait <id> [--timeout <secs>]            Block until workflow completes' println.
+    '  watch    <workflow_id>                           Subscribe to workflow lifecycle events' println.
+    '  unwatch  <workflow_id>                           Remove a workflow subscription' println.
     '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
     '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
     '  audit    (--actor <n> | --worker <id> | --workflow <id>) Roll up provenance by actor/worker/workflow' println.
