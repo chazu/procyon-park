@@ -8,7 +8,7 @@ Main subclass: Object
     "Commands that route to PP (thin HTTP client)."
     ^#('observe' 'decide' 'event' 'plan' 'read' 'notify' 'dismiss'
        'status' 'prime' 'task' 'workflow' 'signal' 'verdict' 'log' 'history' 'dashboard'
-       'workitem' 'gc' 'session' 'usage')
+       'workitem' 'gc' 'session' 'usage' 'identity')
   ]
 
   classMethod: start [
@@ -113,6 +113,7 @@ Main subclass: Object
     '  dashboard                                      Open web dashboard in browser' println.
     '  workitem create|show|list|update|run|plan|review  Manage work items' println.
     '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
+    '  identity <init|show|rotate|list> [args...]     Manage local keypairs' println.
     '  session  [<taskId>]                              View Claude Code session logs' println.
     '  usage    [<taskId>] [--json]                     Report current session token consumption' println.
     '' println.

@@ -1,0 +1,129 @@
+"CliIdentity — `pp identity` subcommand implementations.
+
+ Three leaf commands are exposed via the Cli::Command framework:
+
+   pp identity init <name> [--force]
+   pp identity show <name>
+   pp identity rotate <name>
+
+ Each class builds, configures, and executes a Cli::Command. The actual
+ keypair handling lives in IdentityStore; these classes only deal with
+ argparse and exit-code wiring. Invoked from CliPP>>runIdentity:.
+
+ See IdentityStore for the dependency on maggie-crypto-primitives."
+
+CliIdentityInit subclass: Object
+
+  classMethod: run: args [
+    "Build `pp identity init <name> [--force]` and execute."
+    | cmd rest |
+    cmd := Cli::Command named: 'init' doc: 'Create a new local identity (keypair).'.
+    cmd flag: (Cli::Flag
+      name: 'force'
+      type: #bool
+      default: false
+      doc: 'Overwrite an existing identity with the same name').
+
+    cmd run: [:runArgs |
+      | name force exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp identity init <name> [--force]' println.
+        exitCode := 1
+      ] ifFalse: [
+        name := runArgs at: 0.
+        force := cmd flagValue: 'force'.
+        force isNil ifTrue: [force := false].
+        (IdentityStore init: name force: force) ifFalse: [exitCode := 1]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+
+CliIdentityShow subclass: Object
+
+  classMethod: run: args [
+    "Build `pp identity show <name>` and execute."
+    | cmd rest |
+    cmd := Cli::Command named: 'show' doc: 'Show a local identity (public key + proquint).'.
+
+    cmd run: [:runArgs |
+      | name exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp identity show <name>' println.
+        exitCode := 1
+      ] ifFalse: [
+        name := runArgs at: 0.
+        (IdentityStore show: name) ifFalse: [exitCode := 1]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+
+CliIdentityRotate subclass: Object
+
+  classMethod: run: args [
+    "Build `pp identity rotate <name>` and execute.
+     The server URL is taken from PP_URL (default http://localhost:7777)."
+    | cmd rest |
+    cmd := Cli::Command named: 'rotate' doc: 'Rotate the keypair for a local identity.'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+
+    cmd run: [:runArgs |
+      | cfg name exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp identity rotate <name>' println.
+        exitCode := 1
+      ] ifFalse: [
+        cfg := PPCliConfig new.
+        cmd applyEnvBindings: cfg.
+        name := runArgs at: 0.
+        (IdentityStore rotate: name baseUrl: cfg baseUrl) ifFalse: [exitCode := 1]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+
+CliIdentityList subclass: Object
+
+  classMethod: run: args [
+    "Build `pp identity list` and execute."
+    | cmd rest |
+    cmd := Cli::Command named: 'list' doc: 'List local identities.'.
+
+    cmd run: [:runArgs |
+      | names |
+      names := IdentityStore listNames.
+      names isEmpty ifTrue: [
+        'No identities. Run `pp identity init <name>` to create one.' println.
+        ^0
+      ].
+      names do: [:n | n println].
+      0
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]

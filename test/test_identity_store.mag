@@ -1,0 +1,147 @@
+"Tests for IdentityStore — focused on the parts that do not depend on
+ the maggie-crypto-primitives Identity class. In particular we exercise:
+
+   * rotationAttestationOld:new:ts:   canonical JSON shape
+   * rotationRequestFor:newPub:signature:ts: request shape
+   * rootPath / keyPath: / pubPath:  filesystem layout
+
+ Crypto-dependent paths (`init:force:`, `rotate:baseUrl:`) are wired but
+ not exercised here because they require Identity>>generate / sign: /
+ proquint which arrive with multiplayer:maggie-crypto-primitives."
+
+TestIdentityStore subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [
+    | t |
+    t := super new.
+    t init.
+    ^t
+  ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg,
+                             ' (got ', actual printString,
+                             ' expected ', expected printString, ')') println
+                         ]
+  ]
+
+  method: run [
+    self testRootPath.
+    self testKeyPath.
+    self testPubPath.
+    self testAttestationIncludesFields.
+    self testAttestationIsJson.
+    self testRequestIncludesSignature.
+    ^self report
+  ]
+
+  method: testRootPath [
+    | root |
+    root := IdentityStore rootPath.
+    self assert: (root isKindOf: String)
+      message: 'rootPath returns a String'.
+    self assert: (root endsWith: '.config/pp/identity')
+      message: 'rootPath ends with .config/pp/identity'
+  ]
+
+  method: testKeyPath [
+    | p |
+    p := IdentityStore keyPath: 'alice'.
+    self assert: (p endsWith: 'alice.key')
+      message: 'keyPath: returns <root>/<name>.key'
+  ]
+
+  method: testPubPath [
+    | p |
+    p := IdentityStore pubPath: 'alice'.
+    self assert: (p endsWith: 'alice.pub')
+      message: 'pubPath: returns <root>/<name>.pub'
+  ]
+
+  method: testAttestationIncludesFields [
+    | json |
+    json := IdentityStore rotationAttestationOld: 'AA' new: 'BB' ts: '123'.
+    self assert: (json includes: 'old_pub')
+      message: 'attestation contains old_pub key'.
+    self assert: (json includes: 'new_pub')
+      message: 'attestation contains new_pub key'.
+    self assert: (json includes: 'AA')
+      message: 'attestation includes old pub value'.
+    self assert: (json includes: 'BB')
+      message: 'attestation includes new pub value'.
+    self assert: (json includes: '123')
+      message: 'attestation includes timestamp'
+  ]
+
+  method: testAttestationIsJson [
+    | json decoded |
+    json := IdentityStore rotationAttestationOld: 'old' new: 'new' ts: '1700000000'.
+    decoded := Json decode: json.
+    self assertEqual: (decoded at: 'old_pub') to: 'old'
+      message: 'decoded old_pub matches'.
+    self assertEqual: (decoded at: 'new_pub') to: 'new'
+      message: 'decoded new_pub matches'.
+    self assertEqual: (decoded at: 'ts') to: '1700000000'
+      message: 'decoded ts matches'
+  ]
+
+  method: testRequestIncludesSignature [
+    | body |
+    body := IdentityStore
+      rotationRequestFor: 'OLD'
+      newPub: 'NEW'
+      signature: 'SIG'
+      ts: '42'.
+    self assertEqual: (body at: 'old_pub') to: 'OLD'
+      message: 'request has old_pub'.
+    self assertEqual: (body at: 'new_pub') to: 'NEW'
+      message: 'request has new_pub'.
+    self assertEqual: (body at: 'signature') to: 'SIG'
+      message: 'request has signature'.
+    self assertEqual: (body at: 'ts') to: '42'
+      message: 'request has ts'
+  ]
+
+  method: report [
+    '=== IdentityStore Tests ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      failures do: [:f | ('  - ', f) println]
+    ].
+    ^failed = 0
+  ]
+
+
+TestIdentityStoreMain subclass: Object
+
+  classMethod: run [
+    | t ok |
+    t := TestIdentityStore new.
+    ok := t run.
+    ok ifTrue: ['ALL TESTS PASSED' println]
+       ifFalse: ['TESTS FAILED' println.
+                 System exit: 1]
+  ]
+
+"(entrypoint below — run via: mag -m TestIdentityStoreMain.run ...)"

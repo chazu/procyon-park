@@ -91,6 +91,7 @@ CliPP subclass: Object
     head = 'session'  ifTrue: [^true].
     head = 'usage'    ifTrue: [^true].
     head = 'plan'     ifTrue: [^true].
+    head = 'identity' ifTrue: [^true].
     ^false
   ]
 
@@ -121,6 +122,7 @@ CliPP subclass: Object
     head = 'session'  ifTrue: [^self runSession: args].
     head = 'usage'    ifTrue: [^self runUsage: args].
     head = 'plan'     ifTrue: [^self runPlan: args].
+    head = 'identity' ifTrue: [^self runIdentity: args].
     ^0
   ]
 
@@ -3396,4 +3398,35 @@ PPEOF'.
     rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+
+  "--- Subcommand: identity ----------------------------------------------"
+
+  classMethod: runIdentity: args [
+    "Dispatch `pp identity <init|show|rotate|list> ...` to the matching
+     CliIdentity* class. Unknown subcommands print a short usage."
+    | sub rest |
+    args size < 2 ifTrue: [
+      self printIdentityUsage.
+      ^1
+    ].
+    sub := args at: 1.
+    rest := args size > 2 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
+    sub = 'init'    ifTrue: [^CliIdentityInit run: rest].
+    sub = 'show'    ifTrue: [^CliIdentityShow run: rest].
+    sub = 'rotate'  ifTrue: [^CliIdentityRotate run: rest].
+    sub = 'list'    ifTrue: [^CliIdentityList run: rest].
+    ('Unknown identity subcommand: ', sub) println.
+    self printIdentityUsage.
+    ^1
+  ]
+
+  classMethod: printIdentityUsage [
+    'Usage: pp identity <init|show|rotate|list> [args...]' println.
+    '' println.
+    '  init   <name> [--force]   Create a new keypair' println.
+    '  show   <name>             Print public key and proquint' println.
+    '  rotate <name>             Rotate keypair against /api/user/rotate' println.
+    '  list                      List local identities' println
   ]
