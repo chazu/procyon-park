@@ -1,0 +1,189 @@
+"ClaimId — 128-bit opaque identifier for D6.12 claim idempotency.
+
+ A ClaimId is a 128-bit random value rendered in two equivalent forms:
+
+   hex       — 32 lowercase hex characters. Authoritative wire/tuple form.
+                Stable across platforms, compact, case-stable.
+   proquint  — pronounceable rendering used for CLI/dashboard display only.
+
+ Convention (project-wide): non-human-readable IDs travel as hex and are
+ rendered as proquint. Git commit hashes are the lone exception — they
+ stay hex everywhere. ClaimIds follow the default convention.
+
+ This class adds NO new VM primitives. It leans on:
+   Random nextInt: 256        — per-byte entropy (auto-seeded)
+   Sha256 hash: aString       — hex-encoded 32-byte digest; used as a
+                                  mixer so any weakness in Random is
+                                  absorbed before we truncate to 128 bits
+   Proquint encodeHex64:      — 16-hex-char -> 4-quintuplet string
+   String copyFrom:to:        — Go-style exclusive upper bound
+
+ Shape:
+   generate        -> { 'hex': <32-char hex>, 'proquint': <proquint> }
+   fromHex: hex    -> { 'hex': hex,           'proquint': <proquint> }
+   displayOf: dict -> proquint string
+
+ Worker-side idempotency: a worker generates one ClaimId per claim
+ attempt, caches it in-memory, and replays the same hex on retry. The
+ engine deduplicates by that hex — no cross-worker coordination needed."
+
+ClaimId subclass: Object
+
+  "--- hex nibble table -------------------------------------------------"
+
+  classMethod: hexDigits [
+    ^'0123456789abcdef'
+  ]
+
+  "--- generate ---------------------------------------------------------
+
+   Build 32 bytes of entropy from Random, pass through SHA-256, take the
+   first 16 bytes (32 hex chars) as the ClaimId. SHA-256 mixing mitigates
+   any weakness in Random's underlying source."
+
+  classMethod: generate [
+    | seed digest hex |
+    seed := self freshSeed.
+    digest := Sha256 hash: seed.
+    "digest is 64 lowercase hex chars (32 bytes). Truncate to 128 bits."
+    hex := digest copyFrom: 0 to: 32.
+    ^self buildDict: hex
+  ]
+
+  classMethod: freshSeed [
+    "32 bytes of entropy, each in [0,255], separated so Random values do
+     not accidentally collapse when concatenated as decimal strings."
+    | buf |
+    buf := ''.
+    32 timesRepeat: [
+      buf := buf, (Random nextInt: 256) printString, '.'
+    ].
+    ^buf
+  ]
+
+  "--- fromHex: ---------------------------------------------------------
+
+   Rehydrate a ClaimId from its wire form. Raises on malformed input so
+   callers can surface corrupt tuples loudly rather than silently. The
+   caller is expected to have read the hex field out of a tuple payload."
+
+  classMethod: fromHex: hexString [
+    | normalized |
+    hexString isNil ifTrue: [Exception signal: 'ClaimId fromHex: nil'].
+    hexString size = 32 ifFalse: [
+      Exception signal: 'ClaimId fromHex: expected 32 chars, got ', hexString size printString
+    ].
+    normalized := hexString asLowercase.
+    (self isLowerHex: normalized) ifFalse: [
+      Exception signal: 'ClaimId fromHex: non-hex character in ', hexString
+    ].
+    ^self buildDict: normalized
+  ]
+
+  "--- displayOf: -------------------------------------------------------
+
+   CLI/dashboard render helper — gives back the proquint form for a
+   ClaimId dict. Always returns a String."
+
+  classMethod: displayOf: idDict [
+    idDict isNil ifTrue: [^''].
+    ^idDict at: 'proquint' ifAbsent: ['']
+  ]
+
+  "--- internal ---------------------------------------------------------"
+
+  classMethod: buildDict: hex [
+    | dict |
+    dict := Dictionary new.
+    dict at: 'hex' put: hex.
+    dict at: 'proquint' put: (self proquintOf: hex).
+    ^dict
+  ]
+
+  classMethod: proquintOf: hex [
+    "Encode 32 hex chars as four 32-bit proquints joined with '-'. Each
+     encodeHex call handles 8 hex chars (32 bits). Total output has 8
+     quintuplets — 47 chars (8*5 + 7 dashes). Using the 32-bit form
+     rather than encodeHex64 avoids SmallInt overflow on decode in the
+     round-trip path."
+    | parts i chunk |
+    parts := Array new: 4.
+    i := 0.
+    [i < 4] whileTrue: [
+      chunk := hex copyFrom: i * 8 to: (i * 8) + 8.
+      parts at: i put: (Proquint encodeHex: chunk).
+      i := i + 1
+    ].
+    ^((parts at: 0), '-', (parts at: 1), '-', (parts at: 2), '-', (parts at: 3))
+  ]
+
+  classMethod: isLowerHex: s [
+    | digits i c |
+    digits := self hexDigits.
+    i := 0.
+    [i < s size] whileTrue: [
+      c := s at: i.
+      (digits includes: c) ifFalse: [^false].
+      i := i + 1
+    ].
+    ^true
+  ]
+
+  "--- decode helper (test support) -------------------------------------
+
+   Decode the proquint form back to the underlying 32-char hex. Uses
+   Proquint decode64 on each half and re-pads to 16 hex chars. Exposed
+   so tests can prove that the proquint encoding is lossless; production
+   code should keep the hex form around and never need this path."
+
+  classMethod: hexFromProquint: pq [
+    "Inverse of proquintOf:. Split the 8 quintuplets into 4 groups of 2,
+     decode each as a 32-bit value, and emit 8 hex chars per group."
+    | quints hex i pair val |
+    quints := self splitQuints: pq.
+    quints size = 8 ifFalse: [
+      Exception signal: 'ClaimId hexFromProquint: expected 8 quintuplets, got ', quints size printString
+    ].
+    hex := ''.
+    i := 0.
+    [i < 4] whileTrue: [
+      pair := (quints at: i * 2), '-', (quints at: (i * 2) + 1).
+      val := Proquint decode: pair.
+      hex := hex, (self int32ToHex: val).
+      i := i + 1
+    ].
+    ^hex
+  ]
+
+  classMethod: splitQuints: pq [
+    "Split a hyphen-separated proquint into its quintuplet parts."
+    | dash parts start i |
+    dash := Character value: 45.
+    parts := Array new: 0.
+    start := 0.
+    i := 0.
+    [i < pq size] whileTrue: [
+      ((pq at: i) = dash) ifTrue: [
+        parts := parts copyWith: (pq copyFrom: start to: i).
+        start := i + 1
+      ].
+      i := i + 1
+    ].
+    parts := parts copyWith: (pq copyFrom: start to: pq size).
+    ^parts
+  ]
+
+  classMethod: int32ToHex: anInt [
+    "Render a non-negative 32-bit integer as an 8-char lowercase hex
+     string, zero-padded. Callers guarantee SmallInt range."
+    | digits n hex nibble |
+    digits := self hexDigits.
+    n := anInt.
+    hex := ''.
+    8 timesRepeat: [
+      nibble := n bitAnd: 15.
+      n := n bitShift: -4.
+      hex := (digits at: nibble) asString, hex
+    ].
+    ^hex
+  ]
