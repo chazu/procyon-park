@@ -366,6 +366,35 @@ CliWorkerRegister subclass: Object
     ^self renderResponse: response
   ]
 
+  classMethod: renderHeartbeatResponse: response [
+    "Decode JSON, print ttl on success, error on failure. Returns true on ok."
+    | result errMsg ttl |
+    (response isNil or: [(response isKindOf: String) not or: [response isEmpty]]) ifTrue: [
+      'Error: empty or invalid response from server.' println.
+      ^false
+    ].
+    result := nil.
+    [result := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      response println.
+      ^false
+    ].
+    (result isKindOf: Dictionary) ifFalse: [
+      response println.
+      ^false
+    ].
+    errMsg := result at: 'error' ifAbsent: [nil].
+    errMsg notNil ifTrue: [
+      ('Worker heartbeat rejected: ', errMsg) println.
+      ^false
+    ].
+    ttl := result at: 'ttl' ifAbsent: [nil].
+    ttl notNil
+      ifTrue: [('Worker heartbeat ok (ttl=', ttl printString, 's)') println]
+      ifFalse: [(Json encodePretty: result) println].
+    ^true
+  ]
+
   classMethod: renderResponse: response [
     "Decode the JSON body, surface server error on failure, print the
      created worker identity on success. Returns true on 200/ok, false
@@ -395,4 +424,130 @@ CliWorkerRegister subclass: Object
       ifTrue: [('Worker registered: ', workerIdent) println]
       ifFalse: [(Json encodePretty: result) println].
     ^true
+  ]
+
+
+CliWorkerHeartbeat subclass: Object
+  "pp worker heartbeat <name> [--interval S] [--once] [--server <url>]
+
+   Posts a signed heartbeat to /api/worker/heartbeat. Request is
+   signed with the worker's private key (loaded from WorkerStore);
+   X-PP-Actor is 'worker:<name>'.
+
+   Default interval 30s (matches recommended 30s heartbeat / 90s TTL).
+   Harmonised with D6.2 claim-lease default of 5 min: heartbeats are
+   an order of magnitude more frequent so a worker that dies mid-lease
+   still lets the TTL expire and an operator to reclaim within a minute
+   or two, while the lease bound itself survives transient hiccups."
+
+  classMethod: defaultInterval [ ^30 ]
+
+  classMethod: run: args [
+    | cmd rest |
+    cmd := Cli::Command named: 'heartbeat' doc: 'Send worker heartbeats to the PP server.'.
+    cmd flag: (Cli::Flag
+      name: 'interval'
+      type: #int
+      default: 30
+      doc: 'Heartbeat interval in seconds (default 30).').
+    cmd flag: (Cli::Flag
+      name: 'once'
+      type: #bool
+      default: false
+      doc: 'Send a single heartbeat and exit (useful for cron / testing).').
+    cmd flag: (Cli::Flag
+      name: 'server'
+      type: #string
+      default: ''
+      doc: 'Override server URL (precedence: --server > PP_URL > default).').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+
+    cmd run: [:runArgs |
+      | cfg name exitCode once interval |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp worker heartbeat <name> [--interval S] [--once] [--server <url>]' println.
+        exitCode := 1
+      ] ifFalse: [
+        cfg := PPCliConfig new.
+        cmd applyEnvBindings: cfg.
+        name := runArgs at: 0.
+        once := cmd flagValue: 'once'.
+        once isNil ifTrue: [once := false].
+        interval := cmd flagValue: 'interval'.
+        (interval isNil or: [interval < 1]) ifTrue: [interval := self defaultInterval].
+
+        once
+          ifTrue: [
+            (self sendOnce: name cmd: cmd cfg: cfg) ifFalse: [exitCode := 1]
+          ]
+          ifFalse: [
+            exitCode := self runLoop: name interval: interval cmd: cmd cfg: cfg
+          ]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: resolveBaseUrl: cmd cfg: cfg [
+    | flagVal |
+    flagVal := cmd flagValue: 'server'.
+    (flagVal notNil and: [flagVal isEmpty not]) ifTrue: [^flagVal].
+    ^cfg baseUrl
+  ]
+
+  classMethod: sendOnce: name cmd: cmd cfg: cfg [
+    "Load the worker identity, POST a single heartbeat, render response.
+     Returns true on 200/ok, false otherwise."
+    | workerRec workerIdent actorHeader body baseUrl response |
+    workerRec := WorkerStore load: name.
+    workerRec isNil ifTrue: [
+      ('Hint: run `pp worker init ', name, '` first.') println.
+      ^false
+    ].
+    workerIdent := workerRec at: 'identity'.
+    actorHeader := 'worker:', name.
+    body := Dictionary new.
+    body at: 'name' put: name.
+    baseUrl := self resolveBaseUrl: cmd cfg: cfg.
+    response := CLIBase
+                  signedPost: '/api/worker/heartbeat'
+                  body: body
+                  baseUrl: baseUrl
+                  asActor: actorHeader
+                  signer: workerIdent.
+    ^CliWorkerRegister renderHeartbeatResponse: response
+  ]
+
+  classMethod: runLoop: name interval: interval cmd: cmd cfg: cfg [
+    "Fork a background heartbeat loop and park the foreground. A Ctrl-C
+     at the shell tears the process down; we make no attempt to catch
+     SIGINT here because the surrounding Cli runner exits cleanly on
+     unhandled errors anyway.
+
+     We always send one heartbeat synchronously up front so the caller
+     sees an immediate success/failure before entering the loop."
+    | ok |
+    ok := self sendOnce: name cmd: cmd cfg: cfg.
+    ok ifFalse: [^1].
+    ('Worker heartbeat loop started for ', name,
+     ' (interval=', interval printString, 's).') println.
+    [
+      [true] whileTrue: [
+        Process sleep: interval * 1000.
+        self sendOnce: name cmd: cmd cfg: cfg
+      ]
+    ] fork.
+    "Block the foreground forever so the process does not exit while
+     the heartbeat loop is running. A signal (Ctrl-C) terminates the VM."
+    [true] whileTrue: [Process sleep: 60000].
+    ^0
   ]

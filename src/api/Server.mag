@@ -282,7 +282,10 @@ ApiServer subclass: Object
      sha256(body) check binds the attestation to the operator's key."
     self signedPost: '/api/worker/register'
          fields: #('worker_pubkey' 'operator_pubkey' 'nonce' 'manifest' 'name')
-         do: [:body :actorCtx | self handleWorkerRegister: body actor: actorCtx]
+         do: [:body :actorCtx | self handleWorkerRegister: body actor: actorCtx].
+    self signedPost: '/api/worker/heartbeat'
+         fields: #('name')
+         do: [:body :actorCtx | self handleWorkerHeartbeat: body actor: actorCtx]
   ]
 
   method: handleWorkerRegister: body actor: actorCtx [
@@ -391,6 +394,89 @@ ApiServer subclass: Object
     "Worker heartbeat interval in seconds. Future work: read from server.toml
      [worker].heartbeat_interval. Default: 30s → 3x = 90s tuple TTL."
     ^30
+  ]
+
+  method: handleWorkerHeartbeat: body actor: actorCtx [
+    "Handle POST /api/worker/heartbeat.
+
+     Body: {name, manifest?}. Signed with the worker's key
+     (X-PP-Actor: worker:<name>).
+
+     Semantics:
+       - actorCtx must be verified and carry a worker: identity whose
+         name matches body.name. Mismatch → 403.
+       - Current worker tuple must exist and not be expired. Missing /
+         expired → 410 (client must re-register).
+       - If body includes a manifest dict, validate and merge it into
+         the stored payload (preserving the drain flag and other
+         operator-set fields).
+       - Re-issue the affine tuple with the same identity, carrying the
+         merged payload and a fresh 3 * heartbeat_interval TTL. BBS
+         outAffine: currently appends rather than overwriting (see
+         observation filed from D6.6 wave-4), so we inp: the existing
+         tuple first and then outAffine: the refreshed copy as a
+         workaround.
+       - On success: 200 {ok:true, ttl:N}."
+    | name identity actorStr existing payload newPayload newManifest manifestErr ttl heartbeat result |
+
+    actorCtx verified ifFalse: [
+      enforceSignatures
+        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
+        ifFalse: [^self errorResponse: 503
+                         message: 'enforce_signatures must be true for worker heartbeat']
+    ].
+
+    name := body at: 'name'.
+    (name isString and: [name isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'name must be a non-empty string'
+    ].
+
+    identity := Identity worker: name.
+
+    "Caller must have authenticated as this very worker."
+    actorStr := actorCtx actor.
+    actorStr = identity ifFalse: [
+      ^self errorResponse: 403
+               message: 'actor ', actorStr printString,
+                        ' does not match worker ', identity
+    ].
+
+    existing := bbs rdp: 'worker' scope: '/' identity: identity.
+    existing isNil ifTrue: [
+      ^self errorResponse: 410
+               message: 'worker tuple missing or expired — re-register'
+    ].
+
+    payload := existing at: 'payload' ifAbsent: [Dictionary new].
+    newPayload := Dictionary new.
+    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
+
+    newManifest := body at: 'manifest' ifAbsent: [nil].
+    newManifest notNil ifTrue: [
+      (newManifest isKindOf: Dictionary) ifFalse: [
+        ^self errorResponse: 400 message: 'manifest must be a dict'
+      ].
+      manifestErr := self validateWorkerManifest: newManifest.
+      manifestErr notNil ifTrue: [^self errorResponse: 400 message: manifestErr].
+      "Drain flag is preserved — do not let a manifest refresh clear it."
+      newPayload at: 'manifest' put: newManifest
+    ].
+
+    newPayload at: 'heartbeat_at' put: DateTime now epochSeconds.
+
+    heartbeat := self workerHeartbeatInterval.
+    ttl := heartbeat * 3.
+
+    "Workaround for outAffine append-semantics: consume the existing
+     tuple first so the refresh truly overwrites instead of accumulating."
+    bbs inp: 'worker' scope: '/' identity: identity.
+    bbs outAffine: 'worker' scope: '/' identity: identity
+        payload: newPayload ttl: ttl actor: identity.
+
+    result := Dictionary new.
+    result at: 'ok' put: true.
+    result at: 'ttl' put: ttl.
+    ^self okResponse: result
   ]
 
   method: handleTaskCreate: body actor: actorCtx [

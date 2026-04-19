@@ -1,0 +1,262 @@
+"Tests for ApiServer>>handleWorkerHeartbeat: — D6.6 wave 4.
+
+ Invariants:
+   WH1  A valid heartbeat refreshes the affine worker tuple, updating
+        heartbeat_at and returning 200 {ok:true, ttl:N}.
+   WH2  A heartbeat whose name has no (or expired) tuple → 410.
+   WH3  A heartbeat carrying a manifest refresh merges the manifest into
+        the stored payload while preserving the drain flag set by a
+        prior operator action.
+   WH4  An unverified (anonymous) actorCtx → 401 under
+        enforce_signatures (server default).
+
+ The handler is invoked directly without an HTTP round-trip, using
+ synthetic ActorContext instances, so we isolate the business logic
+ from the request-level signature path."
+
+THBTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Worker Heartbeat Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+THBHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | ts |
+    ts := DateTime now epochSeconds printString.
+    ^'/tmp/pp-test-bbs-hb-', ts, '-', (Object new identityHash printString)
+  ]
+
+  classMethod: makeBBS [
+    ^BBS withDataDir: self makeTempDir
+  ]
+
+  classMethod: makeServerFor: bbs [
+    ^ApiServer on: 19992 bbs: bbs
+  ]
+
+  classMethod: sampleManifest [
+    | m |
+    m := Dictionary new.
+    m at: 'slots' put: 2.
+    m at: 'models' put: #('sonnet' 'opus').
+    m at: 'repos' put: #('procyon-park').
+    m at: 'roles' put: #('implementer').
+    m at: 'operator' put: 'alice'.
+    m at: 'accept_from' put: #('alice').
+    ^m
+  ]
+
+  classMethod: sampleManifestWithSlots: n [
+    | m |
+    m := self sampleManifest.
+    m at: 'slots' put: n.
+    ^m
+  ]
+
+  classMethod: sampleWorkerPubkey [
+    ^'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899'
+  ]
+
+  classMethod: registerUser: name pubkey: pubHex onBBS: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'pubkey' put: pubHex.
+    payload at: 'status' put: 'active'.
+    payload at: 'created_at' put: 1234567890.
+    bbs upsertPinned: 'identity' scope: '/' identity: 'user:', name
+        payload: payload actor: 'test-admin'
+  ]
+
+  classMethod: registerWorker: name operatorPub: opPub onBBS: bbs server: server [
+    "Register a worker via the normal handler so the tuple matches
+     production layout exactly (category=worker, affine, payload includes
+     drain=false / manifest / worker_pubkey)."
+    | body ctx |
+    body := Dictionary new.
+    body at: 'name' put: name.
+    body at: 'worker_pubkey' put: self sampleWorkerPubkey.
+    body at: 'operator_pubkey' put: opPub.
+    body at: 'nonce' put: 'nonce-', name.
+    body at: 'manifest' put: self sampleManifest.
+    ctx := ActorContext actor: 'user:alice' timestamp: 1234567890
+                        verified: true isAdmin: false.
+    server handleWorkerRegister: body actor: ctx.
+    ^body
+  ]
+
+  classMethod: heartbeatCtxFor: name verified: v [
+    ^ActorContext actor: 'worker:', name timestamp: 1234567890
+                  verified: v isAdmin: false
+  ]
+
+  classMethod: anonCtx [ ^ActorContext anonymous ]
+
+"=== TestWorkerHeartbeat ==="
+TestWorkerHeartbeat subclass: Object
+
+  classMethod: run: t [
+    self testExtendsTtl: t.
+    self testMissingTuple: t.
+    self testManifestRefreshPreservesDrain: t.
+    self testUnsignedRejected: t
+  ]
+
+  classMethod: testExtendsTtl: t [
+    | bbs server aliceHex beforeTuple beforeHeartbeat resp afterTuple afterHeartbeat body ctx |
+    '--- WH1: heartbeat refreshes tuple ---' println.
+    bbs := THBHelper makeBBS.
+    server := THBHelper makeServerFor: bbs.
+    aliceHex := 'ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100'.
+    THBHelper registerUser: 'alice' pubkey: aliceHex onBBS: bbs.
+    THBHelper registerWorker: 'alice-w1' operatorPub: aliceHex onBBS: bbs server: server.
+
+    beforeTuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-w1'.
+    t assert: beforeTuple notNil message: 'WH1: pre-heartbeat tuple exists'.
+    beforeHeartbeat := (beforeTuple at: 'payload') at: 'heartbeat_at' ifAbsent: [nil].
+
+    "Sleep a second so the heartbeat_at timestamp moves forward. BBS
+     epochSeconds is per-second granularity, so no sleep → identical
+     timestamp."
+    Process sleep: 1100.
+
+    body := Dictionary new.
+    body at: 'name' put: 'alice-w1'.
+    ctx := THBHelper heartbeatCtxFor: 'alice-w1' verified: true.
+    resp := server handleWorkerHeartbeat: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WH1: heartbeat returns 200'.
+
+    afterTuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-w1'.
+    t assert: afterTuple notNil message: 'WH1: post-heartbeat tuple still present'.
+    afterHeartbeat := (afterTuple at: 'payload') at: 'heartbeat_at' ifAbsent: [nil].
+    t assert: afterHeartbeat notNil
+      message: 'WH1: heartbeat_at stamped into payload'.
+    (beforeHeartbeat notNil and: [afterHeartbeat notNil]) ifTrue: [
+      t assert: afterHeartbeat >= beforeHeartbeat
+        message: 'WH1: heartbeat_at advances (ttl reset)'
+    ]
+  ]
+
+  classMethod: testMissingTuple: t [
+    | bbs server resp body ctx |
+    '--- WH2: missing tuple → 410 ---' println.
+    bbs := THBHelper makeBBS.
+    server := THBHelper makeServerFor: bbs.
+
+    body := Dictionary new.
+    body at: 'name' put: 'ghost'.
+    ctx := THBHelper heartbeatCtxFor: 'ghost' verified: true.
+    resp := server handleWorkerHeartbeat: body actor: ctx.
+    t assertEqual: resp status to: 410
+      message: 'WH2: heartbeat for unknown worker → 410 Gone'
+  ]
+
+  classMethod: testManifestRefreshPreservesDrain: t [
+    | bbs server aliceHex tuple payload newPayload body ctx resp after afterPayload afterManifest |
+    '--- WH3: manifest refresh preserves drain flag ---' println.
+    bbs := THBHelper makeBBS.
+    server := THBHelper makeServerFor: bbs.
+    aliceHex := 'ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100'.
+    THBHelper registerUser: 'alice' pubkey: aliceHex onBBS: bbs.
+    THBHelper registerWorker: 'alice-w2' operatorPub: aliceHex onBBS: bbs server: server.
+
+    "Simulate an operator action that flipped drain=true. We rewrite the
+     same affine tuple directly through BBS so we don't depend on a
+     /api/worker/drain endpoint that is not yet shipped."
+    tuple := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-w2'.
+    payload := tuple at: 'payload'.
+    newPayload := Dictionary new.
+    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
+    newPayload at: 'drain' put: true.
+    bbs inp: 'worker' scope: '/' identity: 'worker:alice-w2'.
+    bbs outAffine: 'worker' scope: '/' identity: 'worker:alice-w2'
+        payload: newPayload ttl: 90 actor: 'worker:alice-w2'.
+
+    body := Dictionary new.
+    body at: 'name' put: 'alice-w2'.
+    body at: 'manifest' put: (THBHelper sampleManifestWithSlots: 5).
+    ctx := THBHelper heartbeatCtxFor: 'alice-w2' verified: true.
+    resp := server handleWorkerHeartbeat: body actor: ctx.
+    t assertEqual: resp status to: 200 message: 'WH3: heartbeat with manifest returns 200'.
+
+    after := bbs rdp: 'worker' scope: '/' identity: 'worker:alice-w2'.
+    t assert: after notNil message: 'WH3: tuple survives manifest refresh'.
+    afterPayload := after at: 'payload'.
+    t assertEqual: (afterPayload at: 'drain' ifAbsent: [nil]) to: true
+      message: 'WH3: drain flag is preserved across manifest refresh'.
+    afterManifest := afterPayload at: 'manifest' ifAbsent: [Dictionary new].
+    t assertEqual: (afterManifest at: 'slots' ifAbsent: [nil]) to: 5
+      message: 'WH3: manifest was refreshed (slots=5)'
+  ]
+
+  classMethod: testUnsignedRejected: t [
+    | bbs server body ctx resp |
+    '--- WH4: unsigned heartbeat rejected under enforce_signatures ---' println.
+    bbs := THBHelper makeBBS.
+    server := THBHelper makeServerFor: bbs.
+
+    body := Dictionary new.
+    body at: 'name' put: 'alice-w1'.
+
+    "Anonymous (unverified) actor under default enforce_signatures=true → 401."
+    ctx := THBHelper anonCtx.
+    resp := server handleWorkerHeartbeat: body actor: ctx.
+    t assertEqual: resp status to: 401
+      message: 'WH4: anonymous caller → 401'.
+
+    "Explicit verified=false also rejected."
+    ctx := THBHelper heartbeatCtxFor: 'alice-w1' verified: false.
+    resp := server handleWorkerHeartbeat: body actor: ctx.
+    t assertEqual: resp status to: 401
+      message: 'WH4: verified=false → 401'
+  ]
+
+"=== Main ==="
+THBMain subclass: Object
+  classMethod: start [
+    | t |
+    t := THBTest new.
+    TestWorkerHeartbeat run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

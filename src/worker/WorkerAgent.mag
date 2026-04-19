@@ -1,0 +1,87 @@
+"WorkerAgent — in-process agent that owns a worker's lifecycle
+ once it is registered with the server.
+
+ D6.6 wave 4 ships only the heartbeat loop. Subsequent stories
+ (D6.7 claim, D6.8 budget, D6.9 drain) hook in here. The class is
+ intentionally small: start forks a [block] heartbeat loop and
+ stop flips a flag so the loop exits on its next tick.
+
+ Usage:
+     agent := WorkerAgent onName: 'alice' baseUrl: 'http://localhost:7777'.
+     agent start.
+     ...
+     agent stop.
+"
+
+WorkerAgent subclass: Object
+  instanceVars: name baseUrl interval running identity
+
+  classMethod: onName: aName baseUrl: aUrl [
+    ^super new initName: aName baseUrl: aUrl interval: 30
+  ]
+
+  classMethod: onName: aName baseUrl: aUrl interval: secs [
+    ^super new initName: aName baseUrl: aUrl interval: secs
+  ]
+
+  method: initName: aName baseUrl: aUrl interval: secs [
+    name := aName.
+    baseUrl := aUrl.
+    interval := (secs isNil or: [secs < 1]) ifTrue: [30] ifFalse: [secs].
+    running := false.
+    identity := nil
+  ]
+
+  method: name     [ ^name ]
+  method: baseUrl  [ ^baseUrl ]
+  method: interval [ ^interval ]
+  method: running  [ ^running ]
+
+  method: start [
+    "Load the worker keypair, kick off a heartbeat loop in a forked
+     block. Safe to call twice — second start is a no-op while
+     running is true."
+    | rec |
+    running ifTrue: [^self].
+    rec := WorkerStore load: name.
+    rec isNil ifTrue: [
+      ('WorkerAgent: cannot start — no local keypair for ', name) println.
+      ^self
+    ].
+    identity := rec at: 'identity'.
+    running := true.
+    [self heartbeatLoop] fork.
+    ^self
+  ]
+
+  method: stop [
+    "Flip the running flag. The loop checks it every interval seconds
+     and exits cleanly on the next tick."
+    running := false.
+    identity := nil
+  ]
+
+  method: heartbeatLoop [
+    "Inner loop — fires one heartbeat, then sleeps interval seconds."
+    [running] whileTrue: [
+      [self sendHeartbeat] on: Exception do: [:e |
+        ('WorkerAgent: heartbeat error: ', e messageText) println
+      ].
+      running ifTrue: [Process sleep: interval * 1000]
+    ]
+  ]
+
+  method: sendHeartbeat [
+    "Post a single signed heartbeat. Silent on success; logs on error
+     through the calling loop's on:do:."
+    | body actorHeader |
+    identity isNil ifTrue: [^self].
+    body := Dictionary new.
+    body at: 'name' put: name.
+    actorHeader := 'worker:', name.
+    CLIBase signedPost: '/api/worker/heartbeat'
+            body: body
+            baseUrl: baseUrl
+            asActor: actorHeader
+            signer: identity
+  ]
