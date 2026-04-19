@@ -298,11 +298,11 @@ PP subclass: CLIBase
   ]
 
   method: cmdWorker: args [
-    "pp worker <init|register> <name> [flags...]
+    "pp worker <init|register|drain> <name> [flags...]
      Delegates to the CliWorker* classes."
     | sub rest |
     args size < 2 ifTrue: [
-      'Usage: pp worker <init|register|heartbeat> <name> [flags...]' println.
+      'Usage: pp worker <init|register|heartbeat|drain> <name> [flags...]' println.
       ^self
     ].
     sub := args at: 1.
@@ -310,6 +310,7 @@ PP subclass: CLIBase
     sub = 'init'      ifTrue: [^CliWorkerInit run: rest].
     sub = 'register'  ifTrue: [^CliWorkerRegister run: rest].
     sub = 'heartbeat' ifTrue: [^CliWorkerHeartbeat run: rest].
+    sub = 'drain'     ifTrue: [^CliWorkerDrain run: rest].
     ('Unknown worker subcommand: ', sub) println
   ]
 
