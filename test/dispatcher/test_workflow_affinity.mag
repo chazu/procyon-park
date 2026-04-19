@@ -1,0 +1,258 @@
+"Tests for WorkflowEngine affinity field on task payloads (F4.1 / F4.2).
+
+ Invariants under test:
+   WA1  A template with no affinity at any level produces tasks whose
+        payload.affinity = {team: true} (hard default).
+   WA2  A template with a workflow-root affinity but no per-transition
+        affinity produces tasks whose payload.affinity equals the
+        workflow-root dict (only known keys).
+   WA3  A per-transition affinity overrides the workflow-root affinity
+        for that transition's task.
+   WA4  All documented affinity keys (launcher_only, workers, model,
+        repo, team) round-trip from the template dict onto the task
+        payload unchanged in value.
+
+ Temp vars are declared at the method top (Maggie requirement), and
+ Dictionaries are built with Dictionary new / at:put: (no dict literals,
+ no reliance on iteration order)."
+
+WARunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== WorkflowEngine affinity Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+WAHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: taskTupleFor: bbs instance: instanceId [
+    "Return the single task tuple spawned for a workflow instance, or nil."
+    ^(bbs scanAll: 'task') detect: [:t |
+      ((t at: 'payload') at: 'workflow_instance' ifAbsent: ['']) = instanceId
+    ] ifNone: [nil]
+  ]
+
+  classMethod: seedTemplate: bbs identity: ident wfAffinity: wfAff trAffinity: trAff [
+    "Seed a minimal role-bearing template. Either affinity arg may be nil.
+     Transition id is 'impl' so the task identity is '<instance>:task:impl'."
+    | transitions tr payload |
+    transitions := Array new: 0.
+    tr := Dictionary new.
+    tr at: 'id' put: 'impl'.
+    tr at: 'in' put: #('start').
+    tr at: 'out' put: #('end').
+    tr at: 'role' put: 'implementer'.
+    tr at: 'description' put: 'do the thing'.
+    trAff notNil ifTrue: [tr at: 'affinity' put: trAff].
+    transitions := transitions copyWith: tr.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    wfAff notNil ifTrue: [payload at: 'affinity' put: wfAff].
+
+    bbs outPinned: 'template' scope: 'system' identity: ident payload: payload
+  ]
+
+"=== TestAffinityNoneDefault (WA1) ==="
+TestAffinityNoneDefault subclass: Object
+  classMethod: run: t [
+    | tempDir bbs engine instanceId task aff |
+    '--- WA1: no affinity -> default {team:true} ---' println.
+    tempDir := WAHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    WAHelper seedTemplate: bbs identity: 'wa-tmpl-none' wfAffinity: nil trAffinity: nil.
+    engine := WorkflowEngine on: bbs.
+
+    instanceId := engine instantiate: 'wa-tmpl-none' scope: 'default' params: (Dictionary new).
+    engine advance.
+
+    task := WAHelper taskTupleFor: bbs instance: instanceId.
+    t assert: task notNil message: 'WA1: task was spawned'.
+    task notNil ifTrue: [
+      aff := (task at: 'payload') at: 'affinity' ifAbsent: [nil].
+      t assert: aff notNil message: 'WA1: task.payload.affinity present'.
+      aff notNil ifTrue: [
+        t assertEqual: (aff at: 'team' ifAbsent: [nil]) to: true
+          message: 'WA1: default affinity has team=true'.
+        t assertEqual: aff size to: 1
+          message: 'WA1: default affinity has exactly one key'
+      ]
+    ]
+  ]
+
+"=== TestAffinityWorkflowRootDefault (WA2) ==="
+TestAffinityWorkflowRootDefault subclass: Object
+  classMethod: run: t [
+    | tempDir bbs engine instanceId task aff wfAff |
+    '--- WA2: workflow-root affinity applies when no per-transition ---' println.
+    tempDir := WAHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    wfAff := Dictionary new.
+    wfAff at: 'model' put: 'opus'.
+    wfAff at: 'team' put: true.
+
+    WAHelper seedTemplate: bbs identity: 'wa-tmpl-wf' wfAffinity: wfAff trAffinity: nil.
+    engine := WorkflowEngine on: bbs.
+
+    instanceId := engine instantiate: 'wa-tmpl-wf' scope: 'default' params: (Dictionary new).
+    engine advance.
+
+    task := WAHelper taskTupleFor: bbs instance: instanceId.
+    t assert: task notNil message: 'WA2: task was spawned'.
+    task notNil ifTrue: [
+      aff := (task at: 'payload') at: 'affinity' ifAbsent: [nil].
+      t assert: aff notNil message: 'WA2: task.payload.affinity present'.
+      aff notNil ifTrue: [
+        t assertEqual: (aff at: 'model' ifAbsent: [nil]) to: 'opus'
+          message: 'WA2: workflow-root model propagated'.
+        t assertEqual: (aff at: 'team' ifAbsent: [nil]) to: true
+          message: 'WA2: workflow-root team propagated'
+      ]
+    ]
+  ]
+
+"=== TestAffinityTransitionOverride (WA3) ==="
+TestAffinityTransitionOverride subclass: Object
+  classMethod: run: t [
+    | tempDir bbs engine instanceId task aff wfAff trAff |
+    '--- WA3: per-transition affinity wins over workflow-root ---' println.
+    tempDir := WAHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    wfAff := Dictionary new.
+    wfAff at: 'team' put: true.
+
+    trAff := Dictionary new.
+    trAff at: 'launcher_only' put: true.
+
+    WAHelper seedTemplate: bbs identity: 'wa-tmpl-tr' wfAffinity: wfAff trAffinity: trAff.
+    engine := WorkflowEngine on: bbs.
+
+    instanceId := engine instantiate: 'wa-tmpl-tr' scope: 'default' params: (Dictionary new).
+    engine advance.
+
+    task := WAHelper taskTupleFor: bbs instance: instanceId.
+    t assert: task notNil message: 'WA3: task was spawned'.
+    task notNil ifTrue: [
+      aff := (task at: 'payload') at: 'affinity' ifAbsent: [nil].
+      t assert: aff notNil message: 'WA3: task.payload.affinity present'.
+      aff notNil ifTrue: [
+        t assertEqual: (aff at: 'launcher_only' ifAbsent: [nil]) to: true
+          message: 'WA3: per-transition launcher_only propagated'.
+        t assert: (aff includesKey: 'team') not
+          message: 'WA3: workflow-root team key did NOT leak through'
+      ]
+    ]
+  ]
+
+"=== TestAffinityKeyShapes (WA4) ==="
+TestAffinityKeyShapes subclass: Object
+  classMethod: run: t [
+    | tempDir bbs engine instanceId task aff trAff workers |
+    '--- WA4: all documented keys round-trip ---' println.
+    tempDir := WAHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    workers := Array new: 0.
+    workers := workers copyWith: 'worker:alice'.
+    workers := workers copyWith: 'worker:bob'.
+
+    trAff := Dictionary new.
+    trAff at: 'launcher_only' put: false.
+    trAff at: 'workers' put: workers.
+    trAff at: 'model' put: 'sonnet'.
+    trAff at: 'repo' put: 'procyon-park@abc123'.
+    trAff at: 'team' put: false.
+
+    WAHelper seedTemplate: bbs identity: 'wa-tmpl-keys' wfAffinity: nil trAffinity: trAff.
+    engine := WorkflowEngine on: bbs.
+
+    instanceId := engine instantiate: 'wa-tmpl-keys' scope: 'default' params: (Dictionary new).
+    engine advance.
+
+    task := WAHelper taskTupleFor: bbs instance: instanceId.
+    t assert: task notNil message: 'WA4: task was spawned'.
+    task notNil ifTrue: [
+      aff := (task at: 'payload') at: 'affinity' ifAbsent: [nil].
+      t assert: aff notNil message: 'WA4: task.payload.affinity present'.
+      aff notNil ifTrue: [
+        t assertEqual: (aff at: 'launcher_only' ifAbsent: [nil]) to: false
+          message: 'WA4: launcher_only round-tripped'.
+        t assertEqual: (aff at: 'model' ifAbsent: [nil]) to: 'sonnet'
+          message: 'WA4: model round-tripped'.
+        t assertEqual: (aff at: 'repo' ifAbsent: [nil]) to: 'procyon-park@abc123'
+          message: 'WA4: repo round-tripped'.
+        t assertEqual: (aff at: 'team' ifAbsent: [nil]) to: false
+          message: 'WA4: team round-tripped'.
+        t assertEqual: ((aff at: 'workers' ifAbsent: [#()]) size) to: 2
+          message: 'WA4: workers array round-tripped with 2 entries'
+      ]
+    ]
+  ]
+
+"=== Main ==="
+WorkflowAffinityMain subclass: Object
+  classMethod: start [
+    | t |
+    t := WARunner new.
+    TestAffinityNoneDefault run: t.
+    TestAffinityWorkflowRootDefault run: t.
+    TestAffinityTransitionOverride run: t.
+    TestAffinityKeyShapes run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

@@ -5,6 +5,12 @@ start_places: ["request"]
 terminal_places: ["done"]
 max_review_cycles: 3
 
+// Workflow-level affinity default (F4.2). Applies to every task tuple
+// spawned by this workflow unless a transition overrides it or the CLI
+// layers an override on top. Shape matches workflows/_affinity.cue
+// #Affinity (launcher_only?, workers?, model?, repo?, team?).
+affinity: {team: true}
+
 // Shared fragments for the create-worktree → merge-worktree → notify-head
 // bookend. Hidden fields are stripped by `cue export` so they never reach
 // the emitted template.
@@ -52,6 +58,10 @@ transitions: [
 		out:         ["evaluating"]
 		role:        "foreman"
 		description: "Evaluate review and test results for: {{description}}. Read observations from reviewers/testers. Write verdict: pp signal verdict:{{instance}} decision pass (or fix/exhausted). Also write review cycle count: pp signal review_cycle:{{instance}} count N."
+		// Per-transition affinity override (F4.1): keep foreman evaluation on
+		// the launcher's own worker pool so verdicts ride the same trust
+		// boundary as the run.
+		affinity: {launcher_only: true}
 	},
 	{
 		id:  "pass"
