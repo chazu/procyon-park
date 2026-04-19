@@ -1,0 +1,197 @@
+"Tests for /api/workflow/start CLI affinity override (F4.3).
+
+ Invariants:
+   WS1  CLI override passed to Dispatcher>>instantiateWorkflow:...overrideAffinity:
+        produces a task payload whose affinity equals the override dict,
+        even when the template has both per-transition and workflow-root
+        affinity set — precedence rule: override > per-transition > wf-root.
+   WS2  Absent CLI override falls back to CUE per-transition affinity
+        (back-compat behaviour — the 4-arg instantiateWorkflow path)."
+
+WSRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg,
+                            ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Workflow Start (F4.3) Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+WSHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: taskTupleFor: bbs instance: instanceId [
+    ^(bbs scanAll: 'task') detect: [:t |
+      ((t at: 'payload') at: 'workflow_instance' ifAbsent: ['']) = instanceId
+    ] ifNone: [nil]
+  ]
+
+  classMethod: seedTemplate: bbs identity: ident [
+    "Seed a role-bearing template with BOTH workflow-root and per-transition
+     affinity so the override path can be proven to win over both."
+    | transitions tr payload wfAff trAff |
+    transitions := Array new: 0.
+    tr := Dictionary new.
+    tr at: 'id' put: 'impl'.
+    tr at: 'in' put: #('start').
+    tr at: 'out' put: #('end').
+    tr at: 'role' put: 'implementer'.
+    tr at: 'description' put: 'do the thing'.
+    trAff := Dictionary new.
+    trAff at: 'model' put: 'sonnet'.
+    tr at: 'affinity' put: trAff.
+    transitions := transitions copyWith: tr.
+
+    wfAff := Dictionary new.
+    wfAff at: 'team' put: true.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    payload at: 'affinity' put: wfAff.
+
+    bbs outPinned: 'template' scope: 'system' identity: ident payload: payload
+  ]
+
+"=== TestOverridePrecedence (WS1) ==="
+TestOverridePrecedence subclass: Object
+  classMethod: run: t [
+    | tempDir bbs engine override instanceId task aff workers |
+    '--- WS1: CLI override wins over per-transition and workflow-root ---' println.
+    tempDir := WSHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    WSHelper seedTemplate: bbs identity: 'ws-tmpl-over'.
+    engine := WorkflowEngine on: bbs.
+
+    "CLI-style override: launcher_only + a specific worker list."
+    override := Dictionary new.
+    override at: 'launcher_only' put: true.
+    workers := Array new: 0.
+    workers := workers copyWith: 'worker:w1'.
+    workers := workers copyWith: 'worker:w2'.
+    override at: 'workers' put: workers.
+
+    instanceId := engine
+      instantiate: 'ws-tmpl-over'
+      scope: 'default'
+      params: Dictionary new
+      launchedBy: 'user:tester'
+      overrideAffinity: override.
+
+    engine advance.
+
+    task := WSHelper taskTupleFor: bbs instance: instanceId.
+    t assert: task notNil message: 'WS1: task was spawned'.
+    task notNil ifTrue: [
+      aff := (task at: 'payload') at: 'affinity' ifAbsent: [nil].
+      t assert: aff notNil message: 'WS1: task.payload.affinity present'.
+      aff notNil ifTrue: [
+        t assertEqual: (aff at: 'launcher_only' ifAbsent: [nil]) to: true
+          message: 'WS1a: CLI override launcher_only wins'.
+        t assertEqual: ((aff at: 'workers' ifAbsent: [#()]) size) to: 2
+          message: 'WS1b: CLI override workers array propagated'.
+        t assert: (aff includesKey: 'model') not
+          message: 'WS1c: per-transition model did NOT leak through override'.
+        t assert: (aff includesKey: 'team') not
+          message: 'WS1d: workflow-root team did NOT leak through override'
+      ]
+    ]
+  ]
+
+"=== TestAbsentOverrideFallback (WS2) ==="
+TestAbsentOverrideFallback subclass: Object
+  classMethod: run: t [
+    | tempDir bbs engine instanceId task aff |
+    '--- WS2: absent override -> CUE per-transition still applies ---' println.
+    tempDir := WSHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    WSHelper seedTemplate: bbs identity: 'ws-tmpl-nooverride'.
+    engine := WorkflowEngine on: bbs.
+
+    instanceId := engine
+      instantiate: 'ws-tmpl-nooverride'
+      scope: 'default'
+      params: Dictionary new
+      launchedBy: 'user:tester'
+      overrideAffinity: nil.
+
+    engine advance.
+
+    task := WSHelper taskTupleFor: bbs instance: instanceId.
+    t assert: task notNil message: 'WS2: task was spawned'.
+    task notNil ifTrue: [
+      aff := (task at: 'payload') at: 'affinity' ifAbsent: [nil].
+      t assert: aff notNil message: 'WS2: task.payload.affinity present'.
+      aff notNil ifTrue: [
+        t assertEqual: (aff at: 'model' ifAbsent: [nil]) to: 'sonnet'
+          message: 'WS2a: per-transition model applies with no override'
+      ]
+    ]
+  ]
+
+"=== Main ==="
+TestWorkflowStartMain subclass: Object
+  classMethod: run [
+    | t |
+    t := WSRunner new.
+    [TestOverridePrecedence run: t] on: Exception do: [:e |
+      ('TestOverridePrecedence CRASHED: ', e messageText) println.
+      t assert: false message: 'TestOverridePrecedence crashed'
+    ].
+    [TestAbsentOverrideFallback run: t] on: Exception do: [:e |
+      ('TestAbsentOverrideFallback CRASHED: ', e messageText) println.
+      t assert: false message: 'TestAbsentOverrideFallback crashed'
+    ].
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
+
+TestWorkflowStartMain run

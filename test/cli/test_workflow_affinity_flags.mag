@@ -1,0 +1,179 @@
+"Tests for `pp workflow <template> ... [--affinity|--worker|--model|--repo]`
+ F4.3 CLI flag parsing via CliPP>>buildAffinityFromFlags:worker:model:repo:.
+
+ We test the pure helper directly rather than round-tripping through
+ HttpClient: the helper is the single source of truth for how CLI flag
+ values become the `affinity` dict that ships in the /api/workflow/start
+ POST body, so asserting on its shape is equivalent to asserting on the
+ body shape without needing a process-level fake.
+
+ Invariants:
+   WAF1  No flags supplied -> returns nil (caller omits `affinity` key).
+   WAF2  --affinity launcher-only -> {launcher_only: true}.
+   WAF3  --affinity team -> {team: true}.
+   WAF4  Unknown --affinity value is silently dropped (CUE default applies).
+   WAF5  --worker a,b -> {workers: [worker:a, worker:b]} with auto-prefix.
+   WAF6  --worker accepts already-prefixed ids idempotently.
+   WAF7  --model m -> {model: m}.
+   WAF8  --repo r -> {repo: r}.
+   WAF9  All flags together merge into a single dict."
+
+WAFRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg,
+                            ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Workflow Affinity Flags Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== TestWorkflowAffinityFlags ==="
+TestWorkflowAffinityFlags subclass: Object
+
+  classMethod: run: t [
+    | d workers |
+    '--- TestWorkflowAffinityFlags ---' println.
+
+    "WAF1: no flags -> nil"
+    d := CliPP buildAffinityFromFlags: '' worker: '' model: '' repo: ''.
+    t assert: d isNil
+      message: 'WAF1: empty flags yield nil (caller omits affinity key)'.
+
+    "WAF2: --affinity launcher-only"
+    d := CliPP buildAffinityFromFlags: 'launcher-only' worker: '' model: '' repo: ''.
+    t assert: d notNil
+      message: 'WAF2a: launcher-only yields a dict'.
+    d notNil ifTrue: [
+      t assertEqual: (d at: 'launcher_only' ifAbsent: [nil]) to: true
+        message: 'WAF2b: launcher_only=true in dict'.
+      t assertEqual: d size to: 1
+        message: 'WAF2c: dict has exactly one key'
+    ].
+
+    "WAF3: --affinity team"
+    d := CliPP buildAffinityFromFlags: 'team' worker: '' model: '' repo: ''.
+    t assert: d notNil
+      message: 'WAF3a: team yields a dict'.
+    d notNil ifTrue: [
+      t assertEqual: (d at: 'team' ifAbsent: [nil]) to: true
+        message: 'WAF3b: team=true in dict'
+    ].
+
+    "WAF4: unknown --affinity value -> nil (no other flags)"
+    d := CliPP buildAffinityFromFlags: 'bogus' worker: '' model: '' repo: ''.
+    t assert: d isNil
+      message: 'WAF4: unknown --affinity value is silently dropped'.
+
+    "WAF5: --worker a,b (auto prefix)"
+    d := CliPP buildAffinityFromFlags: '' worker: 'w1,w2' model: '' repo: ''.
+    t assert: d notNil
+      message: 'WAF5a: worker list yields a dict'.
+    d notNil ifTrue: [
+      workers := d at: 'workers' ifAbsent: [#()].
+      t assertEqual: workers size to: 2
+        message: 'WAF5b: 2 workers parsed'.
+      t assertEqual: (workers at: 0) to: 'worker:w1'
+        message: 'WAF5c: first worker auto-prefixed'.
+      t assertEqual: (workers at: 1) to: 'worker:w2'
+        message: 'WAF5d: second worker auto-prefixed'
+    ].
+
+    "WAF6: already-prefixed workers pass through"
+    d := CliPP buildAffinityFromFlags: '' worker: 'worker:alice,worker:bob' model: '' repo: ''.
+    d notNil ifTrue: [
+      workers := d at: 'workers' ifAbsent: [#()].
+      t assertEqual: (workers at: 0) to: 'worker:alice'
+        message: 'WAF6a: already-prefixed worker untouched'.
+      t assertEqual: (workers at: 1) to: 'worker:bob'
+        message: 'WAF6b: second already-prefixed worker untouched'
+    ].
+
+    "WAF7: --model m"
+    d := CliPP buildAffinityFromFlags: '' worker: '' model: 'opus' repo: ''.
+    t assert: d notNil
+      message: 'WAF7a: model yields a dict'.
+    d notNil ifTrue: [
+      t assertEqual: (d at: 'model' ifAbsent: [nil]) to: 'opus'
+        message: 'WAF7b: model value present'
+    ].
+
+    "WAF8: --repo r"
+    d := CliPP buildAffinityFromFlags: '' worker: '' model: '' repo: 'procyon-park'.
+    t assert: d notNil
+      message: 'WAF8a: repo yields a dict'.
+    d notNil ifTrue: [
+      t assertEqual: (d at: 'repo' ifAbsent: [nil]) to: 'procyon-park'
+        message: 'WAF8b: repo value present'
+    ].
+
+    "WAF9: merge all flags"
+    d := CliPP buildAffinityFromFlags: 'launcher-only'
+                                  worker: 'w1,w2'
+                                   model: 'sonnet'
+                                    repo: 'procyon-park'.
+    t assert: d notNil
+      message: 'WAF9a: merged dict not nil'.
+    d notNil ifTrue: [
+      t assertEqual: (d at: 'launcher_only' ifAbsent: [nil]) to: true
+        message: 'WAF9b: launcher_only merged'.
+      t assertEqual: (d at: 'model' ifAbsent: [nil]) to: 'sonnet'
+        message: 'WAF9c: model merged'.
+      t assertEqual: (d at: 'repo' ifAbsent: [nil]) to: 'procyon-park'
+        message: 'WAF9d: repo merged'.
+      workers := d at: 'workers' ifAbsent: [#()].
+      t assertEqual: workers size to: 2
+        message: 'WAF9e: two workers merged'
+    ]
+  ]
+
+"=== Main ==="
+TestWorkflowAffinityFlagsMain subclass: Object
+  classMethod: run [
+    | t |
+    t := WAFRunner new.
+    [TestWorkflowAffinityFlags run: t] on: Exception do: [:e |
+      ('TestWorkflowAffinityFlags CRASHED: ', e messageText) println.
+      t assert: false message: 'TestWorkflowAffinityFlags crashed'
+    ].
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
+
+TestWorkflowAffinityFlagsMain run

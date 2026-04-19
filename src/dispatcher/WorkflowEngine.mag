@@ -36,6 +36,11 @@ WorkflowEngine subclass: Object
   ]
 
   method: instantiate: templateIdentity scope: scope params: params launchedBy: launchedBy [
+    "Back-compat entry point — no CLI override affinity."
+    ^self instantiate: templateIdentity scope: scope params: params launchedBy: launchedBy overrideAffinity: nil
+  ]
+
+  method: instantiate: templateIdentity scope: scope params: params launchedBy: launchedBy overrideAffinity: overrideAffinity [
     "Create a workflow instance from a template.
      1. Read template from BBS
      2. Write workflow tuple with status running
@@ -79,6 +84,14 @@ WorkflowEngine subclass: Object
     workflowPayload at: 'params' put: params.
     workflowPayload at: 'scope' put: scope.
     workflowPayload at: 'started_at' put: DateTime now epochSeconds.
+    "F4.3: stamp CLI-provided affinity override onto the workflow tuple so
+     subsequent ticks that fire transitions can layer it over per-transition
+     and workflow-root CUE affinity with highest precedence."
+    (overrideAffinity notNil and: [overrideAffinity isKindOf: Dictionary]) ifTrue: [
+      overrideAffinity isEmpty ifFalse: [
+        workflowPayload at: 'override_affinity' put: overrideAffinity
+      ]
+    ].
 
     bbs out: 'workflow' scope: scope identity: instanceId payload: workflowPayload actor: nil launchedBy: launchedBy executedBy: nil.
 
@@ -122,7 +135,7 @@ WorkflowEngine subclass: Object
 
   method: advanceInstance: wf [
     "Advance a single workflow instance."
-    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params maxCycles cycleSignal cycleCount verdictPayload launchedBy wfAffinity |
+    | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params maxCycles cycleSignal cycleCount verdictPayload launchedBy wfAffinity overrideAffinity |
 
     instanceId := wf at: 'identity'.
     scope := wf at: 'scope'.
@@ -208,10 +221,13 @@ WorkflowEngine subclass: Object
      building per-task affinity; per-transition affinity wins over this,
      and both win over the hard default."
     wfAffinity := templatePayload at: 'affinity' ifAbsent: [nil].
+    "F4.3: CLI-provided affinity override (stamped at instantiate time)
+     wins over both per-transition and workflow-root CUE affinity."
+    overrideAffinity := wfPayload at: 'override_affinity' ifAbsent: [nil].
 
     "Check each transition for enabled-ness"
     transitions do: [:tr |
-      consumedTokens := self tryFireTransition: tr instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity
+      consumedTokens := self tryFireTransition: tr instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity overrideAffinity: overrideAffinity
     ]
   ]
 
@@ -296,10 +312,17 @@ WorkflowEngine subclass: Object
   ]
 
   method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity [
+    "Back-compat entry — no CLI override affinity."
+    ^self tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity overrideAffinity: nil
+  ]
+
+  method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity overrideAffinity: overrideAffinity [
     "Try to fire a single transition. Checks input places, preconditions, then fires.
      Returns updated consumedTokens array.
      wfAffinity is the workflow-root affinity dict (or nil) from the template payload —
-     used as the middle tier of the F4.1/F4.2 precedence chain when building task affinity."
+     used as the middle tier of the F4.1/F4.2 precedence chain when building task affinity.
+     overrideAffinity is the CLI-provided (F4.3) override dict which — when present —
+     sits above per-transition CUE affinity in the precedence chain."
 
     | inPlaces outPlaces preconditions role action taskPayload workdir resolvedDesc tokenStatus worktreeInfo descParams fixCtx trAffinity affinity |
     inPlaces := transition at: 'in'.
@@ -418,7 +441,7 @@ WorkflowEngine subclass: Object
        CLI-driven overrides are layered on top of this by the
        multiplayer:affinity-cli code path before claim dispatch."
       trAffinity := transition at: 'affinity' ifAbsent: [nil].
-      affinity := self buildAffinity: trAffinity wfAffinity: wfAffinity.
+      affinity := self buildAffinity: trAffinity wfAffinity: wfAffinity overrideAffinity: overrideAffinity.
       taskPayload at: 'affinity' put: affinity.
       "Per-transition timeout override (seconds). When absent the harness
        falls back to the role's defaultTimeout, then to a hard default."
@@ -466,8 +489,13 @@ WorkflowEngine subclass: Object
   "--- Affinity Resolution (F4.1 / F4.2) ---"
 
   method: buildAffinity: trAffinity wfAffinity: wfAffinity [
+    "Back-compat entry — no CLI override."
+    ^self buildAffinity: trAffinity wfAffinity: wfAffinity overrideAffinity: nil
+  ]
+
+  method: buildAffinity: trAffinity wfAffinity: wfAffinity overrideAffinity: overrideAffinity [
     "Produce the effective affinity Dictionary for a task, applying the
-     precedence chain per-transition > workflow-root > hard default.
+     precedence chain cli-override > per-transition > workflow-root > hard default.
 
      Read-site is tolerant: affinity may arrive as a Dictionary (the
      normal CUE→Maggie round trip) or as nil (absent). Unknown shapes
@@ -488,11 +516,16 @@ WorkflowEngine subclass: Object
 
     | source result validKeys |
     source := nil.
-    (trAffinity notNil and: [trAffinity isKindOf: Dictionary]) ifTrue: [
-      source := trAffinity
+    (overrideAffinity notNil
+      and: [(overrideAffinity isKindOf: Dictionary) and: [overrideAffinity isEmpty not]]) ifTrue: [
+      source := overrideAffinity
     ] ifFalse: [
-      (wfAffinity notNil and: [wfAffinity isKindOf: Dictionary]) ifTrue: [
-        source := wfAffinity
+      (trAffinity notNil and: [trAffinity isKindOf: Dictionary]) ifTrue: [
+        source := trAffinity
+      ] ifFalse: [
+        (wfAffinity notNil and: [wfAffinity isKindOf: Dictionary]) ifTrue: [
+          source := wfAffinity
+        ]
       ]
     ].
 

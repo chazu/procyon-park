@@ -263,6 +263,21 @@ CliPP subclass: Object
       type: #string
       default: ''
       doc: 'Inject repo into params and default scope to repo name').
+    cmd flag: (Cli::Flag
+      name: 'affinity'
+      type: #string
+      default: ''
+      doc: 'Affinity mode: launcher-only | team (F4.3 override)').
+    cmd flag: (Cli::Flag
+      name: 'worker'
+      type: #string
+      default: ''
+      doc: 'Comma-separated worker ids (e.g. w1,w2) — F4.3 override').
+    cmd flag: (Cli::Flag
+      name: 'model'
+      type: #string
+      default: ''
+      doc: 'Preferred model (e.g. opus, sonnet) — F4.3 override').
 
     argTail := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
     repoParams := self extractParamFlags: argTail.
@@ -270,15 +285,18 @@ CliPP subclass: Object
     prunedRest := repoParams at: 1.
 
     cmd run: [:runArgs |
-      | scopeArg repoArg theScope templateId body exitCode |
+      | scopeArg repoArg theScope templateId body exitCode affinityArg workerArg modelArg affinityDict |
       exitCode := 0.
       runArgs size < 1 ifTrue: [
-        'Usage: pp workflow <template> [--scope <scope>] [--repo <name>] [--param key=value ...]' println.
+        'Usage: pp workflow <template> [--scope <scope>] [--repo <name>] [--affinity launcher-only|team] [--worker w1,w2] [--model m] [--param key=value ...]' println.
         exitCode := 1
       ] ifFalse: [
         templateId := runArgs at: 0.
         scopeArg := cmd flagValue: 'scope'.
         repoArg := cmd flagValue: 'repo'.
+        affinityArg := cmd flagValue: 'affinity'.
+        workerArg := cmd flagValue: 'worker'.
+        modelArg := cmd flagValue: 'model'.
         (repoArg isNil or: [repoArg isEmpty]) ifTrue: [
           repoArg := System env: 'PP_REPO'.
           (repoArg isNil or: [repoArg isEmpty]) ifTrue: [repoArg := nil]
@@ -295,6 +313,15 @@ CliPP subclass: Object
         body at: 'template' put: templateId.
         body at: 'scope' put: theScope.
         body at: 'params' put: params.
+        "F4.3: build affinity override dict from CLI flags. Omit key entirely
+         when no flags were provided so the server falls back to CUE defaults."
+        affinityDict := self buildAffinityFromFlags: affinityArg
+                             worker: workerArg
+                               model: modelArg
+                                repo: repoArg.
+        affinityDict notNil ifTrue: [
+          body at: 'affinity' put: affinityDict
+        ].
         self postAndPrint: cfg path: '/api/workflow/start' body: body
       ].
       exitCode
@@ -303,6 +330,67 @@ CliPP subclass: Object
     rest := prunedRest.
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: buildAffinityFromFlags: affinityArg worker: workerArg model: modelArg repo: repoArg [
+    "F4.3: translate --affinity / --worker / --model / --repo flag values
+     into a single affinity Dictionary suitable for the /api/workflow/start
+     request body. Returns nil when no relevant flags were supplied so the
+     caller can omit the `affinity` key and let CUE workflow defaults apply.
+
+     Mapping:
+       --affinity launcher-only   → {launcher_only: true}
+       --affinity team            → {team: true}
+       --worker a,b               → {workers: [worker:a, worker:b]}
+       --model m                  → {model: m}
+       --repo r                   → {repo: r}
+     All supplied flags are merged into a single dict. Unknown --affinity
+     values are ignored (silent fallback to CUE defaults)."
+    | affinity any workers rawParts part trimmed normalized |
+    affinity := Dictionary new.
+    any := false.
+
+    (affinityArg notNil and: [affinityArg isEmpty not]) ifTrue: [
+      affinityArg = 'launcher-only' ifTrue: [
+        affinity at: 'launcher_only' put: true.
+        any := true
+      ].
+      affinityArg = 'team' ifTrue: [
+        affinity at: 'team' put: true.
+        any := true
+      ]
+    ].
+
+    (workerArg notNil and: [workerArg isEmpty not]) ifTrue: [
+      workers := Array new: 0.
+      rawParts := workerArg split: ','.
+      rawParts do: [:p |
+        trimmed := p trimBoth.
+        trimmed isEmpty ifFalse: [
+          normalized := (trimmed startsWith: 'worker:')
+            ifTrue: [trimmed]
+            ifFalse: ['worker:', trimmed].
+          workers := workers copyWith: normalized
+        ]
+      ].
+      workers size > 0 ifTrue: [
+        affinity at: 'workers' put: workers.
+        any := true
+      ]
+    ].
+
+    (modelArg notNil and: [modelArg isEmpty not]) ifTrue: [
+      affinity at: 'model' put: modelArg.
+      any := true
+    ].
+
+    (repoArg notNil and: [repoArg isEmpty not]) ifTrue: [
+      affinity at: 'repo' put: repoArg.
+      any := true
+    ].
+
+    any ifFalse: [^nil].
+    ^affinity
   ]
 
   classMethod: runWorkflowTree: args [
