@@ -561,42 +561,16 @@
       border-color: var(--terra);
     }
 
-    /* Crew strip — role badges */
-    .crew-strip{
-      display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
-      gap: 10px;
-      margin: 0 0 16px 0;
-    }
-    .crew-badge{
-      margin: 0;
-      text-align: center;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 6px;
-    }
-    .crew-badge img{
-      display: block;
-      width: 100%;
-      height: auto;
-      max-height: 84px;
-      aspect-ratio: 2.88 / 1;
-      object-fit: cover;
-      border: 2px solid var(--bg);
-      box-shadow: 3px 3px 0 rgba(0,0,0,.55);
+    /* Role badge — inline raccoon eye strip next to role name */
+    img.role-badge{
+      display: inline-block;
+      vertical-align: -6px;
+      height: 22px;
+      width: auto;
+      margin: 0 4px 0 2px;
+      border: 1px solid var(--bg);
+      box-shadow: 1px 1px 0 rgba(0,0,0,.5);
       image-rendering: auto;
-    }
-    .crew-badge figcaption{
-      font-family: var(--f-slab);
-      font-weight: 800;
-      font-size: 11px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--cream-hi);
-    }
-    @media (max-width: 900px){
-      .crew-strip{ grid-template-columns: repeat(3, minmax(0,1fr)); }
     }
 
     /* History Explorer */
@@ -784,14 +758,6 @@
   <div class="page">
 
     <section class="tab-view is-active" id="view-overview" role="tabpanel">
-      <div class="crew-strip" aria-label="The Crew">
-        <figure class="crew-badge"><img src="/dashboard/roles/role-scout.png" alt="Scout"><figcaption>Scout</figcaption></figure>
-        <figure class="crew-badge"><img src="/dashboard/roles/role-planner.png" alt="Planner"><figcaption>Planner</figcaption></figure>
-        <figure class="crew-badge"><img src="/dashboard/roles/role-implementer.png" alt="Implementer"><figcaption>Implementer</figcaption></figure>
-        <figure class="crew-badge"><img src="/dashboard/roles/role-reviewer.png" alt="Reviewer"><figcaption>Reviewer</figcaption></figure>
-        <figure class="crew-badge"><img src="/dashboard/roles/role-foreman.png" alt="Foreman"><figcaption>Foreman</figcaption></figure>
-        <figure class="crew-badge"><img src="/dashboard/roles/role-head.png" alt="Head"><figcaption>Head</figcaption></figure>
-      </div>
       <div class="layout">
         <div class="col">
           <div class="panel panel--terra">
