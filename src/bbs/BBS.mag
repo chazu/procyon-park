@@ -79,9 +79,16 @@ BBS subclass: Object
   ]
 
   method: out: category scope: scope identity: identity payload: payload actor: actor [
+    ^self out: category scope: scope identity: identity payload: payload actor: actor launchedBy: nil executedBy: nil
+  ]
+
+  method: out: category scope: scope identity: identity payload: payload actor: actor launchedBy: launchedBy executedBy: executedBy [
+    "Write a linear tuple with optional provenance. launchedBy/executedBy
+     are only emitted when non-nil; typically meaningful only for the
+     'task' category but accepted generically so callers don't special-case."
     | d |
     Categories validate: category.
-    d := Tuple linear: category scope: scope identity: identity payload: payload id: self assignId actor: actor.
+    d := Tuple linear: category scope: scope identity: identity payload: payload id: self assignId actor: actor launchedBy: launchedBy executedBy: executedBy.
     space out: d.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'out' tuple: d.
@@ -94,9 +101,13 @@ BBS subclass: Object
   ]
 
   method: outPinned: category scope: scope identity: identity payload: payload actor: actor [
+    ^self outPinned: category scope: scope identity: identity payload: payload actor: actor launchedBy: nil executedBy: nil
+  ]
+
+  method: outPinned: category scope: scope identity: identity payload: payload actor: actor launchedBy: launchedBy executedBy: executedBy [
     | d |
     Categories validate: category.
-    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor.
+    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor launchedBy: launchedBy executedBy: executedBy.
     space outPersistent: d.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'out-pinned' tuple: d.
@@ -109,9 +120,13 @@ BBS subclass: Object
   ]
 
   method: outAffine: category scope: scope identity: identity payload: payload ttl: ttlSeconds actor: actor [
+    ^self outAffine: category scope: scope identity: identity payload: payload ttl: ttlSeconds actor: actor launchedBy: nil executedBy: nil
+  ]
+
+  method: outAffine: category scope: scope identity: identity payload: payload ttl: ttlSeconds actor: actor launchedBy: launchedBy executedBy: executedBy [
     | d |
     Categories validate: category.
-    d := Tuple affine: category scope: scope identity: identity payload: payload id: self assignId ttl: ttlSeconds actor: actor.
+    d := Tuple affine: category scope: scope identity: identity payload: payload id: self assignId ttl: ttlSeconds actor: actor launchedBy: launchedBy executedBy: executedBy.
     space outAffine: d ttl: ttlSeconds.
     mutex critical: [index := index copyWith: d].
     self appendHistory: 'out-affine' tuple: d.
