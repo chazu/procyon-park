@@ -1,0 +1,255 @@
+"Tests for /api/tasks/complete D6.5 claim/lease completion handler.
+
+ Invariants under test:
+   TC1  Happy completion: stored claim_id matches the request. Task flips
+        to status=completed, claim_expires_at cleared, and a completion
+        event tuple (identity task-complete:<id>) is emitted.
+   TC2  Late completion (F3.4): stored claim_id != request claim_id.
+        Handler emits an event tuple with identity late-completion:<id>
+        carrying {worker_id, claim_id, submitted_status}, does NOT
+        clobber task state, and returns a 409 response.
+   TC3  D6.5 repo-not-available carveout: status=failed,
+        reason=repo-not-available flips task back to pending, clears
+        worker_id/claim_id/executed_by/claim_expires_at, sets
+        last_failure_reason=repo-not-available, and DOES NOT bump
+        retry_count (reaper owns retry_count)."
+
+TCRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== /api/tasks/complete Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helper ---"
+TCHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedTask: identity scope: scope claimId: claimId workerId: workerId in: bbs [
+    "Seed a task tuple in a claimed/dispatched state with the given claim_id
+     and worker_id so /api/tasks/complete has something to operate on."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: 'dispatched'.
+    payload at: 'description' put: 'seed task'.
+    payload at: 'claim_id' put: claimId.
+    payload at: 'worker_id' put: workerId.
+    payload at: 'executed_by' put: workerId.
+    payload at: 'claim_expires_at' put: 999999.
+    payload at: 'renewed_at' put: nil.
+    payload at: 'missed_renewals' put: 0.
+    payload at: 'retry_count' put: 0.
+    payload at: 'max_retries' put: 3.
+    payload at: 'last_failure_reason' put: nil.
+    ^bbs out: 'task' scope: scope identity: identity payload: payload actor: nil
+  ]
+
+  classMethod: findTask: identity in: bbs [
+    ^(bbs scanAll: 'task') detect: [:t | (t at: 'identity') = identity] ifNone: [nil]
+  ]
+
+  classMethod: findEvent: identity in: bbs [
+    ^(bbs scanAll: 'event') detect: [:e | (e at: 'identity') = identity] ifNone: [nil]
+  ]
+
+  classMethod: makeBody: taskId worker: workerId claim: claimId status: status [
+    | body |
+    body := Dictionary new.
+    body at: 'task_id' put: taskId.
+    body at: 'worker_id' put: workerId.
+    body at: 'claim_id' put: claimId.
+    body at: 'status' put: status.
+    ^body
+  ]
+
+"=== TestTaskComplete ==="
+TestTaskComplete subclass: Object
+
+  classMethod: run: t [
+    self runHappy: t.
+    self runLate: t.
+    self runRepoNotAvailable: t
+  ]
+
+  classMethod: runHappy: t [
+    | tempDir bbs server ctx body resp task payload event eventPayload |
+    '--- TC1: happy completion ---' println.
+    tempDir := TCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    ctx := ActorContext actor: 'worker:w1' timestamp: 1 verified: true isAdmin: false.
+
+    TCHelper seedTask: 'task-happy' scope: 'demo' claimId: 'claim-AAA' workerId: 'worker:w1' in: bbs.
+
+    body := TCHelper makeBody: 'task-happy' worker: 'worker:w1' claim: 'claim-AAA' status: 'completed'.
+    resp := server handleTaskComplete: body actor: ctx.
+
+    task := TCHelper findTask: 'task-happy' in: bbs.
+    t assert: task notNil message: 'TC1: task still exists'.
+    task notNil ifTrue: [
+      payload := task at: 'payload' ifAbsent: [Dictionary new].
+      t assertEqual: (payload at: 'status' ifAbsent: ['MISSING']) to: 'completed'
+        message: 'TC1: task status flipped to completed'.
+      t assertEqual: (payload at: 'claim_expires_at' ifAbsent: ['MISSING']) to: nil
+        message: 'TC1: claim_expires_at cleared'
+    ].
+
+    event := TCHelper findEvent: 'task-complete:task-happy' in: bbs.
+    t assert: event notNil message: 'TC1: task-complete event tuple emitted'.
+    event notNil ifTrue: [
+      eventPayload := event at: 'payload' ifAbsent: [Dictionary new].
+      t assertEqual: (eventPayload at: 'type' ifAbsent: ['MISSING']) to: 'task-completed'
+        message: 'TC1: event type = task-completed'.
+      t assertEqual: (eventPayload at: 'claim_id' ifAbsent: ['MISSING']) to: 'claim-AAA'
+        message: 'TC1: event carries claim_id'
+    ]
+  ]
+
+  classMethod: runLate: t [
+    | tempDir bbs server ctx body resp task payload event eventPayload respBody |
+    '--- TC2: late completion ---' println.
+    tempDir := TCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    ctx := ActorContext actor: 'worker:w-old' timestamp: 1 verified: true isAdmin: false.
+
+    "Stored claim is claim-CURRENT. Old worker submits completion with stale claim-OLD."
+    TCHelper seedTask: 'task-late' scope: 'demo' claimId: 'claim-CURRENT' workerId: 'worker:w-new' in: bbs.
+
+    body := TCHelper makeBody: 'task-late' worker: 'worker:w-old' claim: 'claim-OLD' status: 'completed'.
+    resp := server handleTaskComplete: body actor: ctx.
+
+    t assertEqual: resp status to: 409 message: 'TC2: late completion returns 409'.
+
+    "State must be untouched — still dispatched, still has the current claim."
+    task := TCHelper findTask: 'task-late' in: bbs.
+    t assert: task notNil message: 'TC2: task still exists'.
+    task notNil ifTrue: [
+      payload := task at: 'payload' ifAbsent: [Dictionary new].
+      t assertEqual: (payload at: 'status' ifAbsent: ['MISSING']) to: 'dispatched'
+        message: 'TC2: task status NOT clobbered (still dispatched)'.
+      t assertEqual: (payload at: 'claim_id' ifAbsent: ['MISSING']) to: 'claim-CURRENT'
+        message: 'TC2: claim_id NOT overwritten'.
+      t assertEqual: (payload at: 'executed_by' ifAbsent: ['MISSING']) to: 'worker:w-new'
+        message: 'TC2: executed_by NOT overwritten'
+    ].
+
+    "Event tuple with identity late-completion:<task-id> must exist."
+    event := TCHelper findEvent: 'late-completion:task-late' in: bbs.
+    t assert: event notNil message: 'TC2: late-completion event tuple emitted'.
+    event notNil ifTrue: [
+      eventPayload := event at: 'payload' ifAbsent: [Dictionary new].
+      t assertEqual: (eventPayload at: 'type' ifAbsent: ['MISSING']) to: 'late-completion'
+        message: 'TC2: event type = late-completion'.
+      t assertEqual: (eventPayload at: 'worker_id' ifAbsent: ['MISSING']) to: 'worker:w-old'
+        message: 'TC2: event payload carries worker_id'.
+      t assertEqual: (eventPayload at: 'claim_id' ifAbsent: ['MISSING']) to: 'claim-OLD'
+        message: 'TC2: event payload carries submitted claim_id'.
+      t assertEqual: (eventPayload at: 'submitted_status' ifAbsent: ['MISSING']) to: 'completed'
+        message: 'TC2: event payload carries submitted_status'
+    ].
+
+    "409 response body must advertise the current executed_by so the late
+     worker can observe who owns the task now."
+    respBody := Json decode: resp body.
+    t assertEqual: (respBody at: 'executed_by' ifAbsent: ['MISSING']) to: 'worker:w-new'
+      message: 'TC2: 409 body carries current executed_by'
+  ]
+
+  classMethod: runRepoNotAvailable: t [
+    | tempDir bbs server ctx body resp task payload event |
+    '--- TC3: repo-not-available carveout ---' println.
+    tempDir := TCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    ctx := ActorContext actor: 'worker:w1' timestamp: 1 verified: true isAdmin: false.
+
+    TCHelper seedTask: 'task-rna' scope: 'demo' claimId: 'claim-RNA' workerId: 'worker:w1' in: bbs.
+
+    body := TCHelper makeBody: 'task-rna' worker: 'worker:w1' claim: 'claim-RNA' status: 'failed'.
+    body at: 'reason' put: 'repo-not-available'.
+    resp := server handleTaskComplete: body actor: ctx.
+
+    task := TCHelper findTask: 'task-rna' in: bbs.
+    t assert: task notNil message: 'TC3: task still exists'.
+    task notNil ifTrue: [
+      payload := task at: 'payload' ifAbsent: [Dictionary new].
+      t assertEqual: (payload at: 'status' ifAbsent: ['MISSING']) to: 'pending'
+        message: 'TC3: task flipped back to pending'.
+      t assertEqual: (payload at: 'worker_id' ifAbsent: ['MISSING']) to: nil
+        message: 'TC3: worker_id cleared'.
+      t assertEqual: (payload at: 'claim_id' ifAbsent: ['MISSING']) to: nil
+        message: 'TC3: claim_id cleared'.
+      t assertEqual: (payload at: 'executed_by' ifAbsent: ['MISSING']) to: nil
+        message: 'TC3: executed_by cleared'.
+      t assertEqual: (payload at: 'claim_expires_at' ifAbsent: ['MISSING']) to: nil
+        message: 'TC3: claim_expires_at cleared'.
+      t assertEqual: (payload at: 'last_failure_reason' ifAbsent: ['MISSING']) to: 'repo-not-available'
+        message: 'TC3: last_failure_reason = repo-not-available'.
+      t assertEqual: (payload at: 'retry_count' ifAbsent: [-1]) to: 0
+        message: 'TC3: retry_count NOT bumped (reaper owns retries)'
+    ].
+
+    event := TCHelper findEvent: 'task-complete:task-rna' in: bbs.
+    t assert: event notNil message: 'TC3: completion event tuple emitted for failed/rna'
+  ]
+
+"=== Main ==="
+TaskCompleteMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TCRunner new.
+    TestTaskComplete run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

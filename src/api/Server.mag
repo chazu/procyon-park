@@ -232,6 +232,9 @@ ApiServer subclass: Object
     self signedPost: '/api/task/create' fields: #('scope' 'identity' 'role' 'description') do: [:body :actorCtx |
       self handleTaskCreate: body actor: actorCtx
     ].
+    self signedPost: '/api/tasks/complete' fields: #('task_id' 'worker_id' 'claim_id' 'status') do: [:body :actorCtx |
+      self handleTaskComplete: body actor: actorCtx
+    ].
     self signedPost: '/api/signal' fields: #('scope' 'identity' 'payload') do: [:body :actorCtx |
       | id |
       id := bbs upsertSignal: (body at: 'scope') identity: (body at: 'identity') payload: (body at: 'payload') actor: (self actorOf: actorCtx).
@@ -755,6 +758,118 @@ ApiServer subclass: Object
     d at: 'status' put: 'ok'.
     d at: 'claim_expires_at' put: (outcome at: 1).
     d at: 'retry_count' put: (outcome at: 2).
+    ^self okResponse: d
+  ]
+
+  method: handleTaskComplete: body actor: actorCtx [
+    "Handle POST /api/tasks/complete — D6.5 claim/lease completion.
+
+     Body: {task_id, worker_id, claim_id, status in {completed, failed}, reason?}.
+
+     Semantics:
+       (1) If stored payload.claim_id != request claim_id: treat as LATE
+           COMPLETION (F3.4). Emit an event tuple with identity
+           late-completion:<task_id> carrying {worker_id, claim_id,
+           submitted_status}. Return 409 with current executed_by. Do NOT
+           clobber state.
+       (2) On claim match, status=completed: set status=completed, clear
+           claim_expires_at.
+       (3) status=failed AND reason=repo-not-available (D6.5 carveout):
+           flip back to pending, clear worker_id/claim_id/executed_by/
+           claim_expires_at, DO NOT bump retry_count, set
+           last_failure_reason=repo-not-available.
+       (4) status=failed with any other reason: set status=failed,
+           last_failure_reason=reason, DO NOT touch retry_count. Reaper
+           owns retry_count; regular failures are terminal unless the
+           repo-not-available carveout applies.
+     Emits a completion event tuple on branches (2)/(3)/(4)."
+    | taskId workerId claimId status reason task scope payload storedClaimId executedBy eventPayload actorStr updated d eventType |
+
+    actorCtx verified ifFalse: [
+      enforceSignatures
+        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
+        ifFalse: [^self errorResponse: 503
+                         message: 'enforce_signatures must be true for task complete']
+    ].
+
+    taskId := body at: 'task_id'.
+    workerId := body at: 'worker_id'.
+    claimId := body at: 'claim_id'.
+    status := body at: 'status'.
+    reason := body at: 'reason' ifAbsent: [nil].
+
+    (status = 'completed' or: [status = 'failed']) ifFalse: [
+      ^self errorResponse: 400 message: 'status must be completed or failed'
+    ].
+
+    task := (bbs scanAll: 'task') detect: [:t | (t at: 'identity') = taskId] ifNone: [nil].
+    task isNil ifTrue: [^self errorResponse: 404 message: 'task not found: ', taskId].
+    scope := task at: 'scope'.
+    payload := task at: 'payload'.
+    storedClaimId := payload at: 'claim_id' ifAbsent: [nil].
+
+    actorStr := self actorOf: actorCtx.
+
+    "Late-completion branch (F3.4). Stored claim must exist AND mismatch."
+    (storedClaimId notNil and: [(storedClaimId = claimId) not]) ifTrue: [
+      executedBy := payload at: 'executed_by' ifAbsent: [nil].
+      eventPayload := Dictionary new.
+      eventPayload at: 'type' put: 'late-completion'.
+      eventPayload at: 'worker_id' put: workerId.
+      eventPayload at: 'claim_id' put: claimId.
+      eventPayload at: 'submitted_status' put: status.
+      bbs out: 'event' scope: scope
+          identity: 'late-completion:', taskId
+          payload: eventPayload actor: actorStr.
+      d := Dictionary new.
+      d at: 'error' put: 'late completion: task already reclaimed'.
+      d at: 'executed_by' put: executedBy.
+      ^self jsonResponse: 409 body: d
+    ].
+
+    "Atomic update via BBS>>update: — rewrites the linear task tuple."
+    updated := bbs update: 'task' scope: scope identity: taskId do: [:p |
+      status = 'completed' ifTrue: [
+        p at: 'status' put: 'completed'.
+        p at: 'claim_expires_at' put: nil.
+        p at: 'completed_at' put: DateTime now epochSeconds
+      ] ifFalse: [
+        "status = 'failed'"
+        reason = 'repo-not-available' ifTrue: [
+          "D6.5 carveout: recycle back to pending without burning a retry."
+          p at: 'status' put: 'pending'.
+          p at: 'worker_id' put: nil.
+          p at: 'claim_id' put: nil.
+          p at: 'executed_by' put: nil.
+          p at: 'claim_expires_at' put: nil.
+          p at: 'last_failure_reason' put: 'repo-not-available'
+        ] ifFalse: [
+          "Regular failure: terminal. Reaper owns retry_count."
+          p at: 'status' put: 'failed'.
+          p at: 'last_failure_reason' put: (reason isNil ifTrue: ['unknown'] ifFalse: [reason]).
+          p at: 'failed_at' put: DateTime now epochSeconds
+        ]
+      ]
+    ].
+    updated isNil ifTrue: [^self errorResponse: 404 message: 'task not found: ', taskId].
+
+    "Emit completion event tuple."
+    status = 'completed'
+      ifTrue: [eventType := 'task-completed']
+      ifFalse: [eventType := 'task-failed'].
+    eventPayload := Dictionary new.
+    eventPayload at: 'type' put: eventType.
+    eventPayload at: 'worker_id' put: workerId.
+    eventPayload at: 'claim_id' put: claimId.
+    eventPayload at: 'status' put: status.
+    reason notNil ifTrue: [eventPayload at: 'reason' put: reason].
+    bbs out: 'event' scope: scope
+        identity: 'task-complete:', taskId
+        payload: eventPayload actor: actorStr.
+
+    d := Dictionary new.
+    d at: 'status' put: 'ok'.
+    d at: 'task_id' put: taskId.
     ^self okResponse: d
   ]
 
