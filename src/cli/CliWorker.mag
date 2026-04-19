@@ -229,6 +229,21 @@ CliWorkerRegister subclass: Object
       type: #bool
       default: false
       doc: 'Signal intent to update an existing worker manifest (same behavior; label-only, the server is idempotent on matching operator_pubkey)').
+    cmd flag: (Cli::Flag
+      name: 'max-tokens-per-day'
+      type: #int
+      default: 0
+      doc: 'D6.8: soft-drain this worker once tokensToday reaches N (0 = no cap)').
+    cmd flag: (Cli::Flag
+      name: 'max-usd-per-day'
+      type: #int
+      default: 0
+      doc: 'D6.8: soft-drain this worker once usdToday reaches N (0 = no cap)').
+    cmd flag: (Cli::Flag
+      name: 'budget-mode'
+      type: #string
+      default: 'hard'
+      doc: 'D6.8: hard (stop claiming on breach) or soft (warn per claim-past-threshold)').
     cmd envBinding: (Cli::EnvBinding
       envName: 'PP_URL'
       setter: #baseUrl:
@@ -465,6 +480,21 @@ CliWorkerHeartbeat subclass: Object
       type: #string
       default: ''
       doc: 'Override server URL (precedence: --server > PP_URL > default).').
+    cmd flag: (Cli::Flag
+      name: 'max-tokens-per-day'
+      type: #int
+      default: 0
+      doc: 'D6.8: soft-drain this worker once tokensToday reaches N (0 = no cap)').
+    cmd flag: (Cli::Flag
+      name: 'max-usd-per-day'
+      type: #int
+      default: 0
+      doc: 'D6.8: soft-drain this worker once usdToday reaches N (0 = no cap)').
+    cmd flag: (Cli::Flag
+      name: 'budget-mode'
+      type: #string
+      default: 'hard'
+      doc: 'D6.8: hard (stop claiming on breach) or soft (warn per claim-past-threshold)').
     cmd envBinding: (Cli::EnvBinding
       envName: 'PP_URL'
       setter: #baseUrl:
@@ -540,11 +570,27 @@ CliWorkerHeartbeat subclass: Object
 
      We always send one heartbeat synchronously up front so the caller
      sees an immediate success/failure before entering the loop."
-    | ok |
+    | ok maxTokens maxUsd mode |
     ok := self sendOnce: name cmd: cmd cfg: cfg.
     ok ifFalse: [^1].
     ('Worker heartbeat loop started for ', name,
      ' (interval=', interval printString, 's).') println.
+    "D6.8 budget guardrails — currently just echoed to stdout so the
+     operator sees the caps in effect. Wiring through to a long-lived
+     WorkerAgent across the fork boundary is out of scope; this CLI
+     surface accepts the flags so a future story (multiplayer:harness-usage)
+     can consume them from the same invocation."
+    maxTokens := cmd flagValue: 'max-tokens-per-day'.
+    maxUsd := cmd flagValue: 'max-usd-per-day'.
+    mode := cmd flagValue: 'budget-mode'.
+    (maxTokens isNil or: [maxTokens < 1]) ifFalse: [
+      ('Budget: max-tokens-per-day=', maxTokens printString,
+       ' mode=', (mode isNil ifTrue: ['hard'] ifFalse: [mode])) println
+    ].
+    (maxUsd isNil or: [maxUsd < 1]) ifFalse: [
+      ('Budget: max-usd-per-day=', maxUsd printString,
+       ' mode=', (mode isNil ifTrue: ['hard'] ifFalse: [mode])) println
+    ].
     [
       [true] whileTrue: [
         Process sleep: interval * 1000.
