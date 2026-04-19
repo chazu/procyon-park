@@ -65,6 +65,7 @@ Dispatcher subclass: Object
     workflowEngine advance.
     ruleEngine evaluate.
     scheduler dispatch.
+    self reapExpiredClaims.
     bbs flushIfDirty.
 
     "Every 6th tick (~60s): reconciliation"
@@ -75,6 +76,109 @@ Dispatcher subclass: Object
     "Every 30th tick (~5min): housekeeping"
     (tick \\ 30) = 0 ifTrue: [
       self housekeep
+    ]
+  ]
+
+  "--- Reaper (D6.2 / D6.3) ---"
+
+  method: reapExpiredClaims [
+    "Sweep task tuples whose lease has expired. Runs every tick.
+
+     D6.3: lease expiry is the SOLE reap signal — heartbeat gaps MUST NOT
+     trigger a reap.
+     D6.2: two consecutive sweeps past claim_expires_at are required
+     before the task is re-pended or failed (missed_renewals increments
+     on each sweep; action fires when it reaches 2).
+
+     For each task tuple with status='claimed' AND claim_expires_at != nil
+     AND now > claim_expires_at:
+       (1) Atomically bump missed_renewals.
+       (2) When missed_renewals reaches 2:
+             - Bump retry_count.
+             - If retry_count >= max_retries (D6.5 default 3):
+                 status=failed, last_failure_reason=reaped, failed_at=now.
+             - Else:
+                 flip status back to pending, clear worker_id/claim_id/
+                 executed_by/claim_expires_at/renewed_at, reset
+                 missed_renewals=0.
+           Emit a reap event tuple with the previous worker_id and the
+           (new) retry_count."
+    | now tasks |
+    now := DateTime now epochSeconds.
+    tasks := bbs scanAll: 'task'.
+    tasks do: [:t |
+      | payload status expiresAt |
+      payload := t at: 'payload' ifAbsent: [Dictionary new].
+      status := payload at: 'status' ifAbsent: [''].
+      expiresAt := payload at: 'claim_expires_at' ifAbsent: [nil].
+      (status = 'claimed'
+        and: [expiresAt notNil and: [now > expiresAt]]) ifTrue: [
+          self reapTask: t now: now
+      ]
+    ]
+  ]
+
+  method: reapTask: taskTuple now: now [
+    "Process a single expired-claim task tuple. The core state change is
+     done inside BBS>>update: so the payload rewrite is atomic with the
+     status re-check (the task may have been renewed or completed between
+     scanAll: and this update). Emits the reap event outside the atomic
+     block only if an action was taken."
+    | scope taskId outcome |
+    scope := taskTuple at: 'scope'.
+    taskId := taskTuple at: 'identity'.
+    outcome := Dictionary new.
+    outcome at: 'reaped' put: false.
+    outcome at: 'terminal' put: false.
+    outcome at: 'prev_worker' put: nil.
+    outcome at: 'retry_count' put: 0.
+
+    bbs update: 'task' scope: scope identity: taskId do: [:p |
+      | status expiresAt missed max retryCount |
+      status := p at: 'status' ifAbsent: [''].
+      expiresAt := p at: 'claim_expires_at' ifAbsent: [nil].
+      (status = 'claimed'
+        and: [expiresAt notNil and: [now > expiresAt]]) ifTrue: [
+          missed := (p at: 'missed_renewals' ifAbsent: [0]) + 1.
+          p at: 'missed_renewals' put: missed.
+          missed >= 2 ifTrue: [
+            retryCount := (p at: 'retry_count' ifAbsent: [0]) + 1.
+            max := p at: 'max_retries' ifAbsent: [3].
+            outcome at: 'reaped' put: true.
+            outcome at: 'prev_worker' put: (p at: 'worker_id' ifAbsent: [nil]).
+            outcome at: 'retry_count' put: retryCount.
+            p at: 'retry_count' put: retryCount.
+            retryCount >= max ifTrue: [
+              "D6.5: exhausted retries — terminal failure."
+              p at: 'status' put: 'failed'.
+              p at: 'last_failure_reason' put: 'reaped'.
+              p at: 'failed_at' put: now.
+              outcome at: 'terminal' put: true
+            ] ifFalse: [
+              "Re-pend for another claim attempt."
+              p at: 'status' put: 'pending'.
+              p at: 'worker_id' put: nil.
+              p at: 'claim_id' put: nil.
+              p at: 'executed_by' put: nil.
+              p at: 'claim_expires_at' put: nil.
+              p at: 'renewed_at' put: nil.
+              p at: 'missed_renewals' put: 0
+            ]
+          ]
+      ]
+    ].
+
+    (outcome at: 'reaped') ifTrue: [
+      | eventPayload |
+      eventPayload := Dictionary new.
+      eventPayload at: 'type' put: 'reap'.
+      eventPayload at: 'task_id' put: taskId.
+      eventPayload at: 'worker_id' put: (outcome at: 'prev_worker').
+      eventPayload at: 'retry_count' put: (outcome at: 'retry_count').
+      eventPayload at: 'terminal' put: (outcome at: 'terminal').
+      bbs out: 'event' scope: scope
+          identity: 'reap:', taskId
+          payload: eventPayload actor: nil
     ]
   ]
 

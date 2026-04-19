@@ -1,0 +1,382 @@
+"Tests for Dispatcher>>reapExpiredClaims — D6.2 / D6.3 lease-expiry reaper.
+
+ Invariants under test:
+   RP1  First sweep against an expired claimed task increments
+        missed_renewals to 1 but takes no further action (status stays
+        claimed, retry_count unchanged).
+   RP2  Second sweep (missed_renewals already 1) against a still-expired
+        claimed task: missed_renewals reaches 2, retry_count bumps, and
+        the task is re-pended with worker_id/claim_id/executed_by/
+        claim_expires_at/renewed_at cleared and missed_renewals=0.
+   RP3  When the two-sweep threshold is reached AND retry_count would
+        meet/exceed max_retries, the task lands status=failed with
+        last_failure_reason='reaped'.
+   RP4  A reap event tuple (identity=reap:<task_id>) is emitted whenever
+        action fires, carrying the previous worker_id and the new
+        retry_count.
+   RP5  Heartbeat-age / renewal tuples MUST NOT be inspected — a claimed
+        task whose lease has NOT expired is left alone (D6.3).
+   RP6  Non-claimed statuses (pending, completed, failed) are never
+        touched by the reaper.
+   RP7  The reaper clears claim_expires_at on re-pend, so a subsequent
+        sweep immediately after the re-pend is a no-op until a new claim
+        stamps a fresh expiry."
+
+RPRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== Dispatcher Reaper Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+RPHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d /tmp/pp-test-reaper-XXXXXX'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: makeBBS [
+    ^BBS withDataDir: self makeTempDir
+  ]
+
+  classMethod: makeDispatcher: bbs [
+    "Dispatcher reaper methods only touch BBS — the harness factory and
+     scheduler/workflow/rule engines are never invoked from the reaper
+     path, so a nil factory is safe for these unit tests."
+    ^Dispatcher on: bbs harnessFactory: nil
+  ]
+
+  classMethod: seedExpiredClaim: identity worker: wid claim: cid retry: rc missed: mr onBBS: bbs [
+    "Seed a task tuple already in claimed state with claim_expires_at in
+     the past (so the reaper sees it as expired)."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: 'claimed'.
+    payload at: 'description' put: 'reapable task'.
+    payload at: 'worker_id' put: wid.
+    payload at: 'claim_id' put: cid.
+    payload at: 'executed_by' put: wid.
+    payload at: 'claim_expires_at' put: 1.
+    payload at: 'renewed_at' put: 1.
+    payload at: 'missed_renewals' put: mr.
+    payload at: 'retry_count' put: rc.
+    payload at: 'max_retries' put: 3.
+    payload at: 'last_failure_reason' put: nil.
+    bbs out: 'task' scope: 'demo-scope' identity: identity payload: payload
+        actor: 'user:alice' launchedBy: 'user:alice' executedBy: wid
+  ]
+
+  classMethod: seedLiveClaim: identity onBBS: bbs [
+    "Seed a task tuple whose lease is still in the future — the reaper
+     MUST NOT touch it."
+    | payload farFuture |
+    farFuture := DateTime now epochSeconds + 3600.
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: 'claimed'.
+    payload at: 'description' put: 'live task'.
+    payload at: 'worker_id' put: 'worker:live'.
+    payload at: 'claim_id' put: 'claim-live'.
+    payload at: 'executed_by' put: 'worker:live'.
+    payload at: 'claim_expires_at' put: farFuture.
+    payload at: 'renewed_at' put: farFuture - 100.
+    payload at: 'missed_renewals' put: 0.
+    payload at: 'retry_count' put: 0.
+    payload at: 'max_retries' put: 3.
+    bbs out: 'task' scope: 'demo-scope' identity: identity payload: payload
+        actor: 'user:alice' launchedBy: 'user:alice' executedBy: 'worker:live'
+  ]
+
+  classMethod: seedStatus: identity status: status onBBS: bbs [
+    "Seed a task tuple with an arbitrary non-claimed status."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: status.
+    payload at: 'description' put: 'non-claimed task'.
+    payload at: 'worker_id' put: nil.
+    payload at: 'claim_id' put: nil.
+    payload at: 'claim_expires_at' put: nil.
+    payload at: 'missed_renewals' put: 0.
+    payload at: 'retry_count' put: 0.
+    payload at: 'max_retries' put: 3.
+    bbs out: 'task' scope: 'demo-scope' identity: identity payload: payload
+        actor: 'user:alice' launchedBy: 'user:alice' executedBy: nil
+  ]
+
+  classMethod: findTask: identity in: bbs [
+    ^(bbs scanAll: 'task') detect: [:t | (t at: 'identity') = identity] ifNone: [nil]
+  ]
+
+  classMethod: payloadOf: identity in: bbs [
+    | t |
+    t := self findTask: identity in: bbs.
+    t isNil ifTrue: [^nil].
+    ^t at: 'payload'
+  ]
+
+  classMethod: reapEventsFor: identity in: bbs [
+    | target |
+    target := 'reap:', identity.
+    ^(bbs scanAll: 'event') select: [:e | (e at: 'identity') = target]
+  ]
+
+"=== TestReaper ==="
+TestReaper subclass: Object
+
+  classMethod: run: t [
+    self testFirstSweepIncrementsOnly: t.
+    self testSecondSweepRepends: t.
+    self testThirdReapLandsFailed: t.
+    self testReapEventEmitted: t.
+    self testLiveClaimUntouched: t.
+    self testNonClaimedUntouched: t.
+    self testRependedNoOpOnNextSweep: t
+  ]
+
+  classMethod: testFirstSweepIncrementsOnly: t [
+    | bbs dispatcher payload events |
+    '--- RP1: first sweep increments missed_renewals only ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    RPHelper seedExpiredClaim: 'rp1' worker: 'worker:w1' claim: 'c1'
+             retry: 0 missed: 0 onBBS: bbs.
+
+    dispatcher reapExpiredClaims.
+
+    payload := RPHelper payloadOf: 'rp1' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'claimed'
+      message: 'RP1: status still claimed after first sweep'.
+    t assertEqual: (payload at: 'missed_renewals') to: 1
+      message: 'RP1: missed_renewals bumped to 1'.
+    t assertEqual: (payload at: 'retry_count') to: 0
+      message: 'RP1: retry_count unchanged'.
+    t assertEqual: (payload at: 'worker_id') to: 'worker:w1'
+      message: 'RP1: worker_id still stamped'.
+    t assertEqual: (payload at: 'claim_id') to: 'c1'
+      message: 'RP1: claim_id still stamped'.
+
+    events := RPHelper reapEventsFor: 'rp1' in: bbs.
+    t assertEqual: events size to: 0
+      message: 'RP1: no reap event on first sweep'
+  ]
+
+  classMethod: testSecondSweepRepends: t [
+    | bbs dispatcher payload |
+    '--- RP2: second sweep re-pends and clears claim fields ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    "Start with missed_renewals=1 to simulate the second sweep."
+    RPHelper seedExpiredClaim: 'rp2' worker: 'worker:w2' claim: 'c2'
+             retry: 0 missed: 1 onBBS: bbs.
+
+    dispatcher reapExpiredClaims.
+
+    payload := RPHelper payloadOf: 'rp2' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'pending'
+      message: 'RP2: status flipped back to pending'.
+    t assertEqual: (payload at: 'retry_count') to: 1
+      message: 'RP2: retry_count incremented'.
+    t assertEqual: (payload at: 'missed_renewals') to: 0
+      message: 'RP2: missed_renewals reset to 0 on re-pend'.
+    t assert: ((payload at: 'worker_id') isNil)
+      message: 'RP2: worker_id cleared'.
+    t assert: ((payload at: 'claim_id') isNil)
+      message: 'RP2: claim_id cleared'.
+    t assert: ((payload at: 'executed_by') isNil)
+      message: 'RP2: executed_by cleared'.
+    t assert: ((payload at: 'claim_expires_at') isNil)
+      message: 'RP2: claim_expires_at cleared'.
+    t assert: ((payload at: 'renewed_at') isNil)
+      message: 'RP2: renewed_at cleared'.
+    t assert: ((payload at: 'last_failure_reason') isNil)
+      message: 'RP2: last_failure_reason NOT set on re-pend (only on terminal)'
+  ]
+
+  classMethod: testThirdReapLandsFailed: t [
+    | bbs dispatcher payload events evPayload |
+    '--- RP3: reap at max_retries lands status=failed cause=reaped ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    "retry_count=2, max_retries=3 (default). Second-sweep bump brings
+     retry_count to 3, which meets the threshold → terminal failure."
+    RPHelper seedExpiredClaim: 'rp3' worker: 'worker:w3' claim: 'c3'
+             retry: 2 missed: 1 onBBS: bbs.
+
+    dispatcher reapExpiredClaims.
+
+    payload := RPHelper payloadOf: 'rp3' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'failed'
+      message: 'RP3: status=failed after exhausting retries'.
+    t assertEqual: (payload at: 'retry_count') to: 3
+      message: 'RP3: retry_count bumped to max'.
+    t assertEqual: (payload at: 'last_failure_reason') to: 'reaped'
+      message: 'RP3: last_failure_reason=reaped'.
+    t assert: ((payload at: 'failed_at' ifAbsent: [nil]) notNil)
+      message: 'RP3: failed_at stamped'.
+    "Claim fields are NOT cleared on terminal failure — they're the
+     audit trail for who held the last claim."
+    t assertEqual: (payload at: 'worker_id') to: 'worker:w3'
+      message: 'RP3: worker_id preserved on terminal failure for audit'.
+
+    events := RPHelper reapEventsFor: 'rp3' in: bbs.
+    t assertEqual: events size to: 1
+      message: 'RP3: one terminal reap event emitted'.
+    evPayload := (events at: 0) at: 'payload'.
+    t assertEqual: (evPayload at: 'terminal') to: true
+      message: 'RP3: reap event payload.terminal=true'
+  ]
+
+  classMethod: testReapEventEmitted: t [
+    | bbs dispatcher events evPayload |
+    '--- RP4: reap event carries prev worker_id and retry_count ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    RPHelper seedExpiredClaim: 'rp4' worker: 'worker:w4' claim: 'c4'
+             retry: 0 missed: 1 onBBS: bbs.
+
+    dispatcher reapExpiredClaims.
+
+    events := RPHelper reapEventsFor: 'rp4' in: bbs.
+    t assertEqual: events size to: 1
+      message: 'RP4: exactly one reap event emitted on action'.
+    evPayload := (events at: 0) at: 'payload'.
+    t assertEqual: (evPayload at: 'type') to: 'reap'
+      message: 'RP4: event type=reap'.
+    t assertEqual: (evPayload at: 'task_id') to: 'rp4'
+      message: 'RP4: event carries task_id'.
+    t assertEqual: (evPayload at: 'worker_id') to: 'worker:w4'
+      message: 'RP4: event carries previous worker_id'.
+    t assertEqual: (evPayload at: 'retry_count') to: 1
+      message: 'RP4: event carries new retry_count'.
+    t assertEqual: (evPayload at: 'terminal') to: false
+      message: 'RP4: non-terminal reap reports terminal=false'
+  ]
+
+  classMethod: testLiveClaimUntouched: t [
+    | bbs dispatcher payload events |
+    '--- RP5: live (non-expired) claim left alone ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    RPHelper seedLiveClaim: 'rp5' onBBS: bbs.
+
+    dispatcher reapExpiredClaims.
+    dispatcher reapExpiredClaims.
+    dispatcher reapExpiredClaims.
+
+    payload := RPHelper payloadOf: 'rp5' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'claimed'
+      message: 'RP5: live claim remains claimed across multiple sweeps'.
+    t assertEqual: (payload at: 'missed_renewals') to: 0
+      message: 'RP5: live claim missed_renewals stays at 0 (heartbeat is NOT a signal)'.
+    t assertEqual: (payload at: 'retry_count') to: 0
+      message: 'RP5: live claim retry_count untouched'.
+
+    events := RPHelper reapEventsFor: 'rp5' in: bbs.
+    t assertEqual: events size to: 0
+      message: 'RP5: no reap event for live claim'
+  ]
+
+  classMethod: testNonClaimedUntouched: t [
+    | bbs dispatcher |
+    '--- RP6: non-claimed statuses ignored by the reaper ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    RPHelper seedStatus: 'rp6-pending' status: 'pending' onBBS: bbs.
+    RPHelper seedStatus: 'rp6-completed' status: 'completed' onBBS: bbs.
+    RPHelper seedStatus: 'rp6-failed' status: 'failed' onBBS: bbs.
+
+    dispatcher reapExpiredClaims.
+
+    t assertEqual: ((RPHelper payloadOf: 'rp6-pending' in: bbs) at: 'status') to: 'pending'
+      message: 'RP6: pending task untouched'.
+    t assertEqual: ((RPHelper payloadOf: 'rp6-completed' in: bbs) at: 'status') to: 'completed'
+      message: 'RP6: completed task untouched'.
+    t assertEqual: ((RPHelper payloadOf: 'rp6-failed' in: bbs) at: 'status') to: 'failed'
+      message: 'RP6: failed task untouched'
+  ]
+
+  classMethod: testRependedNoOpOnNextSweep: t [
+    | bbs dispatcher payload events |
+    '--- RP7: re-pended task is no-op on subsequent sweep ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    RPHelper seedExpiredClaim: 'rp7' worker: 'worker:w7' claim: 'c7'
+             retry: 0 missed: 1 onBBS: bbs.
+
+    "First sweep: re-pends (missed was 1, now 2)."
+    dispatcher reapExpiredClaims.
+    payload := RPHelper payloadOf: 'rp7' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'pending'
+      message: 'RP7: re-pended after first sweep'.
+
+    "Second sweep: claim_expires_at is nil now → no-op."
+    dispatcher reapExpiredClaims.
+    payload := RPHelper payloadOf: 'rp7' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'pending'
+      message: 'RP7: still pending after second sweep'.
+    t assertEqual: (payload at: 'retry_count') to: 1
+      message: 'RP7: retry_count not re-incremented by subsequent sweep'.
+    t assertEqual: (payload at: 'missed_renewals') to: 0
+      message: 'RP7: missed_renewals remains 0 after subsequent sweep'.
+
+    events := RPHelper reapEventsFor: 'rp7' in: bbs.
+    t assertEqual: events size to: 1
+      message: 'RP7: only one reap event despite two sweeps'
+  ]
+
+"=== Main ==="
+ReaperMain subclass: Object
+  classMethod: start [
+    | t |
+    t := RPRunner new.
+    TestReaper run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
