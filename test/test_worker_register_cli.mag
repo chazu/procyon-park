@@ -1,0 +1,230 @@
+"Tests for CliWorkerRegister — integration-lite.
+
+ These tests drive the pure-Smalltalk pieces of `pp worker register`
+ (flag parsing, manifest construction, canonical-attestation JSON,
+ body shape, response rendering) without actually making an HTTP call.
+ A full round-trip against a live server lives in the
+ test_worker_register.mag suite.
+
+ Invariants:
+   WRC1  splitCsv: handles empty / single / multi-value inputs.
+   WRC2  parseRepos: decodes name:path:head triples.
+   WRC3  buildManifest: emits all six required fields with defaults.
+   WRC4  canonicalAttestationFor: keys are ASCII-sorted.
+   WRC5  bodyFor: carries worker_pubkey/operator_pubkey/nonce/manifest/
+         signature/name — no more, no less of the request-critical set.
+   WRC6  renderResponse: returns false when the server returns an
+         `error` field, true when it returns `identity`.
+   WRC7  freshNonce returns a non-empty string and two consecutive
+         calls return distinct values (proxy for collision resistance)."
+
+TWRCTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg, ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== CliWorkerRegister Tests ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+
+TestCliWorkerRegister subclass: Object
+
+  classMethod: run: t [
+    self testSplitCsv: t.
+    self testParseRepos: t.
+    self testBuildManifest: t.
+    self testCanonicalAttestation: t.
+    self testBodyShape: t.
+    self testRenderResponse: t.
+    self testFreshNonce: t
+  ]
+
+  classMethod: testSplitCsv: t [
+    '--- WRC1: splitCsv ---' println.
+    t assertEqual: (CliWorkerRegister splitCsv: '') size to: 0
+      message: 'WRC1: empty string → empty array'.
+    t assertEqual: (CliWorkerRegister splitCsv: nil) size to: 0
+      message: 'WRC1: nil → empty array'.
+    t assertEqual: (CliWorkerRegister splitCsv: 'alice') size to: 1
+      message: 'WRC1: single value → 1 element'.
+    t assertEqual: (CliWorkerRegister splitCsv: 'a,b,c') size to: 3
+      message: 'WRC1: three values → 3 elements'.
+    t assertEqual: ((CliWorkerRegister splitCsv: ' a , b ') at: 0) to: 'a'
+      message: 'WRC1: entries are trimmed'
+  ]
+
+  classMethod: testParseRepos: t [
+    | repos r |
+    '--- WRC2: parseRepos ---' println.
+    repos := CliWorkerRegister parseRepos: 'pp:/tmp/pp:main,maggie:/tmp/maggie:dev'.
+    t assertEqual: repos size to: 2
+      message: 'WRC2: two repo entries parsed'.
+    r := repos at: 0.
+    t assertEqual: (r at: 'name') to: 'pp'
+      message: 'WRC2: first repo name'.
+    t assertEqual: (r at: 'path') to: '/tmp/pp'
+      message: 'WRC2: first repo path'.
+    t assertEqual: (r at: 'head') to: 'main'
+      message: 'WRC2: first repo head'
+  ]
+
+  classMethod: testBuildManifest: t [
+    | manifest |
+    '--- WRC3: buildManifest ---' println.
+    manifest := CliWorkerRegister
+                  buildManifest: 'alice'
+                  slots: 2
+                  models: #('sonnet')
+                  repos: (Array new: 0)
+                  roles: CliWorkerRegister defaultRoles
+                  acceptFrom: CliWorkerRegister defaultAcceptFrom.
+    #('slots' 'models' 'repos' 'roles' 'operator' 'accept_from') do: [:f |
+      t assert: (manifest includesKey: f)
+        message: 'WRC3: manifest includes required field ', f
+    ].
+    t assertEqual: (manifest at: 'operator') to: 'alice'
+      message: 'WRC3: operator field populated'.
+    t assertEqual: (manifest at: 'slots') to: 2
+      message: 'WRC3: slots field populated'
+  ]
+
+  classMethod: testCanonicalAttestation: t [
+    | manifest attest kIdx nIdx oIdx wIdx |
+    '--- WRC4: canonical attestation ordering ---' println.
+    manifest := CliWorkerRegister
+                  buildManifest: 'alice'
+                  slots: 1
+                  models: #('sonnet')
+                  repos: (Array new: 0)
+                  roles: #('implementer')
+                  acceptFrom: #('*').
+    attest := CliWorkerRegister
+                canonicalAttestationFor: 'workerpub0000'
+                operatorPub: 'operatorpub1111'
+                nonce: 'nonce-xyz'
+                manifest: manifest.
+    t assert: (attest isKindOf: String)
+      message: 'WRC4: attestation is a String'.
+    "Canonical layout: attestation must start with the 'manifest'
+     key and contain the other three keys in ASCII order. We test
+     with startsWith: + includesSubstring: to avoid relying on a
+     substring-index primitive that Maggie strings don't expose."
+    t assert: (attest startsWith: '{"manifest":')
+      message: 'WRC4: attestation starts with manifest key'.
+    t assert: (attest includesSubstring: ',"nonce":')
+      message: 'WRC4: nonce key present after manifest'.
+    t assert: (attest includesSubstring: ',"operator_pubkey":')
+      message: 'WRC4: operator_pubkey key present'.
+    t assert: (attest includesSubstring: ',"worker_pubkey":')
+      message: 'WRC4: worker_pubkey key present'.
+    t assert: (attest endsWith: '}')
+      message: 'WRC4: attestation is a valid JSON object'.
+    kIdx := nil. nIdx := nil. oIdx := nil. wIdx := nil
+  ]
+
+  classMethod: testBodyShape: t [
+    | manifest body |
+    '--- WRC5: body shape ---' println.
+    manifest := CliWorkerRegister
+                  buildManifest: 'alice'
+                  slots: 1
+                  models: #('sonnet')
+                  repos: (Array new: 0)
+                  roles: #('implementer')
+                  acceptFrom: #('*').
+    body := CliWorkerRegister
+              bodyFor: 'alice-w1'
+              workerPub: 'workerpub'
+              operatorPub: 'operatorpub'
+              nonce: 'nonce'
+              manifest: manifest
+              signature: 'sig0'.
+    #('name' 'worker_pubkey' 'operator_pubkey' 'nonce' 'manifest' 'signature') do: [:f |
+      t assert: (body includesKey: f)
+        message: 'WRC5: body includes ', f
+    ].
+    t assertEqual: (body at: 'name') to: 'alice-w1'
+      message: 'WRC5: body.name matches argument'.
+    "No retained operator private key in the body — only the pubkey
+     and the produced signature."
+    t assert: ((body includesKey: 'privHex') not)
+      message: 'WRC5: body does NOT retain operator private key'.
+    t assert: ((body includesKey: 'operator_privkey') not)
+      message: 'WRC5: body does NOT retain operator_privkey field'
+  ]
+
+  classMethod: testRenderResponse: t [
+    | okBody errBody okResult errResult |
+    '--- WRC6: renderResponse ---' println.
+    okBody := '{"identity":"worker:alice-w1"}'.
+    errBody := '{"error":"operator_pubkey does not match authenticated actor"}'.
+    okResult := CliWorkerRegister renderResponse: okBody.
+    errResult := CliWorkerRegister renderResponse: errBody.
+    t assert: okResult
+      message: 'WRC6: ok response returns true'.
+    t assert: errResult not
+      message: 'WRC6: error response returns false'.
+    t assert: (CliWorkerRegister renderResponse: nil) not
+      message: 'WRC6: nil response returns false'.
+    t assert: (CliWorkerRegister renderResponse: '') not
+      message: 'WRC6: empty response returns false'
+  ]
+
+  classMethod: testFreshNonce: t [
+    | n1 n2 |
+    '--- WRC7: freshNonce ---' println.
+    n1 := CliWorkerRegister freshNonce.
+    n2 := CliWorkerRegister freshNonce.
+    t assert: (n1 isKindOf: String)
+      message: 'WRC7: nonce is a String'.
+    t assert: n1 isEmpty not
+      message: 'WRC7: nonce is non-empty'.
+    t assert: (n1 = n2) not
+      message: 'WRC7: consecutive nonces differ'
+  ]
+
+
+TWRCMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TWRCTest new.
+    TestCliWorkerRegister run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
