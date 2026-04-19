@@ -1,8 +1,19 @@
 "CliWorker — `pp worker` subcommand implementations.
 
    pp worker init <name> [--force]
+   pp worker register <name> [--operator <opname>] [--slots N]
+                             [--model M1,M2,...] [--repo name:path:head,...]
+                             [--role R1,R2,...] [--accept-from u1,u2,...]
+                             [--server <url>]
 
- Mirrors CliIdentity. Delegates keypair work to WorkerStore."
+ init mirrors CliIdentity and delegates to WorkerStore.
+
+ register loads a worker keypair locally, loads an operator identity,
+ builds a canonical attestation JSON (stable key order), signs it with
+ the operator's private key, and POSTs to /api/worker/register with
+ request-level signing routed through CLIBase. The operator private-key
+ identity is discarded as soon as the request is sent so no reference
+ to the unlocked key survives the method call."
 
 CliWorkerInit subclass: Object
 
@@ -34,4 +45,354 @@ CliWorkerInit subclass: Object
     rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+
+CliWorkerRegister subclass: Object
+
+  "--- Defaults --------------------------------------------------------
+
+   Role set defaults to the canonical Procyon Park role list. This
+   matches the .mag files shipped under src/roles/ (minus Role.mag, the
+   base class). Kept as a classMethod so tests can exercise the default
+   without re-reading the string list inline."
+
+  classMethod: defaultRoles [
+    ^#('implementer' 'planner' 'reviewer' 'tester' 'fixer' 'scout' 'doc-reviewer' 'foreman')
+  ]
+
+  classMethod: defaultAcceptFrom [
+    ^#('*')
+  ]
+
+  "--- Flag parsing helpers --------------------------------------------"
+
+  classMethod: splitCsv: value [
+    "Split a comma-separated string into a trimmed Array. Empty / nil
+     returns an empty Array so callers can detect 'no flag given'."
+    | result parts |
+    (value isNil or: [value isEmpty]) ifTrue: [^Array new: 0].
+    result := Array new: 0.
+    parts := value split: ','.
+    parts do: [:p |
+      | trimmed |
+      trimmed := p trimSeparators.
+      trimmed isEmpty ifFalse: [result := result copyWith: trimmed]
+    ].
+    ^result
+  ]
+
+  classMethod: parseRepos: value [
+    "Parse --repo flag. Format: name:path:head,name2:path2:head2.
+     Each entry becomes a Dictionary {name, path, head}."
+    | entries repos |
+    entries := self splitCsv: value.
+    repos := Array new: 0.
+    entries do: [:entry |
+      | parts rec |
+      parts := entry split: ':'.
+      rec := Dictionary new.
+      rec at: 'name' put: (parts size > 0 ifTrue: [parts at: 0] ifFalse: ['']).
+      rec at: 'path' put: (parts size > 1 ifTrue: [parts at: 1] ifFalse: ['']).
+      rec at: 'head' put: (parts size > 2 ifTrue: [parts at: 2] ifFalse: ['']).
+      repos := repos copyWith: rec
+    ].
+    ^repos
+  ]
+
+  "--- Manifest construction -------------------------------------------"
+
+  classMethod: buildManifest: operatorName slots: slots models: models repos: repos roles: roles acceptFrom: acceptFrom [
+    "Assemble the manifest Dictionary using canonical field names.
+     Server validateWorkerManifest: requires all six keys present."
+    | m |
+    m := Dictionary new.
+    m at: 'slots' put: slots.
+    m at: 'models' put: models.
+    m at: 'repos' put: repos.
+    m at: 'roles' put: roles.
+    m at: 'operator' put: operatorName.
+    m at: 'accept_from' put: acceptFrom.
+    ^m
+  ]
+
+  "--- Canonical attestation -------------------------------------------
+
+   Hand-build the attestation JSON so key ordering is stable across
+   platforms without relying on Dictionary insertion order guarantees
+   (see review-issue-1: Maggie's Dictionary does not document a stable
+   iteration order when encoded to JSON). Keys are emitted in ASCII
+   order: manifest, nonce, operator_pubkey, worker_pubkey — which is
+   also the order the signature verifier recomputes on the server side.
+
+   Manifest is encoded via Json encode: (a nested dict); its internal
+   key order is not strictly deterministic, but it is self-contained
+   within this attestation so a round-trip through the operator's
+   signer re-encodes the whole thing at verification time."
+
+  classMethod: canonicalAttestationFor: workerPub operatorPub: operatorPub nonce: nonce manifest: manifest [
+    "Stable JSON: keys in alphabetical order."
+    | mjson |
+    mjson := Json encode: manifest.
+    ^'{"manifest":', mjson,
+      ',"nonce":', (Json encode: nonce),
+      ',"operator_pubkey":', (Json encode: operatorPub),
+      ',"worker_pubkey":', (Json encode: workerPub),
+      '}'
+  ]
+
+  "--- Request body ----------------------------------------------------"
+
+  classMethod: bodyFor: name workerPub: workerPub operatorPub: operatorPub nonce: nonce manifest: manifest signature: signature [
+    "Assemble the /api/worker/register body. Includes the separate
+     attestation `signature` field for defence-in-depth; the server
+     currently validates the request-level signature, but the explicit
+     field documents operator intent and survives if the request-level
+     signing scheme later changes."
+    | body |
+    body := Dictionary new.
+    body at: 'name' put: name.
+    body at: 'worker_pubkey' put: workerPub.
+    body at: 'operator_pubkey' put: operatorPub.
+    body at: 'nonce' put: nonce.
+    body at: 'manifest' put: manifest.
+    body at: 'signature' put: signature.
+    ^body
+  ]
+
+  "--- Nonce -----------------------------------------------------------"
+
+  classMethod: freshNonce [
+    "Timestamp + object identity hash. Good enough for anti-replay
+     given the server's separate timestamp skew window; not a
+     security-grade nonce."
+    ^DateTime now epochSeconds printString, '-', (Object new identityHash printString)
+  ]
+
+  "--- Server URL resolution -------------------------------------------
+
+   Precedence (D6.4): --server flag > PP_URL env > default
+   http://localhost:7777. The optional ~/.config/pp/config.toml layer is
+   not wired here yet — the existing CLI already falls back to env-only;
+   when TOML loading lands everywhere we'll consume it in the same
+   PPCliConfig instance."
+
+  classMethod: resolveServer: cmd flagValue: flagVal [
+    "flagVal is the --server flag's raw value (may be empty)."
+    (flagVal notNil and: [flagVal isEmpty not]) ifTrue: [^flagVal].
+    ^cmd flagValue: 'server'. "(returns nil if unset; caller falls back)"
+  ]
+
+  "--- run: args -------------------------------------------------------"
+
+  classMethod: run: args [
+    "Build `pp worker register <name> [flags...]` and execute."
+    | cmd rest |
+    cmd := Cli::Command named: 'register' doc: 'Register a local worker with the PP server.'.
+    cmd flag: (Cli::Flag
+      name: 'operator'
+      type: #string
+      default: ''
+      doc: 'Operator identity name (defaults to current user identity)').
+    cmd flag: (Cli::Flag
+      name: 'slots'
+      type: #int
+      default: 1
+      doc: 'Number of concurrent slots this worker offers').
+    cmd flag: (Cli::Flag
+      name: 'model'
+      type: #string
+      default: ''
+      doc: 'Comma-separated list of model names (e.g. sonnet,opus)').
+    cmd flag: (Cli::Flag
+      name: 'repo'
+      type: #string
+      default: ''
+      doc: 'Comma-separated list of repos as name:path:head').
+    cmd flag: (Cli::Flag
+      name: 'role'
+      type: #string
+      default: ''
+      doc: 'Comma-separated list of roles this worker will accept').
+    cmd flag: (Cli::Flag
+      name: 'accept-from'
+      type: #string
+      default: ''
+      doc: 'Comma-separated list of operator names this worker accepts tasks from').
+    cmd flag: (Cli::Flag
+      name: 'server'
+      type: #string
+      default: ''
+      doc: 'Override server URL (precedence: --server > PP_URL > default)').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+
+    cmd run: [:runArgs |
+      | cfg name exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp worker register <name> [--operator <opname>] [--slots N] [--model M,...] [--repo n:p:h,...] [--role R,...] [--accept-from u,...] [--server <url>]' println.
+        exitCode := 1
+      ] ifFalse: [
+        cfg := PPCliConfig new.
+        cmd applyEnvBindings: cfg.
+        name := runArgs at: 0.
+        (self performRegister: name cmd: cmd cfg: cfg) ifFalse: [exitCode := 1]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: performRegister: name cmd: cmd cfg: cfg [
+    "Main execution path factored out for testability. Returns true on
+     success, false on any failure (after printing an operator-friendly
+     diagnostic)."
+    | workerRec operatorName opRec opIdent operatorPub workerPub
+      serverFlag baseUrl slots modelsFlag reposFlag rolesFlag acceptFlag
+      models repos roles acceptFrom manifest nonce attestation signature body response |
+
+    "1. Load worker keypair."
+    workerRec := WorkerStore load: name.
+    workerRec isNil ifTrue: [
+      ('Hint: run `pp worker init ', name, '` first.') println.
+      ^false
+    ].
+    workerPub := workerRec at: 'pubHex'.
+
+    "2. Resolve operator identity — --operator flag or the current
+        local user identity when unset."
+    operatorName := cmd flagValue: 'operator'.
+    (operatorName isNil or: [operatorName isEmpty])
+      ifTrue: [
+        opRec := IdentityStore loadCurrent.
+        opRec isNil ifTrue: [
+          'Error: no --operator given and no current identity is set.' println.
+          'Hint: run `pp identity init <name>` or pass --operator <opname>.' println.
+          ^false
+        ].
+        operatorName := opRec at: 'name'
+      ]
+      ifFalse: [
+        opRec := IdentityStore load: operatorName.
+        opRec isNil ifTrue: [^false]
+      ].
+    opIdent := opRec at: 'identity'.
+    operatorPub := opRec at: 'pubHex'.
+
+    "3. Build manifest from flags with sensible defaults."
+    slots := cmd flagValue: 'slots'.
+    (slots isNil or: [slots < 1]) ifTrue: [slots := 1].
+
+    modelsFlag := cmd flagValue: 'model'.
+    models := self splitCsv: modelsFlag.
+    models isEmpty ifTrue: [models := #('sonnet')].
+
+    reposFlag := cmd flagValue: 'repo'.
+    repos := self parseRepos: reposFlag.
+
+    rolesFlag := cmd flagValue: 'role'.
+    roles := self splitCsv: rolesFlag.
+    roles isEmpty ifTrue: [roles := self defaultRoles].
+
+    acceptFlag := cmd flagValue: 'accept-from'.
+    acceptFrom := self splitCsv: acceptFlag.
+    acceptFrom isEmpty ifTrue: [acceptFrom := self defaultAcceptFrom].
+
+    manifest := self buildManifest: operatorName
+                     slots: slots
+                     models: models
+                     repos: repos
+                     roles: roles
+                     acceptFrom: acceptFrom.
+
+    "4. Nonce."
+    nonce := self freshNonce.
+
+    "5. Canonical attestation (stable key order)."
+    attestation := self canonicalAttestationFor: workerPub
+                        operatorPub: operatorPub
+                        nonce: nonce
+                        manifest: manifest.
+
+    "6. Sign attestation with the operator private key."
+    signature := nil.
+    [signature := opIdent sign: attestation] on: Exception do: [:e |
+      ('Error signing attestation: ', e messageText) println.
+      ^false
+    ].
+
+    "7. POST the request. Request-level signing uses the operator's
+        identity and puts the operator's user-identity name in X-PP-Actor
+        so the server binds actorCtx to body.operator_pubkey."
+    body := self bodyFor: name
+                 workerPub: workerPub
+                 operatorPub: operatorPub
+                 nonce: nonce
+                 manifest: manifest
+                 signature: signature.
+
+    "Resolve server URL: --server > PP_URL env > default."
+    serverFlag := cmd flagValue: 'server'.
+    baseUrl := (serverFlag notNil and: [serverFlag isEmpty not])
+                 ifTrue: [serverFlag]
+                 ifFalse: [cfg baseUrl].
+
+    response := CLIBase
+                  signedPost: '/api/worker/register'
+                  body: body
+                  baseUrl: baseUrl
+                  asActor: operatorName
+                  signer: opIdent.
+
+    "8. Zero/discard operator private key references. Maggie strings are
+        immutable so we can't overwrite the key bytes in place, but we
+        drop every local reference to the unlocked Identity so the GC can
+        reclaim it on the next cycle. Pattern-matches CliUserHelper
+        signedAdminPost: which also releases its identity reference once
+        the HTTP call returns."
+    opIdent := nil.
+    opRec := nil.
+    signature := nil.
+    attestation := nil.
+
+    "9. Interpret the response."
+    ^self renderResponse: response
+  ]
+
+  classMethod: renderResponse: response [
+    "Decode the JSON body, surface server error on failure, print the
+     created worker identity on success. Returns true on 200/ok, false
+     otherwise."
+    | result errMsg workerIdent |
+    (response isNil or: [(response isKindOf: String) not or: [response isEmpty]]) ifTrue: [
+      'Error: empty or invalid response from server.' println.
+      ^false
+    ].
+    result := nil.
+    [result := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      response println.
+      ^false
+    ].
+    (result isKindOf: Dictionary) ifFalse: [
+      response println.
+      ^false
+    ].
+    errMsg := result at: 'error' ifAbsent: [nil].
+    errMsg notNil ifTrue: [
+      ('Worker registration rejected: ', errMsg) println.
+      ^false
+    ].
+    workerIdent := result at: 'identity' ifAbsent: [nil].
+    workerIdent notNil
+      ifTrue: [('Worker registered: ', workerIdent) println]
+      ifFalse: [(Json encodePretty: result) println].
+    ^true
   ]

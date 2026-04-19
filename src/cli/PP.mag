@@ -297,16 +297,17 @@ PP subclass: CLIBase
   ]
 
   method: cmdWorker: args [
-    "pp worker <init> <name> [--force]
+    "pp worker <init|register> <name> [flags...]
      Delegates to the CliWorker* classes."
     | sub rest |
     args size < 2 ifTrue: [
-      'Usage: pp worker <init> <name> [--force]' println.
+      'Usage: pp worker <init|register> <name> [flags...]' println.
       ^self
     ].
     sub := args at: 1.
     rest := args size > 2 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
-    sub = 'init' ifTrue: [^CliWorkerInit run: rest].
+    sub = 'init'     ifTrue: [^CliWorkerInit run: rest].
+    sub = 'register' ifTrue: [^CliWorkerRegister run: rest].
     ('Unknown worker subcommand: ', sub) println
   ]
 
