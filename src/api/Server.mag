@@ -251,7 +251,7 @@ ApiServer subclass: Object
       ]]
     ].
     self signedRouteOnly: '/api/workflow/status' do: [:req :actorCtx | self handleWorkflowStatus: req].
-    self signedRouteOnly: '/api/workflow/cancel' do: [:req :actorCtx | self handleWorkflowCancel: req].
+    self signedRouteOnly: '/api/workflow/cancel' do: [:req :actorCtx | self handleWorkflowCancel: req actor: actorCtx].
     self signedRouteOnly: '/api/workflow/watch' do: [:req :actorCtx | self handleWorkflowWatch: req actor: actorCtx].
     self signedRouteOnly: '/api/workflow/unwatch' do: [:req :actorCtx | self handleWorkflowUnwatch: req actor: actorCtx].
     self registerTaskRoutes
@@ -1625,16 +1625,40 @@ ApiServer subclass: Object
 
   "--- Workflow Cancel ---"
 
-  method: handleWorkflowCancel: req [
-    "POST /api/workflow/cancel — cancel a running workflow and all child workflows."
-    | body wfId scope wf payload taskStatus cancelledCount d |
+  method: handleWorkflowCancel: req actor: actorCtx [
+    "POST /api/workflow/cancel — cancel a running workflow and all child workflows.
+
+     D6.15 authority rules:
+       - body.reason is required; must be non-empty after stripping whitespace.
+       - Authorized cancellers = {launched-by of workflow} ∪ {operators of
+         workers holding active claims on tasks in this workflow} ∪ admins.
+       - Any other caller → 403."
+    | body |
     body := self parseBody: req.
     body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+    ^self handleWorkflowCancelBody: body actor: actorCtx
+  ]
 
+  method: handleWorkflowCancelBody: body actor: actorCtx [
+    "Body-driven workflow cancellation (direct entry point for tests)."
+    | wfId scope reasonRaw reason wf payload taskStatus launchedBy
+      authoritySet tasks taskId opPubkey workerTuple workerPayload
+      identities identityMatch actorStr cancelledCount d |
     wfId := body at: 'workflow_id' ifAbsent: [nil].
     wfId isNil ifTrue: [^self errorResponse: 400 message: 'workflow_id required'].
 
     scope := body at: 'scope' ifAbsent: ['default'].
+
+    "D6.15: --reason is mandatory, non-empty after strip"
+    reasonRaw := body at: 'reason' ifAbsent: [nil].
+    reasonRaw isNil ifTrue: [^self errorResponse: 400 message: 'reason required'].
+    (reasonRaw isKindOf: String) ifFalse: [
+      ^self errorResponse: 400 message: 'reason must be a string'
+    ].
+    reason := reasonRaw trimBoth.
+    reason isEmpty ifTrue: [
+      ^self errorResponse: 400 message: 'reason required (non-empty after stripping whitespace)'
+    ].
 
     "Check workflow exists"
     wf := bbs rdp: 'workflow' scope: scope identity: wfId.
@@ -1647,16 +1671,75 @@ ApiServer subclass: Object
       ^self errorResponse: 409 message: 'workflow already ', taskStatus
     ].
 
+    "--- D6.15 authority computation ---"
+    actorStr := self actorOf: actorCtx.
+    (actorStr isNil or: [actorStr isEmpty]) ifTrue: [
+      ^self errorResponse: 401 message: 'authenticated actor required'
+    ].
+
+    authoritySet := Dictionary new.
+
+    "1) launched-by of the workflow"
+    launchedBy := wf at: 'launched_by' ifAbsent: [payload at: 'launched_by' ifAbsent: [nil]].
+    (launchedBy notNil and: [launchedBy isEmpty not]) ifTrue: [
+      authoritySet at: launchedBy put: true
+    ].
+
+    "2) operators of workers with active claims on tasks in this workflow.
+        Resolve: task.worker_id → worker tuple at scope=/ → operator_pubkey →
+        identity tuple (user:<name>) whose pubkey matches."
+    identities := bbs scan: 'identity' scope: '/'.
+    tasks := bbs scan: 'task' scope: scope.
+    tasks do: [:t |
+      | tp tStatus twid |
+      tp := t at: 'payload' ifAbsent: [Dictionary new].
+      ((tp at: 'workflow_instance' ifAbsent: ['']) = wfId) ifTrue: [
+        tStatus := tp at: 'status' ifAbsent: [''].
+        twid := tp at: 'worker_id' ifAbsent: [nil].
+        "An 'active claim' = task dispatched or claimed and worker_id set."
+        (tStatus = 'dispatched' and: [twid notNil and: [twid isEmpty not]]) ifTrue: [
+          workerTuple := bbs rdp: 'worker' scope: '/' identity: twid.
+          workerTuple notNil ifTrue: [
+            workerPayload := workerTuple at: 'payload' ifAbsent: [Dictionary new].
+            opPubkey := workerPayload at: 'operator_pubkey' ifAbsent: [nil].
+            (opPubkey notNil and: [opPubkey isEmpty not]) ifTrue: [
+              identityMatch := identities detect: [:id |
+                | idPayload idName |
+                idName := id at: 'identity' ifAbsent: [''].
+                idPayload := id at: 'payload' ifAbsent: [Dictionary new].
+                (idName startsWith: 'user:') and: [
+                  (idPayload at: 'pubkey' ifAbsent: [nil]) = opPubkey
+                ]
+              ] ifNone: [nil].
+              identityMatch notNil ifTrue: [
+                authoritySet at: (identityMatch at: 'identity') put: true
+              ]
+            ]
+          ]
+        ]
+      ]
+    ].
+
+    "3) Admins always authorized. Recognized via actorCtx isAdmin flag."
+    (actorCtx notNil and: [actorCtx isAdmin]) ifFalse: [
+      (authoritySet includesKey: actorStr) ifFalse: [
+        ^self errorResponse: 403 message: 'actor not authorized to cancel this workflow (D6.15)'
+      ]
+    ].
+
     "Delegate to WorkflowEngine which handles recursive child cancellation"
     dispatcher isNil ifTrue: [
       ^self errorResponse: 500 message: 'No dispatcher configured'
     ].
-    cancelledCount := dispatcher workflowEngine cancelWorkflow: wfId scope: scope.
+    cancelledCount := dispatcher workflowEngine
+      cancelWorkflow: wfId scope: scope reason: reason actor: actorStr.
 
     d := Dictionary new.
     d at: 'status' put: 'ok'.
     d at: 'workflow_id' put: wfId.
     d at: 'tasks_cancelled' put: cancelledCount.
+    d at: 'reason' put: reason.
+    d at: 'cancelled_by' put: actorStr.
     ^self okResponse: d
   ]
 

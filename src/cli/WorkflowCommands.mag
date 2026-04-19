@@ -250,10 +250,10 @@ WorkflowCommands subclass: CLIBase
   ]
 
   method: cmdWorkflowCancel: args [
-    "pp workflow cancel <workflow-id> [--scope <scope>]"
-    | wfId theScope body |
+    "pp workflow cancel <workflow-id> --reason <text> [--scope <scope>]"
+    | wfId theScope reasonArg reasonStripped body |
     args size < 3 ifTrue: [
-      'Usage: pp workflow cancel <workflow-id> [--scope <scope>]' println.
+      'Usage: pp workflow cancel <workflow-id> --reason <text> [--scope <scope>]' println.
       ^self
     ].
 
@@ -261,9 +261,17 @@ WorkflowCommands subclass: CLIBase
     theScope := self flagValue: '--scope' in: args.
     theScope isNil ifTrue: [theScope := scope].
 
+    reasonArg := self flagValue: '--reason' in: args.
+    reasonStripped := (reasonArg isNil) ifTrue: [''] ifFalse: [reasonArg trimBoth].
+    reasonStripped isEmpty ifTrue: [
+      'Error: --reason <text> is required and must be non-empty (D6.15).' println.
+      ^self
+    ].
+
     body := Dictionary new.
     body at: 'workflow_id' put: wfId.
     body at: 'scope' put: theScope.
+    body at: 'reason' put: reasonStripped.
 
     self post: '/api/workflow/cancel' body: body
   ]

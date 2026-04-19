@@ -797,10 +797,17 @@ WorkflowEngine subclass: Object
   "--- Workflow Cancellation ---"
 
   method: cancelWorkflow: instanceId scope: scope [
-    "Cancel a workflow and recursively cancel all child workflows
-     spawned by dispatch-waves. Returns the total number of tasks cancelled."
+    "Back-compat: no reason/actor attribution (legacy internal callers)."
+    ^self cancelWorkflow: instanceId scope: scope reason: nil actor: nil
+  ]
 
-    | wf payload status cancelledCount tasks taskPayload taskIdentity taskStatus signals sigId sigPayload childInstance childScope childWf childPayload childStatus |
+  method: cancelWorkflow: instanceId scope: scope reason: reason actor: actor [
+    "D6.15: Cancel a workflow and recursively cancel all child workflows
+     spawned by dispatch-waves. Emits an urgent notification to the
+     launched-by identity carrying {actor, reason, workflow_id}.
+     Returns the total number of tasks cancelled."
+
+    | wf payload status cancelledCount tasks taskPayload taskIdentity taskStatus signals sigId sigPayload childInstance childScope childWf childPayload childStatus launchedBy notifyPayload notifyScope notifyMsg notifyId |
 
     "Look up the workflow"
     wf := bbs rdp: 'workflow' scope: scope identity: instanceId.
@@ -811,10 +818,19 @@ WorkflowEngine subclass: Object
     status := payload at: 'status' ifAbsent: ['unknown'].
     (status = 'completed' or: [status = 'cancelled' or: [status = 'failed']]) ifTrue: [^0].
 
+    "Capture launched-by before mutating"
+    launchedBy := wf at: 'launched_by' ifAbsent: [payload at: 'launched_by' ifAbsent: [nil]].
+
     "Atomically update workflow to cancelled"
     bbs update: 'workflow' scope: scope identity: instanceId do: [:p |
       p at: 'status' put: 'cancelled'.
-      p at: 'cancelled_at' put: DateTime now epochSeconds
+      p at: 'cancelled_at' put: DateTime now epochSeconds.
+      (reason notNil and: [reason isEmpty not]) ifTrue: [
+        p at: 'cancel_reason' put: reason
+      ].
+      (actor notNil and: [actor isEmpty not]) ifTrue: [
+        p at: 'cancelled_by' put: actor
+      ]
     ].
 
     "Cancel pending/dispatched tasks belonging to this workflow"
@@ -834,7 +850,8 @@ WorkflowEngine subclass: Object
     ].
 
     "Cascade: find wave-child and child-spawn signals scoped to this workflow instance
-     and recursively cancel each child workflow."
+     and recursively cancel each child workflow. Reason/actor propagate so child
+     workflows' launched-by identities also receive urgent notifications."
     signals := bbs scan: 'signal' scope: instanceId.
     signals do: [:sig |
       sigId := sig at: 'identity'.
@@ -850,16 +867,48 @@ WorkflowEngine subclass: Object
             childStatus := childPayload at: 'status' ifAbsent: ['unknown'].
             (childStatus = 'completed' or: [childStatus = 'cancelled' or: [childStatus = 'failed']]) ifFalse: [
               bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Cascading cancel to child: ', childInstance, ' (parent: ', instanceId, ')').
-              cancelledCount := cancelledCount + (self cancelWorkflow: childInstance scope: childScope)
+              cancelledCount := cancelledCount + (self
+                cancelWorkflow: childInstance
+                scope: childScope
+                reason: reason
+                actor: actor)
             ]
           ]
         ]
       ]
     ].
 
-    "Emit event and notify"
+    "Emit event"
     bbs emitEvent: scope identity: (Identity workflowCancelled: instanceId) type: 'workflow-cancelled' summary: 'Workflow ', instanceId, ' cancelled'.
-    bbs notify: ('Workflow ', instanceId, ' has been cancelled') scope: scope severity: 'info'.
+
+    "D6.15: urgent notification to launched-by identity with actor+reason+workflow_id.
+     Scope the notification to the launched-by identity when present, falling back
+     to the workflow's scope otherwise. Payload carries the structured context
+     so consumers can filter by cancelling actor and reason."
+    notifyScope := (launchedBy notNil and: [launchedBy isEmpty not])
+      ifTrue: [launchedBy]
+      ifFalse: [scope].
+    notifyMsg := (reason notNil and: [reason isEmpty not])
+      ifTrue: ['Workflow ', instanceId, ' cancelled by ',
+               ((actor notNil and: [actor isEmpty not]) ifTrue: [actor] ifFalse: ['unknown']),
+               ': ', reason]
+      ifFalse: ['Workflow ', instanceId, ' has been cancelled'].
+    notifyPayload := Dictionary new.
+    notifyPayload at: 'message' put: notifyMsg.
+    notifyPayload at: 'severity' put: 'urgent'.
+    notifyPayload at: 'read' put: false.
+    notifyPayload at: 'workflow_id' put: instanceId.
+    (actor notNil and: [actor isEmpty not]) ifTrue: [
+      notifyPayload at: 'cancelled_by' put: actor
+    ].
+    (reason notNil and: [reason isEmpty not]) ifTrue: [
+      notifyPayload at: 'reason' put: reason
+    ].
+    (launchedBy notNil and: [launchedBy isEmpty not]) ifTrue: [
+      notifyPayload at: 'launched_by' put: launchedBy
+    ].
+    notifyId := 'notify-workflow-cancelled-', instanceId, '-', DateTime now epochSeconds printString.
+    bbs out: 'notification' scope: notifyScope identity: notifyId payload: notifyPayload actor: actor.
 
     "Clean up worktree directory"
     self cleanupWorktree: instanceId.
