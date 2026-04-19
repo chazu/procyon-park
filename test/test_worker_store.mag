@@ -1,0 +1,179 @@
+"Tests for WorkerStore — filesystem shell plus crypto-dependent paths.
+
+ Crypto-dependent tests rely on the Identity class delivered by
+ maggie-crypto-primitives. If that class is unavailable the test is
+ reported as skipped rather than failed."
+
+TestWorkerStore subclass: Object
+  instanceVars: passed failed skipped failures
+
+  classMethod: new [
+    | t |
+    t := super new.
+    t init.
+    ^t
+  ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    skipped := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: cryptoAvailable [
+    "Returns true if Identity>>generate is wired up."
+    | ok |
+    ok := false.
+    [Identity generate. ok := true]
+      on: Exception
+      do: [:e | ok := false].
+    ^ok
+  ]
+
+  method: uniqueName [
+    ^'tws_test_', DateTime now epochSeconds printString
+  ]
+
+  method: cleanup: name [
+    | kf pf |
+    kf := WorkerStore keyPath: name.
+    pf := WorkerStore pubPath: name.
+    (File exists: kf) ifTrue: [File delete: kf].
+    (File exists: pf) ifTrue: [File delete: pf]
+  ]
+
+  method: run [
+    self testRootPath.
+    self testKeyPath.
+    self testPubPath.
+    self cryptoAvailable ifTrue: [
+      self testInitWritesKeypair.
+      self testLoadRoundTrip.
+      self testInitWithoutForceFailsOnExisting.
+      self testListReturnsNames
+    ] ifFalse: [
+      skipped := skipped + 4.
+      'SKIP: crypto primitives not available (Identity>>generate)' println
+    ].
+    ^self report
+  ]
+
+  method: testRootPath [
+    | root |
+    root := WorkerStore rootPath.
+    self assert: (root isKindOf: String)
+      message: 'rootPath returns a String'.
+    self assert: (root endsWith: '.config/pp/worker')
+      message: 'rootPath ends with .config/pp/worker'
+  ]
+
+  method: testKeyPath [
+    | p |
+    p := WorkerStore keyPath: 'alice'.
+    self assert: (p endsWith: 'alice.key')
+      message: 'keyPath: returns <root>/<name>.key'
+  ]
+
+  method: testPubPath [
+    | p |
+    p := WorkerStore pubPath: 'alice'.
+    self assert: (p endsWith: 'alice.pub')
+      message: 'pubPath: returns <root>/<name>.pub'
+  ]
+
+  method: testInitWritesKeypair [
+    | name ok kf pf |
+    name := self uniqueName, '_write'.
+    self cleanup: name.
+    ok := WorkerStore init: name force: false.
+    kf := WorkerStore keyPath: name.
+    pf := WorkerStore pubPath: name.
+    self assert: ok
+      message: 'init: returns true on success'.
+    self assert: (File exists: kf)
+      message: 'init writes <name>.key file'.
+    self assert: (File exists: pf)
+      message: 'init writes <name>.pub file'.
+    self cleanup: name
+  ]
+
+  method: testLoadRoundTrip [
+    | name rec pubFromStore |
+    name := self uniqueName, '_load'.
+    self cleanup: name.
+    WorkerStore init: name force: false.
+    rec := WorkerStore load: name.
+    self assert: (rec notNil)
+      message: 'load: returns a record'.
+    self assert: ((rec at: 'name') = name)
+      message: 'load returns correct name'.
+    pubFromStore := WorkerStore pubkeyOf: name.
+    self assert: (pubFromStore = (rec at: 'pubHex'))
+      message: 'pubkeyOf: matches loaded pubHex'.
+    self cleanup: name
+  ]
+
+  method: testInitWithoutForceFailsOnExisting [
+    | name first second |
+    name := self uniqueName, '_force'.
+    self cleanup: name.
+    first := WorkerStore init: name force: false.
+    self assert: first
+      message: 'first init succeeds'.
+    second := WorkerStore init: name force: false.
+    self assert: (second = false)
+      message: 'second init without --force returns false'.
+    self cleanup: name
+  ]
+
+  method: testListReturnsNames [
+    | a b names foundA foundB |
+    a := self uniqueName, '_la'.
+    b := self uniqueName, '_lb'.
+    self cleanup: a.
+    self cleanup: b.
+    WorkerStore init: a force: false.
+    WorkerStore init: b force: false.
+    names := WorkerStore list.
+    foundA := names includes: a.
+    foundB := names includes: b.
+    self assert: foundA
+      message: 'list includes first created worker'.
+    self assert: foundB
+      message: 'list includes second created worker'.
+    self cleanup: a.
+    self cleanup: b
+  ]
+
+  method: report [
+    '=== WorkerStore Tests ===' println.
+    ('Passed:  ', passed printString) println.
+    ('Failed:  ', failed printString) println.
+    ('Skipped: ', skipped printString) println.
+    failed > 0 ifTrue: [
+      failures do: [:f | ('  - ', f) println]
+    ].
+    ^failed = 0
+  ]
+
+
+TestWorkerStoreMain subclass: Object
+
+  classMethod: run [
+    | t ok |
+    t := TestWorkerStore new.
+    ok := t run.
+    ok ifTrue: ['ALL TESTS PASSED' println]
+       ifFalse: ['TESTS FAILED' println.
+                 System exit: 1]
+  ]

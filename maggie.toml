@@ -17,5 +17,5 @@ output = "pp"
 
 
 [test]
-dirs = ["src", "src/bbs", "src/api", "src/cli", "src/collections", "src/dispatcher", "src/dispatcher/actions", "src/harness", "src/identity", "src/roles", "test", "test/bbs"]
+dirs = ["src", "src/bbs", "src/api", "src/cli", "src/collections", "src/dispatcher", "src/dispatcher/actions", "src/harness", "src/identity", "src/roles", "src/worker", "test", "test/bbs"]
 entry = "TestWorkflowRefactorMain.run"

@@ -1,0 +1,121 @@
+"WorkerStore — manages local worker keypairs stored under ~/.config/pp/worker.
+
+ Each worker comprises a private key file <name>.key (mode 0600) and a
+ hex-encoded public key file <name>.pub (mode 0644). Modeled on
+ IdentityStore but scoped to the worker namespace."
+
+WorkerStore subclass: Object
+
+  "--- Filesystem layout ------------------------------------------------"
+
+  classMethod: rootPath [
+    ^File join: File homeDirectory with: '.config/pp/worker'
+  ]
+
+  classMethod: ensureDir [
+    | root |
+    root := self rootPath.
+    (File exists: root) ifFalse: [File createDirectory: root].
+    ^root
+  ]
+
+  classMethod: keyPath: name [
+    ^File join: self rootPath with: name, '.key'
+  ]
+
+  classMethod: pubPath: name [
+    ^File join: self rootPath with: name, '.pub'
+  ]
+
+  "--- init: name force: aBool ------------------------------------------
+
+   Generate a new keypair for `name` and persist it under the worker
+   root. Refuses to overwrite unless force is true. Prints the new
+   public-key hex on success. Returns true on success, false when refused."
+
+  classMethod: init: name force: aBool [
+    | keyFile pubFile ident pub priv |
+    self ensureDir.
+    keyFile := self keyPath: name.
+    pubFile := self pubPath: name.
+
+    ((File exists: keyFile) and: [aBool not]) ifTrue: [
+      ('Error: worker already exists: ', keyFile) println.
+      ('Use --force to overwrite (existing key will be lost).') println.
+      ^false
+    ].
+
+    ident := Identity generate.
+    priv := ident privHex.
+    pub := ident pubHex.
+
+    File writeFileContents: keyFile contents: priv mode: 8r600.
+    File writeFileContents: pubFile contents: pub mode: 8r644.
+
+    ('Worker created: ', name) println.
+    ('  pubkey: ', pub) println.
+    ^true
+  ]
+
+  "--- load: name --------------------------------------------------------
+
+   Load a worker record. Returns a Dictionary with keys
+     name, privHex, pubHex, identity
+   or prints an error and returns nil if the files are missing."
+
+  classMethod: load: name [
+    | keyFile pubFile priv pub ident result |
+    keyFile := self keyPath: name.
+    pubFile := self pubPath: name.
+
+    (File exists: keyFile) ifFalse: [
+      ('Error: no worker named ', name, ' (missing ', keyFile, ')') println.
+      ^nil
+    ].
+    (File exists: pubFile) ifFalse: [
+      ('Error: public key file missing: ', pubFile) println.
+      ^nil
+    ].
+
+    priv := (File readFileContents: keyFile) trimSeparators.
+    pub := (File readFileContents: pubFile) trimSeparators.
+
+    ident := Identity fromPrivHex: priv.
+
+    result := Dictionary new.
+    result at: 'name' put: name.
+    result at: 'privHex' put: priv.
+    result at: 'pubHex' put: pub.
+    result at: 'identity' put: ident.
+    ^result
+  ]
+
+  "--- list --------------------------------------------------------------
+
+   Returns an Array of worker names (stems of *.key files) stored
+   locally. Empty if the directory does not yet exist."
+
+  classMethod: list [
+    | names |
+    names := Array new: 0.
+    (File exists: self rootPath) ifFalse: [^names].
+    (File listDirectory: self rootPath) do: [:entry |
+      (entry endsWith: '.key') ifTrue: [
+        (entry endsWith: '.key.bak') ifFalse: [
+          names := names copyWith: (entry copyFrom: 0 to: entry size - 4)
+        ]
+      ]
+    ].
+    ^names
+  ]
+
+  "--- pubkeyOf: name ----------------------------------------------------
+
+   Returns the hex-encoded public key for `name`, or nil if missing."
+
+  classMethod: pubkeyOf: name [
+    | pubFile |
+    pubFile := self pubPath: name.
+    (File exists: pubFile) ifFalse: [^nil].
+    ^(File readFileContents: pubFile) trimSeparators
+  ]
