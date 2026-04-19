@@ -42,6 +42,7 @@ PP subclass: CLIBase
       args do: [:a | wtArgs := wtArgs copyWith: a].
       ^Repo new runWith: wtArgs
     ].
+    cmd = 'identity'  ifTrue: [^self cmdIdentity: args].
     cmd = 'help'      ifTrue: [^self printUsage].
 
     ('Unknown command: ', cmd) println.
@@ -274,6 +275,23 @@ PP subclass: CLIBase
     self post: '/api/signal' body: body
   ]
 
+  method: cmdIdentity: args [
+    "pp identity <init|show|rotate|list> ...
+     Delegates to the CliIdentity* classes regardless of PP_USE_CLI."
+    | sub rest baseUrl |
+    args size < 2 ifTrue: [
+      'Usage: pp identity <init|show|rotate|list> [args...]' println.
+      ^self
+    ].
+    sub := args at: 1.
+    rest := args size > 2 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
+    sub = 'init'   ifTrue: [^CliIdentityInit run: rest].
+    sub = 'show'   ifTrue: [^CliIdentityShow run: rest].
+    sub = 'rotate' ifTrue: [^CliIdentityRotate run: rest].
+    sub = 'list'   ifTrue: [^CliIdentityList run: rest].
+    ('Unknown identity subcommand: ', sub) println
+  ]
+
   method: printUsage [
     'Procyon Park CLI' println.
     '' println.
@@ -300,6 +318,7 @@ PP subclass: CLIBase
     '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
     '  session  [<taskId>]                              View Claude Code session logs' println.
     '  usage    [<taskId>]                              Report current session token consumption' println.
+    '  identity <init|show|rotate|list> [args...]       Manage local keypairs' println.
     '  help                                             Show this help' println.
     '' println.
     'Environment:' println.

@@ -1,0 +1,273 @@
+"IdentityStore — manages local agent keypairs stored under ~/.config/pp/identity.
+
+ Each identity comprises a private key file <name>.key (mode 0600) and a
+ hex-encoded public key file <name>.pub (mode 0644). A `current` pointer
+ file names the default identity used for signing when no -i flag is given.
+
+ This class depends on the crypto primitives delivered by the
+ `multiplayer:maggie-crypto-primitives` story:
+
+   Identity generate          -- create a new Ed25519 keypair
+   <identity> privHex         -- hex-encoded 32-byte private key
+   <identity> pubHex          -- hex-encoded 32-byte public key
+   <identity> proquint        -- human-friendly public-key mnemonic
+   <identity> sign: aString   -- returns hex-encoded Ed25519 signature
+   File writeFileContents:contents:mode:  -- write with Unix file mode
+   HttpClient post:body:contentType:headers: -- POST with custom headers
+
+ Until those primitives land, the commands referencing them will raise
+ doesNotUnderstand at runtime; the surrounding shell (init/show/list and
+ filesystem layout) works immediately."
+
+IdentityStore subclass: Object
+
+  "--- Filesystem layout ------------------------------------------------"
+
+  classMethod: rootPath [
+    ^File join: File homeDirectory with: '.config/pp/identity'
+  ]
+
+  classMethod: ensureDir [
+    | root |
+    root := self rootPath.
+    (File exists: root) ifFalse: [File createDirectory: root].
+    ^root
+  ]
+
+  classMethod: keyPath: name [
+    ^File join: self rootPath with: name, '.key'
+  ]
+
+  classMethod: pubPath: name [
+    ^File join: self rootPath with: name, '.pub'
+  ]
+
+  classMethod: currentPath [
+    ^File join: self rootPath with: 'current'
+  ]
+
+  "--- init: name force: aBool ------------------------------------------
+
+   Generate a new keypair for `name` and persist it under the identity
+   root. Refuses to overwrite unless force is true. Sets the `current`
+   pointer file to `name` if it does not already exist. Prints the new
+   public-key hex and its proquint rendering on success. Returns true on
+   success, false when refused."
+
+  classMethod: init: name force: aBool [
+    | keyFile pubFile currentFile ident pub priv |
+    self ensureDir.
+    keyFile := self keyPath: name.
+    pubFile := self pubPath: name.
+    currentFile := self currentPath.
+
+    ((File exists: keyFile) and: [aBool not]) ifTrue: [
+      ('Error: identity already exists: ', keyFile) println.
+      ('Use --force to overwrite (existing key will be lost).') println.
+      ^false
+    ].
+
+    ident := Identity generate.
+    priv := ident privHex.
+    pub := ident pubHex.
+
+    "Write the private key with restrictive permissions."
+    File writeFileContents: keyFile contents: priv mode: 8r600.
+    File writeFileContents: pubFile contents: pub mode: 8r644.
+
+    "Set the current pointer when unset so first-init wins."
+    (File exists: currentFile) ifFalse: [
+      File writeFileContents: currentFile contents: name mode: 8r644
+    ].
+
+    ('Identity created: ', name) println.
+    ('  pubkey:   ', pub) println.
+    ('  proquint: ', ident proquint) println.
+    ^true
+  ]
+
+  "--- load: name --------------------------------------------------------
+
+   Load an identity record. Returns a Dictionary with keys
+     name, privHex, pubHex, proquint
+   or prints an error and returns nil if the files are missing."
+
+  classMethod: load: name [
+    | keyFile pubFile priv pub ident result |
+    keyFile := self keyPath: name.
+    pubFile := self pubPath: name.
+
+    (File exists: keyFile) ifFalse: [
+      ('Error: no identity named ', name, ' (missing ', keyFile, ')') println.
+      ^nil
+    ].
+    (File exists: pubFile) ifFalse: [
+      ('Error: public key file missing: ', pubFile) println.
+      ^nil
+    ].
+
+    priv := (File readFileContents: keyFile) trimSeparators.
+    pub := (File readFileContents: pubFile) trimSeparators.
+
+    ident := Identity fromPrivHex: priv.
+
+    result := Dictionary new.
+    result at: 'name' put: name.
+    result at: 'privHex' put: priv.
+    result at: 'pubHex' put: pub.
+    result at: 'proquint' put: ident proquint.
+    result at: 'identity' put: ident.
+    ^result
+  ]
+
+  "--- loadCurrent -------------------------------------------------------
+
+   Resolve the active identity. Prefers the ~/.config/pp/identity/current
+   pointer; falls back to the first *.key file found in the directory."
+
+  classMethod: loadCurrent [
+    | currentFile name entries |
+    currentFile := self currentPath.
+    (File exists: currentFile) ifTrue: [
+      name := (File readFileContents: currentFile) trimSeparators.
+      name isEmpty ifFalse: [^self load: name]
+    ].
+    "Fall back — first .key file (alphabetically) wins."
+    (File exists: self rootPath) ifFalse: [^nil].
+    entries := File listDirectory: self rootPath.
+    entries do: [:entry |
+      (entry endsWith: '.key') ifTrue: [
+        | stem |
+        stem := entry copyFrom: 0 to: entry size - 4.
+        ^self load: stem
+      ]
+    ].
+    ^nil
+  ]
+
+  "--- listNames ---------------------------------------------------------
+
+   Returns an Array of identity names (stems of *.key files) stored
+   locally. Empty if the directory does not yet exist."
+
+  classMethod: listNames [
+    | names |
+    names := Array new: 0.
+    (File exists: self rootPath) ifFalse: [^names].
+    (File listDirectory: self rootPath) do: [:entry |
+      (entry endsWith: '.key') ifTrue: [
+        (entry endsWith: '.key.bak') ifFalse: [
+          names := names copyWith: (entry copyFrom: 0 to: entry size - 4)
+        ]
+      ]
+    ].
+    ^names
+  ]
+
+  "--- show: name --------------------------------------------------------"
+
+  classMethod: show: name [
+    | rec |
+    rec := self load: name.
+    rec isNil ifTrue: [^false].
+    ('name:     ', (rec at: 'name')) println.
+    ('pubkey:   ', (rec at: 'pubHex')) println.
+    ('proquint: ', (rec at: 'proquint')) println.
+    ^true
+  ]
+
+  "--- attestation helpers ----------------------------------------------
+
+   Exposed as classMethods so unit tests can exercise the canonical JSON
+   construction without hitting the network."
+
+  classMethod: rotationAttestationOld: oldPub new: newPub ts: ts [
+    "Build the canonical JSON signed when rotating a keypair. The key
+     order is fixed so signatures remain reproducible across platforms."
+    | dict |
+    dict := Dictionary new.
+    dict at: 'old_pub' put: oldPub.
+    dict at: 'new_pub' put: newPub.
+    dict at: 'ts' put: ts.
+    ^Json encode: dict
+  ]
+
+  classMethod: rotationRequestFor: oldPub newPub: newPub signature: sig ts: ts [
+    "Build the full /api/user/rotate request body."
+    | body |
+    body := Dictionary new.
+    body at: 'old_pub' put: oldPub.
+    body at: 'new_pub' put: newPub.
+    body at: 'ts' put: ts.
+    body at: 'signature' put: sig.
+    ^body
+  ]
+
+  "--- rotate: name ------------------------------------------------------
+
+   Rotate the keypair for `name`: generate a new keypair locally, sign
+   an attestation with the OLD key, POST it to /api/user/rotate, and on
+   2xx overwrite the on-disk key files. The old key is preserved as
+   <name>.key.bak for recovery."
+
+  classMethod: rotate: name baseUrl: baseUrl [
+    | oldRec oldIdent newIdent oldPub newPub ts attest sig body json client response status |
+    oldRec := self load: name.
+    oldRec isNil ifTrue: [^false].
+
+    oldIdent := oldRec at: 'identity'.
+    oldPub := oldRec at: 'pubHex'.
+    newIdent := Identity generate.
+    newPub := newIdent pubHex.
+    ts := DateTime now epochSeconds printString.
+
+    attest := self rotationAttestationOld: oldPub new: newPub ts: ts.
+    sig := oldIdent sign: attest.
+    body := self rotationRequestFor: oldPub newPub: newPub signature: sig ts: ts.
+    json := Json encode: body.
+
+    client := HttpClient new.
+    [
+      response := client post: baseUrl, '/api/user/rotate' body: json contentType: 'application/json'.
+    ] on: Exception do: [:e |
+      ('Error posting rotation: ', e messageText) println.
+      ^false
+    ].
+
+    "The rotate endpoint is expected to return a JSON body with a
+     `status` field. If decode fails we conservatively abort."
+    status := nil.
+    [
+      | decoded |
+      (response notNil and: [response isEmpty not]) ifTrue: [
+        decoded := Json decode: response.
+        status := decoded at: 'status' ifAbsent: [nil]
+      ]
+    ] on: Exception do: [:e | status := nil].
+
+    (status = 'ok' or: [status = 'success' or: [status = 'accepted']]) ifFalse: [
+      ('Rotation rejected by server (status=', status printString, ')') println.
+      response notNil ifTrue: [response println].
+      ^false
+    ].
+
+    "Server accepted the rotation — atomically swap the on-disk keys."
+    self swapKeysFor: name toPriv: newIdent privHex pub: newPub.
+    ('Identity rotated: ', name) println.
+    ('  pubkey:   ', newPub) println.
+    ('  proquint: ', newIdent proquint) println.
+    ^true
+  ]
+
+  classMethod: swapKeysFor: name toPriv: newPriv pub: newPub [
+    "Move current key files aside and write the rotated pair."
+    | keyFile pubFile backup |
+    keyFile := self keyPath: name.
+    pubFile := self pubPath: name.
+    backup := keyFile, '.bak'.
+    (File exists: backup) ifTrue: [File delete: backup].
+    (File exists: keyFile) ifTrue: [File rename: keyFile to: backup].
+    File writeFileContents: keyFile contents: newPriv mode: 8r600.
+    File writeFileContents: pubFile contents: newPub mode: 8r644.
+    ^self
+  ]
