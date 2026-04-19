@@ -82,6 +82,7 @@ CliPP subclass: Object
     head = 'dismiss'  ifTrue: [^true].
     head = 'read'     ifTrue: [^true].
     head = 'history'  ifTrue: [^true].
+    head = 'audit'    ifTrue: [^true].
     head = 'workflow' ifTrue: [^true].
     head = 'workitem' ifTrue: [^true].
     head = 'repo'     ifTrue: [^true].
@@ -114,6 +115,7 @@ CliPP subclass: Object
     head = 'dismiss'  ifTrue: [^self runDismiss: args].
     head = 'read'     ifTrue: [^self runRead: args].
     head = 'history'  ifTrue: [^self runHistory: args].
+    head = 'audit'    ifTrue: [^self runAudit: args].
     head = 'workitem' ifTrue: [^self runWorkitem: args].
     head = 'repo'     ifTrue: [^self runRepo: args].
     head = 'worktree' ifTrue: [^self runWorktree: args].
@@ -2045,6 +2047,246 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     ] on: Exception do: [:e |
       ('Error: ', e messageText) println
     ]
+  ]
+
+  "--- Subcommand: audit ---------------------------------------------------"
+
+  classMethod: runAudit: args [
+    "Build, configure, and dispatch the `pp audit` command.
+
+     Exactly one of --actor / --worker / --workflow must be supplied.
+     The command POSTs /api/scan with the matching filter key and
+     renders the results via Cli::Output table:headers:keys:.
+
+       --actor <name>    roll-up across observation, decision, event,
+                         task, workflow, signal categories, grouped by
+                         CATEGORY / WORKFLOW.
+       --worker <id>     task rows filtered by payload.executed_by;
+                         includes token/time totals when present and
+                         prints an informative empty notice when
+                         no executed_by stamp is set (pre multiplayer:claim).
+       --workflow <id>   lineage of a workflow instance — launcher
+                         (from launched_by) + tasks + observations +
+                         decisions attributed to it."
+    | cmd cfg rest |
+    cmd := Cli::Command named: 'audit' doc: 'Roll up provenance by actor / worker / workflow'.
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_SCOPE'
+      setter: #scope:
+      type: #string
+      default: 'default').
+
+    cmd flag: (Cli::Flag
+      name: 'actor'
+      type: #string
+      default: ''
+      doc: 'Actor name (bare -> user:<name>) to roll up').
+    cmd flag: (Cli::Flag
+      name: 'worker'
+      type: #string
+      default: ''
+      doc: 'Worker id (worker:<name>) to roll up').
+    cmd flag: (Cli::Flag
+      name: 'workflow'
+      type: #string
+      default: ''
+      doc: 'Workflow instance id to roll up').
+
+    cfg := PPCliConfig new.
+
+    cmd run: [:runArgs |
+      | actor worker workflow modeCount exitCode |
+      cmd applyEnvBindings: cfg.
+      actor := cmd flagValue: 'actor'.
+      worker := cmd flagValue: 'worker'.
+      workflow := cmd flagValue: 'workflow'.
+      modeCount := 0.
+      (actor notNil and: [actor isEmpty not]) ifTrue: [modeCount := modeCount + 1].
+      (worker notNil and: [worker isEmpty not]) ifTrue: [modeCount := modeCount + 1].
+      (workflow notNil and: [workflow isEmpty not]) ifTrue: [modeCount := modeCount + 1].
+      exitCode := 0.
+      modeCount = 1 ifFalse: [
+        'Error: pp audit requires exactly one of --actor, --worker, or --workflow.' println.
+        'Usage: pp audit (--actor <name> | --worker <id> | --workflow <instance>)' println.
+        exitCode := 1
+      ] ifTrue: [
+        (actor notNil and: [actor isEmpty not]) ifTrue: [
+          self performAuditActor: cfg name: actor
+        ] ifFalse: [
+          (worker notNil and: [worker isEmpty not]) ifTrue: [
+            self performAuditWorker: cfg id: worker
+          ] ifFalse: [
+            self performAuditWorkflow: cfg id: workflow
+          ]
+        ]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: normalizeActor: name [
+    "Accept either a bare name or a fully-qualified 'user:<name>' and
+     return the user:-prefixed form used by applyScanFilters."
+    (name startsWith: 'user:') ifTrue: [^name].
+    ^'user:', name
+  ]
+
+  classMethod: auditScan: cfg category: category filterKey: filterKey value: value [
+    "POST /api/scan with an optional actor/worker/workflow filter.
+     /api/scan is intentionally unsigned per F1.4/NF6, so we route
+     through the unauthedPost helper rather than signedPost.
+     Returns the (possibly empty) tuples array."
+    | body response result |
+    body := Dictionary new.
+    body at: 'category' put: category.
+    body at: filterKey put: value.
+    response := self unauthedPost: '/api/scan' body: body cfg: cfg.
+    response isNil ifTrue: [^Array new: 0].
+    [
+      result := Json decode: response.
+      ^result at: 'tuples' ifAbsent: [Array new: 0]
+    ] on: Exception do: [:e | ^Array new: 0]
+  ]
+
+  classMethod: performAuditActor: cfg name: rawName [
+    "Scan each attribution-bearing category filtered by actor=user:<name>
+     and render one aggregated table keyed by CATEGORY / WORKFLOW / ID."
+    | actor categories rows allEmpty |
+    actor := self normalizeActor: rawName.
+    ('Audit: actor=', actor) println.
+    '' println.
+    categories := #('observation' 'decision' 'event' 'task' 'workflow' 'signal').
+    rows := Array new: 0.
+    allEmpty := true.
+    categories do: [:cat |
+      | tuples |
+      tuples := self auditScan: cfg category: cat filterKey: 'actor' value: actor.
+      tuples isEmpty ifFalse: [allEmpty := false].
+      tuples do: [:t |
+        | payload row wf |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        wf := payload at: 'workflow_instance' ifAbsent: [''].
+        row := Dictionary new.
+        row at: 'category' put: cat.
+        row at: 'scope' put: (t at: 'scope' ifAbsent: ['']).
+        row at: 'workflow' put: wf.
+        row at: 'identity' put: (t at: 'identity' ifAbsent: ['']).
+        row at: 'ts' put: (t at: 'created_at' ifAbsent: ['?']) printString.
+        rows := rows copyWith: row
+      ]
+    ].
+    allEmpty ifTrue: [
+      ('No tuples attributed to ', actor, '.') println.
+      ^self
+    ].
+    Cli::Output
+      table: rows
+      headers: #('CATEGORY' 'SCOPE' 'WORKFLOW' 'IDENTITY' 'TS')
+      keys: #('category' 'scope' 'workflow' 'identity' 'ts')
+  ]
+
+  classMethod: performAuditWorker: cfg id: rawWorker [
+    "Task-centric roll-up for a single worker id. payload.executed_by
+     is only stamped once multiplayer:claim lands, so it is legitimate
+     for this table to be empty today — we say so explicitly rather
+     than emit a silent empty table."
+    | worker tasks rows totalTokens totalSeconds |
+    worker := rawWorker.
+    ('Audit: worker=', worker) println.
+    '' println.
+    tasks := self auditScan: cfg category: 'task' filterKey: 'worker' value: worker.
+    rows := Array new: 0.
+    totalTokens := 0.
+    totalSeconds := 0.
+    tasks do: [:t |
+      | payload row toks secs |
+      payload := t at: 'payload' ifAbsent: [Dictionary new].
+      toks := payload at: 'tokens_used' ifAbsent: [0].
+      secs := payload at: 'seconds_used' ifAbsent: [0].
+      (toks isKindOf: Integer) ifTrue: [totalTokens := totalTokens + toks].
+      (secs isKindOf: Integer) ifTrue: [totalSeconds := totalSeconds + secs].
+      row := Dictionary new.
+      row at: 'identity' put: (t at: 'identity' ifAbsent: ['']).
+      row at: 'scope' put: (t at: 'scope' ifAbsent: ['']).
+      row at: 'workflow' put: (payload at: 'workflow_instance' ifAbsent: ['']).
+      row at: 'role' put: (payload at: 'role' ifAbsent: ['']).
+      row at: 'status' put: (payload at: 'status' ifAbsent: ['']).
+      row at: 'tokens' put: toks printString.
+      row at: 'seconds' put: secs printString.
+      rows := rows copyWith: row
+    ].
+    tasks isEmpty ifTrue: [
+      ('No tasks stamped with executed_by=', worker, '.') println.
+      'Note: executed_by provenance is set by multiplayer:claim; without claim no tasks will match.' println.
+      ^self
+    ].
+    Cli::Output
+      table: rows
+      headers: #('IDENTITY' 'SCOPE' 'WORKFLOW' 'ROLE' 'STATUS' 'TOKENS' 'SECONDS')
+      keys: #('identity' 'scope' 'workflow' 'role' 'status' 'tokens' 'seconds').
+    '' println.
+    ('Totals: tokens=', totalTokens printString, '  seconds=', totalSeconds printString) println
+  ]
+
+  classMethod: performAuditWorkflow: cfg id: wfId [
+    "Lineage view for a single workflow instance. Shows the launcher
+     (from the workflow tuple's launched_by stamp), its tasks, and any
+     observation/decision tuples that named the workflow_instance."
+    | wfScope wf launcher categories rows emptyAll |
+    ('Audit: workflow=', wfId) println.
+    '' println.
+    wfScope := self findWorkflowScope: cfg id: wfId.
+    wf := wfScope notNil ifTrue: [
+      self safeRdp: cfg category: 'workflow' scope: wfScope identity: wfId
+    ] ifFalse: [nil].
+    wf notNil ifTrue: [
+      launcher := wf at: 'launched_by' ifAbsent: ['(unstamped)'].
+      ('  scope:       ', wfScope) println.
+      ('  launched_by: ', launcher) println.
+      ('  template:    ', ((wf at: 'payload' ifAbsent: [Dictionary new]) at: 'template' ifAbsent: ['?'])) println.
+      ('  status:      ', ((wf at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: ['?'])) println.
+      '' println
+    ] ifFalse: [
+      'Workflow tuple not found; showing best-effort filter results.' println.
+      '' println
+    ].
+    categories := #('task' 'observation' 'decision').
+    rows := Array new: 0.
+    emptyAll := true.
+    categories do: [:cat |
+      | tuples |
+      tuples := self auditScan: cfg category: cat filterKey: 'workflow' value: wfId.
+      tuples isEmpty ifFalse: [emptyAll := false].
+      tuples do: [:t |
+        | payload row |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        row := Dictionary new.
+        row at: 'category' put: cat.
+        row at: 'identity' put: (t at: 'identity' ifAbsent: ['']).
+        row at: 'actor' put: (t at: 'actor' ifAbsent: [payload at: 'actor' ifAbsent: ['']]).
+        row at: 'executed_by' put: (t at: 'executed_by' ifAbsent: [payload at: 'executed_by' ifAbsent: ['']]).
+        row at: 'role' put: (payload at: 'role' ifAbsent: ['']).
+        row at: 'status' put: (payload at: 'status' ifAbsent: ['']).
+        rows := rows copyWith: row
+      ]
+    ].
+    emptyAll ifTrue: [
+      'No task/observation/decision tuples reference this workflow_instance.' println.
+      ^self
+    ].
+    Cli::Output
+      table: rows
+      headers: #('CATEGORY' 'IDENTITY' 'ACTOR' 'EXECUTED_BY' 'ROLE' 'STATUS')
+      keys: #('category' 'identity' 'actor' 'executed_by' 'role' 'status')
   ]
 
   "--- Subcommand: workitem (parent + children) ----------------------------"

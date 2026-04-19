@@ -7,7 +7,7 @@ Main subclass: Object
   classMethod: ppCommands [
     "Commands that route to PP (thin HTTP client)."
     ^#('observe' 'decide' 'event' 'plan' 'read' 'notify' 'dismiss'
-       'status' 'prime' 'task' 'workflow' 'signal' 'verdict' 'log' 'history' 'dashboard'
+       'status' 'prime' 'task' 'workflow' 'signal' 'verdict' 'log' 'history' 'audit' 'dashboard'
        'workitem' 'gc' 'session' 'usage' 'identity' 'worker' 'user')
   ]
 
@@ -110,6 +110,7 @@ Main subclass: Object
     '  clean-branches [--dry-run] [--all]             Remove stale branches' println.
     '  log      [--since <secs>] [--no-follow]        Tail notification stream' println.
     '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
+    '  audit    (--actor <name> | --worker <id> | --workflow <id>) Roll up provenance by actor/worker/workflow' println.
     '  dashboard                                      Open web dashboard in browser' println.
     '  workitem create|show|list|update|run|plan|review  Manage work items' println.
     '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.

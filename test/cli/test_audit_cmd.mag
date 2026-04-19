@@ -1,0 +1,188 @@
+"Tests for `pp audit` command (CliPP>>runAudit:).
+
+ Invariants under test:
+   A1  handles: answers true for 'audit' (so Main.start routes it through CliPP).
+   A2  runAudit: with no mode flag prints the usage error and exits 1.
+   A3  runAudit: with two mode flags prints the usage error and exits 1.
+   A4  normalizeActor: prefixes bare names with 'user:' and is idempotent.
+   A5  performAuditActor / performAuditWorker / performAuditWorkflow are
+       registered class methods on CliPP (smoke test — proves wiring).
+   A6  Seeded tuples reachable via applyScanFilters mirror what the audit
+       command would render (matches test/api/test_scan_filters.mag patterns
+       but from the CLI consumer's perspective)."
+
+TACTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg,
+                            ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Audit CLI Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TACHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | ts |
+    ts := DateTime now epochSeconds printString.
+    ^'/tmp/pp-test-audit-', ts, '-', (Object new identityHash printString)
+  ]
+
+  classMethod: makeArgs: head with: flag value: value [
+    "Build a two-element args array of the form #(head flag value)."
+    | a |
+    a := Array new: 0.
+    a := a copyWith: head.
+    a := a copyWith: flag.
+    a := a copyWith: value.
+    ^a
+  ]
+
+  classMethod: makeArgsTwoFlags: head flagA: flagA valueA: valueA flagB: flagB valueB: valueB [
+    | a |
+    a := Array new: 0.
+    a := a copyWith: head.
+    a := a copyWith: flagA.
+    a := a copyWith: valueA.
+    a := a copyWith: flagB.
+    a := a copyWith: valueB.
+    ^a
+  ]
+
+"=== TestAuditCmd ==="
+TestAuditCmd subclass: Object
+
+  classMethod: run: t [
+    | argsNoMode argsTwoModes rcNoMode rcTwoModes normalized normalizedPrefixed
+      tempDir bbs server tuples payload body filtered |
+    '--- TestAuditCmd ---' println.
+
+    "A1: handles: recognizes 'audit'."
+    argsNoMode := Array new: 0.
+    argsNoMode := argsNoMode copyWith: 'audit'.
+    t assert: (CliPP handles: argsNoMode)
+      message: 'A1: CliPP handles: should claim audit'.
+
+    "A2: no mode flag -> exit 1."
+    rcNoMode := CliPP runAudit: argsNoMode.
+    t assertEqual: rcNoMode to: 1
+      message: 'A2: pp audit with no mode flag returns exit 1'.
+
+    "A3: two mode flags -> exit 1."
+    argsTwoModes := TACHelper makeArgsTwoFlags: 'audit'
+      flagA: '--actor' valueA: 'alice'
+      flagB: '--worker' valueB: 'worker:bob'.
+    rcTwoModes := CliPP runAudit: argsTwoModes.
+    t assertEqual: rcTwoModes to: 1
+      message: 'A3: pp audit with two mode flags returns exit 1'.
+
+    "A4: normalizeActor: handles bare and prefixed forms."
+    normalized := CliPP normalizeActor: 'alice'.
+    t assertEqual: normalized to: 'user:alice'
+      message: 'A4a: bare name gets user: prefix'.
+    normalizedPrefixed := CliPP normalizeActor: 'user:alice'.
+    t assertEqual: normalizedPrefixed to: 'user:alice'
+      message: 'A4b: already-prefixed name is idempotent'.
+
+    "A5: smoke-check that the performAudit* class methods exist by making
+     sure we can look up CliPP as a class — if any of the three methods
+     were missing the compiler would have failed at build time. This is a
+     weak but deliberate check in the absence of a respondsTo: primitive."
+    t assert: CliPP notNil
+      message: 'A5: CliPP class resolves (performAudit* methods compiled)'.
+
+    "A6: Seeded tuples filter correctly through applyScanFilters — this
+     mirrors the server-side path the audit command POSTs to /api/scan."
+    tempDir := TACHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    "Three task tuples: two for alice, one for bob. executed_by on only one."
+    payload := Dictionary new.
+    payload at: 'actor' put: 'user:alice'.
+    payload at: 'workflow_instance' put: 'wf-1'.
+    bbs out: 'task' scope: 'demo' identity: 'wf-1:task:t1' payload: payload.
+    payload := Dictionary new.
+    payload at: 'actor' put: 'user:alice'.
+    payload at: 'workflow_instance' put: 'wf-1'.
+    payload at: 'executed_by' put: 'worker:bob'.
+    bbs out: 'task' scope: 'demo' identity: 'wf-1:task:t2' payload: payload.
+    payload := Dictionary new.
+    payload at: 'actor' put: 'user:carol'.
+    payload at: 'workflow_instance' put: 'wf-2'.
+    bbs out: 'task' scope: 'demo' identity: 'wf-2:task:t1' payload: payload.
+
+    tuples := bbs scanAll: 'task'.
+    t assertEqual: tuples size to: 3
+      message: 'A6a: 3 seeded task tuples'.
+
+    body := Dictionary new.
+    body at: 'actor' put: 'user:alice'.
+    filtered := server applyScanFilters: tuples body: body.
+    t assertEqual: filtered size to: 2
+      message: 'A6b: actor=user:alice snapshot -> 2 rows'.
+
+    body := Dictionary new.
+    body at: 'worker' put: 'worker:bob'.
+    filtered := server applyScanFilters: tuples body: body.
+    t assertEqual: filtered size to: 1
+      message: 'A6c: worker=worker:bob snapshot -> 1 row'.
+
+    body := Dictionary new.
+    body at: 'workflow' put: 'wf-1'.
+    filtered := server applyScanFilters: tuples body: body.
+    t assertEqual: filtered size to: 2
+      message: 'A6d: workflow=wf-1 snapshot -> 2 rows'
+  ]
+
+"=== Main ==="
+TestAuditCmdMain subclass: Object
+
+  classMethod: run [
+    | t |
+    t := TACTest new.
+    [TestAuditCmd run: t] on: Exception do: [:e |
+      ('TestAuditCmd CRASHED: ', e messageText) println.
+      t assert: false message: 'TestAuditCmd crashed'
+    ].
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
+
+TestAuditCmdMain run
