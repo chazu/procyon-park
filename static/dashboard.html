@@ -1131,10 +1131,20 @@
     const startTab = (location.hash || '').replace('#','');
     if (startTab === 'board' || startTab === 'overview' || startTab === 'history') activateTab(startTab);
 
-    const es   = new EventSource('/api/sse/dashboard');
+    // SSE_DASHBOARD_CATEGORIES — categories backing the overview/board/feed
+    // panels. When the server drops us (queue overflow from slow consumer
+    // isolation, §4.11 / D6.14), we POST /api/scan for each category to
+    // rebuild local state before the EventSource auto-reconnects, closing
+    // the stale-state gap introduced by the per-connection bounded queue.
+    const SSE_DASHBOARD_CATEGORIES = [
+      'workflow', 'workitem', 'task', 'token',
+      'notification', 'event', 'worker', 'identity'
+    ];
+
+    let es = null;
     const conn = document.getElementById('conn');
 
-    es.addEventListener('datastar-patch-elements', (e) => {
+    function handlePatchElements(e) {
       const lines = e.data.split('\n');
       let html = '';
       for (const line of lines) {
@@ -1152,9 +1162,47 @@
           if (root.id === 'dashboard-workitems') refreshBoardFilters();
         }
       }
-    });
-    es.onopen  = () => { conn.classList.remove('is-off'); };
-    es.onerror = () => { conn.classList.add('is-off');    };
+    }
+
+    async function resyncDashboardState() {
+      // Best-effort: fire all category scans in parallel, tolerate failures
+      // (server may still be coming back). Visible panels will be replaced
+      // wholesale by the next SSE tick; this scan pass is primarily to warm
+      // client-side caches (filter dropdowns) that depend on full state.
+      try {
+        await Promise.allSettled(SSE_DASHBOARD_CATEGORIES.map(async (cat) => {
+          const resp = await fetch('/api/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ category: cat })
+          });
+          if (!resp.ok) return;
+          return resp.json().catch(() => null);
+        }));
+      } catch (_) { /* swallow — SSE reconnect will refresh UI */ }
+    }
+
+    let reconnecting = false;
+    function openEventSource() {
+      es = new EventSource('/api/sse/dashboard');
+      es.addEventListener('datastar-patch-elements', handlePatchElements);
+      es.onopen  = () => { conn.classList.remove('is-off'); reconnecting = false; };
+      es.onerror = async () => {
+        conn.classList.add('is-off');
+        // readyState === CLOSED means the browser has given up on this
+        // socket (typical when the server closed on queue overflow).
+        // Resync state, then open a fresh EventSource to reconnect.
+        if (es && es.readyState === EventSource.CLOSED && !reconnecting) {
+          reconnecting = true;
+          try { es.close(); } catch (_) {}
+          await resyncDashboardState();
+          // brief backoff so we don't hammer the server if it's still down
+          setTimeout(openEventSource, 1000);
+        }
+        // readyState === CONNECTING — let the browser retry on its own.
+      };
+    }
+    openEventSource();
 
     const filterScope    = document.getElementById('filter-scope');
     const filterWorkflow = document.getElementById('filter-workflow');

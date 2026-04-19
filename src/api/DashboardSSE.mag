@@ -22,42 +22,109 @@ DashboardSSE subclass: Object
     "Register an SSE subscriber along with the verified identity that
      upgraded the stream. Identity is either 'user:<name>', 'admin:<hex>',
      'worker:<name>', or 'anonymous'. The tuple is tracked in-memory so the
-     presence panel can render the humans currently watching."
-    | entry id |
+     presence panel can render the humans currently watching.
+
+     Each subscriber also gets a bounded SSEQueue and a dedicated drainer
+     forked via [block] fork. The tick loop enqueues snapshots (non-
+     blocking); the drainer is the only thing that ever calls
+     conn send:event:, so a slow client can only stall its own queue —
+     never the tick loop serving every other subscriber (§4.11, D6.14)."
+    | entry id queue |
     id := identity ifNil: ['anonymous'].
+    queue := SSEQueue new.
     entry := Dictionary new.
     entry at: 'conn' put: conn.
     entry at: 'identity' put: id.
     entry at: 'subscribedAt' put: DateTime now epochSeconds.
+    entry at: 'queue' put: queue.
     sseSubscribers := sseSubscribers copyWith: entry.
     ('SSE dashboard client connected as ', id,
-      ', total: ', sseSubscribers size printString) println
+      ', total: ', sseSubscribers size printString) println.
+    [self drainLoopFor: entry] fork
+  ]
+
+  method: drainLoopFor: entry [
+    "Per-connection drainer. Dequeues events and calls conn send:event:.
+     Exits when the queue is closed and empty, when the connection
+     drops, or when send: raises — in which case the queue is closed
+     and the next tick will prune the subscriber. Never throws: any
+     exception terminates the drainer, allowing the conn to be reaped."
+    | q conn done evt |
+    q := entry at: 'queue'.
+    conn := entry at: 'conn'.
+    done := false.
+    [done] whileFalse: [
+      evt := q dequeue.
+      evt isNil ifTrue: [
+        (q isClosed or: [conn isOpen not])
+          ifTrue: [done := true]
+          ifFalse: [Process sleep: 50]
+      ] ifFalse: [
+        [conn send: (evt at: 'data') event: (evt at: 'event')]
+          on: Exception do: [:e |
+            ('SSE drainer: send failed for ', (entry at: 'identity'),
+              ': ', e messageText) println.
+            q close.
+            done := true
+          ]
+      ]
+    ].
+    [conn close] on: Exception do: [:e | ]
   ]
 
   method: tick [
     | live |
     sseSubscribers isEmpty ifTrue: [^self].
-    live := sseSubscribers select: [:entry | (entry at: 'conn') isOpen].
-    sseSubscribers := live.
-    live do: [:entry |
-      | conn |
+    live := Array new: 0.
+    sseSubscribers do: [:entry |
+      | conn q |
       conn := entry at: 'conn'.
-      [self broadcastTo: conn] on: Exception do: [:e |
-        ('SSE error: ', e messageText) println
+      q := entry at: 'queue'.
+      ((conn isOpen) and: [q isClosed not]) ifTrue: [
+        [self broadcastTo: entry] on: Exception do: [:e |
+          ('SSE error: ', e messageText) println
+        ].
+        "broadcastTo: may have closed the queue on overflow —
+         re-check before keeping the subscriber."
+        q isClosed ifFalse: [live := live copyWith: entry]
       ]
-    ]
+    ].
+    sseSubscribers := live
   ]
 
-  method: broadcastTo: conn [
-    self sendWorkflows: conn.
-    self sendCompletions: conn.
-    self sendWorkitems: conn.
-    self sendScopeViolations: conn.
-    self sendPresence: conn.
-    self sendNotifs: conn
+  method: broadcastTo: entry [
+    self sendWorkflows: entry.
+    self sendCompletions: entry.
+    self sendWorkitems: entry.
+    self sendScopeViolations: entry.
+    self sendPresence: entry.
+    self sendNotifs: entry
   ]
 
-  method: sendScopeViolations: conn [
+  method: sendElements: html to: entry [
+    "Enqueue a datastar-patch-elements event for this subscriber.
+     On overflow (queue full, 256 events pending), close the queue
+     and drop the connection — the browser will reconnect and replay
+     state via /api/scan. Returns true if enqueued, false otherwise."
+    | q evt ok conn |
+    q := entry at: 'queue'.
+    q isClosed ifTrue: [^false].
+    evt := Dictionary new.
+    evt at: 'data' put: ('elements ', html).
+    evt at: 'event' put: 'datastar-patch-elements'.
+    ok := q enqueue: evt.
+    ok ifFalse: [
+      q close.
+      conn := entry at: 'conn'.
+      [conn close] on: Exception do: [:e | ].
+      ('SSE dashboard: queue overflow (cap=', q capacity printString,
+        '), dropping client ', (entry at: 'identity')) println.
+      ^false
+    ].
+    ^true
+  ]
+
+  method: sendScopeViolations: entry [
     "Aggregate scope-violation events per role so operators can spot systematic
      prompt issues (e.g. one role consistently editing outside its workdir).
      Each scope-violation event emitted by Scheduler>>validateScope:taskId:scope:
@@ -137,10 +204,10 @@ DashboardSSE subclass: Object
       s := s, '</ul>'
     ].
     s := s, '</div>'.
-    conn send: ('elements ', s) event: 'datastar-patch-elements'
+    ^self sendElements: s to: entry
   ]
 
-  method: sendPresence: conn [
+  method: sendPresence: entry [
     "Render the two-column presence panel: humans currently connected to
      the SSE stream (live sseSubscribers) on the left, affine worker tuples
      (active heartbeat, scope='/') on the right. Workers are rendered with
@@ -241,7 +308,7 @@ DashboardSSE subclass: Object
     s := s, '</div>'.
 
     s := s, '</div></section>'.
-    conn send: ('elements ', s) event: 'datastar-patch-elements'
+    ^self sendElements: s to: entry
   ]
 
   method: array: anArray includesString: aString [
@@ -265,7 +332,7 @@ DashboardSSE subclass: Object
     ^n
   ]
 
-  method: sendWorkitems: conn [
+  method: sendWorkitems: entry [
     "Broadcast work items grouped by status as a Kanban-style board.
      Columns: backlog, ready, in-progress, done, blocked."
     | s workitems statuses buckets |
@@ -314,10 +381,10 @@ DashboardSSE subclass: Object
       s := s, '</div>'
     ].
     s := s, '</div></div>'.
-    conn send: ('elements ', s) event: 'datastar-patch-elements'
+    ^self sendElements: s to: entry
   ]
 
-  method: sendWorkflows: conn [
+  method: sendWorkflows: entry [
     | s workflows allTokens allTasks now |
     workflows := bbs scanAll: 'workflow'.
     allTokens := bbs scanAll: 'token'.
@@ -375,7 +442,7 @@ DashboardSSE subclass: Object
       ]
     ].
     s := s, '</div>'.
-    conn send: ('elements ', s) event: 'datastar-patch-elements'
+    ^self sendElements: s to: entry
   ]
 
   method: tokenTotalsFor: wfId in: allTasks [
@@ -527,7 +594,7 @@ DashboardSSE subclass: Object
     ^s
   ]
 
-  method: sendCompletions: conn [
+  method: sendCompletions: entry [
     "Broadcast the most recent completed/failed/cancelled workflows with duration.
      Running workflows are handled by sendWorkflows: and disappear from the active
      list on completion, so this section gives operators a short-lived record of
@@ -582,7 +649,7 @@ DashboardSSE subclass: Object
       ]
     ].
     s := s, '</div>'.
-    conn send: ('elements ', s) event: 'datastar-patch-elements'
+    ^self sendElements: s to: entry
   ]
 
   method: insertEntry: entry into: topN maxSize: maxSize [
@@ -621,7 +688,7 @@ DashboardSSE subclass: Object
     ^(seconds // 86400) printString, 'd ', ((seconds \\ 86400) // 3600) printString, 'h'
   ]
 
-  method: sendNotifs: conn [
+  method: sendNotifs: entry [
     | s notifications recent |
     notifications := bbs scanAll: 'notification'.
     recent := notifications size > 30
@@ -657,5 +724,5 @@ DashboardSSE subclass: Object
       s := s, '</ul>'
     ].
     s := s, '</div>'.
-    conn send: ('elements ', s) event: 'datastar-patch-elements'
+    ^self sendElements: s to: entry
   ]
