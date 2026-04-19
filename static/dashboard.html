@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="pp-viewer" content="">
   <title>Procyon Park</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -788,6 +789,41 @@
     li.sev-urgent .notif-scope{ background: var(--terra); color: var(--cream-hi); }
     li.sev-error  .notif-scope{ background: var(--rose); color: var(--cream-hi); }
 
+    /* ══════════════ SCOPE TOGGLE (mine | team) ══════════════ */
+    .scope-toggle{
+      display: inline-flex;
+      align-items: stretch;
+      border: 1px solid var(--rule-hi);
+      background: var(--surface);
+      white-space: nowrap;
+    }
+    .scope-toggle label{
+      font-family: var(--f-slab);
+      font-weight: 800;
+      font-size: 10.5px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--cream-dim);
+      padding: 6px 11px;
+      cursor: pointer;
+      transition: background .1s ease, color .1s ease;
+      border-right: 1px solid var(--rule-hi);
+    }
+    .scope-toggle label:last-of-type{ border-right: none; }
+    .scope-toggle input{ position: absolute; opacity: 0; pointer-events: none; }
+    .scope-toggle label:hover{ color: var(--cream); }
+    .scope-toggle label.is-active{
+      background: var(--cobalt);
+      color: var(--cream-hi);
+    }
+    /* Scope filter — in "mine" mode, hide cards neither launched nor executed by viewer.
+       The [data-pp-viewer] attribute selectors below are activated by JS injecting a
+       rule bound to the current viewer identity. */
+    body.pp-scope-mine .wf-card[data-launched-by]:not([data-launched-by=""]),
+    body.pp-scope-mine .wi-card[data-launched-by]:not([data-launched-by=""]){
+      /* baseline: visible unless identity-specific rule hides it */
+    }
+
     /* ══════════════ EMPTY STATE ══════════════ */
     .empty-state{
       font-family: var(--f-serif);
@@ -831,6 +867,10 @@
       <div class="hero-sub">Swarm Dispatch</div>
     </div>
     <div class="hero-metrics">
+      <div class="scope-toggle" id="scope-toggle" role="radiogroup" aria-label="Card scope filter" title="Show cards from everyone (team) or only your own (mine)">
+        <label data-scope="mine"><input type="radio" name="pp-card-scope" value="mine">Mine</label>
+        <label data-scope="team"><input type="radio" name="pp-card-scope" value="team">Team</label>
+      </div>
       <div class="queue-badge" id="queue-badge" title="Pending tasks / worker slot capacity (D6.11)">
         <span class="qb-label">pending</span>
         <span class="qb-value" id="queue-badge-value">–</span>
@@ -982,6 +1022,100 @@
   </div>
 
   <script>
+    // --- Card scope toggle (mine | team) — §4.7, D6.7 default team ---
+    // Persisted to localStorage under pp.cardScope. In "mine" mode we inject
+    // a dynamic CSS rule scoped to the current viewer identity so that cards
+    // whose data-launched-by AND data-executed-by both differ from the viewer
+    // are hidden. In "team" mode all cards are visible.
+    const PP_SCOPE_KEY = 'pp.cardScope';
+    const scopeToggleEl = document.getElementById('scope-toggle');
+    const scopeRadios = scopeToggleEl.querySelectorAll('input[name="pp-card-scope"]');
+    let ppViewerIdentity = null;
+    let ppScopeStyleEl = null;
+
+    function ppCssEscape(s) {
+      // Basic CSS string escape for attribute selector value.
+      return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    }
+    function updateScopeStyle() {
+      if (!ppScopeStyleEl) {
+        ppScopeStyleEl = document.createElement('style');
+        ppScopeStyleEl.id = 'pp-scope-style';
+        document.head.appendChild(ppScopeStyleEl);
+      }
+      if (ppViewerIdentity) {
+        const id = ppCssEscape(ppViewerIdentity);
+        // Hide cards where BOTH attributes differ from viewer identity.
+        // A card matches :not([data-launched-by="id"]):not([data-executed-by="id"])
+        // when neither attribute equals id (including when the attribute is
+        // absent or empty).
+        ppScopeStyleEl.textContent =
+          'body.pp-scope-mine .wf-card:not([data-launched-by="' + id + '"]):not([data-executed-by="' + id + '"]),' +
+          'body.pp-scope-mine .wi-card:not([data-launched-by="' + id + '"]):not([data-executed-by="' + id + '"])' +
+          '{ display: none !important; }';
+      } else {
+        // Unknown viewer — in "mine" mode, hide every attributed card so the
+        // user is not misled into thinking filtering worked.
+        ppScopeStyleEl.textContent =
+          'body.pp-scope-mine .wf-card, body.pp-scope-mine .wi-card { display: none !important; }';
+      }
+    }
+    function applyScope(scope) {
+      const mine = scope === 'mine';
+      document.body.classList.toggle('pp-scope-mine', mine);
+      document.body.classList.toggle('pp-scope-team', !mine);
+      scopeToggleEl.querySelectorAll('label').forEach(l => {
+        l.classList.toggle('is-active', l.getAttribute('data-scope') === scope);
+      });
+      scopeRadios.forEach(r => { r.checked = (r.value === scope); });
+    }
+    function setScope(scope, persist) {
+      if (scope !== 'mine' && scope !== 'team') scope = 'team';
+      applyScope(scope);
+      if (persist) {
+        try { localStorage.setItem(PP_SCOPE_KEY, scope); } catch (_){}
+      }
+    }
+    scopeRadios.forEach(r => {
+      r.addEventListener('change', () => { if (r.checked) setScope(r.value, true); });
+    });
+    scopeToggleEl.querySelectorAll('label').forEach(l => {
+      l.addEventListener('click', (ev) => {
+        // Clicking the label activates the radio; also handle keyboard.
+        const s = l.getAttribute('data-scope');
+        if (s) setScope(s, true);
+      });
+    });
+
+    // Read viewer identity: prefer <meta name="pp-viewer">, fall back to /api/whoami.
+    (function initViewerIdentity(){
+      const meta = document.querySelector('meta[name="pp-viewer"]');
+      const metaContent = meta && meta.getAttribute('content');
+      if (metaContent && metaContent.trim()) {
+        ppViewerIdentity = metaContent.trim();
+        updateScopeStyle();
+        return;
+      }
+      fetch('/api/whoami', { credentials: 'same-origin' })
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (data && typeof data.identity === 'string' && data.identity.trim()) {
+            ppViewerIdentity = data.identity.trim();
+          }
+          updateScopeStyle();
+        })
+        .catch(() => { updateScopeStyle(); });
+      updateScopeStyle();
+    })();
+
+    // Init from localStorage (default 'team' on first visit — D6.7).
+    (function initScope(){
+      let stored = null;
+      try { stored = localStorage.getItem(PP_SCOPE_KEY); } catch (_){}
+      const initial = (stored === 'mine' || stored === 'team') ? stored : 'team';
+      setScope(initial, false);
+    })();
+
     const tabs  = document.querySelectorAll('.tab');
     const views = document.querySelectorAll('.tab-view');
     function activateTab(name){
