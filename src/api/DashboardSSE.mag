@@ -224,7 +224,7 @@ DashboardSSE subclass: Object
             ifTrue: [self formatDuration: (now - dispatchedAt)]
             ifFalse: ['pending'].
           taskLine := '<br><small>role: <b>', role, '</b>',
-            ' <img class="role-badge" src="/dashboard/roles/role-', role, '.png" alt="" onerror="this.style.display=''none''">',
+            '<img class="role-badge" src="/dashboard/roles/role-', role, '.png" alt="" onerror="this.style.display=''none''">',
             ' · ', tStatus, ' · ', durStr, '</small>'
         ].
         tokenTotals := self tokenTotalsFor: wfId in: allTasks.
