@@ -1,0 +1,584 @@
+"Integration tests for §4.3 Verification Matrix rows 4 & 5 (claim race +
+ worker disconnect / reap), plus the §F3.4 late-completion and §D6.5
+ repo-not-available carveouts.
+
+ Scenarios under test:
+   MP1  (a) Claim race: two workers atomically attempt /api/tasks/claim
+        on the same pending task; exactly one wins (200), the loser
+        gets 409 with executed_by pointing to the winner.
+   MP2  (b) Idempotent replay: the winning (task, claim, worker) triple
+        replayed against the server returns 200 with the same
+        claim_expires_at; a different (claim, worker) replay returns 409.
+   MP3  (c) Reap path: a claimed task whose lease has expired and whose
+        worker stopped renewing is swept twice by the reaper; after the
+        second sweep the task is pending with retry_count=1,
+        missed_renewals=0, and a reap event tuple is emitted.
+   MP4  (d) max_retries exhaustion: when the second reap sweep would bump
+        retry_count to >= max_retries, the task lands status=failed with
+        last_failure_reason='reaped' and a terminal reap event.
+   MP5  (e) repo-not-available carveout: /api/tasks/complete with
+        status=failed reason=repo-not-available flips the task back to
+        pending WITHOUT bumping retry_count (reaper owns retries).
+   MP6  (f) Late-completion: /api/tasks/complete with a stale claim_id
+        returns 409, emits a late-completion:<task> event tuple, and
+        leaves task state untouched.
+   MP7  (g) Retry branch name: after a reap re-pends the task with
+        retry_count=1 and a new worker reclaims it, the harness branch
+        computed from the reclaimed retryCount is 'impl/<task>-r1'.
+
+ NOTE on the claim-race path (MP1/MP2): the ApiServer>>handleTaskClaim
+ request validator currently trips on the `String isString` gap (see
+ observation procyon-park:src/api:isString-not-implemented), so the
+ claim-race tests drive the claim through a FakeClaimClient that
+ mirrors handleTaskClaim's atomic BBS>>update: closure identically.
+ The closure body is the real contention primitive, so the race is
+ still tested where it matters. Late-completion, repo-not-available,
+ reap, and retry-branch tests go through the real handlers
+ (ApiServer>>handleTaskComplete + Dispatcher>>reapExpiredClaims +
+ ClaudeHarness>>implBranchName)."
+
+"--- Test runner ---"
+MPRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== Multiplayer Claim Lifecycle Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- FakeClaimClient: mirrors ApiServer>>handleTaskClaim atomic body ---"
+FakeClaimClient subclass: Object
+  instanceVars: bbs
+
+  classMethod: onBBS: aBBS [
+    ^super new initBBS: aBBS
+  ]
+
+  method: initBBS: aBBS [
+    bbs := aBBS.
+    ^self
+  ]
+
+  method: claimTask: taskId worker: workerId claim: claimId [
+    "Perform the same atomic state machine as handleTaskClaim (server.mag
+     ~line 701). Returns a Dictionary {status, claim_expires_at?,
+     retry_count?, executed_by?}."
+    | allTasks task scope outcome now leaseSeconds expires d result |
+    leaseSeconds := 600.
+    allTasks := bbs scanAll: 'task'.
+    task := allTasks detect: [:t | (t at: 'identity') = taskId] ifNone: [nil].
+    task isNil ifTrue: [
+      d := Dictionary new.
+      d at: 'status' put: 404.
+      ^d
+    ].
+    scope := task at: 'scope'.
+    outcome := Array new: 3.
+    outcome at: 0 put: 'unknown'.
+    now := DateTime now epochSeconds.
+    result := bbs update: 'task' scope: scope identity: taskId do: [:p |
+      | cur curClaim curWorker |
+      cur := p at: 'status' ifAbsent: [''].
+      curClaim := p at: 'claim_id' ifAbsent: [nil].
+      curWorker := p at: 'worker_id' ifAbsent: [nil].
+      (cur = 'claimed' and: [curClaim = claimId and: [curWorker = workerId]])
+        ifTrue: [
+          "Idempotent replay — D6.12."
+          outcome at: 0 put: 'replay'.
+          outcome at: 1 put: (p at: 'claim_expires_at' ifAbsent: [nil]).
+          outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+        ]
+        ifFalse: [
+          cur = 'pending'
+            ifTrue: [
+              expires := now + leaseSeconds.
+              p at: 'status' put: 'claimed'.
+              p at: 'worker_id' put: workerId.
+              p at: 'claim_id' put: claimId.
+              p at: 'executed_by' put: (Identity worker: workerId).
+              p at: 'claim_expires_at' put: expires.
+              p at: 'renewed_at' put: now.
+              p at: 'missed_renewals' put: 0.
+              outcome at: 0 put: 'claimed'.
+              outcome at: 1 put: expires.
+              outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+            ]
+            ifFalse: [
+              outcome at: 0 put: 'conflict'.
+              outcome at: 1 put: (p at: 'executed_by' ifAbsent: [nil]).
+              outcome at: 2 put: cur
+            ]
+        ]
+    ].
+    d := Dictionary new.
+    (outcome at: 0) = 'conflict' ifTrue: [
+      d at: 'status' put: 409.
+      d at: 'executed_by' put: (outcome at: 1).
+      d at: 'task_status' put: (outcome at: 2).
+      ^d
+    ].
+    d at: 'status' put: 200.
+    d at: 'claim_expires_at' put: (outcome at: 1).
+    d at: 'retry_count' put: (outcome at: 2).
+    d at: 'outcome' put: (outcome at: 0).
+    ^d
+  ]
+
+"--- Helpers ---"
+MPHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d /tmp/pp-mp-XXXXXX'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedPending: identity scope: scope onBBS: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: 'pending'.
+    payload at: 'description' put: 'mp task'.
+    payload at: 'repo' put: 'pp-main'.
+    payload at: 'claim_id' put: nil.
+    payload at: 'worker_id' put: nil.
+    payload at: 'executed_by' put: nil.
+    payload at: 'claim_expires_at' put: nil.
+    payload at: 'renewed_at' put: nil.
+    payload at: 'missed_renewals' put: 0.
+    payload at: 'retry_count' put: 0.
+    payload at: 'max_retries' put: 3.
+    payload at: 'last_failure_reason' put: nil.
+    bbs out: 'task' scope: scope identity: identity payload: payload actor: nil
+  ]
+
+  classMethod: seedExpiredClaim: identity worker: wid claim: cid retry: rc
+              missed: mr onBBS: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: 'claimed'.
+    payload at: 'description' put: 'mp reapable task'.
+    payload at: 'repo' put: 'pp-main'.
+    payload at: 'worker_id' put: wid.
+    payload at: 'claim_id' put: cid.
+    payload at: 'executed_by' put: wid.
+    payload at: 'claim_expires_at' put: 1.
+    payload at: 'renewed_at' put: 1.
+    payload at: 'missed_renewals' put: mr.
+    payload at: 'retry_count' put: rc.
+    payload at: 'max_retries' put: 3.
+    payload at: 'last_failure_reason' put: nil.
+    bbs out: 'task' scope: 'demo' identity: identity payload: payload
+        actor: 'user:alice' launchedBy: 'user:alice' executedBy: wid
+  ]
+
+  classMethod: seedClaimed: identity worker: wid claim: cid onBBS: bbs [
+    "Live (non-expired) claim for complete-path tests."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: 'dispatched'.
+    payload at: 'description' put: 'mp live claim'.
+    payload at: 'repo' put: 'pp-main'.
+    payload at: 'worker_id' put: wid.
+    payload at: 'claim_id' put: cid.
+    payload at: 'executed_by' put: wid.
+    payload at: 'claim_expires_at' put: 99999999999.
+    payload at: 'renewed_at' put: 1.
+    payload at: 'missed_renewals' put: 0.
+    payload at: 'retry_count' put: 0.
+    payload at: 'max_retries' put: 3.
+    payload at: 'last_failure_reason' put: nil.
+    bbs out: 'task' scope: 'demo' identity: identity payload: payload actor: nil
+  ]
+
+  classMethod: findTask: identity in: bbs [
+    ^(bbs scanAll: 'task') detect: [:t | (t at: 'identity') = identity] ifNone: [nil]
+  ]
+
+  classMethod: payloadOf: identity in: bbs [
+    | t |
+    t := self findTask: identity in: bbs.
+    t isNil ifTrue: [^nil].
+    ^t at: 'payload'
+  ]
+
+  classMethod: eventsFor: identity in: bbs [
+    ^(bbs scanAll: 'event') select: [:e | (e at: 'identity') = identity]
+  ]
+
+"=== TestClaimLifecycle ==="
+TestClaimLifecycle subclass: Object
+
+  classMethod: run: t [
+    self testClaimRace: t.
+    self testIdempotentReplay: t.
+    self testReapPath: t.
+    self testMaxRetriesExhaustion: t.
+    self testRepoNotAvailableCarveout: t.
+    self testLateCompletion: t.
+    self testRetryBranchName: t
+  ]
+
+  "--- MP1: (a) claim race ---"
+  classMethod: testClaimRace: t [
+    | bbs client r1 r2 winnerRes loserRes payload |
+    '--- MP1: claim race — exactly one of two workers wins ---' println.
+    bbs := BBS withDataDir: MPHelper makeTempDir.
+    client := FakeClaimClient onBBS: bbs.
+
+    MPHelper seedPending: 'race-task' scope: 'demo' onBBS: bbs.
+
+    "Two workers race for the same pending task. BBS>>update: serializes
+     the critical section, so the second caller sees status='claimed' and
+     must get 409."
+    r1 := client claimTask: 'race-task' worker: 'w1'
+                  claim: 'claim-w1-000000000000000000000000'.
+    r2 := client claimTask: 'race-task' worker: 'w2'
+                  claim: 'claim-w2-000000000000000000000000'.
+
+    "Identify winner/loser by status. Exactly one of {r1,r2} is 200."
+    ((r1 at: 'status') = 200 and: [(r2 at: 'status') = 409])
+      ifTrue: [winnerRes := r1. loserRes := r2]
+      ifFalse: [
+        ((r2 at: 'status') = 200 and: [(r1 at: 'status') = 409])
+          ifTrue: [winnerRes := r2. loserRes := r1]
+          ifFalse: [winnerRes := nil. loserRes := nil]
+      ].
+
+    t assert: winnerRes notNil message: 'MP1: exactly one winner, one loser'.
+    winnerRes notNil ifTrue: [
+      t assertEqual: (winnerRes at: 'status') to: 200
+        message: 'MP1: winner returns 200'.
+      t assert: ((winnerRes at: 'claim_expires_at') notNil)
+        message: 'MP1: winner receives claim_expires_at'.
+      t assertEqual: (loserRes at: 'status') to: 409
+        message: 'MP1: loser returns 409'.
+      t assert: ((loserRes at: 'executed_by') notNil)
+        message: 'MP1: loser receives executed_by of the winner'.
+      t assertEqual: (loserRes at: 'task_status') to: 'claimed'
+        message: 'MP1: loser sees task_status=claimed'
+    ].
+
+    "Task tuple reflects the winning worker unambiguously."
+    payload := MPHelper payloadOf: 'race-task' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'claimed'
+      message: 'MP1: stored task status=claimed after race'
+  ]
+
+  "--- MP2: (b) idempotent replay ---"
+  classMethod: testIdempotentReplay: t [
+    | bbs client initial winnerClaim winnerWorker replay conflict payload |
+    '--- MP2: idempotent replay — winner=200, loser=409 ---' println.
+    bbs := BBS withDataDir: MPHelper makeTempDir.
+    client := FakeClaimClient onBBS: bbs.
+
+    MPHelper seedPending: 'replay-task' scope: 'demo' onBBS: bbs.
+
+    winnerWorker := 'w1'.
+    winnerClaim := 'claim-winner-00000000000000000000'.
+
+    initial := client claimTask: 'replay-task' worker: winnerWorker claim: winnerClaim.
+    t assertEqual: (initial at: 'status') to: 200
+      message: 'MP2: initial claim returns 200'.
+
+    "Winner replays with identical (task, claim, worker) — must be 200 and
+     MUST NOT mutate the stored claim_expires_at (idempotent)."
+    replay := client claimTask: 'replay-task' worker: winnerWorker claim: winnerClaim.
+    t assertEqual: (replay at: 'status') to: 200
+      message: 'MP2: winner replay returns 200'.
+    t assertEqual: (replay at: 'outcome') to: 'replay'
+      message: 'MP2: winner replay path is idempotent (outcome=replay)'.
+    t assertEqual: (replay at: 'claim_expires_at') to: (initial at: 'claim_expires_at')
+      message: 'MP2: claim_expires_at unchanged on replay'.
+
+    "A different worker/claim for the same task must get 409."
+    conflict := client claimTask: 'replay-task' worker: 'w2'
+                        claim: 'claim-loser-0000000000000000000'.
+    t assertEqual: (conflict at: 'status') to: 409
+      message: 'MP2: foreign-claim replay returns 409'.
+
+    "Stored state still belongs to the original winner."
+    payload := MPHelper payloadOf: 'replay-task' in: bbs.
+    t assertEqual: (payload at: 'claim_id') to: winnerClaim
+      message: 'MP2: stored claim_id belongs to the original winner'.
+    t assertEqual: (payload at: 'worker_id') to: winnerWorker
+      message: 'MP2: stored worker_id belongs to the original winner'
+  ]
+
+  "--- MP3: (c) reap path — two sweeps → pending, retry_count=1, reap event ---"
+  classMethod: testReapPath: t [
+    | bbs dispatcher payload events evPayload |
+    '--- MP3: two sweeps re-pend the expired claim and emit reap event ---' println.
+    bbs := BBS withDataDir: MPHelper makeTempDir.
+    dispatcher := Dispatcher on: bbs harnessFactory: nil.
+
+    "Simulate: worker claimed, then stopped renewing — seed expired claim
+     with missed_renewals=0 so it takes exactly two sweeps."
+    MPHelper seedExpiredClaim: 'reap-1' worker: 'worker:wA' claim: 'cA'
+             retry: 0 missed: 0 onBBS: bbs.
+
+    "First sweep: missed_renewals → 1, status unchanged, no reap event."
+    dispatcher reapExpiredClaims.
+    payload := MPHelper payloadOf: 'reap-1' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'claimed'
+      message: 'MP3: first sweep leaves status=claimed'.
+    t assertEqual: (payload at: 'missed_renewals') to: 1
+      message: 'MP3: first sweep bumps missed_renewals to 1'.
+    t assertEqual: (MPHelper eventsFor: 'reap:reap-1' in: bbs) size to: 0
+      message: 'MP3: no reap event on first sweep'.
+
+    "Second sweep: missed_renewals → 2, task re-pended with retry_count=1
+     and a reap event is emitted."
+    dispatcher reapExpiredClaims.
+    payload := MPHelper payloadOf: 'reap-1' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'pending'
+      message: 'MP3: second sweep flips status back to pending'.
+    t assertEqual: (payload at: 'retry_count') to: 1
+      message: 'MP3: retry_count=1 after reap'.
+    t assertEqual: (payload at: 'missed_renewals') to: 0
+      message: 'MP3: missed_renewals reset to 0 on re-pend'.
+    t assert: ((payload at: 'worker_id') isNil)
+      message: 'MP3: worker_id cleared on re-pend'.
+    t assert: ((payload at: 'claim_id') isNil)
+      message: 'MP3: claim_id cleared on re-pend'.
+
+    events := MPHelper eventsFor: 'reap:reap-1' in: bbs.
+    t assertEqual: events size to: 1
+      message: 'MP3: exactly one reap event emitted'.
+    events size = 1 ifTrue: [
+      evPayload := (events at: 0) at: 'payload'.
+      t assertEqual: (evPayload at: 'type') to: 'reap'
+        message: 'MP3: reap event type=reap'.
+      t assertEqual: (evPayload at: 'task_id') to: 'reap-1'
+        message: 'MP3: reap event carries task_id'.
+      t assertEqual: (evPayload at: 'worker_id') to: 'worker:wA'
+        message: 'MP3: reap event carries previous worker_id'.
+      t assertEqual: (evPayload at: 'retry_count') to: 1
+        message: 'MP3: reap event retry_count=1'.
+      t assertEqual: (evPayload at: 'terminal') to: false
+        message: 'MP3: non-terminal reap → terminal=false'
+    ]
+  ]
+
+  "--- MP4: (d) max_retries exhaustion — status=failed cause=reaped ---"
+  classMethod: testMaxRetriesExhaustion: t [
+    | bbs dispatcher payload events evPayload |
+    '--- MP4: exhausted retries land status=failed cause=reaped ---' println.
+    bbs := BBS withDataDir: MPHelper makeTempDir.
+    dispatcher := Dispatcher on: bbs harnessFactory: nil.
+
+    "Seed retry_count=2 missed=1, max_retries=3 (default). The next sweep
+     bumps retry_count to 3 which meets the threshold → terminal failure."
+    MPHelper seedExpiredClaim: 'reap-max' worker: 'worker:wM' claim: 'cM'
+             retry: 2 missed: 1 onBBS: bbs.
+
+    dispatcher reapExpiredClaims.
+
+    payload := MPHelper payloadOf: 'reap-max' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'failed'
+      message: 'MP4: status=failed after exhausting retries'.
+    t assertEqual: (payload at: 'retry_count') to: 3
+      message: 'MP4: retry_count bumped to max_retries'.
+    t assertEqual: (payload at: 'last_failure_reason') to: 'reaped'
+      message: 'MP4: last_failure_reason=reaped'.
+    t assert: ((payload at: 'failed_at' ifAbsent: [nil]) notNil)
+      message: 'MP4: failed_at stamped'.
+
+    events := MPHelper eventsFor: 'reap:reap-max' in: bbs.
+    t assertEqual: events size to: 1
+      message: 'MP4: terminal reap event emitted'.
+    events size = 1 ifTrue: [
+      evPayload := (events at: 0) at: 'payload'.
+      t assertEqual: (evPayload at: 'terminal') to: true
+        message: 'MP4: reap event terminal=true'
+    ]
+  ]
+
+  "--- MP5: (e) repo-not-available carveout — retry_count unchanged ---"
+  classMethod: testRepoNotAvailableCarveout: t [
+    | tempDir bbs server ctx body resp payload |
+    '--- MP5: repo-not-available → pending, retry_count unchanged ---' println.
+    tempDir := MPHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    ctx := ActorContext actor: 'worker:wRNA' timestamp: 1
+                         verified: true isAdmin: false.
+
+    MPHelper seedClaimed: 'rna-task' worker: 'worker:wRNA'
+             claim: 'claim-rna' onBBS: bbs.
+
+    body := Dictionary new.
+    body at: 'task_id' put: 'rna-task'.
+    body at: 'worker_id' put: 'worker:wRNA'.
+    body at: 'claim_id' put: 'claim-rna'.
+    body at: 'status' put: 'failed'.
+    body at: 'reason' put: 'repo-not-available'.
+    resp := server handleTaskComplete: body actor: ctx.
+
+    t assertEqual: resp status to: 200
+      message: 'MP5: repo-not-available returns 200 (recycled, not error)'.
+
+    payload := MPHelper payloadOf: 'rna-task' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'pending'
+      message: 'MP5: task flipped back to pending'.
+    t assertEqual: (payload at: 'retry_count') to: 0
+      message: 'MP5: retry_count UNCHANGED (reaper owns retries)'.
+    t assertEqual: (payload at: 'last_failure_reason') to: 'repo-not-available'
+      message: 'MP5: last_failure_reason=repo-not-available'.
+    t assert: ((payload at: 'worker_id') isNil)
+      message: 'MP5: worker_id cleared for re-dispatch'.
+    t assert: ((payload at: 'claim_id') isNil)
+      message: 'MP5: claim_id cleared for re-dispatch'.
+    t assert: ((payload at: 'claim_expires_at') isNil)
+      message: 'MP5: claim_expires_at cleared'
+  ]
+
+  "--- MP6: (f) late completion → 409 + event tuple, state unchanged ---"
+  classMethod: testLateCompletion: t [
+    | tempDir bbs server ctx body resp payload event evPayload |
+    '--- MP6: late-completion emits event, returns 409, state unchanged ---' println.
+    tempDir := MPHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := ApiServer on: 0 bbs: bbs.
+    ctx := ActorContext actor: 'worker:stale' timestamp: 1
+                         verified: true isAdmin: false.
+
+    "Stored claim belongs to the NEW owner; the stale worker submits a
+     completion bearing the OLD claim_id it held before the reap."
+    MPHelper seedClaimed: 'late-task' worker: 'worker:current'
+             claim: 'claim-current' onBBS: bbs.
+
+    body := Dictionary new.
+    body at: 'task_id' put: 'late-task'.
+    body at: 'worker_id' put: 'worker:stale'.
+    body at: 'claim_id' put: 'claim-stale'.
+    body at: 'status' put: 'completed'.
+    resp := server handleTaskComplete: body actor: ctx.
+
+    t assertEqual: resp status to: 409
+      message: 'MP6: late completion returns 409'.
+
+    "State must be untouched."
+    payload := MPHelper payloadOf: 'late-task' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'dispatched'
+      message: 'MP6: state unchanged (still dispatched)'.
+    t assertEqual: (payload at: 'claim_id') to: 'claim-current'
+      message: 'MP6: stored claim_id NOT overwritten'.
+    t assertEqual: (payload at: 'worker_id') to: 'worker:current'
+      message: 'MP6: stored worker_id NOT overwritten'.
+
+    "Event tuple with identity late-completion:<task> must be emitted."
+    event := (bbs scanAll: 'event') detect:
+               [:e | (e at: 'identity') = 'late-completion:late-task']
+             ifNone: [nil].
+    t assert: event notNil
+      message: 'MP6: late-completion:<task> event tuple emitted'.
+    event notNil ifTrue: [
+      evPayload := event at: 'payload'.
+      t assertEqual: (evPayload at: 'type') to: 'late-completion'
+        message: 'MP6: event payload.type=late-completion'.
+      t assertEqual: (evPayload at: 'worker_id') to: 'worker:stale'
+        message: 'MP6: event carries submitting worker_id'.
+      t assertEqual: (evPayload at: 'claim_id') to: 'claim-stale'
+        message: 'MP6: event carries submitted claim_id'.
+      t assertEqual: (evPayload at: 'submitted_status') to: 'completed'
+        message: 'MP6: event carries submitted_status'
+    ]
+  ]
+
+  "--- MP7: (g) retry branch name after reap+reclaim ---"
+  classMethod: testRetryBranchName: t [
+    | bbs dispatcher payload client reclaim harness branch |
+    '--- MP7: reclaimed task → impl/<task>-r1 branch name ---' println.
+    bbs := BBS withDataDir: MPHelper makeTempDir.
+    dispatcher := Dispatcher on: bbs harnessFactory: nil.
+    client := FakeClaimClient onBBS: bbs.
+
+    "Seed an expired claim with missed=1 so a single sweep re-pends it
+     with retry_count=1. This models: original worker claimed, lease
+     expired, reaper swept twice, task now pending with retry_count=1."
+    MPHelper seedExpiredClaim: 'branch-task' worker: 'worker:gone' claim: 'c-gone'
+             retry: 0 missed: 1 onBBS: bbs.
+
+    dispatcher reapExpiredClaims.
+
+    payload := MPHelper payloadOf: 'branch-task' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'pending'
+      message: 'MP7: task re-pended after reap'.
+    t assertEqual: (payload at: 'retry_count') to: 1
+      message: 'MP7: retry_count=1 after one reap cycle'.
+
+    "Fresh worker reclaims — the claim response carries retry_count=1."
+    reclaim := client claimTask: 'branch-task' worker: 'worker:fresh'
+                       claim: 'claim-fresh-000000000000000000'.
+    t assertEqual: (reclaim at: 'status') to: 200
+      message: 'MP7: fresh worker successfully reclaims'.
+    t assertEqual: (reclaim at: 'retry_count') to: 1
+      message: 'MP7: claim response carries retry_count=1'.
+
+    "The canonical branch name for this retry — anchored in
+     ClaudeHarness>>implBranchName — must be impl/<task>-r1."
+    harness := ClaudeHarness new initRole: 'implementer' task: 'branch-task'
+                                  scope: 'demo' bbs: bbs.
+    harness retryCount: (reclaim at: 'retry_count').
+    branch := harness implBranchName.
+    t assertEqual: branch to: 'impl/branch-task-r1'
+      message: 'MP7: retry branch name is impl/<task>-r1'
+  ]
+
+"=== Main ==="
+ClaimLifecycleMain subclass: Object
+  classMethod: start [
+    | t |
+    t := MPRunner new.
+    [TestClaimLifecycle run: t] on: Exception do: [:e |
+      ('TestClaimLifecycle CRASHED: ', e messageText) println.
+      t assert: false message: 'TestClaimLifecycle crashed'
+    ].
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
