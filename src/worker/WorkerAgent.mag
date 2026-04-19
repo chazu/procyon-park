@@ -17,7 +17,7 @@
 "
 
 WorkerAgent subclass: Object
-  instanceVars: name baseUrl interval running identity maxTokensPerDay maxUsdPerDay budgetMode tokensToday usdToday budgetResetAt softDrained softDrainReason notifications bbs inflight
+  instanceVars: name baseUrl interval running identity maxTokensPerDay maxUsdPerDay budgetMode tokensToday usdToday budgetResetAt softDrained softDrainReason notifications bbs inflight lease client harnessFactory claimRunning
 
   classMethod: onName: aName baseUrl: aUrl [
     ^super new initName: aName baseUrl: aUrl interval: 30
@@ -43,7 +43,11 @@ WorkerAgent subclass: Object
     softDrainReason := nil.
     notifications := Array new: 0.
     bbs := nil.
-    inflight := 0
+    inflight := 0.
+    lease := 600.
+    client := nil.
+    harnessFactory := nil.
+    claimRunning := false
   ]
 
   "--- Accessors -----------------------------------------------------"
@@ -87,6 +91,23 @@ WorkerAgent subclass: Object
    Array (handy for tests and for workers that have no in-process
    BBS)."
   method: bbs: aBBS [ bbs := aBBS. ^self ]
+
+  "Pluggable client seam. The client must answer post: path body: body
+   returning a Dictionary {'status': Int, 'body': Dict|nil}. Default is
+   nil — the claim loop will construct an HTTP-backed client lazily.
+   Tests inject a fake that routes directly to an ApiServer handler."
+  method: client: aClient [ client := aClient. ^self ]
+
+  "Pluggable harness factory seam. The factory must answer
+   createFor:task:scope:bbs: returning something that answers
+   retryCount:, workDir:, repoName:, run, failureReason. Default nil →
+   use HarnessFactory new."
+  method: harnessFactory: aFactory [ harnessFactory := aFactory. ^self ]
+
+  "Default lease is 600s (D6.2). Setter exists so tests can shrink the
+   renewal cadence without having to re-seed tuples."
+  method: lease: secs [ lease := secs. ^self ]
+  method: lease       [ ^lease ]
 
   "Tests use these to force a specific rollover boundary."
   method: budgetResetAt: ts [ budgetResetAt := ts. ^self ]
@@ -289,4 +310,326 @@ WorkerAgent subclass: Object
       ]
     ].
     ^payload
+  ]
+
+  "--- Claim loop (D6.6/D6.2/D6.5) ----------------------------------
+   startClaimLoop forks an independent worker that polls
+   /api/tasks/available, attempts to claim, spawns the local harness,
+   keeps the lease alive, and finally reports completion. Forked via
+   [block] fork (NOT Process fork:) per the Maggie goroutine
+   convention — Process fork: is not wired up.
+
+   The loop honors canClaim: when soft-drain has been engaged (budget
+   breach or operator drain), the loop idles and checks back after
+   `interval` seconds. In-flight tasks continue regardless — soft-drain
+   is a gate on new claims, never a yank on running work."
+
+  method: startClaimLoop [
+    identity isNil ifTrue: [
+      | rec |
+      rec := WorkerStore load: name.
+      rec isNil ifTrue: [
+        ('WorkerAgent: cannot startClaimLoop — no local keypair for ', name) println.
+        ^self
+      ].
+      identity := rec at: 'identity'
+    ].
+    claimRunning ifTrue: [^self].
+    claimRunning := true.
+    [self claimLoop] fork.
+    ^self
+  ]
+
+  method: stopClaimLoop [
+    claimRunning := false.
+    ^self
+  ]
+
+  method: claimLoop [
+    "Outer loop. Each tick either claims a single task (and runs it to
+     completion inline before looking for another) or sleeps and
+     retries. Exceptions surface as log lines so one bad tick does not
+     terminate the loop."
+    [claimRunning] whileTrue: [
+      [self claimTick] on: Exception do: [:e |
+        ('WorkerAgent: claim tick error: ', e messageText) println
+      ].
+      claimRunning ifTrue: [Process sleep: interval * 1000]
+    ]
+  ]
+
+  method: claimTick [
+    "One pass over the available queue. Returns self regardless of
+     outcome; caller handles pacing."
+    | tasks |
+    self canClaim ifFalse: [^self].
+    tasks := self fetchAvailable.
+    (tasks isNil or: [tasks isEmpty]) ifTrue: [^self].
+    "Walk candidates until one claim sticks (200). 409 → try next."
+    tasks do: [:t |
+      self attemptClaimAndRun: t ifClaimed: [^self]
+    ].
+    ^self
+  ]
+
+  method: attemptClaimAndRun: taskTuple ifClaimed: onClaimed [
+    "Generate a fresh claim_id, POST /api/tasks/claim, and on 200 spawn
+     the harness inline. 409 → return without running. The onClaimed
+     block is invoked (with no argument) on a successful claim so the
+     caller can break out of its tasks-do: walk."
+    | result claimHex retryCount |
+    result := self attemptClaim: taskTuple.
+    (result at: 'status') = 200 ifFalse: [^self].
+    claimHex := result at: 'claim_id'.
+    retryCount := result at: 'retry_count'.
+    self taskStarted.
+    onClaimed value.
+    "Per D6.3 the branch is impl/<task_id>-r<retry_count>; branch naming
+     itself lives in the harness/scheduler (see ClaudeHarness), so we
+     only forward retryCount. Role/workflow context travels through the
+     task payload."
+    [self runClaimed: taskTuple claimId: claimHex retryCount: retryCount]
+      on: Exception do: [:e |
+        ('WorkerAgent: run error on ', taskId, ': ', e messageText) println.
+        self taskFinished
+      ]
+  ]
+
+  method: runClaimed: taskTuple claimId: claimHex retryCount: retryCount [
+    "Spawn the harness, renew the lease on a forked timer at lease/3
+     (≈200s for the default 10min lease, D6.2), then post completion.
+     Bookkeeping: taskFinished always runs, renewal timer always
+     stops."
+    | taskId scope payload role repoName workDir harness factory
+      renewCtl status reason failure |
+    taskId := taskTuple at: 'identity'.
+    scope := taskTuple at: 'scope'.
+    payload := taskTuple at: 'payload' ifAbsent: [Dictionary new].
+    role := payload at: 'role' ifAbsent: ['implementer'].
+    repoName := payload at: 'repo' ifAbsent: [''].
+    workDir := payload at: 'workdir' ifAbsent: [File workingDirectory].
+    factory := harnessFactory isNil ifTrue: [HarnessFactory new] ifFalse: [harnessFactory].
+    harness := factory createFor: role task: taskId scope: scope bbs: bbs.
+    harness retryCount: retryCount.
+    harness workDir: workDir.
+    harness repoName: repoName.
+    "Renewal timer. renewCtl is a one-slot Array used as a shared flag
+     between the outer method and the forked timer. Float/Int math is
+     avoided by keeping the sleep as Int milliseconds."
+    renewCtl := Array new: 1.
+    renewCtl at: 0 put: true.
+    [self renewLoop: taskId scope: scope claimId: claimHex ctl: renewCtl] fork.
+    failure := nil.
+    [harness run] on: Exception do: [:e |
+      failure := 'harness-exception: ', e messageText.
+      ('WorkerAgent: harness raised: ', e messageText) println
+    ].
+    renewCtl at: 0 put: false.
+    "Harness exposes failureReason (set e.g. on repo-not-available per
+     D6.5). When the harness signalled an exception we keep that
+     reason; otherwise we trust its self-reported reason."
+    failure isNil ifTrue: [
+      [failure := harness failureReason] on: Exception do: [:e | failure := nil]
+    ].
+    failure isNil
+      ifTrue: [status := 'completed'. reason := nil]
+      ifFalse: [status := 'failed'. reason := failure].
+    [self completeTask: taskId claimId: claimHex status: status reason: reason]
+      on: Exception do: [:e |
+        ('WorkerAgent: complete error for ', taskId, ': ', e messageText) println
+      ].
+    self taskFinished
+  ]
+
+  method: renewLoop: taskId scope: scope claimId: claimHex ctl: renewCtl [
+    "Fire /api/tasks/renew every lease/3 seconds until ctl flips to
+     false OR the server responds 409 (task reaped and reclaimed).
+     Float/Int coercion note: lease is Int, lease // 3 is Int, so the
+     sleep millis calculation stays Int — Maggie's Int * 1000 returns
+     Int which is what Process sleep: wants."
+    | tick abandoned body resp status |
+    tick := (lease // 3) * 1000.
+    tick < 1000 ifTrue: [tick := 1000].
+    abandoned := false.
+    [(renewCtl at: 0) and: [abandoned not]] whileTrue: [
+      Process sleep: tick.
+      (renewCtl at: 0) ifTrue: [
+        body := Dictionary new.
+        body at: 'task_id' put: taskId.
+        body at: 'scope' put: scope.
+        body at: 'worker_id' put: name.
+        body at: 'claim_id' put: claimHex.
+        resp := nil.
+        [resp := self httpPost: '/api/tasks/renew' body: body]
+          on: Exception do: [:e |
+            ('WorkerAgent: renew exception: ', e messageText) println
+          ].
+        resp notNil ifTrue: [
+          status := resp at: 'status' ifAbsent: [500].
+          status = 409 ifTrue: [
+            ('WorkerAgent: renew 409 for ', taskId, ' — task reaped, abandoning renewal') println.
+            abandoned := true
+          ]
+        ]
+      ]
+    ].
+    ^abandoned
+  ]
+
+  "--- Step helpers -------------------------------------------------
+   These are factored out so the worker test harness can drive a
+   single end-to-end tick (available→claim→renew→complete) without
+   running the forked loop."
+
+  method: attemptClaim: taskTuple [
+    "Attempt a single /api/tasks/claim. Returns a Dictionary:
+       {status: 200|409|…, claim_id: hex, retry_count: Int,
+        claim_expires_at: ts|nil, task_id, scope}.
+     On non-200 outcomes claim_id/retry_count are still stamped from
+     the request (useful for replay logic)."
+    | taskId scope claimHex body resp d status |
+    taskId := taskTuple at: 'identity'.
+    scope := taskTuple at: 'scope'.
+    claimHex := self generateClaimHex.
+    body := Dictionary new.
+    body at: 'task_id' put: taskId.
+    body at: 'worker_id' put: name.
+    body at: 'claim_id' put: claimHex.
+    resp := self httpPost: '/api/tasks/claim' body: body.
+    status := resp at: 'status' ifAbsent: [500].
+    d := Dictionary new.
+    d at: 'status' put: status.
+    d at: 'claim_id' put: claimHex.
+    d at: 'task_id' put: taskId.
+    d at: 'scope' put: scope.
+    d at: 'claim_expires_at' put: ((resp at: 'body' ifAbsent: [Dictionary new])
+                                     at: 'claim_expires_at' ifAbsent: [nil]).
+    d at: 'retry_count' put: ((resp at: 'body' ifAbsent: [Dictionary new])
+                                at: 'retry_count' ifAbsent: [0]).
+    status = 409 ifTrue: [
+      ('WorkerAgent: claim 409 on ', taskId, ' — picking next') println
+    ].
+    ^d
+  ]
+
+  method: generateClaimHex [
+    "32 lowercase hex chars of Random entropy — UUIDv4-equivalent
+     128-bit opaque id used as the claim idempotency key per D6.12.
+     We do not use ClaimId here because the Proquint/Sha256 backing
+     currently raises on the test path (see observation:
+     procyon-park:src/util:ClaimId-Sha256-missing); Random is
+     sufficient for per-claim uniqueness within a worker process."
+    | digits buf nibble |
+    digits := '0123456789abcdef'.
+    buf := ''.
+    32 timesRepeat: [
+      nibble := Random nextInt: 16.
+      buf := buf, (digits at: nibble) asString
+    ].
+    ^buf
+  ]
+
+  method: renewOnce: taskId scope: scope claimId: claimHex [
+    "Fire a single /api/tasks/renew. Returns true on 200, false on 409
+     (task reaped / stolen) or other failure. Used by tests to drive
+     one renewal tick without running the forked renewal timer."
+    | body resp |
+    body := Dictionary new.
+    body at: 'task_id' put: taskId.
+    body at: 'scope' put: scope.
+    body at: 'worker_id' put: name.
+    body at: 'claim_id' put: claimHex.
+    resp := self httpPost: '/api/tasks/renew' body: body.
+    ^((resp at: 'status' ifAbsent: [500]) = 200)
+  ]
+
+  method: fetchAvailable [
+    "Array of task tuple Dicts (each with 'identity', 'scope',
+     'payload'). Empty array on any error or empty queue."
+    | body resp tasks |
+    body := Dictionary new.
+    body at: 'worker_id' put: name.
+    resp := self httpPost: '/api/tasks/available' body: body.
+    ((resp at: 'status' ifAbsent: [500]) = 200) ifFalse: [^Array new: 0].
+    tasks := (resp at: 'body' ifAbsent: [Dictionary new])
+               at: 'tasks' ifAbsent: [Array new: 0].
+    tasks isNil ifTrue: [^Array new: 0].
+    ^tasks
+  ]
+
+  method: completeTask: taskId claimId: claimHex status: status reason: reason [
+    "POST /api/tasks/complete. Returns true on 200, false otherwise."
+    | body resp s |
+    body := Dictionary new.
+    body at: 'task_id' put: taskId.
+    body at: 'worker_id' put: name.
+    body at: 'claim_id' put: claimHex.
+    body at: 'status' put: status.
+    reason notNil ifTrue: [body at: 'reason' put: reason].
+    resp := self httpPost: '/api/tasks/complete' body: body.
+    s := resp at: 'status' ifAbsent: [500].
+    ^s = 200
+  ]
+
+  "--- HTTP seam -----------------------------------------------------
+   All outbound worker-signed requests funnel through httpPost:body:.
+   When `client` is set, the request goes through the injected
+   fake — this is the test seam. Otherwise we go through
+   CLIBase>>signedPost:body:baseUrl:asActor:signer: (same as the
+   heartbeat path) and best-effort-infer a status code from the
+   response body.
+
+   Returns a Dictionary with keys:
+     'status' (Int) — inferred HTTP status (200/4xx/500)
+     'body'   (Dict|nil) — decoded JSON body, or nil on parse failure"
+
+  method: httpPost: path body: body [
+    client notNil ifTrue: [^client post: path body: body].
+    ^self defaultHttpPost: path body: body
+  ]
+
+  method: defaultHttpPost: path body: body [
+    | raw actorHeader result d |
+    actorHeader := 'worker:', name.
+    raw := nil.
+    [raw := CLIBase signedPost: path
+                    body: body
+                    baseUrl: baseUrl
+                    asActor: actorHeader
+                    signer: identity]
+      on: Exception do: [:e |
+        ('WorkerAgent: http error on ', path, ': ', e messageText) println.
+        raw := nil
+      ].
+    d := Dictionary new.
+    (raw isNil or: [(raw isKindOf: String) not] or: [raw isEmpty]) ifTrue: [
+      d at: 'status' put: 500.
+      d at: 'body' put: nil.
+      ^d
+    ].
+    result := nil.
+    [result := Json decode: raw] on: Exception do: [:e | result := nil].
+    result isNil ifTrue: [
+      d at: 'status' put: 500.
+      d at: 'body' put: nil.
+      ^d
+    ].
+    "Infer status from the canonical server response shapes. 200 bodies
+     carry either status='ok' or ok=true; 409 bodies carry an error
+     string AND a context field (executed_by/status). Anything else we
+     bucket as 500 so the caller treats it as retryable error."
+    ((result at: 'status' ifAbsent: [nil]) = 'ok'
+       or: [(result at: 'ok' ifAbsent: [nil]) = true]) ifTrue: [
+      d at: 'status' put: 200.
+      d at: 'body' put: result.
+      ^d
+    ].
+    (result includesKey: 'error') ifTrue: [
+      d at: 'status' put: 409.
+      d at: 'body' put: result.
+      ^d
+    ].
+    d at: 'status' put: 500.
+    d at: 'body' put: result.
+    ^d
   ]
