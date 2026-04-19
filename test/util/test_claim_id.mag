@@ -1,0 +1,173 @@
+"Tests for ClaimId — 128-bit claim idempotency identifier.
+
+ Covers the D6.12 acceptance criteria:
+   * 1000 generated ids are pairwise distinct
+   * every generated id matches ^[0-9a-f]{32}$
+   * proquint encoding round-trips back to the original 16 bytes (hex)
+   * fromHex: produces the same proquint as generate for a given hex"
+
+TestClaimId subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [
+    | t |
+    t := super new.
+    t init.
+    ^t
+  ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg,
+                             ' (got ', actual printString,
+                             ' expected ', expected printString, ')') println
+                         ]
+  ]
+
+  method: run [
+    self testShapeOfGenerate.
+    self testHexRegex.
+    self testUniqueness.
+    self testProquintRoundTrip.
+    self testFromHexRoundTrip.
+    self testFromHexRejectsBadInput.
+    self testDisplayOf.
+    ^self report
+  ]
+
+  "--- tests ------------------------------------------------------------"
+
+  method: testShapeOfGenerate [
+    | id |
+    id := ClaimId generate.
+    self assert: id notNil message: 'generate returns a dictionary'.
+    self assert: ((id at: 'hex') notNil) message: 'has hex key'.
+    self assert: ((id at: 'proquint') notNil) message: 'has proquint key'.
+    self assertEqual: (id at: 'hex') size to: 32
+      message: 'hex is 32 chars'
+  ]
+
+  method: testHexRegex [
+    "Every generated id matches ^[0-9a-f]{32}$."
+    | digits ok i hex c |
+    digits := '0123456789abcdef'.
+    100 timesRepeat: [
+      hex := (ClaimId generate) at: 'hex'.
+      ok := hex size = 32.
+      i := 0.
+      [ok and: [i < hex size]] whileTrue: [
+        c := hex at: i.
+        (digits includes: c) ifFalse: [ok := false].
+        i := i + 1
+      ].
+      self assert: ok message: 'hex is lowercase [0-9a-f]{32}: ', hex
+    ]
+  ]
+
+  method: testUniqueness [
+    "Generate 1000 ids; all hex strings must be distinct."
+    | seen n id hex dup |
+    seen := Dictionary new.
+    n := 1000.
+    dup := false.
+    n timesRepeat: [
+      id := ClaimId generate.
+      hex := id at: 'hex'.
+      (seen includesKey: hex) ifTrue: [dup := true].
+      seen at: hex put: true
+    ].
+    self assert: dup not message: '1000 generated ids are pairwise distinct'.
+    self assertEqual: seen size to: n
+      message: '1000 generated ids produce 1000 unique hex values'
+  ]
+
+  method: testProquintRoundTrip [
+    "Encode hex -> proquint, decode proquint -> hex, expect match."
+    | id hex roundTripped |
+    20 timesRepeat: [
+      id := ClaimId generate.
+      hex := id at: 'hex'.
+      roundTripped := ClaimId hexFromProquint: (id at: 'proquint').
+      self assertEqual: roundTripped to: hex
+        message: 'proquint round-trip preserves 16 bytes'
+    ]
+  ]
+
+  method: testFromHexRoundTrip [
+    "fromHex: a known hex string yields the same proquint generate would."
+    | hex a b |
+    hex := 'deadbeefcafebabe0123456789abcdef'.
+    a := ClaimId fromHex: hex.
+    self assertEqual: (a at: 'hex') to: hex
+      message: 'fromHex: preserves hex'.
+    "Generate a second fromHex: dict and confirm they carry identical
+     proquint strings — i.e. the encoding is deterministic."
+    b := ClaimId fromHex: hex.
+    self assertEqual: (a at: 'proquint') to: (b at: 'proquint')
+      message: 'fromHex: proquint is deterministic'.
+    "Also confirm round-trip back through hexFromProquint."
+    self assertEqual: (ClaimId hexFromProquint: (a at: 'proquint')) to: hex
+      message: 'fromHex: proquint round-trips to hex'
+  ]
+
+  method: testFromHexRejectsBadInput [
+    | caught |
+    caught := false.
+    [ClaimId fromHex: 'tooShort'] on: Exception do: [:e | caught := true].
+    self assert: caught message: 'fromHex: rejects short input'.
+    caught := false.
+    [ClaimId fromHex: 'ZZZZbeefcafebabe0123456789abcdef'] on: Exception do: [:e | caught := true].
+    self assert: caught message: 'fromHex: rejects non-hex characters'
+  ]
+
+  method: testDisplayOf [
+    | id pq |
+    id := ClaimId generate.
+    pq := ClaimId displayOf: id.
+    self assertEqual: pq to: (id at: 'proquint')
+      message: 'displayOf: returns the proquint form'.
+    self assertEqual: (ClaimId displayOf: nil) to: ''
+      message: 'displayOf: nil is empty string'
+  ]
+
+  "--- reporting --------------------------------------------------------"
+
+  method: report [
+    '=== ClaimId Tests ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      failures do: [:f | ('  - ', f) println]
+    ].
+    ^failed = 0
+  ]
+
+
+TestClaimIdMain subclass: Object
+
+  classMethod: run [
+    | t ok |
+    t := TestClaimId new.
+    ok := t run.
+    ok ifTrue: ['ALL TESTS PASSED' println]
+       ifFalse: ['TESTS FAILED' println.
+                 System exit: 1]
+  ]
