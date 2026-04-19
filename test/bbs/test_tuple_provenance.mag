@@ -1,0 +1,126 @@
+"Tests for Tuple provenance fields (launched_by / executed_by).
+
+ Invariants under test:
+   PR1  Tuple category:...:actor:launchedBy:executedBy: emits launched_by
+        when non-nil.
+   PR2  Tuple omits executed_by key entirely when nil (byte-compat with
+        existing tuples).
+   PR3  Round-trip through Json encode/decode preserves launched_by and
+        leaves executed_by absent.
+   PR4  Existing actor:-only factories remain byte-compatible (no
+        launched_by/executed_by leakage).
+   PR5  Convenience task:scope:identity:payload:id:actor:launchedBy:executedBy:
+        produces a task-category tuple with provenance.
+
+ Standalone runner at bottom (TupleProvMain start)."
+
+TPRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Tuple Provenance Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== TestTupleProvenance ==="
+TestTupleProvenance subclass: Object
+
+  classMethod: run: t [
+    | payload tuple encoded decoded actorOnly taskTuple |
+    '--- TestTupleProvenance ---' println.
+
+    payload := Dictionary new.
+    payload at: 'title' put: 'hello'.
+
+    "Build a task tuple with launched_by=user:alice, executed_by=nil."
+    tuple := Tuple linear: 'task' scope: 'r' identity: 'task-1' payload: payload id: 42
+      actor: nil launchedBy: 'user:alice' executedBy: nil.
+
+    "PR1 — launched_by present."
+    t assert: (tuple includesKey: 'launched_by')
+      message: 'PR1: launched_by key present when non-nil'.
+    t assertEqual: (tuple at: 'launched_by') to: 'user:alice'
+      message: 'PR1: launched_by value preserved'.
+
+    "PR2 — executed_by absent entirely (byte-compat)."
+    t assert: (tuple includesKey: 'executed_by') not
+      message: 'PR2: executed_by key absent when nil'.
+
+    "PR3 — Json round-trip preserves launched_by, executed_by stays absent."
+    encoded := Json encode: tuple.
+    decoded := Json decode: encoded.
+    t assert: (decoded includesKey: 'launched_by')
+      message: 'PR3: launched_by present after Json round-trip'.
+    t assertEqual: (decoded at: 'launched_by') to: 'user:alice'
+      message: 'PR3: launched_by value preserved after round-trip'.
+    t assert: (decoded includesKey: 'executed_by') not
+      message: 'PR3: executed_by key absent after round-trip'.
+
+    "PR4 — actor-only variant (no provenance kwargs) emits neither."
+    actorOnly := Tuple linear: 'task' scope: 'r' identity: 'task-2' payload: payload id: 43
+      actor: 'agent:bob'.
+    t assert: (actorOnly includesKey: 'launched_by') not
+      message: 'PR4: actor-only factory omits launched_by'.
+    t assert: (actorOnly includesKey: 'executed_by') not
+      message: 'PR4: actor-only factory omits executed_by'.
+    t assertEqual: (actorOnly at: 'actor') to: 'agent:bob'
+      message: 'PR4: actor stamp preserved on actor-only factory'.
+
+    "PR5 — task:...:launchedBy:executedBy: convenience factory."
+    taskTuple := Tuple task: 'r' identity: 'task-3' payload: payload id: 44
+      actor: nil launchedBy: 'user:alice' executedBy: 'agent:bob'.
+    t assertEqual: (taskTuple at: 'category') to: 'task'
+      message: 'PR5: task: convenience sets category=task'.
+    t assertEqual: (taskTuple at: 'launched_by') to: 'user:alice'
+      message: 'PR5: task: convenience preserves launched_by'.
+    t assertEqual: (taskTuple at: 'executed_by') to: 'agent:bob'
+      message: 'PR5: task: convenience preserves executed_by'
+  ]
+
+"=== Main ==="
+TupleProvMain subclass: Object
+  classMethod: start [
+    | t |
+    t := TPRunner new.
+    TestTupleProvenance run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]
