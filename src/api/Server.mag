@@ -4,6 +4,7 @@
 ApiServer subclass: Object
   instanceVars: httpServer bbs port dispatcher dashboardSSE
                 adminList skewSeconds enforceSignatures signatureVerifier
+                queueMaxPending
 
   classMethod: on: portNumber bbs: aBBS [
     ^super new initPort: portNumber bbs: aBBS dispatcher: nil
@@ -36,10 +37,11 @@ ApiServer subclass: Object
      identity epic — every mutating endpoint now requires a valid ed25519
      signature out of the box. Operators who explicitly want the legacy
      anonymous path back must set [security].enforce_signatures = false."
-    | home path config adminCfg secCfg |
+    | home path config adminCfg secCfg queueCfg qMax |
     adminList := Array new: 0.
     skewSeconds := 120.
     enforceSignatures := true.
+    queueMaxPending := nil.
     home := System env: 'HOME'.
     home isNil ifTrue: [home := ''].
     path := home, '/.config/pp/server.toml'.
@@ -54,6 +56,18 @@ ApiServer subclass: Object
         secCfg notNil ifTrue: [
           skewSeconds := secCfg at: 'skew_seconds' ifAbsent: [120].
           enforceSignatures := secCfg at: 'enforce_signatures' ifAbsent: [true]
+        ].
+        "D6.11 / §4.10: opt-in queue backpressure. [queue].max_pending caps
+         the number of pending task tuples; creation endpoints respond 429
+         once the current depth reaches it. Absent / nil / non-positive
+         values disable the guard (opt-in)."
+        queueCfg := config at: 'queue' ifAbsent: [nil].
+        queueCfg notNil ifTrue: [
+          qMax := queueCfg at: 'max_pending' ifAbsent: [nil].
+          (qMax notNil and: [qMax isKindOf: Number])
+            ifTrue: [
+              qMax > 0 ifTrue: [queueMaxPending := qMax]
+            ]
         ]
       ] on: Exception do: [:e |
         ('Warning: could not load server.toml: ', e messageText) println
@@ -209,10 +223,11 @@ ApiServer subclass: Object
       self okResponse: d
     ].
     self signedPost: '/api/workflow/start' fields: #('template' 'scope') do: [:body :actorCtx |
-      | instanceId d overrideAffinity |
+      | instanceId d overrideAffinity bp |
+      bp := self queueBackpressureResponse.
       dispatcher isNil ifTrue: [
         self errorResponse: 500 message: 'No dispatcher configured'
-      ] ifFalse: [
+      ] ifFalse: [bp notNil ifTrue: [bp] ifFalse: [
         [
           "F4.3: optional affinity override in the request body takes precedence
            over CUE per-transition and workflow-root defaults. Only pass through
@@ -233,7 +248,7 @@ ApiServer subclass: Object
         ] on: Exception do: [:e |
           self errorResponse: 400 message: e messageText
         ]
-      ]
+      ]]
     ].
     self signedRouteOnly: '/api/workflow/status' do: [:req :actorCtx | self handleWorkflowStatus: req].
     self signedRouteOnly: '/api/workflow/cancel' do: [:req :actorCtx | self handleWorkflowCancel: req].
@@ -605,7 +620,9 @@ ApiServer subclass: Object
 
   method: handleTaskCreate: body actor: actorCtx [
     "Handle /api/task/create — extracted to avoid method-size limit in route registration."
-    | taskPayload id wfInst instanceId transId childSignalPayload parts actor |
+    | taskPayload id wfInst instanceId transId childSignalPayload parts actor bp |
+    bp := self queueBackpressureResponse.
+    bp notNil ifTrue: [^bp].
     actor := self actorOf: actorCtx.
     taskPayload := Dictionary new.
     taskPayload at: 'role' put: (body at: 'role').
@@ -1191,6 +1208,39 @@ ApiServer subclass: Object
 
   method: okResponse: dict [
     ^self jsonResponse: 200 body: dict
+  ]
+
+  method: queueMaxPending [ ^queueMaxPending ]
+
+  method: countPendingTasks [
+    "Count task tuples whose payload.status = 'pending'. Used for
+     D6.11 / §4.10 queue backpressure."
+    | tasks n |
+    n := 0.
+    tasks := bbs scanAll: 'task'.
+    tasks do: [:t |
+      | p status |
+      p := t at: 'payload'.
+      status := p at: 'status' ifAbsent: [''].
+      status = 'pending' ifTrue: [n := n + 1]
+    ].
+    ^n
+  ]
+
+  method: queueBackpressureResponse [
+    "If [queue].max_pending is configured and the current pending-task
+     depth meets or exceeds it, return a 429 HttpResponse carrying
+     {error, code=queue_full, depth, max_pending}. Otherwise nil."
+    | depth d |
+    queueMaxPending isNil ifTrue: [^nil].
+    depth := self countPendingTasks.
+    depth < queueMaxPending ifTrue: [^nil].
+    d := Dictionary new.
+    d at: 'error' put: 'queue full'.
+    d at: 'code' put: 'queue_full'.
+    d at: 'depth' put: depth.
+    d at: 'max_pending' put: queueMaxPending.
+    ^self jsonResponse: 429 body: d
   ]
 
   method: errorResponse: statusCode message: msg [
@@ -1881,6 +1931,11 @@ ApiServer subclass: Object
       ^self errorResponse: 500 message: 'No dispatcher configured'
     ].
 
+    "D6.11 / §4.10: reject with 429 if pending-task queue is saturated."
+    (self queueBackpressureResponse) notNil ifTrue: [
+      ^self queueBackpressureResponse
+    ].
+
     "Update status to in-progress"
     self updateWorkitemStatus: identity scope: scope status: 'in-progress'.
 
@@ -1944,8 +1999,12 @@ ApiServer subclass: Object
   "--- Dashboard ---"
 
   method: handleDashboard: req [
-    "GET /api/dashboard — return workflows, tasks, tokens, recent notifications, and health."
-    | workflows tasks tokens notifications recent d health |
+    "GET /api/dashboard — return workflows, tasks, tokens, recent notifications, and health.
+     D6.11 / §4.10: also surface pending_tasks and the summed worker slot
+     capacity so the dashboard can render a red-threshold depth indicator
+     without re-scanning tuples client-side."
+    | workflows tasks tokens notifications recent d health
+      pending workers slotSum |
     workflows := bbs scanAll: 'workflow'.
     tasks := bbs scanAll: 'task'.
     tokens := bbs scanAll: 'token'.
@@ -1953,6 +2012,23 @@ ApiServer subclass: Object
     recent := notifications size > 20
       ifTrue: [notifications copyFrom: (notifications size - 20)]
       ifFalse: [notifications].
+
+    pending := 0.
+    tasks do: [:t |
+      | p |
+      p := t at: 'payload'.
+      (p at: 'status' ifAbsent: ['']) = 'pending' ifTrue: [pending := pending + 1]
+    ].
+
+    slotSum := 0.
+    workers := bbs scanAll: 'worker'.
+    workers do: [:w |
+      | wp s |
+      wp := w at: 'payload'.
+      s := wp at: 'slots' ifAbsent: [0].
+      (s isKindOf: Number) ifTrue: [slotSum := slotSum + s]
+    ].
+
     health := Dictionary new.
     health at: 'tuples' put: bbs size.
     health at: 'uptime' put: bbs uptime.
@@ -1962,6 +2038,11 @@ ApiServer subclass: Object
     d at: 'tokens' put: tokens.
     d at: 'notifications' put: recent.
     d at: 'health' put: health.
+    d at: 'pending_tasks' put: pending.
+    d at: 'worker_slots' put: slotSum.
+    queueMaxPending notNil ifTrue: [
+      d at: 'queue_max_pending' put: queueMaxPending
+    ].
     ^self okResponse: d
   ]
 
