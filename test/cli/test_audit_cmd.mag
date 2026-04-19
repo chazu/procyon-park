@@ -182,7 +182,7 @@ TestAuditCmdMain subclass: Object
       t assert: false message: 'TestAuditCmd crashed'
     ].
     t report.
-    t failed > 0 ifTrue: [System exit: 1]
+    ^t failed
   ]
 
-TestAuditCmdMain run
+

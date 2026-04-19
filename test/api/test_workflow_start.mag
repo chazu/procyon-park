@@ -191,7 +191,7 @@ TestWorkflowStartMain subclass: Object
       t assert: false message: 'TestAbsentOverrideFallback crashed'
     ].
     t report.
-    t failed > 0 ifTrue: [System exit: 1]
+    ^t failed
   ]
 
-TestWorkflowStartMain run
+

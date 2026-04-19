@@ -213,5 +213,5 @@ TasksAvailableMain subclass: Object
     t := TARunner new.
     TestTasksAvailable run: t.
     t report.
-    t failed > 0 ifTrue: [System exit: 1]
+    ^t failed
   ]

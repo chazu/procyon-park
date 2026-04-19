@@ -173,7 +173,7 @@ TestWorkflowAffinityFlagsMain subclass: Object
       t assert: false message: 'TestWorkflowAffinityFlags crashed'
     ].
     t report.
-    t failed > 0 ifTrue: [System exit: 1]
+    ^t failed
   ]
 
-TestWorkflowAffinityFlagsMain run
+

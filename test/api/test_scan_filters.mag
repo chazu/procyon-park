@@ -149,5 +149,5 @@ ScanFiltersMain subclass: Object
     t := SFRunner new.
     TestScanFilters run: t.
     t report.
-    t failed > 0 ifTrue: [System exit: 1]
+    ^t failed
   ]

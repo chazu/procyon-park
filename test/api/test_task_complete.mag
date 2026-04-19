@@ -251,5 +251,5 @@ TaskCompleteMain subclass: Object
     t := TCRunner new.
     TestTaskComplete run: t.
     t report.
-    t failed > 0 ifTrue: [System exit: 1]
+    ^t failed
   ]

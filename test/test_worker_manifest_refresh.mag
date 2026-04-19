@@ -356,5 +356,5 @@ TWMRMain subclass: Object
     t := TWMRTest new.
     TestWorkerManifestRefresh run: t.
     t report.
-    t failed > 0 ifTrue: [System exit: 1]
+    ^t failed
   ]

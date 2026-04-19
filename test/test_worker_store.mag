@@ -173,7 +173,5 @@ TestWorkerStoreMain subclass: Object
     | t ok |
     t := TestWorkerStore new.
     ok := t run.
-    ok ifTrue: ['ALL TESTS PASSED' println]
-       ifFalse: ['TESTS FAILED' println.
-                 System exit: 1]
+    ^ok ifTrue: [ 'ALL TESTS PASSED' println. 0 ] ifFalse: [ 'TESTS FAILED' println. 1 ]
   ]
