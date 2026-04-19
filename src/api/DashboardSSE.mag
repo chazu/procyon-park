@@ -689,11 +689,23 @@ DashboardSSE subclass: Object
   ]
 
   method: sendNotifs: entry [
-    | s notifications recent |
+    | s notifications recent identity watchSet visible |
     notifications := bbs scanAll: 'notification'.
-    recent := notifications size > 30
-      ifTrue: [notifications copyFrom: (notifications size - 30)]
-      ifFalse: [notifications].
+    identity := entry at: 'identity' ifAbsent: ['anonymous'].
+    "§4.8 (F8.1): filter per connection by signed identity. Unsigned
+     (--local) connections keep the legacy broadcast semantics so the
+     dashboard still works without an identity store."
+    (identity isNil or: [identity = 'anonymous']) ifTrue: [
+      visible := notifications
+    ] ifFalse: [
+      watchSet := self watchWorkflowsFor: identity.
+      visible := notifications select: [:n |
+        self notification: n visibleTo: identity watches: watchSet
+      ]
+    ].
+    recent := visible size > 30
+      ifTrue: [visible copyFrom: (visible size - 30)]
+      ifFalse: [visible].
     s := '<div id="dashboard-notifications"><h2>Recent Activity</h2>'.
     recent isEmpty ifTrue: [
       s := s, '<div class="empty-state">No recent activity</div>'
@@ -725,4 +737,55 @@ DashboardSSE subclass: Object
     ].
     s := s, '</div>'.
     ^self sendElements: s to: entry
+  ]
+
+  method: watchWorkflowsFor: identity [
+    "Resolve active workflow subscriptions for the given identity. Mirrors
+     ApiServer>>watchWorkflowsFor: so SSE filtering matches long-poll
+     filtering one-for-one. Returns an empty Array for anonymous/nil."
+    | watches result prefix |
+    (identity isNil or: [identity isEmpty]) ifTrue: [^Array new: 0].
+    watches := bbs scanAll: 'watch'.
+    result := Array new: 0.
+    prefix := identity, ':'.
+    watches do: [:w |
+      | p wid wfId owner matches |
+      p := w at: 'payload' ifAbsent: [Dictionary new].
+      wid := w at: 'identity' ifAbsent: [''].
+      wfId := p at: 'workflow_id' ifAbsent: [nil].
+      (wfId isNil and: [wid startsWith: prefix]) ifTrue: [
+        wfId := wid copyFrom: prefix size + 1 to: wid size
+      ].
+      owner := p at: 'user' ifAbsent: [nil].
+      matches := (owner = identity) or: [wid startsWith: prefix].
+      (matches and: [wfId notNil and: [wfId isEmpty not]]) ifTrue: [
+        result := result copyWith: wfId
+      ]
+    ].
+    ^result
+  ]
+
+  method: notification: n visibleTo: identity watches: watchSet [
+    "§4.8 (F8.1) per-identity visibility predicate. identity must be a
+     verified signed actor (never nil here — anonymous connections
+     bypass this predicate in sendNotifs:)."
+    | p launchedBy observers scope workflow |
+    launchedBy := n at: 'launched_by' ifAbsent: [nil].
+    launchedBy = identity ifTrue: [^true].
+    p := n at: 'payload' ifAbsent: [Dictionary new].
+    observers := p at: 'observers' ifAbsent: [nil].
+    (observers notNil and: [observers isKindOf: Array]) ifTrue: [
+      observers do: [:o | o = identity ifTrue: [^true]]
+    ].
+    watchSet isEmpty ifFalse: [
+      scope := n at: 'scope' ifAbsent: [''].
+      scope isNil ifTrue: [scope := ''].
+      workflow := (scope startsWith: 'wf-')
+        ifTrue: [scope]
+        ifFalse: [p at: 'workflow_instance' ifAbsent: ['']].
+      (workflow notNil and: [workflow isEmpty not]) ifTrue: [
+        watchSet do: [:w | w = workflow ifTrue: [^true]]
+      ]
+    ].
+    ^false
   ]

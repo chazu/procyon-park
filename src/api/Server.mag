@@ -181,11 +181,14 @@ ApiServer subclass: Object
       self okResponse: (self okWithId: id)
     ].
     self signedPost: '/api/notify' fields: #('message') do: [:body :actorCtx |
-      | id |
+      | id observers |
+      observers := body at: 'observers' ifAbsent: [nil].
+      (observers notNil and: [(observers isKindOf: Array) not]) ifTrue: [observers := nil].
       id := bbs notify: (body at: 'message')
                scope: (body at: 'scope' ifAbsent: ['system'])
                severity: (body at: 'severity' ifAbsent: ['info'])
-               actor: (self actorOf: actorCtx).
+               actor: (self actorOf: actorCtx)
+               observers: observers.
       self okResponse: (self okWithId: id)
     ].
     self signedPost: '/api/dismiss' fields: #('task_id' 'scope') do: [:body :actorCtx |
@@ -1522,13 +1525,17 @@ ApiServer subclass: Object
   "--- Convenience Endpoints ---"
 
   method: handleNotifications: req [
-    | since notifications filtered d |
+    | since notifications filtered d identity watchSet |
     since := req queryParam: 'since'.
     since isNil ifTrue: [since := 0] ifFalse: [since := since asInteger].
 
+    identity := self notifyIdentityFor: req.
+    watchSet := self watchWorkflowsFor: identity.
+
     notifications := bbs scanAll: 'notification'.
     filtered := notifications select: [:n |
-      (n at: 'created_at' ifAbsent: [0]) >= since
+      ((n at: 'created_at' ifAbsent: [0]) >= since)
+        and: [self notification: n visibleTo: identity watches: watchSet]
     ].
 
     d := Dictionary new.
@@ -1537,21 +1544,94 @@ ApiServer subclass: Object
     ^self okResponse: d
   ]
 
+  method: notifyIdentityFor: req [
+    "Resolve the signed caller identity for a GET request. Returns the
+     actor string (e.g. 'user:alice') or nil when the request cannot be
+     verified. In --local (enforceSignatures=false) mode, verification
+     failures fall through as nil — callers then broadcast all
+     notifications to preserve legacy behaviour."
+    | actorCtx |
+    actorCtx := signatureVerifier verify: req adminList: adminList skewSeconds: skewSeconds.
+    actorCtx isNil ifTrue: [
+      actorCtx := signatureVerifier verifySSE: req adminList: adminList skewSeconds: skewSeconds
+    ].
+    actorCtx isNil ifTrue: [^nil].
+    ^actorCtx actor
+  ]
+
+  method: watchWorkflowsFor: identity [
+    "Collect the set of workflow_ids the given identity has an active watch
+     tuple for. Returns an empty Array for nil/empty identities."
+    | watches result prefix |
+    (identity isNil or: [identity isEmpty]) ifTrue: [^Array new: 0].
+    watches := bbs scanAll: 'watch'.
+    result := Array new: 0.
+    prefix := identity, ':'.
+    watches do: [:w |
+      | p wfId wid owner matches |
+      p := w at: 'payload' ifAbsent: [Dictionary new].
+      wid := w at: 'identity' ifAbsent: [''].
+      wfId := p at: 'workflow_id' ifAbsent: [nil].
+      (wfId isNil and: [wid startsWith: prefix]) ifTrue: [
+        "Fallback: parse identity tuple '<user>:<wfId>'."
+        wfId := wid copyFrom: prefix size + 1 to: wid size
+      ].
+      owner := p at: 'user' ifAbsent: [nil].
+      matches := (owner = identity) or: [wid startsWith: prefix].
+      (matches and: [wfId notNil and: [wfId isEmpty not]]) ifTrue: [
+        result := result copyWith: wfId
+      ]
+    ].
+    ^result
+  ]
+
+  method: notification: n visibleTo: identity watches: watchSet [
+    "§4.8 (F8.1) per-identity visibility. When identity is nil (unsigned
+     --local mode) every notification is visible. Otherwise, include
+     iff: identity equals launched_by, OR identity appears in the
+     payload observers array, OR the watchSet contains the notification's
+     workflow_id (derived from scope='wf-...' or payload.workflow_instance)."
+    | p launchedBy observers scope workflow |
+    identity isNil ifTrue: [^true].
+    launchedBy := n at: 'launched_by' ifAbsent: [nil].
+    launchedBy = identity ifTrue: [^true].
+    p := n at: 'payload' ifAbsent: [Dictionary new].
+    observers := p at: 'observers' ifAbsent: [nil].
+    (observers notNil and: [observers isKindOf: Array]) ifTrue: [
+      observers do: [:o | o = identity ifTrue: [^true]]
+    ].
+    watchSet isEmpty ifFalse: [
+      scope := n at: 'scope' ifAbsent: [''].
+      scope isNil ifTrue: [scope := ''].
+      workflow := (scope startsWith: 'wf-')
+        ifTrue: [scope]
+        ifFalse: [p at: 'workflow_instance' ifAbsent: ['']].
+      (workflow notNil and: [workflow isEmpty not]) ifTrue: [
+        watchSet do: [:w | w = workflow ifTrue: [^true]]
+      ]
+    ].
+    ^false
+  ]
+
   method: handleNotificationStream: req [
     "GET /api/notifications/stream?since=<epoch>&wait=<0|1> — long-polling notification stream.
      Returns notifications since the given epoch. If none found and wait!=0, holds
      the request for up to 10 seconds, polling every 500ms.
      Pass wait=0 to return immediately (used by --no-follow)."
-    | since wait notifications filtered mapped d i obj p |
+    | since wait notifications filtered mapped d i obj p identity watchSet |
     since := req queryParam: 'since'.
     since isNil ifTrue: [since := 0] ifFalse: [since := since asInteger].
     wait := req queryParam: 'wait'.
     wait isNil ifTrue: [wait := 1] ifFalse: [wait := wait asInteger].
 
+    identity := self notifyIdentityFor: req.
+    watchSet := self watchWorkflowsFor: identity.
+
     "Initial scan"
     notifications := bbs scanAll: 'notification'.
     filtered := notifications select: [:n |
-      (n at: 'created_at' ifAbsent: [0]) >= since
+      ((n at: 'created_at' ifAbsent: [0]) >= since)
+        and: [self notification: n visibleTo: identity watches: watchSet]
     ].
 
     "Long-poll: if no notifications yet and wait enabled, wait up to 10 seconds"
@@ -1560,9 +1640,12 @@ ApiServer subclass: Object
       [filtered isEmpty and: [i < 20]] whileTrue: [
         Process sleep: 500.
         i := i + 1.
+        "Refresh watch set each tick so new subscriptions surface mid-poll."
+        watchSet := self watchWorkflowsFor: identity.
         notifications := bbs scanAll: 'notification'.
         filtered := notifications select: [:n |
-          (n at: 'created_at' ifAbsent: [0]) >= since
+          ((n at: 'created_at' ifAbsent: [0]) >= since)
+            and: [self notification: n visibleTo: identity watches: watchSet]
         ]
       ]
     ].

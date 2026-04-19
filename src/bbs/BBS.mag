@@ -455,12 +455,29 @@ BBS subclass: Object
   ]
 
   method: notify: message scope: scope severity: severity actor: actor [
+    ^self notify: message scope: scope severity: severity actor: actor observers: nil
+  ]
+
+  method: notify: message scope: scope severity: severity actor: actor observers: observers [
+    "Emit a notification tuple with optional per-identity observer list.
+     The emitting actor is stamped as launched_by so SSE/long-poll filters
+     in the API layer can show it to the initiator. Observers (array of
+     identities) are persisted in payload so those identities see it even
+     if they have no watch subscription. See §4.8 (F8.1)."
     | payload |
     payload := Dictionary new.
     payload at: 'message' put: message.
     payload at: 'severity' put: severity.
     payload at: 'read' put: false.
-    ^self out: 'notification' scope: scope identity: 'notify-', DateTime now epochSeconds printString payload: payload actor: actor
+    (observers notNil and: [observers isKindOf: Array])
+      ifTrue: [payload at: 'observers' put: observers].
+    ^self out: 'notification'
+          scope: scope
+          identity: 'notify-', DateTime now epochSeconds printString
+          payload: payload
+          actor: actor
+          launchedBy: actor
+          executedBy: nil
   ]
 
   "--- Persistence ---"
