@@ -377,11 +377,12 @@ WorkerAgent subclass: Object
      the harness inline. 409 → return without running. The onClaimed
      block is invoked (with no argument) on a successful claim so the
      caller can break out of its tasks-do: walk."
-    | result claimHex retryCount |
+    | result claimHex retryCount taskId |
     result := self attemptClaim: taskTuple.
     (result at: 'status') = 200 ifFalse: [^self].
     claimHex := result at: 'claim_id'.
     retryCount := result at: 'retry_count'.
+    taskId := taskTuple at: 'identity'.
     self taskStarted.
     onClaimed value.
     "Per D6.3 the branch is impl/<task_id>-r<retry_count>; branch naming
@@ -413,11 +414,15 @@ WorkerAgent subclass: Object
     harness retryCount: retryCount.
     harness workDir: workDir.
     harness repoName: repoName.
-    "Renewal timer. renewCtl is a one-slot Array used as a shared flag
-     between the outer method and the forked timer. Float/Int math is
-     avoided by keeping the sleep as Int milliseconds."
-    renewCtl := Array new: 1.
+    "Renewal timer. renewCtl is a two-slot Array used as a shared flag
+     between the outer method and the forked timer:
+       slot 0 — running (true while outer method wants renewals to fire)
+       slot 1 — abandoned (set by the timer when the server returns 409
+                for a renew, i.e. the task was reaped and re-dispatched)
+     Float/Int math is avoided by keeping the sleep as Int milliseconds."
+    renewCtl := Array new: 2.
     renewCtl at: 0 put: true.
+    renewCtl at: 1 put: false.
     [self renewLoop: taskId scope: scope claimId: claimHex ctl: renewCtl] fork.
     failure := nil.
     [harness run] on: Exception do: [:e |
@@ -434,6 +439,17 @@ WorkerAgent subclass: Object
     failure isNil
       ifTrue: [status := 'completed'. reason := nil]
       ifFalse: [status := 'failed'. reason := failure].
+    "If the renewal path observed a 409, the task was reaped and
+     re-dispatched by the server. Posting /api/tasks/complete with our
+     (now-stale) claim_id would at best return 409 and at worst race
+     against the new owner's completion. Abandon silently — taskFinished
+     still runs so in-flight bookkeeping is honest."
+    (renewCtl at: 1) ifTrue: [
+      ('WorkerAgent: abandoning complete for ', taskId,
+       ' — renewal was 409ed (task reaped)') println.
+      self taskFinished.
+      ^self
+    ].
     [self completeTask: taskId claimId: claimHex status: status reason: reason]
       on: Exception do: [:e |
         ('WorkerAgent: complete error for ', taskId, ': ', e messageText) println
@@ -468,7 +484,10 @@ WorkerAgent subclass: Object
           status := resp at: 'status' ifAbsent: [500].
           status = 409 ifTrue: [
             ('WorkerAgent: renew 409 for ', taskId, ' — task reaped, abandoning renewal') println.
-            abandoned := true
+            abandoned := true.
+            "Surface abandonment to the runClaimed: caller so it skips
+             the now-pointless /api/tasks/complete."
+            renewCtl at: 1 put: true
           ]
         ]
       ]
