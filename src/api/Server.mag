@@ -127,8 +127,9 @@ ApiServer subclass: Object
 
     "Convenience endpoints"
     self signedPost: '/api/observe' fields: #('scope' 'identity' 'detail') do: [:body :actorCtx |
-      | id witnessedBy witnessErr |
+      | id witnessedBy witnessErr agentIdentity |
       witnessedBy := body at: 'witnessed_by' ifAbsent: [nil].
+      agentIdentity := body at: 'agent_identity' ifAbsent: [nil].
       witnessErr := self validateWitness: witnessedBy.
       witnessErr notNil ifTrue: [
         self errorResponse: 400 message: witnessErr
@@ -139,7 +140,8 @@ ApiServer subclass: Object
                  tags: (body at: 'tags' ifAbsent: [#()])
                  task: (body at: 'task' ifAbsent: [''])
                  actor: (self actorOf: actorCtx)
-                 witnessedBy: witnessedBy.
+                 witnessedBy: witnessedBy
+                 agentIdentity: agentIdentity.
         self okResponse: (self okWithId: id)
       ]
     ].
@@ -150,7 +152,8 @@ ApiServer subclass: Object
                detail: (body at: 'detail')
                rationale: (body at: 'rationale' ifAbsent: [''])
                task: (body at: 'task' ifAbsent: [''])
-               actor: (self actorOf: actorCtx).
+               actor: (self actorOf: actorCtx)
+               agentIdentity: (body at: 'agent_identity' ifAbsent: [nil]).
       self okResponse: (self okWithId: id)
     ].
     self signedPost: '/api/event' fields: #('scope' 'identity') do: [:body :actorCtx |
@@ -159,7 +162,8 @@ ApiServer subclass: Object
                 identity: (body at: 'identity')
                 type: (body at: 'type' ifAbsent: ['generic'])
                 summary: (body at: 'summary' ifAbsent: [''])
-                actor: (self actorOf: actorCtx).
+                actor: (self actorOf: actorCtx)
+                agentIdentity: (body at: 'agent_identity' ifAbsent: [nil]).
       self okResponse: (self okWithId: id)
     ].
     self signedPost: '/api/notify' fields: #('message') do: [:body :actorCtx |
@@ -400,6 +404,12 @@ ApiServer subclass: Object
     (body includesKey: 'workdir') ifTrue: [taskPayload at: 'workdir' put: (body at: 'workdir')].
     (body includesKey: 'workflow_instance') ifTrue: [taskPayload at: 'workflow_instance' put: (body at: 'workflow_instance')].
     (body includesKey: 'repo') ifTrue: [taskPayload at: 'repo' put: (body at: 'repo')].
+    "Observational agent_identity (<human>/<workflow-instance>/<role>) —
+     additive to the verified launched_by/actor signer; pp audit consumes
+     this in a follow-up story."
+    (body includesKey: 'agent_identity') ifTrue: [
+      taskPayload at: 'agent_identity' put: (body at: 'agent_identity')
+    ].
     "Stamp launched_by with the verified signer (nil when anonymous so the
      key stays absent, preserving byte-compat)."
     id := bbs out: 'task' scope: (body at: 'scope') identity: (body at: 'identity') payload: taskPayload actor: actor launchedBy: actor executedBy: nil.

@@ -389,16 +389,25 @@ BBS subclass: Object
   ]
 
   method: observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor [
-    ^self observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor witnessedBy: nil
+    ^self observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor witnessedBy: nil agentIdentity: nil
   ]
 
   method: observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor witnessedBy: witnessedBy [
-    "Write an observation tuple. witnessed_by, when non-nil, is stamped into
-     the payload as a single-identity attestation (D6.1). Callers are
+    ^self observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor witnessedBy: witnessedBy agentIdentity: nil
+  ]
+
+  method: observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor agentIdentity: agentIdentity [
+    ^self observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor witnessedBy: nil agentIdentity: agentIdentity
+  ]
+
+  method: observe: scope identity: identity detail: detail tags: tags task: taskId actor: actor witnessedBy: witnessedBy agentIdentity: agentIdentity [
+    "Write an observation tuple. witnessed_by (D6.1) and agent_identity (F5.2)
+     are each stamped into the payload only when non-nil. Callers are
      responsible for validating witnessedBy against the identity registry
-     before calling this method."
+     before calling. agent_identity is observational — it does NOT replace
+     the verified actor (the signer)."
     | payload |
-    payload := Tuple observationPayload: detail tags: tags task: taskId witnessedBy: witnessedBy.
+    payload := Tuple observationPayload: detail tags: tags task: taskId witnessedBy: witnessedBy agentIdentity: agentIdentity.
     ^self out: 'observation' scope: scope identity: identity payload: payload actor: actor
   ]
 
@@ -407,11 +416,18 @@ BBS subclass: Object
   ]
 
   method: decide: scope identity: identity detail: detail rationale: rationale task: taskId actor: actor [
+    ^self decide: scope identity: identity detail: detail rationale: rationale task: taskId actor: actor agentIdentity: nil
+  ]
+
+  method: decide: scope identity: identity detail: detail rationale: rationale task: taskId actor: actor agentIdentity: agentIdentity [
     | payload |
     payload := Dictionary new.
     payload at: 'detail' put: detail.
     rationale isEmpty ifFalse: [payload at: 'rationale' put: rationale].
     taskId isEmpty ifFalse: [payload at: 'task' put: taskId].
+    (agentIdentity notNil and: [agentIdentity isEmpty not]) ifTrue: [
+      payload at: 'agent_identity' put: agentIdentity
+    ].
     ^self outPinned: 'decision' scope: scope identity: identity payload: payload actor: actor
   ]
 
@@ -420,10 +436,17 @@ BBS subclass: Object
   ]
 
   method: emitEvent: scope identity: identity type: type summary: summary actor: actor [
+    ^self emitEvent: scope identity: identity type: type summary: summary actor: actor agentIdentity: nil
+  ]
+
+  method: emitEvent: scope identity: identity type: type summary: summary actor: actor agentIdentity: agentIdentity [
     | payload |
     payload := Dictionary new.
     payload at: 'type' put: type.
     summary isEmpty ifFalse: [payload at: 'summary' put: summary].
+    (agentIdentity notNil and: [agentIdentity isEmpty not]) ifTrue: [
+      payload at: 'agent_identity' put: agentIdentity
+    ].
     ^self out: 'event' scope: scope identity: identity payload: payload actor: actor
   ]
 

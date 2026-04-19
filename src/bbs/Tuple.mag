@@ -83,15 +83,20 @@ Tuple subclass: Object
   ]
 
   classMethod: observationPayload: detail tags: tags task: taskId witnessedBy: witnessedBy [
-    "Build a payload Dictionary for an observation tuple. witnessed_by is
-     only stamped when non-nil, preserving byte-compat with tuples that
-     omit the key entirely."
+    ^self observationPayload: detail tags: tags task: taskId witnessedBy: witnessedBy agentIdentity: nil
+  ]
+
+  classMethod: observationPayload: detail tags: tags task: taskId witnessedBy: witnessedBy agentIdentity: agentIdentity [
+    "Build a payload Dictionary for an observation tuple. witnessed_by and
+     agent_identity are only stamped when non-nil, preserving byte-compat
+     with tuples that omit those keys entirely."
     | p |
     p := Dictionary new.
     p at: 'detail' put: detail.
     p at: 'tags' put: tags.
     (taskId notNil and: [taskId isEmpty not]) ifTrue: [p at: 'task' put: taskId].
     witnessedBy notNil ifTrue: [p at: 'witnessed_by' put: witnessedBy].
+    (agentIdentity notNil and: [agentIdentity isEmpty not]) ifTrue: [p at: 'agent_identity' put: agentIdentity].
     ^p
   ]
 

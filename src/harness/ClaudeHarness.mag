@@ -27,7 +27,7 @@ ClaudeHarness subclass: Object
   method: run [
     "Assemble the system prompt, spawn Claude, wait for completion."
 
-    | contextTuples taskTuple taskDescription taskPayload workflowInstance env home sessionsDir outputFile timeoutArgs shellCmd timeoutSecs timeoutStr |
+    | contextTuples taskTuple taskDescription taskPayload workflowInstance env home sessionsDir outputFile timeoutArgs shellCmd timeoutSecs timeoutStr operatorRec operatorName derivedIdentity |
 
     "Read the task description and workflow instance first (needed for context filtering)"
     taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
@@ -82,6 +82,22 @@ ClaudeHarness subclass: Object
     env at: 'PP_SYSTEM_PROMPT' put: systemPrompt.
     env at: 'PP_TASK_DESC' put: taskDescription.
     env at: 'PP_OUTPUT_FILE' put: outputFile.
+
+    "Derive observational agent identity: <human>/<workflow-instance>/<role>.
+     Observational only — does NOT replace the verified actor (the signer)
+     per D6.1. Stamped into the tuple payload as agent_identity when set.
+     Worker-key signing (multiplayer:worker) is out of scope for this story."
+    operatorRec := nil.
+    [operatorRec := IdentityStore loadCurrent] on: Exception do: [:e | operatorRec := nil].
+    operatorName := (operatorRec notNil)
+      ifTrue: [operatorRec at: 'name' ifAbsent: [nil]]
+      ifFalse: [nil].
+    (operatorName notNil and: [operatorName isEmpty not
+        and: [workflowInstance notNil and: [workflowInstance isEmpty not
+        and: [role notNil and: [role name isEmpty not]]]]]) ifTrue: [
+      derivedIdentity := operatorName, '/', workflowInstance, '/', role name.
+      env at: 'PP_ACTOR' put: derivedIdentity
+    ].
 
     "Build sh -c command that runs claude with stream-json output redirected to file.
      We reference env vars instead of inlining the system prompt to avoid quoting hell."

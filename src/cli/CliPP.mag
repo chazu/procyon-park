@@ -1082,6 +1082,19 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
 
   "--- Shared POST helper for signal-writer commands ---------------------"
 
+  classMethod: stampAgentIdentity: body [
+    "If the PP_ACTOR env var is set (by ClaudeHarness), stamp the derived
+     <human>/<workflow-instance>/<role> identity into the request body so
+     the server can include it as an observational agent_identity payload
+     field. Additive to — does NOT replace — the verified actor field
+     (the signer) per D6.1."
+    | ppActor |
+    ppActor := System env: 'PP_ACTOR'.
+    (ppActor notNil and: [ppActor isEmpty not]) ifTrue: [
+      body at: 'agent_identity' put: ppActor
+    ]
+  ]
+
   classMethod: postAndPrint: cfg path: path body: body [
     "POST a JSON body to the API, pretty-print the decoded response.
      Mutating route — every send is ed25519-signed by the local identity
@@ -1222,6 +1235,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
           tagArr := tagsStr split: ','.
           body at: 'tags' put: tagArr
         ].
+        self stampAgentIdentity: body.
         self postAndPrint: cfg path: '/api/observe' body: body
       ].
       exitCode
@@ -1289,6 +1303,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         (rationale notNil and: [rationale isEmpty not]) ifTrue: [
           body at: 'rationale' put: rationale
         ].
+        self stampAgentIdentity: body.
         self postAndPrint: cfg path: '/api/decide' body: body
       ].
       exitCode
@@ -1356,6 +1371,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         (summary notNil and: [summary isEmpty not]) ifTrue: [
           body at: 'summary' put: summary
         ].
+        self stampAgentIdentity: body.
         self postAndPrint: cfg path: '/api/event' body: body
       ].
       exitCode
@@ -3311,6 +3327,7 @@ PPEOF'.
             cfg taskId isEmpty ifFalse: [
               body at: 'workflow_instance' put: cfg taskId
             ].
+            self stampAgentIdentity: body.
             self postAndPrint: cfg path: '/api/task/create' body: body
           ]
         ]
