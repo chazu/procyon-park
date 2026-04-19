@@ -1,0 +1,153 @@
+"Tests for ApiServer applyScanFilters:body: — the in-memory filters
+ layered on top of /api/scan so pp audit can reuse the endpoint.
+
+ Invariants under test:
+   SF1  No filter keys present -> input tuples returned unchanged.
+   SF2  body 'actor' filter selects only tuples whose payload.actor matches.
+   SF3  body 'worker' filter selects on payload.executed_by.
+   SF4  body 'workflow' filter selects on payload.workflow_instance.
+   SF5  Combined filters AND together (all must match)."
+
+SFRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== /api/scan filter Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helper ---"
+SFHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: tupleWithActor: actor worker: worker workflow: wf [
+    "Build a fake tuple shaped like a BBS scan result."
+    | payload tuple |
+    payload := Dictionary new.
+    actor notNil ifTrue: [payload at: 'actor' put: actor].
+    worker notNil ifTrue: [payload at: 'executed_by' put: worker].
+    wf notNil ifTrue: [payload at: 'workflow_instance' put: wf].
+    tuple := Dictionary new.
+    tuple at: 'payload' put: payload.
+    ^tuple
+  ]
+
+"=== TestScanFilters ==="
+TestScanFilters subclass: Object
+
+  classMethod: run: t [
+    | tempDir bbs server tuples body filtered |
+    '--- TestScanFilters ---' println.
+
+    tempDir := SFHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := ApiServer on: 0 bbs: bbs.
+
+    tuples := Array new: 0.
+    tuples := tuples copyWith: (SFHelper tupleWithActor: 'user:alice' worker: 'w1' workflow: 'wf-A').
+    tuples := tuples copyWith: (SFHelper tupleWithActor: 'user:bob'   worker: 'w1' workflow: 'wf-B').
+    tuples := tuples copyWith: (SFHelper tupleWithActor: 'user:alice' worker: 'w2' workflow: 'wf-A').
+    tuples := tuples copyWith: (SFHelper tupleWithActor: 'user:carol' worker: 'w2' workflow: 'wf-B').
+
+    "SF1: no filter keys -> unchanged."
+    body := Dictionary new.
+    filtered := server applyScanFilters: tuples body: body.
+    t assertEqual: filtered size to: 4
+      message: 'SF1: empty body returns all tuples'.
+
+    "SF2: actor filter."
+    body := Dictionary new.
+    body at: 'actor' put: 'user:alice'.
+    filtered := server applyScanFilters: tuples body: body.
+    t assertEqual: filtered size to: 2
+      message: 'SF2: actor=user:alice matches 2 tuples'.
+
+    "SF3: worker filter."
+    body := Dictionary new.
+    body at: 'worker' put: 'w1'.
+    filtered := server applyScanFilters: tuples body: body.
+    t assertEqual: filtered size to: 2
+      message: 'SF3: worker=w1 matches 2 tuples'.
+
+    "SF4: workflow filter."
+    body := Dictionary new.
+    body at: 'workflow' put: 'wf-B'.
+    filtered := server applyScanFilters: tuples body: body.
+    t assertEqual: filtered size to: 2
+      message: 'SF4: workflow=wf-B matches 2 tuples'.
+
+    "SF5: combined filters AND."
+    body := Dictionary new.
+    body at: 'actor' put: 'user:alice'.
+    body at: 'worker' put: 'w2'.
+    body at: 'workflow' put: 'wf-A'.
+    filtered := server applyScanFilters: tuples body: body.
+    t assertEqual: filtered size to: 1
+      message: 'SF5: alice + w2 + wf-A matches exactly 1 tuple'.
+
+    "SF5b: combined with no overlap -> empty."
+    body := Dictionary new.
+    body at: 'actor' put: 'user:alice'.
+    body at: 'workflow' put: 'wf-B'.
+    filtered := server applyScanFilters: tuples body: body.
+    t assertEqual: filtered size to: 0
+      message: 'SF5b: alice + wf-B matches 0 tuples (AND semantics)'
+  ]
+
+"=== Main ==="
+ScanFiltersMain subclass: Object
+  classMethod: start [
+    | t |
+    t := SFRunner new.
+    TestScanFilters run: t.
+    t report.
+    t failed > 0 ifTrue: [System exit: 1]
+  ]

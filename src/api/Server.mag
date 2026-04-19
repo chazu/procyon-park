@@ -120,6 +120,7 @@ ApiServer subclass: Object
       (body includesKey: 'scope')
         ifTrue: [tuples := bbs scan: (body at: 'category') scope: (body at: 'scope')]
         ifFalse: [tuples := bbs scanAll: (body at: 'category')].
+      tuples := self applyScanFilters: tuples body: body.
       d := Dictionary new. d at: 'tuples' put: tuples. d at: 'count' put: tuples size.
       self okResponse: d
     ].
@@ -419,6 +420,37 @@ ApiServer subclass: Object
   ]
 
   "--- Helpers ---"
+
+  method: applyScanFilters: tuples body: body [
+    "Apply optional actor/worker/workflow filters to scan results.
+     Each filter ANDs with the others. Filters look up payload fields:
+       body 'actor'    -> payload 'actor'
+       body 'worker'   -> payload 'executed_by'
+       body 'workflow' -> payload 'workflow_instance'
+     Tuples missing the relevant payload key never match. Returns the
+     filtered collection (or the original when no filters are present)."
+    | result wantActor wantWorker wantWf |
+    result := tuples.
+    (body includesKey: 'actor') ifTrue: [
+      wantActor := body at: 'actor'.
+      result := result select: [:t |
+        ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'actor' ifAbsent: [nil]) = wantActor
+      ]
+    ].
+    (body includesKey: 'worker') ifTrue: [
+      wantWorker := body at: 'worker'.
+      result := result select: [:t |
+        ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'executed_by' ifAbsent: [nil]) = wantWorker
+      ]
+    ].
+    (body includesKey: 'workflow') ifTrue: [
+      wantWf := body at: 'workflow'.
+      result := result select: [:t |
+        ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'workflow_instance' ifAbsent: [nil]) = wantWf
+      ]
+    ].
+    ^result
+  ]
 
   method: jsonResponse: statusCode body: dict [
     | resp |
