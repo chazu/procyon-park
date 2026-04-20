@@ -112,6 +112,7 @@ CliPP subclass: Object
     head = 'plan'     ifTrue: [^true].
     head = 'identity' ifTrue: [^true].
     head = 'whoami'   ifTrue: [^true].
+    head = 'init'     ifTrue: [^true].
     ^false
   ]
 
@@ -163,6 +164,7 @@ CliPP subclass: Object
     head = 'plan'     ifTrue: [^self runPlan: args].
     head = 'identity' ifTrue: [^self runIdentity: args].
     head = 'whoami'   ifTrue: [^CliWhoami run: args].
+    head = 'init'     ifTrue: [^CliInit run: (args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0])].
     ^0
   ]
 

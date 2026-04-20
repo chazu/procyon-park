@@ -65,6 +65,7 @@ PP subclass: CLIBase
     cmd = 'worker'    ifTrue: [^self cmdWorker: args].
     cmd = 'user'      ifTrue: [^self cmdUser: args].
     cmd = 'whoami'    ifTrue: [^CliWhoami run: args identityOverride: identityOverride].
+    cmd = 'init'      ifTrue: [^CliInit run: (args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0])].
     cmd = 'help'      ifTrue: [^self printUsage].
 
     ('Unknown command: ', cmd) println.
@@ -381,6 +382,7 @@ PP subclass: CLIBase
     '  session  [<taskId>]                              View Claude Code session logs' println.
     '  usage    [<taskId>]                              Report current session token consumption' println.
     '  identity <init|show|rotate|list|use> [args...]   Manage local keypairs' println.
+    '  init     [<name>]                                First-time setup (create identity + config)' println.
     '  worker   init <name> [--force]                  Create a local worker keypair' println.
     '  user     <add|revoke> <name> [--pubkey <hex>]    Admin-gated user registry' println.
     '  whoami                                           Show the active local identity' println.

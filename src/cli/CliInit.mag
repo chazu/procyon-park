@@ -1,0 +1,58 @@
+"CliInit — `pp init [name]`. Ergonomic wrapper that:
+   1. Creates a local Ed25519 identity named <name> (default: $USER or 'local')
+   2. Writes ~/.config/pp/server.toml with that pubkey as sole admin
+   3. Prints next-step guidance
+
+ Idempotent: if server.toml already exists, prints a reminder instead
+ of clobbering. `pp serve` auto-bootstraps to 'local' if the user
+ never runs this — pp init is the explicit, named-admin path."
+
+CliInit subclass: Object
+
+  classMethod: run: args [
+    | name rec ident home tomlPath tomlContents pubHex configDir user |
+    name := ''.
+    args size > 0 ifTrue: [name := args at: 0].
+    (name isNil or: [name isEmpty]) ifTrue: [
+      user := System env: 'USER'.
+      (user isNil or: [user isEmpty])
+        ifTrue: [name := 'local']
+        ifFalse: [name := user]
+    ].
+    home := System env: 'HOME'.
+    home isNil ifTrue: [home := ''].
+    configDir := home, '/.config/pp'.
+    tomlPath := configDir, '/server.toml'.
+    "Short-circuit if already initialised."
+    (File exists: tomlPath) ifTrue: [
+      'Procyon Park is already initialised:' println.
+      ('  config:   ', tomlPath) println.
+      rec := IdentityStore loadCurrent.
+      rec notNil ifTrue: [('  identity: ', (rec at: 'name')) println].
+      ^0
+    ].
+    "Create identity."
+    (IdentityStore init: name force: false) ifFalse: [^1].
+    rec := IdentityStore load: name.
+    rec isNil ifTrue: [^1].
+    ident := rec at: 'identity'.
+    pubHex := rec at: 'pubHex'.
+    "Write server.toml (hand-rolled — Toml encode: exists in VM but avoid
+     an extra dependency surface; matches Server.bootstrapIfNeeded style)."
+    Shell run: 'mkdir -p "', configDir, '"'.
+    tomlContents := '[admin]', (Character lf asString),
+                    'admins = ["', pubHex, '"]', (Character lf asString),
+                    '', (Character lf asString),
+                    '[security]', (Character lf asString),
+                    'enforce_signatures = true', (Character lf asString),
+                    'skew_seconds = 120', (Character lf asString).
+    File writeFileContents: tomlPath contents: tomlContents mode: 8r644.
+    '' println.
+    ('Procyon Park initialised. Identity: ', name) println.
+    ('  pubkey:   ', pubHex) println.
+    ('  proquint: ', ident proquint) println.
+    ('  config:   ', tomlPath) println.
+    '' println.
+    'Next: `pp serve` to start the server.' println.
+    ^0
+  ]
