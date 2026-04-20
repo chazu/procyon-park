@@ -1,0 +1,97 @@
+"Tests for InviteStore: create, claim, expiry, double-claim."
+
+TestInviteStore subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [
+    ^super new init
+  ]
+
+  method: init [
+    passed := 0. failed := 0. failures := Array new: 0.
+    ^self
+  ]
+
+  method: assert: c message: m [
+    c ifTrue: [passed := passed + 1]
+      ifFalse: [failed := failed + 1. failures := failures copyWith: m.
+                ('FAIL: ', m) println]
+  ]
+
+  method: run [
+    self testCreateGeneratesToken.
+    self testClaimConsumesInvite.
+    self testDoubleClaimFails.
+    self testExpiredClaimFails.
+    self testWrongTokenFails.
+    ^self report
+  ]
+
+  method: testCreateGeneratesToken [
+    | bbs store inv |
+    bbs := BBS new.
+    store := InviteStore new bbs: bbs.
+    inv := store create: 'bob' ttl: 60 createdBy: 'alice'.
+    self assert: (inv at: 'token') size >= 32 message: 'token long enough'.
+    self assert: (inv at: 'name') = 'bob' message: 'name preserved'.
+    self assert: (bbs scanAll: 'invite') size = 1 message: 'invite tuple stored'
+  ]
+
+  method: testClaimConsumesInvite [
+    | bbs store inv result |
+    bbs := BBS new.
+    store := InviteStore new bbs: bbs.
+    inv := store create: 'bob' ttl: 60 createdBy: 'alice'.
+    result := store claim: 'bob' token: (inv at: 'token') pubkey: 'deadbeef'.
+    self assert: result notNil message: 'claim succeeded'.
+    self assert: (bbs scanAll: 'invite') isEmpty message: 'invite consumed'.
+    self assert: (bbs scanAll: 'identity') size >= 1 message: 'identity registered'
+  ]
+
+  method: testDoubleClaimFails [
+    | bbs store inv first second |
+    bbs := BBS new.
+    store := InviteStore new bbs: bbs.
+    inv := store create: 'bob' ttl: 60 createdBy: 'alice'.
+    first := store claim: 'bob' token: (inv at: 'token') pubkey: 'aa'.
+    second := store claim: 'bob' token: (inv at: 'token') pubkey: 'bb'.
+    self assert: first notNil message: 'first claim ok'.
+    self assert: second isNil message: 'second claim rejected'
+  ]
+
+  method: testExpiredClaimFails [
+    | bbs store inv result |
+    bbs := BBS new.
+    store := InviteStore new bbs: bbs.
+    inv := store create: 'bob' ttl: 0 createdBy: 'alice'.
+    "Sleep 1s so now > expires_at."
+    Shell run: 'sleep 1'.
+    result := store claim: 'bob' token: (inv at: 'token') pubkey: 'cc'.
+    self assert: result isNil message: 'expired claim rejected'
+  ]
+
+  method: testWrongTokenFails [
+    | bbs store inv result |
+    bbs := BBS new.
+    store := InviteStore new bbs: bbs.
+    inv := store create: 'bob' ttl: 60 createdBy: 'alice'.
+    result := store claim: 'bob' token: 'wrong' pubkey: 'dd'.
+    self assert: result isNil message: 'wrong token rejected'
+  ]
+
+  method: report [
+    '=== InviteStore Tests ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    ^failed = 0
+  ]
+
+
+TestInviteStoreMain subclass: Object
+
+  classMethod: run [
+    | t ok |
+    t := TestInviteStore new.
+    ok := t run.
+    ^ok ifTrue: [ 'ALL TESTS PASSED' println. 0 ] ifFalse: [ 'TESTS FAILED' println. 1 ]
+  ]

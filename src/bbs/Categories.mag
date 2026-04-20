@@ -6,7 +6,7 @@ Categories subclass: Object
     ^#('fact' 'convention' 'observation' 'decision' 'signal'
        'task' 'template' 'workflow' 'token' 'rule' 'ingestion'
        'event' 'obstacle' 'session' 'artifact' 'link' 'notification'
-       'workitem' 'identity' 'worker' 'watch')
+       'workitem' 'identity' 'worker' 'watch' 'invite')
   ]
 
   classMethod: isValid: aString [

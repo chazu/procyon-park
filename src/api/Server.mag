@@ -4,7 +4,7 @@
 ApiServer subclass: Object
   instanceVars: httpServer bbs port dispatcher dashboardSSE
                 adminList skewSeconds enforceSignatures signatureVerifier
-                queueMaxPending
+                queueMaxPending inviteStore
 
   classMethod: on: portNumber bbs: aBBS [
     ^super new initPort: portNumber bbs: aBBS dispatcher: nil
@@ -22,6 +22,7 @@ ApiServer subclass: Object
     httpServer := HttpServer new: port.
     self loadSecurityConfig.
     signatureVerifier := SignatureVerifier on: bbs.
+    inviteStore := InviteStore new bbs: bbs.
     self registerRoutes
   ]
 
@@ -354,7 +355,43 @@ ApiServer subclass: Object
     httpServer route: '/api/user/rotate' method: 'POST' handler: [:req |
       self handleUserRotate: req
     ].
+    self registerInviteRoutes.
     self registerWorkerRoutes
+  ]
+
+  method: registerInviteRoutes [
+    "Invite flow: create is admin-gated; claim is unsigned because
+     the invitee has no identity yet."
+    self signedPost: '/api/invite/create' fields: #('name') do: [:body :actorCtx |
+      | ttl created response |
+      actorCtx isAdmin ifFalse: [
+        ^self errorResponse: 401 message: 'admin signature required'
+      ].
+      ttl := body at: 'ttl_seconds' ifAbsent: [600].
+      created := inviteStore
+        create: (body at: 'name')
+        ttl: ttl
+        createdBy: actorCtx actor.
+      response := Dictionary new.
+      response at: 'name' put: (created at: 'name').
+      response at: 'token' put: (created at: 'token').
+      response at: 'expires_at' put: (created at: 'expires_at').
+      self okResponse: response
+    ].
+    self post: '/api/invite/claim' fields: #('name' 'token' 'pubkey') do: [:body |
+      | result response |
+      result := inviteStore
+        claim: (body at: 'name')
+        token: (body at: 'token')
+        pubkey: (body at: 'pubkey').
+      result isNil ifTrue: [
+        ^self errorResponse: 400 message: 'invalid or expired invite'
+      ].
+      response := Dictionary new.
+      response at: 'name' put: (body at: 'name').
+      response at: 'status' put: 'registered'.
+      self okResponse: response
+    ]
   ]
 
   method: registerWorkerRoutes [

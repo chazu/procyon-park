@@ -1,0 +1,79 @@
+"InviteStore — ephemeral invite tokens for onboarding a teammate.
+
+ An invite is a linear BBS tuple in category 'invite' with payload:
+   { name, token, expires_at, created_by }
+ Creating an invite generates a 64-char hex token (derived from a
+ throwaway Ed25519 keypair's pubkey — pulls from the same CSPRNG).
+ Claiming the invite consumes the tuple and seeds an 'identity' tuple
+ in its place with the invitee's pubkey, matching the shape produced
+ by Server>>handleUserAdd.
+
+ Tokens are plaintext — this is not a cryptographic channel. The
+ confidentiality property comes from the admin sharing the token
+ out-of-band (Slack, Signal, etc). TTL defaults to 10 minutes.
+
+ Invites are stored as linear (non-pinned) tuples so that inp: can
+ consume them atomically on claim."
+
+InviteStore subclass: Object
+  instanceVars: bbs
+
+  classMethod: new [
+    ^super new
+  ]
+
+  method: bbs: aBBS [bbs := aBBS. ^self]
+
+  method: randomToken [
+    "Generate a fresh Ed25519 keypair and take the hex pubkey as token.
+     Pragmatic: the VM already exposes a CSPRNG via Identity generate,
+     and we need 32 bytes of randomness per invite."
+    | throwaway |
+    throwaway := Identity generate.
+    ^throwaway pubHex
+  ]
+
+  method: create: name ttl: ttlSeconds createdBy: adminName [
+    | token now expires payload |
+    token := self randomToken.
+    now := DateTime now epochSeconds.
+    expires := now + ttlSeconds.
+    payload := Dictionary new.
+    payload at: 'name' put: name.
+    payload at: 'token' put: token.
+    payload at: 'expires_at' put: expires.
+    payload at: 'created_by' put: adminName.
+    bbs out: 'invite'
+        scope: '/'
+        identity: 'invite:', name
+        payload: payload.
+    ^payload
+  ]
+
+  method: claim: name token: presented pubkey: pubkey [
+    "Consume the invite tuple, register the identity, return the new
+     identity payload. Returns nil on token mismatch / missing / expired."
+    | tuple payload storedToken expires now idPayload |
+    tuple := bbs rdp: 'invite' scope: '/' identity: 'invite:', name.
+    tuple isNil ifTrue: [^nil].
+    payload := tuple at: 'payload' ifAbsent: [^nil].
+    payload isNil ifTrue: [^nil].
+    storedToken := payload at: 'token' ifAbsent: [^nil].
+    storedToken = presented ifFalse: [^nil].
+    expires := payload at: 'expires_at' ifAbsent: [0].
+    now := DateTime now epochSeconds.
+    now > expires ifTrue: [^nil].
+    "Consume the invite."
+    bbs inp: 'invite' scope: '/' identity: 'invite:', name.
+    "Seed identity tuple matching handleUserAdd's shape:
+       { pubkey, created_at, status: 'active' }"
+    idPayload := Dictionary new.
+    idPayload at: 'pubkey' put: pubkey.
+    idPayload at: 'created_at' put: now.
+    idPayload at: 'status' put: 'active'.
+    bbs upsertPinned: 'identity'
+        scope: '/'
+        identity: 'user:', name
+        payload: idPayload.
+    ^idPayload
+  ]
