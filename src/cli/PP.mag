@@ -339,7 +339,7 @@ PP subclass: CLIBase
      Delegates to the CliIdentity* classes regardless of PP_USE_CLI."
     | sub rest baseUrl |
     args size < 2 ifTrue: [
-      'Usage: pp identity <init|show|rotate|list|use> [args...]' println.
+      'Usage: pp identity <init|show|rotate|list|use|invite|accept> [args...]' println.
       ^self
     ].
     sub := args at: 1.
@@ -349,6 +349,8 @@ PP subclass: CLIBase
     sub = 'rotate' ifTrue: [^CliIdentityRotate run: rest].
     sub = 'list'   ifTrue: [^CliIdentityList run: rest].
     sub = 'use'    ifTrue: [^CliIdentityUse run: rest].
+    sub = 'invite' ifTrue: [^CliIdentityInvite run: rest].
+    sub = 'accept' ifTrue: [^CliIdentityAccept run: rest].
     ('Unknown identity subcommand: ', sub) println
   ]
 

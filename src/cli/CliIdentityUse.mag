@@ -31,3 +31,166 @@ CliIdentityUse subclass: Object
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
+
+
+"CliIdentityInvite — `pp identity invite <name> [--ttl <seconds>]`.
+ Admin-only: signs and POSTs /api/invite/create, then prints a paste-ready
+ command the admin can share with the invitee over chat."
+
+CliIdentityInvite subclass: Object
+
+  classMethod: run: args [
+    | cmd rest |
+    cmd := Cli::Command named: 'invite' doc: 'Create an invite token for a teammate.'.
+    cmd flag: (Cli::Flag
+      name: 'ttl'
+      type: #integer
+      default: 600
+      doc: 'Seconds until the invite expires (default 600)').
+    cmd envBinding: (Cli::EnvBinding
+      envName: 'PP_URL'
+      setter: #baseUrl:
+      type: #string
+      default: 'http://localhost:7777').
+
+    cmd run: [:runArgs |
+      | cfg name ttl body exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp identity invite <name> [--ttl <seconds>]' println.
+        exitCode := 1
+      ] ifFalse: [
+        cfg := PPCliConfig new.
+        cmd applyEnvBindings: cfg.
+        name := runArgs at: 0.
+        ttl := cmd flagValue: 'ttl'.
+        ttl isNil ifTrue: [ttl := 600].
+        body := Dictionary new.
+        body at: 'name' put: name.
+        body at: 'ttl_seconds' put: ttl.
+        (CliUserHelper signedAdminPost: cfg path: '/api/invite/create' body: body)
+          ifFalse: [exitCode := 1]
+          ifTrue: [
+            '' println.
+            'Share with teammate:' println.
+            ('  pp identity accept ', cfg baseUrl, ' --name ', name, ' --token <token-from-above>') println
+          ]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+
+"CliIdentityAccept — `pp identity accept <url> --name <name> --token <token>`.
+ Invitee runs this with a token received out-of-band. Generates a fresh
+ local keypair, POSTs it (unsigned) to /api/invite/claim, sets the new
+ identity as the current pointer on 2xx, rolls back on failure so retry
+ is clean."
+
+CliIdentityAccept subclass: Object
+
+  classMethod: run: args [
+    | cmd rest |
+    cmd := Cli::Command named: 'accept' doc: 'Accept an invite and register locally.'.
+    cmd flag: (Cli::Flag
+      name: 'name'
+      type: #string
+      default: ''
+      doc: 'Identity name to create locally').
+    cmd flag: (Cli::Flag
+      name: 'token'
+      type: #string
+      default: ''
+      doc: 'Invite token received from admin').
+
+    cmd run: [:runArgs |
+      | url name token rec ident body jsonBody response result client errMsg exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp identity accept <url> --name <name> --token <token>' println.
+        exitCode := 1
+      ] ifFalse: [
+        url := runArgs at: 0.
+        name := cmd flagValue: 'name'.
+        token := cmd flagValue: 'token'.
+        (name isNil or: [name isEmpty]) ifTrue: [
+          'Error: --name is required.' println.
+          exitCode := 1
+        ] ifFalse: [
+          (token isNil or: [token isEmpty]) ifTrue: [
+            'Error: --token is required.' println.
+            exitCode := 1
+          ] ifFalse: [
+            (IdentityStore init: name force: false)
+              ifFalse: [exitCode := 1]
+              ifTrue: [
+                rec := IdentityStore load: name.
+                rec isNil
+                  ifTrue: [exitCode := 1]
+                  ifFalse: [
+                    ident := rec at: 'identity'.
+                    body := Dictionary new.
+                    body at: 'name' put: name.
+                    body at: 'token' put: token.
+                    body at: 'pubkey' put: (rec at: 'pubHex').
+                    jsonBody := Json encode: body.
+                    client := HttpClient new.
+                    response := nil.
+                    [response := client post: url, '/api/invite/claim'
+                                  body: jsonBody
+                                  contentType: 'application/json']
+                      on: Exception do: [:e |
+                        ('Error: ', e messageText) println.
+                        self rollback: name.
+                        exitCode := 1
+                      ].
+                    exitCode = 0 ifTrue: [
+                      [result := Json decode: response]
+                        on: Exception do: [:e |
+                          ('Error decoding response: ', e messageText) println.
+                          self rollback: name.
+                          exitCode := 1
+                        ].
+                      exitCode = 0 ifTrue: [
+                        errMsg := (result isKindOf: Dictionary)
+                          ifTrue: [result at: 'error' ifAbsent: [nil]]
+                          ifFalse: [nil].
+                        errMsg notNil
+                          ifTrue: [
+                            ('Rejected: ', errMsg) println.
+                            self rollback: name.
+                            exitCode := 1
+                          ]
+                          ifFalse: [
+                            IdentityStore setCurrent: name.
+                            ('Accepted. Active identity: ', name) println.
+                            ('Server: ', url) println
+                          ]
+                      ]
+                    ]
+                  ]
+              ]
+          ]
+        ]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: rollback: name [
+    "Delete the local keypair so the invitee can retry accept."
+    | keyFile pubFile |
+    keyFile := IdentityStore keyPath: name.
+    pubFile := IdentityStore pubPath: name.
+    (File exists: keyFile) ifTrue: [File delete: keyFile].
+    (File exists: pubFile) ifTrue: [File delete: pubFile].
+    ^self
+  ]
