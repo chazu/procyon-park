@@ -21,4 +21,12 @@ $PP identity use bob >/dev/null
 WHOAMI=$($PP whoami | grep '^name:' | awk '{print $2}')
 [[ "$WHOAMI" == "bob" ]] || { echo "FAIL: expected bob after use, got $WHOAMI"; exit 1; }
 
-echo "PASS: identity switch"
+# current is bob — PP_IDENTITY should override back to alice
+WHOAMI=$(env PP_IDENTITY=alice HOME=$TMP ./pp-int whoami | grep '^name:' | awk '{print $2}')
+[[ "$WHOAMI" == "alice" ]] || { echo "FAIL: PP_IDENTITY override, got $WHOAMI"; exit 1; }
+
+# -i flag should override too
+WHOAMI=$($PP -i alice whoami | grep '^name:' | awk '{print $2}')
+[[ "$WHOAMI" == "alice" ]] || { echo "FAIL: -i override, got $WHOAMI"; exit 1; }
+
+echo "PASS: identity switch and override"

@@ -12,7 +12,7 @@ Main subclass: Object
   ]
 
   classMethod: start [
-    | args cmd wtArgs |
+    | args cmd wtArgs cmdIdx i idArg |
     args := System args.
 
     args isEmpty ifTrue: [
@@ -20,7 +20,27 @@ Main subclass: Object
       ^self
     ].
 
-    cmd := args at: 0.
+    "Find the real command by skipping any leading -i / --identity flags."
+    cmdIdx := 0.
+    [cmdIdx < args size] whileTrue: [
+      idArg := args at: cmdIdx.
+      ((idArg = '-i' or: [idArg = '--identity']) and: [cmdIdx + 1 < args size]) ifTrue: [
+        cmdIdx := cmdIdx + 2
+      ] ifFalse: [
+        ^self dispatchWith: args cmdIdx: cmdIdx
+      ]
+    ].
+    self printUsage
+  ]
+
+  classMethod: dispatchWith: args cmdIdx: idx [
+    | cmd wtArgs |
+    idx >= args size ifTrue: [
+      self printUsage.
+      ^self
+    ].
+
+    cmd := args at: idx.
 
     "GC (before server to stay within bytecode limit). When PP_USE_CLI
      is active we route to the new framework first; otherwise fall

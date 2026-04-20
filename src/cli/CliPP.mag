@@ -65,10 +65,26 @@ CliPP subclass: Object
      `pp status`, the full `pp workflow` subcommand tree, `pp log`,
      `pp prime`, `pp gc`, `pp read`, `pp history`, and the six
      signal-writer subcommands (observe, decide, event, notify, signal,
-     dismiss); everything else falls through to the existing dispatcher."
-    | head |
+     dismiss); everything else falls through to the existing dispatcher.
+     First strips any leading -i / --identity flags."
+    | head i idArg stripped |
     args isEmpty ifTrue: [^false].
-    head := args at: 0.
+
+    "Strip -i <name> / --identity <name> from anywhere in args to find the real command."
+    stripped := Array new: 0.
+    i := 0.
+    [i < args size] whileTrue: [
+      idArg := args at: i.
+      ((idArg = '-i' or: [idArg = '--identity']) and: [i + 1 < args size]) ifTrue: [
+        i := i + 2
+      ] ifFalse: [
+        stripped := stripped copyWith: idArg.
+        i := i + 1
+      ]
+    ].
+    stripped isEmpty ifTrue: [^false].
+
+    head := stripped at: 0.
     head = 'status'   ifTrue: [^true].
     head = 'log'      ifTrue: [^true].
     head = 'prime'    ifTrue: [^true].
@@ -101,8 +117,24 @@ CliPP subclass: Object
 
   classMethod: runWith: args [
     "Dispatch from Main.start. Returns the exit code from cobra."
-    | head |
+    | head i idArg stripped |
     args isEmpty ifTrue: [^0].
+
+    "Strip -i <name> / --identity <name> from anywhere in args."
+    stripped := Array new: 0.
+    i := 0.
+    [i < args size] whileTrue: [
+      idArg := args at: i.
+      ((idArg = '-i' or: [idArg = '--identity']) and: [i + 1 < args size]) ifTrue: [
+        i := i + 2
+      ] ifFalse: [
+        stripped := stripped copyWith: idArg.
+        i := i + 1
+      ]
+    ].
+    args := stripped.
+    args isEmpty ifTrue: [^0].
+
     head := args at: 0.
     head = 'status'   ifTrue: [^self runStatus: args].
     head = 'workflow' ifTrue: [^self runWorkflow: args].

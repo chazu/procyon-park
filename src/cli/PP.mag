@@ -5,11 +5,27 @@ PP subclass: CLIBase
 
   method: runWith: args [
     "Dispatch to the appropriate command based on args."
-    | cmd wtArgs |
+    | cmd wtArgs i idArg stripped |
     args isEmpty ifTrue: [
       self printUsage.
       ^self
     ].
+
+    "Strip -i <name> / --identity <name> from anywhere in args and apply to this CLI."
+    stripped := Array new: 0.
+    i := 0.
+    [i < args size] whileTrue: [
+      idArg := args at: i.
+      ((idArg = '-i' or: [idArg = '--identity']) and: [i + 1 < args size]) ifTrue: [
+        self overrideIdentity: (args at: i + 1).
+        i := i + 2
+      ] ifFalse: [
+        stripped := stripped copyWith: idArg.
+        i := i + 1
+      ]
+    ].
+    args := stripped.
+    args isEmpty ifTrue: [self printUsage. ^self].
 
     cmd := args at: 0.
 
@@ -48,7 +64,7 @@ PP subclass: CLIBase
     cmd = 'identity'  ifTrue: [^self cmdIdentity: args].
     cmd = 'worker'    ifTrue: [^self cmdWorker: args].
     cmd = 'user'      ifTrue: [^self cmdUser: args].
-    cmd = 'whoami'    ifTrue: [^CliWhoami run: args].
+    cmd = 'whoami'    ifTrue: [^CliWhoami run: args identityOverride: identityOverride].
     cmd = 'help'      ifTrue: [^self printUsage].
 
     ('Unknown command: ', cmd) println.

@@ -8,7 +8,7 @@
  keypair has been initialised yet."
 
 CLIBase subclass: Object
-  instanceVars: baseUrl client scope taskId identityRecord identityResolved
+  instanceVars: baseUrl client scope taskId identityRecord identityResolved identityOverride
 
   classMethod: new [
     ^super new initialize
@@ -104,23 +104,35 @@ CLIBase subclass: Object
     taskId isNil ifTrue: [taskId := ''].
     client := self class httpClient.
     identityRecord := nil.
-    identityResolved := false
+    identityResolved := false.
+    identityOverride := System env: 'PP_IDENTITY'.
+    (identityOverride notNil and: [identityOverride isEmpty]) ifTrue: [identityOverride := nil]
   ]
 
   "--- Identity (lazy) -------------------------------------------------"
 
   method: currentIdentity [
     "Resolve the active local identity on first use. Returns the
-     IdentityStore Dictionary record (with keys: name/privHex/pubHex/identity)
-     or nil when no identity has been initialised. The resolution is
-     memoised so repeated POSTs from the same CLIBase instance share the
-     same load."
+     IdentityStore Dictionary record or nil. Priority: instance-level
+     override (set via -i flag in PP dispatcher or PP_IDENTITY env) >
+     ~/.config/pp/identity/current pointer."
     identityResolved ifFalse: [
       identityResolved := true.
-      [identityRecord := IdentityStore loadCurrent]
-        on: Exception do: [:e | identityRecord := nil]
+      [
+        (identityOverride notNil and: [identityOverride isEmpty not])
+          ifTrue: [identityRecord := IdentityStore load: identityOverride]
+          ifFalse: [identityRecord := IdentityStore loadCurrent]
+      ] on: Exception do: [:e | identityRecord := nil]
     ].
     ^identityRecord
+  ]
+
+  method: overrideIdentity: name [
+    "Override the active identity for this CLI instance (used by -i <name>).
+     Invalidates any memoised record so the next currentIdentity reloads."
+    identityOverride := name.
+    identityResolved := false.
+    identityRecord := nil
   ]
 
   "--- HTTP Helpers ---"

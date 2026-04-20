@@ -4,9 +4,15 @@
 
 CliWhoami subclass: Object
 
-  classMethod: run: args [
-    | rec |
-    rec := IdentityStore loadCurrent.
+  classMethod: run: args identityOverride: override [
+    | rec useOverride |
+    useOverride := override.
+    (useOverride isNil or: [useOverride isEmpty]) ifTrue: [
+      useOverride := System env: 'PP_IDENTITY'
+    ].
+    (useOverride notNil and: [useOverride isEmpty not])
+      ifTrue: [rec := IdentityStore load: useOverride]
+      ifFalse: [rec := IdentityStore loadCurrent].
     rec isNil ifTrue: [
       'No active identity. Run `pp init` (solo) or `pp identity init <name>` (advanced).' println.
       System exit: 1.
@@ -16,4 +22,8 @@ CliWhoami subclass: Object
     ('pubkey:   ', (rec at: 'pubHex')) println.
     ('proquint: ', (rec at: 'proquint')) println.
     ^0
+  ]
+
+  classMethod: run: args [
+    ^self run: args identityOverride: nil
   ]
