@@ -17,19 +17,60 @@ Agent orchestration system built in [Maggie](https://github.com/chazu/maggie). C
 # Build
 mag build -o pp && codesign -s - pp
 
-# Register a repo
-./pp repo add /path/to/repo --name my-repo
-
-# Start the server
+# Start the server (auto-creates a 'local' identity on first run)
 ./pp serve
+```
 
-# In another terminal — run a workflow
+That's it for solo use. In another terminal:
+
+```bash
+./pp repo add /path/to/repo --name my-repo
 ./pp workflow story --param description="Add error handling to login" --repo my-repo
-
-# Monitor
 ./pp workflow status
 ./pp log
 ./pp dashboard
+```
+
+### Inviting teammates (multiplayer)
+
+Every mutating request is Ed25519-signed by the caller's identity. To onboard a teammate without copy-pasting hex pubkeys:
+
+```bash
+# Admin (you)
+./pp identity invite alice --ttl 600
+# Share the printed command with Alice over chat/Signal/etc.
+
+# Alice (on her machine)
+pp identity accept http://<your-host>:7777 --name alice --token <token>
+pp whoami
+pp observe alice "I'm on the system"
+```
+
+### Managing identities
+
+```bash
+pp whoami                       # Show the active identity
+pp identity list                # List local keypairs
+pp identity use <name>          # Switch the active identity
+pp -i <name> <command>          # One-shot per-command override
+PP_IDENTITY=<name> <command>    # Env override
+pp identity rotate <name>       # Rotate a keypair (signed by old key)
+```
+
+### Advanced: custom admin name
+
+If you want an admin identity named something other than 'local', run `pp init <name>` BEFORE the first `pp serve`:
+
+```bash
+pp init chazu      # Creates ~/.config/pp/identity/chazu.{key,pub} + server.toml
+pp serve           # Starts server; 'chazu' is the pre-enrolled admin
+```
+
+### Re-initialising from scratch
+
+```bash
+rm -rf ~/.config/pp ~/.pp    # CAUTION: deletes all identities + BBS state
+./pp serve                   # Auto-bootstraps fresh 'local' identity
 ```
 
 ## Workflow Templates
@@ -62,7 +103,10 @@ See [docs/authoring-workflows.md](docs/authoring-workflows.md) for how to write 
 ## CLI Commands
 
 ```
-pp serve                              Start the server
+pp init [<name>]                      First-time setup (create identity + config)
+pp whoami                             Show the active local identity
+
+pp serve                              Start the server (auto-bootstraps on first run)
 pp workflow <template> [--param K=V]  Start a workflow
 pp workflow status                    List running workflows
 pp workflow cancel <id>               Cancel a workflow
@@ -81,6 +125,19 @@ pp status                             System status
 pp log                                Stream notifications
 pp history                            Query audit log
 pp dashboard                          TUI dashboard
+
+pp identity init <name>               Create a local keypair
+pp identity list                      List local identities
+pp identity show <name>               Show identity details
+pp identity use <name>                Switch the active identity
+pp identity rotate <name>             Rotate a keypair
+pp identity invite <name> [--ttl N]   Create an invite token (admin)
+pp identity accept <url> --name <n> --token <t>   Claim an invite
+pp user add <name> --pubkey <hex>     Manually register a user (admin)
+pp user revoke <name>                 Revoke a user (admin)
+
+pp -i <name> <command>                One-shot identity override
+PP_IDENTITY=<name> <command>          Env identity override
 ```
 
 ## Project Structure
