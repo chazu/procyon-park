@@ -74,19 +74,65 @@ ApiServer subclass: Object
       ]
     ].
     (adminList isEmpty and: [(bbs scanAll: 'identity') isEmpty]) ifTrue: [
-      '' println.
-      '========== PP BOOTSTRAP REQUIRED ==========' println.
-      'No admins configured and no identity tuples found.' println.
-      'Add an admin pubkey to ~/.config/pp/server.toml:' println.
-      '  [admin]' println.
-      '  admins = ["<hex-ed25519-pubkey>"]' println.
-      'Optional:' println.
-      '  [security]' println.
-      '  enforce_signatures = true' println.
-      '  skew_seconds = 120' println.
-      '===========================================' println.
-      '' println
+      self bootstrapIfNeeded
     ]
+  ]
+
+  method: bootstrapIfNeeded [
+    "First-run convenience: create a 'local' identity, make it admin,
+     and seed a matching identity tuple. Skipped if the user already
+     has a current pointer (they've run `pp identity init` manually
+     but not registered the pubkey as admin)."
+    | home idDir currentPointer identRecord pubHex tomlPath tomlContents payload now admins configDir |
+    home := System env: 'HOME'.
+    home isNil ifTrue: [home := ''].
+    idDir := home, '/.config/pp/identity'.
+    currentPointer := idDir, '/current'.
+    (File exists: currentPointer) ifTrue: [
+      '' println.
+      'Warning: local identity exists but is not registered as admin.' println.
+      '  Add its pubkey to ~/.config/pp/server.toml under [admin].admins' println.
+      ^self
+    ].
+    "Generate 'local' identity via IdentityStore."
+    (IdentityStore init: 'local' force: false) ifFalse: [^self].
+    identRecord := IdentityStore load: 'local'.
+    identRecord isNil ifTrue: [^self].
+    pubHex := identRecord at: 'pubHex'.
+    "Write server.toml."
+    configDir := home, '/.config/pp'.
+    Shell run: 'mkdir -p "', configDir, '"'.
+    tomlPath := configDir, '/server.toml'.
+    tomlContents := '[admin]', (String with: Character lf),
+                    'admins = ["', pubHex, '"]', (String with: Character lf),
+                    '', (String with: Character lf),
+                    '[security]', (String with: Character lf),
+                    'enforce_signatures = true', (String with: Character lf),
+                    'skew_seconds = 120', (String with: Character lf).
+    File writeFileContents: tomlPath contents: tomlContents mode: 8r644.
+    "Seed pinned identity tuple matching handleUserAdd's shape
+     (category=identity, scope=/, identity=user:<name>)."
+    now := DateTime now epochSeconds.
+    payload := Dictionary new.
+    payload at: 'pubkey' put: pubHex.
+    payload at: 'created_at' put: now.
+    payload at: 'status' put: 'active'.
+    bbs upsertPinned: 'identity'
+        scope: '/'
+        identity: 'user:local'
+        payload: payload
+        actor: nil.
+    "Re-read adminList so this server process picks it up without restart."
+    admins := Array new: 0.
+    admins := admins copyWith: pubHex.
+    adminList := admins.
+    enforceSignatures := true.
+    skewSeconds := 120.
+    '' println.
+    ('Procyon Park bootstrapped as ''local'' (admin pubkey: ', pubHex, ')') println.
+    ('  Local identity: ', idDir, '/local.key') println.
+    ('  Config: ', tomlPath) println.
+    '' println
   ]
 
   method: bbs [ ^bbs ]
