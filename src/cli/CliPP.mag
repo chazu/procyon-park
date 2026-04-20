@@ -95,6 +95,7 @@ CliPP subclass: Object
     head = 'usage'    ifTrue: [^true].
     head = 'plan'     ifTrue: [^true].
     head = 'identity' ifTrue: [^true].
+    head = 'whoami'   ifTrue: [^true].
     ^false
   ]
 
@@ -129,6 +130,7 @@ CliPP subclass: Object
     head = 'usage'    ifTrue: [^self runUsage: args].
     head = 'plan'     ifTrue: [^self runPlan: args].
     head = 'identity' ifTrue: [^self runIdentity: args].
+    head = 'whoami'   ifTrue: [^CliWhoami run: args].
     ^0
   ]
 

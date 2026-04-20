@@ -1,0 +1,19 @@
+"CliWhoami — `pp whoami`. Print the active local identity's name,
+ hex pubkey, and proquint. Returns exit 0 if an identity is loaded,
+ 1 if none is configured (with a hint to run `pp init`)."
+
+CliWhoami subclass: Object
+
+  classMethod: run: args [
+    | rec |
+    rec := IdentityStore loadCurrent.
+    rec isNil ifTrue: [
+      'No active identity. Run `pp init` (solo) or `pp identity init <name>` (advanced).' println.
+      System exit: 1.
+      ^1
+    ].
+    ('name:     ', (rec at: 'name')) println.
+    ('pubkey:   ', (rec at: 'pubHex')) println.
+    ('proquint: ', (rec at: 'proquint')) println.
+    ^0
+  ]
