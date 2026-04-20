@@ -2284,20 +2284,18 @@ ApiServer subclass: Object
   "--- SSE Dashboard Stream ---"
 
   method: handleSSEDashboard: conn request: req [
-    "Accept SSE dashboard subscribers. Attempts signed upgrade via
-     standard X-PP-* headers first, then falls back to query-string
-     credentials (?actor=&ts=&sig=) which is the only viable auth path
-     for the browser's EventSource. When signature enforcement is on and
-     both attempts fail, the subscription is refused. When enforcement
-     is off (--local per §4.9) the connection is accepted anonymously."
+    "Accept SSE dashboard subscribers. The dashboard is a read-only
+     surface; we do not gate it on signatures. If a signed upgrade
+     succeeds we record the actor for audit, otherwise the subscription
+     is anonymous. Mutating endpoints remain signature-gated.
+
+     When auth-gated dashboards are needed (multi-user, per-viewer
+     filtering), revisit this: plan is a session-cookie path via
+     /api/auth/login + /auth/exchange (see chat thread 2026-04-19)."
     | actorCtx identity |
     actorCtx := signatureVerifier verify: req adminList: adminList skewSeconds: skewSeconds.
     actorCtx isNil ifTrue: [
       actorCtx := signatureVerifier verifySSE: req adminList: adminList skewSeconds: skewSeconds
-    ].
-    (enforceSignatures and: [actorCtx isNil]) ifTrue: [
-      ('SSE dashboard: refusing unsigned connection (enforce_signatures=true)') println.
-      ^self
     ].
     actorCtx isNil ifTrue: [actorCtx := ActorContext anonymous].
     identity := actorCtx actor.
