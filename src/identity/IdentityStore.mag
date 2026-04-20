@@ -145,6 +145,17 @@ IdentityStore subclass: Object
     ^nil
   ]
 
+  "--- setCurrent: name -------------------------------------------------
+
+   Point the `current` file at `name`. Caller is responsible for
+   ensuring the key files exist — this is a pure pointer rewrite."
+
+  classMethod: setCurrent: name [
+    self ensureDir.
+    File writeFileContents: self currentPath contents: name mode: 8r644.
+    ^true
+  ]
+
   "--- listNames ---------------------------------------------------------
 
    Returns an Array of identity names (stems of *.key files) stored
