@@ -95,7 +95,7 @@ ApiServer subclass: Object
     | staticDir |
     ('Procyon Park API starting on port ', port printString) println.
     "Register SSE and static routes here (outside registerRoutes chain to avoid bytecode limits)"
-    staticDir := File workingDirectory, '/static'.
+    staticDir := (System env: 'HOME'), '/.pp/static'.
     httpServer serveStatic: '/dashboard/' from: staticDir.
     httpServer sseRoute: '/api/sse/dashboard' handler: [:conn :req |
       self handleSSEDashboard: conn request: req

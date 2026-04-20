@@ -12,6 +12,8 @@ full:
 install: build
 	cp $(BIN) $(GOBIN)/$(BIN)
 	codesign -f -s - $(GOBIN)/$(BIN)
+	mkdir -p $(HOME)/.pp/static
+	cp -r static/. $(HOME)/.pp/static/
 
 run:
 	mag -m Main.start
