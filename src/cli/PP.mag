@@ -318,11 +318,11 @@ PP subclass: CLIBase
   ]
 
   method: cmdIdentity: args [
-    "pp identity <init|show|rotate|list> ...
+    "pp identity <init|show|rotate|list|use> ...
      Delegates to the CliIdentity* classes regardless of PP_USE_CLI."
     | sub rest baseUrl |
     args size < 2 ifTrue: [
-      'Usage: pp identity <init|show|rotate|list> [args...]' println.
+      'Usage: pp identity <init|show|rotate|list|use> [args...]' println.
       ^self
     ].
     sub := args at: 1.
@@ -331,6 +331,7 @@ PP subclass: CLIBase
     sub = 'show'   ifTrue: [^CliIdentityShow run: rest].
     sub = 'rotate' ifTrue: [^CliIdentityRotate run: rest].
     sub = 'list'   ifTrue: [^CliIdentityList run: rest].
+    sub = 'use'    ifTrue: [^CliIdentityUse run: rest].
     ('Unknown identity subcommand: ', sub) println
   ]
 
@@ -363,7 +364,7 @@ PP subclass: CLIBase
     '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
     '  session  [<taskId>]                              View Claude Code session logs' println.
     '  usage    [<taskId>]                              Report current session token consumption' println.
-    '  identity <init|show|rotate|list> [args...]       Manage local keypairs' println.
+    '  identity <init|show|rotate|list|use> [args...]   Manage local keypairs' println.
     '  worker   init <name> [--force]                  Create a local worker keypair' println.
     '  user     <add|revoke> <name> [--pubkey <hex>]    Admin-gated user registry' println.
     '  whoami                                           Show the active local identity' println.

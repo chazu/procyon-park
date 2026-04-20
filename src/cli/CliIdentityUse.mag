@@ -1,0 +1,33 @@
+"CliIdentityUse — `pp identity use <name>` switches the active local
+ identity by rewriting ~/.config/pp/identity/current. Verifies the
+ named identity actually exists on disk first."
+
+CliIdentityUse subclass: Object
+
+  classMethod: run: args [
+    "Build `pp identity use <name>` and execute."
+    | cmd rest |
+    cmd := Cli::Command named: 'use' doc: 'Switch to a local identity.'.
+
+    cmd run: [:runArgs |
+      | name exitCode |
+      exitCode := 0.
+      runArgs size < 1 ifTrue: [
+        'Usage: pp identity use <name>' println.
+        exitCode := 1
+      ] ifFalse: [
+        name := runArgs at: 0.
+        (IdentityStore load: name) isNil ifTrue: [
+          exitCode := 1
+        ] ifFalse: [
+          IdentityStore setCurrent: name.
+          ('Active identity: ', name) println
+        ]
+      ].
+      exitCode
+    ].
+
+    rest := args size > 0 ifTrue: [args] ifFalse: [Array new: 0].
+    cmd setArgs: rest.
+    ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
