@@ -189,6 +189,11 @@ Main subclass: Object
     "Initialize HTTP API (with dispatcher reference for workflow endpoints)"
     api := ApiServer on: port bbs: bbs dispatcher: dispatcher.
 
+    "Pre-flight: fail loudly if the port is already bound. HttpServer start
+     currently swallows bind errors and returns, which lets execution fall
+     through to 'Dispatcher stopped' with no indication of the real problem."
+    self checkPortFree: port.
+
     "Validate registered repos"
     Repo new validateAll.
 
@@ -200,6 +205,23 @@ Main subclass: Object
 
     "Reaching here means server stopped"
     dispatcher stop
+  ]
+
+  classMethod: checkPortFree: port [
+    "Abort startup if the TCP port is already bound by another process.
+     Uses lsof to identify the squatter so the user gets a message
+     actionable enough to reach for kill(1) without spelunking."
+    | portStr lsofOut |
+    portStr := port printString.
+    lsofOut := Shell capture: 'lsof -nP -iTCP:', portStr, ' -sTCP:LISTEN 2>/dev/null'.
+    lsofOut size > 0 ifTrue: [
+      '' println.
+      ('*** ERROR: port ', portStr, ' is already bound ***') println.
+      'Another process is listening on that port:' println.
+      lsofOut println.
+      ('Stop it, or run pp serve --port <other>. (lsof -i :', portStr, ')') println.
+      System exit: 1
+    ]
   ]
 
   classMethod: flagValue: flag in: args [
