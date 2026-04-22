@@ -787,19 +787,14 @@ WorkItemCLI subclass: Object
   "--- Helpers ---"
 
   method: post: path body: dict [
-    "POST JSON and print response."
-    | url jsonBody response result |
-    url := baseUrl, path.
-    jsonBody := Json encode: dict.
-    [
-      response := Shell capture: 'curl -s -X POST "', url, '" -H "Content-Type: application/json" -d ''', jsonBody, ''''.
-      (response notNil and: [response isEmpty not]) ifTrue: [
-        result := Json decode: response.
-        (Json encodePretty: result) println
-      ]
-    ] on: Exception do: [:e |
-      ('Error: ', e messageText) println
-    ]
+    "POST JSON (ed25519-signed by local identity) and pretty-print the
+     decoded response. Delegates to the canonical signing helper in
+     CLIBase so workitem mutations pass through the same auth path as
+     every other mutating CLI call (observe, decide, workflow, …).
+     See docs/plans/2026-04-19-workitem-signature-mismatch-epic.md."
+    | response |
+    response := CLIBase signedPost: path body: dict baseUrl: baseUrl.
+    CliPP renderResponse: response path: path
   ]
 
   method: postAndFormat: path body: dict format: fmt [
