@@ -86,7 +86,11 @@ Have an `action` field. Fire inline. Output tokens are `positive` (except `spawn
 
 Built-in actions:
 - `create-worktree` — create git feature branch + worktree
-- `merge-worktree` — merge impl branch into feature branch, cleanup
+- `merge-worktree` — merge impl branch into feature branch; for standalone
+  workflows (no `parent_branch`) also fast-forward the feature branch into
+  `main` and push `origin/main` (best-effort). Wave-child workflows stop at
+  the shared feature branch — the parent pipeline's `merge-worktree` handles
+  the feature→main merge.
 - `notify-head` — send completion notification
 - `spawn-workflow` — instantiate a child workflow (see below)
 - `dispatch-waves` — read a plan and dispatch stories by wave (see below)

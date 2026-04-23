@@ -97,6 +97,15 @@ CreateWorktreeAction subclass: WorkflowAction
     payload at: 'branch' put: implBranch.
     payload at: 'feature_branch' put: featureBranch.
     payload at: 'repo_path' put: repoPath.
+    "Record whether this is a standalone workflow (feature branch belongs to this
+     instance and must be merged to main at the end) or a wave-child (parent
+     pipeline owns featureBranch and merges it to main itself)."
+    parentBranch notNil ifTrue: [
+      payload at: 'standalone' put: 'false'.
+      payload at: 'parent_branch' put: parentBranch
+    ] ifFalse: [
+      payload at: 'standalone' put: 'true'
+    ].
     bbs upsertSignal: instanceId identity: 'worktree' payload: payload.
     bbs logEngine: 'info' component: 'create-worktree' scope: scope message: ('Wrote worktree signal for: ', instanceId).
 

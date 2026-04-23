@@ -31,7 +31,7 @@ Have a `role` field. When fired:
 Have an `action` field. Fire inline with no agent. Each action is implemented as a `WorkflowAction` subclass in `src/dispatcher/actions/`:
 
 - `create-worktree` (`CreateWorktreeAction`) — creates git branch + worktree, writes a `worktree` signal
-- `merge-worktree` (`MergeWorktreeAction`) — merges impl branch into feature branch, cleans up
+- `merge-worktree` (`MergeWorktreeAction`) — merges impl branch into feature branch, and for **standalone workflows** (story, story-lite, hotfix, spike — anything whose `create-worktree` ran without a `parent_branch`) also fast-forwards the feature branch into `main` and pushes `origin/main` (best-effort). Wave-child workflows stop at the shared feature branch; the parent pipeline's own `merge-worktree` step is responsible for the feature→main merge. The emitted `merge-complete` observation carries `merged_to_main: 'true' | 'false'` to disambiguate.
 - `spawn-workflow` (`SpawnWorkflowAction`) — instantiates a child workflow; parent tokens wait until child completes
 - `dispatch-waves` (`DispatchWavesAction`) — reads subtasks from work items or plan decisions, dispatches as parallel story workflows grouped by wave number
 - `notify-head` (`NotifyHeadAction`) — sends a completion notification

@@ -42,6 +42,13 @@ GitOps subclass: Object
       ]
   ]
 
+  classMethod: pushBranch: branchName in: repoPath [
+    "git push origin <branchName>. Signals Error on failure. Callers typically
+     catch so push failures don't break the workflow (not every repo has an
+     origin configured)."
+    Shell runChecked: 'git -C "', repoPath, '" push origin "', branchName, '"'
+  ]
+
   classMethod: deleteBranch: branchName in: repoPath [
     "git branch -d <branchName>. Warns on failure (does not signal)."
     [Shell runChecked: 'git -C "', repoPath, '" branch -d "', branchName, '"']
