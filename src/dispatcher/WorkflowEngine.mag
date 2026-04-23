@@ -694,8 +694,17 @@ WorkflowEngine subclass: Object
 
   method: failWorkflow: instanceId reason: reason [
     "Mark a workflow as failed. Consumes output tokens at current places
-     so downstream transitions cannot fire."
-    | scope |
+     so downstream transitions cannot fire.
+
+     Post-failure cleanup policy:
+       - If the workflow created a feature branch that has zero commits
+         ahead of main AND the impl branch also has zero commits, delete
+         both branches and the worktree — there is nothing to recover, and
+         leaving the empty feature/<instance> branch around breaks retries
+         (the next dispatch hits 'branch already exists').
+       - Otherwise preserve the worktree and branches so the operator can
+         recover uncommitted work. Clean up with `pp worktree clean`."
+    | scope info payload repoPath featureBranch implBranch worktreeDir standalone featureCommits implCommits cleanedUp |
     scope := self scopeForInstance: instanceId.
 
     bbs logEngine: 'error' component: 'WorkflowEngine' scope: scope message: ('Workflow FAILED: ', instanceId, ' — ', reason).
@@ -713,9 +722,59 @@ WorkflowEngine subclass: Object
     "Notify user"
     bbs notify: ('Workflow failed: ', instanceId, ' — ', reason) scope: scope severity: 'urgent'.
 
-    "Preserve worktree on failure — contents may hold uncommitted work the
-     operator needs to recover. Clean up manually with `pp worktree clean`."
-    bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Preserving worktree for recovery: ~/.pp/worktrees/', instanceId)
+    "Best-effort cleanup of zero-commit branches so the workitem can be
+     re-dispatched cleanly. Only applies to standalone workflows whose
+     feature branch is named feature/<instance> — wave-children share a
+     parent-owned feature branch and must never be deleted here."
+    cleanedUp := false.
+    [
+      info := bbs rdp: 'signal' scope: instanceId identity: 'worktree'.
+      info notNil ifTrue: [
+        payload := info at: 'payload'.
+        repoPath := payload at: 'repo_path' ifAbsent: [nil].
+        featureBranch := payload at: 'feature_branch' ifAbsent: [nil].
+        implBranch := payload at: 'branch' ifAbsent: [nil].
+        worktreeDir := payload at: 'workdir' ifAbsent: [nil].
+        standalone := payload at: 'standalone' ifAbsent: ['false'].
+        (repoPath notNil
+            and: [featureBranch notNil
+            and: [standalone = 'true'
+            and: [featureBranch = ('feature/', instanceId)]]]) ifTrue: [
+          featureCommits := GitOps commitsAheadOf: 'main' on: featureBranch in: repoPath.
+          implCommits := 0.
+          (implBranch notNil and: [implBranch isEmpty not]) ifTrue: [
+            (GitOps branchExists: implBranch in: repoPath) ifTrue: [
+              implCommits := GitOps commitsAheadOf: 'main' on: implBranch in: repoPath
+            ]
+          ].
+          (featureCommits = 0 and: [implCommits = 0]) ifTrue: [
+            bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('No commits on feature/impl branches — cleaning up ', featureBranch).
+            (worktreeDir notNil and: [worktreeDir isEmpty not]) ifTrue: [
+              GitOps removeWorktree: worktreeDir in: repoPath
+            ].
+            (implBranch notNil and: [implBranch isEmpty not]) ifTrue: [
+              (GitOps branchExists: implBranch in: repoPath) ifTrue: [
+                GitOps deleteBranchForce: implBranch in: repoPath
+              ]
+            ].
+            (GitOps branchExists: featureBranch in: repoPath) ifTrue: [
+              GitOps deleteBranchForce: featureBranch in: repoPath
+            ].
+            self cleanupWorktree: instanceId.
+            cleanedUp := true.
+            bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Cleaned up zero-commit branch ', featureBranch, ' — retry will start fresh')
+          ]
+        ]
+      ]
+    ] on: Exception do: [:e |
+      bbs logEngine: 'warn' component: 'WorkflowEngine' scope: scope message: ('Failure cleanup errored (non-fatal): ', e messageText)
+    ].
+
+    cleanedUp ifFalse: [
+      "Preserve worktree on failure — contents may hold uncommitted work the
+       operator needs to recover. Clean up manually with `pp worktree clean`."
+      bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Preserving worktree for recovery: ~/.pp/worktrees/', instanceId)
+    ]
   ]
 
   method: completeWorkflow: wf [

@@ -291,7 +291,7 @@ WorkItemCLI subclass: Object
 
   method: cmdShow: args [
     "pp workitem show <identity> [--repo R]"
-    | identity repo response result tuples item payload comments estimate taskResponse taskResult taskTuples relatedTasks |
+    | identity repo response result tuples item payload comments estimate taskResponse taskResult taskTuples relatedTasks wfResponse wfResult wfTuples relatedWfs |
     args size < 3 ifTrue: [
       'Usage: pp workitem show <identity>' println.
       ^self
@@ -371,6 +371,37 @@ WorkItemCLI subclass: Object
                 ifTrue: ['in-progress']
                 ifFalse: ['pending']].
             ('  [', tRole, '] ', tStatus, ' — ', durStr, '  (', (t at: 'identity'), ')') println
+          ]
+        ]
+      ].
+
+      "Fetch related workflows — any workflow whose params.workitem is this
+       identity. Surfaces failed workflows so the operator knows to retry."
+      wfResponse := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"workflow","scope":"', scope, '"}'''.
+      (wfResponse notNil and: [wfResponse isEmpty not]) ifTrue: [
+        wfResult := Json decode: wfResponse.
+        wfTuples := wfResult at: 'tuples' ifAbsent: [#()].
+        relatedWfs := wfTuples select: [:w |
+          | wp params |
+          wp := w at: 'payload' ifAbsent: [Dictionary new].
+          params := wp at: 'params' ifAbsent: [Dictionary new].
+          (params at: 'workitem' ifAbsent: ['']) = identity
+        ].
+        relatedWfs size > 0 ifTrue: [
+          '' println.
+          'Workflows:' println.
+          relatedWfs do: [:w |
+            | wp wStatus wReason wId |
+            wp := w at: 'payload' ifAbsent: [Dictionary new].
+            wStatus := wp at: 'status' ifAbsent: ['?'].
+            wReason := wp at: 'failure_reason' ifAbsent: [''].
+            wId := w at: 'identity'.
+            wStatus = 'failed' ifTrue: [
+              ('  [failed] ', wId, ' — ', wReason) println.
+              ('         retry: pp workitem run ', identity) println
+            ] ifFalse: [
+              ('  [', wStatus, '] ', wId) println
+            ]
           ]
         ]
       ]
