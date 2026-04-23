@@ -51,7 +51,7 @@ Main subclass: Object
     ].
 
     "Server"
-    cmd = 'serve' ifTrue: [^self startServer: (args copyFrom: 1)].
+    cmd = 'serve' ifTrue: [^self startServerGuarded: (args copyFrom: 1)].
 
     "PoC: when PP_USE_CLI=1 is set, route the ported subcommands
      (status, workflow list, log, prime, gc) through the new Maggie
@@ -148,10 +148,13 @@ Main subclass: Object
     '  PP_URL    Server URL for agent commands (default: http://localhost:7777)' println.
     '  PP_SCOPE  Default scope for agent commands (default: default)' println.
     '  PP_TASK   Current task ID (set by harness when spawning agents)' println.
-    '  PP_PORT   Server port for pp serve (default: 7777)' println
+    '  PP_PORT   Server port for pp serve (default: 7777)' println.
+    '' println.
+    'Logs:' println.
+    '  ~/.pp/logs/pp-serve.log      Rolling serve log (when run under pp-supervisor.sh)' println.
+    '  ~/.pp/logs/crash-<epoch>.log Per-crash dump (exception class + message)' println.
+    '  scripts/pp-supervisor.sh     Auto-restart wrapper for `pp serve`' println
   ]
-
-  "--- Server ---"
 
   classMethod: startServer: args [
     | bbs api dispatcher harnessFactory port portStr |
@@ -205,6 +208,61 @@ Main subclass: Object
 
     "Reaching here means server stopped"
     dispatcher stop
+  ]
+
+  "--- Server ---
+
+   startServerGuarded: wraps startServer: in a top-level exception handler
+   so a fatal crash writes a durable stack-trace log to
+   ~/.pp/logs/crash-<epochSeconds>.log before the process exits. This was
+   added after the server silently vanished mid-session and `pp workflow
+   status` returned 'no response from server' with no breadcrumb — the
+   user had to know to look at the controlling terminal's stdout.
+   Operators who want auto-restart should run pp serve under
+   scripts/pp-supervisor.sh (or any equivalent supervisor)."
+  classMethod: startServerGuarded: args [
+    | home logsDir |
+    "Ensure ~/.pp/logs exists so any crash site can append without racing."
+    home := System env: 'HOME'.
+    home isNil ifTrue: [home := ''].
+    logsDir := home, '/.pp/logs'.
+    Shell run: 'mkdir -p "', logsDir, '"'.
+    [
+      self startServer: args
+    ] on: Exception do: [:e |
+      self writeCrashLog: e logsDir: logsDir.
+      System exit: 2
+    ]
+  ]
+
+  classMethod: writeCrashLog: e logsDir: logsDir [
+    "Best-effort crash dump: timestamp + messageText to a per-crash file and
+     a rolling pp-serve.log. Failures here must NOT re-raise or we lose the
+     original stack trace to stdout."
+    | now stamp crashPath rollingPath body className |
+    [
+      now := DateTime now epochSeconds.
+      stamp := now printString.
+      className := 'Exception'.
+      [className := e class name] on: Exception do: [:_ | className := 'Exception'].
+      body := '=== pp serve crash at epoch=', stamp, ' ===', (String with: Character lf),
+              'exception: ', className, (String with: Character lf),
+              'message: ', e messageText, (String with: Character lf),
+              '(Maggie VM does not expose a full stack trace object; attach controlling', (String with: Character lf),
+              ' terminal output or run under scripts/pp-supervisor.sh for per-run logs.)', (String with: Character lf),
+              (String with: Character lf).
+      crashPath := logsDir, '/crash-', stamp, '.log'.
+      rollingPath := logsDir, '/pp-serve.log'.
+      File writeFileContents: crashPath contents: body mode: 8r644.
+      File appendToFile: rollingPath contents: body.
+      '' println.
+      ('*** pp serve CRASHED: ', className, ': ', e messageText) println.
+      ('    crash log: ', crashPath) println.
+      ('    rolling:   ', rollingPath) println
+    ] on: Exception do: [:_ |
+      "If even the crash writer throws, fall back to stderr-visible output."
+      ('*** pp serve crashed; crash log write failed. Original error: ', e messageText) println
+    ]
   ]
 
   classMethod: checkPortFree: port [

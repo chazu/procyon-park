@@ -106,27 +106,41 @@ Scheduler subclass: Object
     ].
 
     [
-      [harness run] on: Exception do: [:e |
-        bbs logEngine: 'error' component: 'Scheduler' scope: scope message: ('Task failed: ', taskId, ' - ', e messageText).
-        bbs notify: ('Task failed: ', taskId, ' - ', e messageText) scope: scope severity: 'warn'.
-        bbs emitEvent: scope
-            identity: (Identity taskFailed: taskId)
-            type: 'task-failed'
-            summary: e messageText
-      ].
-      "Post-hoc validation: check for out-of-scope changes"
-      workdir notNil ifTrue: [
-        self validateScope: workdir taskId: taskId scope: scope
-      ].
-      "Safety net: if harness exited without emitting task-complete, auto-emit it"
-      self ensureTaskComplete: taskId scope: scope.
-      "Mark task as completed in BBS"
-      bbs update: 'task' scope: scope identity: taskId do: [:p |
-        p at: 'status' put: 'completed'.
-        p at: 'completed_at' put: DateTime now epochSeconds
-      ].
-      "Clean up slot"
-      mutex critical: [activeSlots removeKey: taskId ifAbsent: [nil]]
+      "Worker supervision: an exception anywhere below MUST NOT propagate out
+       of the forked goroutine — an uncaught panic in a fork can tear down
+       the whole server (observed: ~45min session, 7 stories, then silent
+       crash with port 7777 closed). We wrap the entire post-dispatch
+       sequence in a coarse exception handler so harness failures and
+       post-hoc validation failures both degrade gracefully."
+      [
+        [harness run] on: Exception do: [:e |
+          bbs logEngine: 'error' component: 'Scheduler' scope: scope message: ('Task failed: ', taskId, ' - ', e messageText).
+          bbs notify: ('Task failed: ', taskId, ' - ', e messageText) scope: scope severity: 'warn'.
+          bbs emitEvent: scope
+              identity: (Identity taskFailed: taskId)
+              type: 'task-failed'
+              summary: e messageText
+        ].
+        "Post-hoc validation: check for out-of-scope changes"
+        workdir notNil ifTrue: [
+          self validateScope: workdir taskId: taskId scope: scope
+        ].
+        "Safety net: if harness exited without emitting task-complete, auto-emit it"
+        self ensureTaskComplete: taskId scope: scope.
+        "Mark task as completed in BBS"
+        bbs update: 'task' scope: scope identity: taskId do: [:p |
+          p at: 'status' put: 'completed'.
+          p at: 'completed_at' put: DateTime now epochSeconds
+        ].
+        "Clean up slot"
+        mutex critical: [activeSlots removeKey: taskId ifAbsent: [nil]]
+      ] on: Exception do: [:e |
+        "Last-chance handler: log and attempt to release the slot so a
+         post-harness bug doesn't leave the dispatcher permanently short one
+         slot (or worse, crash the whole server)."
+        bbs logEngine: 'error' component: 'Scheduler' scope: scope message: ('Post-dispatch fault for ', taskId, ': ', e messageText).
+        [mutex critical: [activeSlots removeKey: taskId ifAbsent: [nil]]] on: Exception do: [:_ | nil]
+      ]
     ] fork.
 
     mutex critical: [activeSlots at: taskId put: harness]
