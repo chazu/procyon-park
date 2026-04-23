@@ -4,6 +4,12 @@ start_places: ["request"]
 terminal_places: ["done"]
 max_review_cycles: 3
 
+// Required params validated at instantiation (pp-workflow-empty-params-dispatch).
+// Missing or empty values raise a pre-flight error — no silent empty-prompt dispatch.
+// `instance` is auto-injected by the engine, so only caller-supplied params
+// belong here.
+required: ["description"]
+
 // Shared fragments embedded below. Hidden fields (underscore-prefixed) are
 // stripped by `cue export`, so they never appear in the emitted template.
 //

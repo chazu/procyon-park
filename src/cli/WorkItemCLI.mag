@@ -9,10 +9,65 @@ WorkItemCLI subclass: Object
   ]
 
   method: initialize [
+    "Per story-1776966406 (pp-input-validation-strict): do NOT default scope
+     to 'default' when PP_SCOPE is missing. Mutating / scope-ambiguous
+     commands (run, show, update, comment) must require --repo explicitly
+     and error out with a list of scopes where the identity actually lives.
+     Non-mutating list commands retain 'default' as a display convenience."
     baseUrl := System env: 'PP_URL'.
     (baseUrl isNil or: [baseUrl isEmpty]) ifTrue: [baseUrl := 'http://localhost:7777'].
     scope := System env: 'PP_SCOPE'.
-    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default']
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := nil]
+  ]
+
+  method: defaultScope [
+    "Back-compat for list-style commands that can tolerate an
+     unspecified scope. Returns 'default' when no PP_SCOPE / --repo is
+     available. Do NOT use this in commands that act on a specific
+     identity — use requireScopeFor:identity: instead."
+    ^scope isNil ifTrue: ['default'] ifFalse: [scope]
+  ]
+
+  method: requireScopeForCmd: cmdName identity: identity [
+    "Guard: a scope must be known before we act on <identity>. If not,
+     print an error listing the scopes where the identity exists (if
+     any) and return false — callers MUST short-circuit.
+     Per the acceptance criteria in pp-input-validation-strict:
+       - --repo (or PP_SCOPE env) is required.
+       - Missing scope → hard error, no silent default, no side effects."
+    | hits |
+    scope notNil ifTrue: [^true].
+    ('Error: pp workitem ', cmdName, ' requires --repo <scope> (or PP_SCOPE env).') println.
+    hits := self scopesContainingWorkitem: identity.
+    hits isEmpty
+      ifTrue: [('  (no work item with identity ', identity, ' found in any scope.)') println]
+      ifFalse: [
+        '  Identity is present in these scopes:' println.
+        hits do: [:s | ('    - ', s) println].
+        ('  Re-run with --repo <scope>, e.g.: pp workitem ', cmdName, ' ', identity, ' --repo ', (hits at: 0)) println
+      ].
+    ^false
+  ]
+
+  method: scopesContainingWorkitem: identity [
+    "Scan workitems across every scope and return an Array of scopes in
+     which <identity> appears. Best-effort — on error returns empty."
+    | response result tuples hits |
+    hits := Array new: 0.
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"workitem"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^hits].
+      result := Json decode: response.
+      tuples := result at: 'tuples' ifAbsent: [#()].
+      tuples do: [:t |
+        (t at: 'identity' ifAbsent: ['']) = identity ifTrue: [
+          | s |
+          s := t at: 'scope' ifAbsent: [nil].
+          (s notNil and: [(hits includes: s) not]) ifTrue: [hits := hits copyWith: s]
+        ]
+      ]
+    ] on: Exception do: [:e | ^hits].
+    ^hits
   ]
 
   method: runWith: args [
@@ -102,6 +157,7 @@ WorkItemCLI subclass: Object
 
     "Determine scope — use repo if provided, else default"
     repo notNil ifTrue: [scope := repo].
+    scope isNil ifTrue: [scope := 'default'].
 
     "POST to server"
     body := Dictionary new.
@@ -141,6 +197,7 @@ WorkItemCLI subclass: Object
     path := args at: 2.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    scope isNil ifTrue: [scope := 'default'].
 
     (File exists: path) ifFalse: [
       ('File not found: ', path) println.
@@ -300,6 +357,7 @@ WorkItemCLI subclass: Object
     identity := args at: 2.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    (self requireScopeForCmd: 'show' identity: identity) ifFalse: [^self].
 
     "Use scan + filter to get latest version (avoids persistent tuple stale reads)"
     response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"workitem","scope":"', scope, '"}'''.
@@ -384,6 +442,7 @@ WorkItemCLI subclass: Object
     | repo filterStatus filterType filterParent filterLabel response result tuples payload typeStr statusStr titleStr childCount |
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    scope isNil ifTrue: [scope := 'default'].
     filterStatus := self flagValue: '--status' in: args.
     filterType := self flagValue: '--type' in: args.
     filterParent := self flagValue: '--parent' in: args.
@@ -455,6 +514,7 @@ WorkItemCLI subclass: Object
     identity := args at: 2.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    scope isNil ifTrue: [scope := 'default'].
 
     "List items whose parent matches"
     listArgs := Array new: 0.
@@ -478,7 +538,15 @@ WorkItemCLI subclass: Object
     identity := args at: 2.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    (self requireScopeForCmd: 'update' identity: identity) ifFalse: [^self].
 
+    "PATCH semantics (pp-workitem-update-overwrites-unspecified):
+     only touch fields whose flags were explicitly passed. We build a
+     sparse `fields` dict and require at least one user-facing flag.
+     A bare `update <id>` with no field flags is a no-op and rejected
+     up front so the server-side merge never runs and cannot overwrite
+     unspecified data. updated_at is only stamped when something else
+     actually changes, so empty updates never touch the tuple."
     fields := Dictionary new.
     status := self flagValue: '--status' in: args.
     status notNil ifTrue: [fields at: 'status' put: status].
@@ -494,6 +562,14 @@ WorkItemCLI subclass: Object
     template notNil ifTrue: [fields at: 'template' put: template].
     estimate := self flagValue: '--estimate' in: args.
     estimate notNil ifTrue: [fields at: 'estimate' put: estimate].
+
+    fields isEmpty ifTrue: [
+      'Error: pp workitem update requires at least one field flag.' println.
+      '  Available: --status --title --description --wave --depends-on --template --estimate' println.
+      '  A bare update with no fields would be a no-op; refusing to send it.' println.
+      ^self
+    ].
+
     fields at: 'updated_at' put: DateTime now epochSeconds.
 
     body := Dictionary new.
@@ -516,6 +592,7 @@ WorkItemCLI subclass: Object
     text := args at: 3.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    (self requireScopeForCmd: 'comment' identity: identity) ifFalse: [^self].
 
     body := Dictionary new.
     body at: 'identity' put: identity.
@@ -537,6 +614,7 @@ WorkItemCLI subclass: Object
     identity := args at: 2.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    scope isNil ifTrue: [scope := 'default'].
 
     fields := Dictionary new.
     fields at: 'status' put: newStatus.
@@ -564,6 +642,7 @@ WorkItemCLI subclass: Object
     reason isNil ifTrue: [reason := ''].
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    scope isNil ifTrue: [scope := 'default'].
 
     fields := Dictionary new.
     fields at: 'status' put: 'blocked'.
@@ -589,6 +668,7 @@ WorkItemCLI subclass: Object
     identity := args at: 2.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    (self requireScopeForCmd: 'run' identity: identity) ifFalse: [^self].
 
     body := Dictionary new.
     body at: 'identity' put: identity.
@@ -608,6 +688,7 @@ WorkItemCLI subclass: Object
     identity := args at: 2.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    scope isNil ifTrue: [scope := 'default'].
 
     "Start a workitem-plan workflow targeting this work item"
     wfParams := Dictionary new.
@@ -630,6 +711,7 @@ WorkItemCLI subclass: Object
     identity := args at: 2.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    scope isNil ifTrue: [scope := 'default'].
 
     "Start a workitem-review workflow targeting this work item"
     wfParams := Dictionary new.
@@ -656,6 +738,7 @@ WorkItemCLI subclass: Object
     epicId := args at: 2.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
+    scope isNil ifTrue: [scope := 'default'].
     file := self flagValue: '--file' in: args.
     dryRunFlag := args indexOf: '--dry-run'.
     dryRun := dryRunFlag >= 0.

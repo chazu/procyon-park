@@ -84,12 +84,30 @@ ClaudeHarness subclass: Object
     "Read the task description and workflow instance first (needed for context filtering)"
     taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
     taskDescription := taskTuple notNil
-      ifTrue: [(taskTuple at: 'payload') at: 'description' ifAbsent: ['No description']]
-      ifFalse: ['Task: ', taskId].
+      ifTrue: [(taskTuple at: 'payload') at: 'description' ifAbsent: ['']]
+      ifFalse: [''].
     taskPayload := taskTuple notNil
       ifTrue: [taskTuple at: 'payload']
       ifFalse: [Dictionary new].
     workflowInstance := taskPayload at: 'workflow_instance' ifAbsent: [''].
+
+    "Empty-prompt guard (pp-story-harness-empty-prompt).
+     If the task's rendered description is empty (or whitespace only) we
+     MUST NOT spawn the Claude CLI — it would consume an LLM budget
+     while producing nothing of value, and the state machine would be
+     left guessing at the exit code. Instead, surface a precise
+     diagnostic via failureReason so the WorkerAgent marks the task
+     failed. The reason carries the exact fix the operator can run."
+    (taskDescription isNil or: [taskDescription trimBoth isEmpty]) ifTrue: [
+      | wi reason |
+      wi := taskPayload at: 'workitem' ifAbsent: [taskId].
+      reason := 'empty-task-description: story ', wi,
+        ' has empty description; run pp workitem update ', wi,
+        ' --description "..." and retry.'.
+      ('ClaudeHarness: refusing to spawn Claude — ', reason) println.
+      failureReason := reason.
+      ^self
+    ].
 
     "Reviewer tasks get an auto-generated git diff summary (files changed,
      insertions, deletions) so the reviewer does not have to discover

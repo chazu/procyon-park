@@ -30,6 +30,50 @@ WorkflowEngine subclass: Object
 
   "--- Workflow Instantiation ---"
 
+  method: validateRequiredParams: templatePayload params: params template: templateIdentity [
+    "Verify every key listed under `required` in the template is present
+     and non-empty in params. Raise Error with the missing names so
+     callers surface a precise diagnostic. No-op when the template
+     does not declare required keys (back-compat).
+     An empty string, nil, or empty collection counts as missing; the
+     intent is `no silent empty-prompt dispatch`."
+    | required missing val |
+    required := templatePayload at: 'required' ifAbsent: [nil].
+    required isNil ifTrue: [^self].
+    (required isKindOf: Array) ifFalse: [^self].
+    required isEmpty ifTrue: [^self].
+    missing := Array new: 0.
+    required do: [:key |
+      | empty |
+      val := params at: key ifAbsent: [nil].
+      empty := val isNil.
+      empty ifFalse: [
+        (val isKindOf: String) ifTrue: [empty := val isEmpty]
+      ].
+      empty ifFalse: [
+        (val isKindOf: Array) ifTrue: [empty := val isEmpty]
+      ].
+      empty ifFalse: [
+        (val isKindOf: Dictionary) ifTrue: [empty := val isEmpty]
+      ].
+      empty ifTrue: [missing := missing copyWith: key]
+    ].
+    missing isEmpty ifTrue: [^self].
+    Error signal: 'Template ', templateIdentity, ' requires params: ',
+      (self joinMissing: missing),
+      ' (missing or empty). Supply them via --param key=value.'
+  ]
+
+  method: joinMissing: arr [
+    | out first |
+    out := ''. first := true.
+    arr do: [:k |
+      first ifTrue: [out := k. first := false]
+            ifFalse: [out := out, ', ', k]
+    ].
+    ^out
+  ]
+
   method: instantiate: templateIdentity scope: scope params: params [
     "Back-compat entry point — no launched_by attribution."
     ^self instantiate: templateIdentity scope: scope params: params launchedBy: nil
@@ -65,6 +109,14 @@ WorkflowEngine subclass: Object
     ((params at: '_depth' ifAbsent: [0]) > 10) ifTrue: [
       Error signal: 'Spawn depth limit exceeded (max 10)'
     ].
+
+    "Required-params validation (pp-workflow-empty-params-dispatch).
+     Templates may declare `required: [...]` at the top of the CUE file.
+     Each listed key must be present in `params` and non-empty before we
+     instantiate — no silent empty-prompt dispatch. The engine is the
+     authoritative gate here: both /api/workflow/start and every internal
+     SpawnWorkflowAction flow through this method."
+    self validateRequiredParams: (template at: 'payload') params: params template: templateIdentity.
 
     "Auto-infer repo from scope if not specified"
     (params at: 'repo' ifAbsent: [nil]) isNil ifTrue: [

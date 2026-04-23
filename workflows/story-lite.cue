@@ -4,6 +4,10 @@ description: "Lite story: implement in worktree, merge directly"
 start_places: ["request"]
 terminal_places: ["done"]
 
+// Required params (pp-workflow-empty-params-dispatch): fail loudly at
+// instantiation rather than spawning Claude with an empty prompt.
+required: ["description"]
+
 // Shared fragments for the create-worktree → merge-worktree → notify-head
 // bookend. Hidden fields are stripped by `cue export` so they never reach
 // the emitted template.

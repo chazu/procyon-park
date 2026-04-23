@@ -26,6 +26,26 @@ Semantic Versioning.
   release.
 
 ### Fixed
+- Strict input validation at every pp boundary (pp-input-validation-strict,
+  umbrella for four child bugs):
+  - `pp workitem run/show/update/comment` now require `--repo <scope>` (or
+    `PP_SCOPE`); when omitted, the CLI errors pre-flight and lists the
+    scopes where the identity actually lives. No more silent dispatch to
+    the `default` scope.
+  - `pp workitem update <id>` with no field flags is rejected as a no-op
+    error instead of silently stamping `updated_at` and passing an empty
+    payload through. The server-side handler is already PATCH-merge, so
+    the client now refuses to send vacuous updates.
+  - Workflow templates may declare `required: [...]`. `WorkflowEngine`
+    validates required params are present and non-empty at instantiation
+    and raises with the missing names — no more empty-prompt dispatch.
+    `workflows/story.cue` and `workflows/story-lite.cue` now declare
+    `description` as required.
+  - `ClaudeHarness` refuses to spawn Claude when the task's rendered
+    description is empty; sets `failureReason` so `WorkerAgent` marks
+    the task failed with an actionable diagnostic ("run pp workitem
+    update <id> --description ...") instead of letting the CLI exit 1
+    and leaving the state machine to guess.
 - `merge-worktree` on standalone story/story-lite/hotfix/spike workflows now
   fast-forwards the feature branch into `main` and pushes `origin/main`
   (best-effort) instead of leaving the commits stranded on `feature/<id>`.

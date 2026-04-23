@@ -1,0 +1,197 @@
+"Regression tests for pp-input-validation-strict (story-1776966406).
+
+ Consolidates the four child bugs' regression cases where they can be
+ exercised without a running server:
+
+   IV1  WorkflowEngine refuses to instantiate a template whose `required`
+        params are missing from the params dict. No workflow tuple is
+        written, no tokens are seeded.
+   IV2  WorkflowEngine refuses when a required param is present but
+        empty (''), with the same semantics as missing.
+   IV3  WorkflowEngine accepts when every required param is supplied
+        and non-empty — produces a workflow tuple as expected.
+   IV4  Templates without a `required` field remain back-compat (no
+        validation runs; instantiation proceeds unchanged).
+   IV5  ClaudeHarness refuses to spawn Claude when the task's
+        description is empty — failureReason is set with a precise,
+        actionable diagnostic. This is the harness half of the umbrella
+        fix (pp-story-harness-empty-prompt).
+
+ The CLI-level cases (pp workitem run/show/update/comment without
+ --repo; `update` with no field flags) are exercised by end-to-end
+ shell tests rather than unit-level mag tests — see notes in
+ docs/plans/ or run `./pp workitem update nope` manually to observe
+ the guard."
+
+IVRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: report [
+    '=== Input Validation Strict Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ]
+  ]
+
+  method: failed [ ^failed ]
+
+IVHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedTemplate: bbs identity: ident required: requiredArr [
+    "Seed a minimal role-bearing template. If requiredArr is non-nil, set
+     `required` so validateRequiredParams: has something to check."
+    | transitions tr payload |
+    transitions := Array new: 0.
+    tr := Dictionary new.
+    tr at: 'id' put: 'impl'.
+    tr at: 'in' put: #('start').
+    tr at: 'out' put: #('end').
+    tr at: 'role' put: 'implementer'.
+    tr at: 'description' put: 'do it'.
+    transitions := transitions copyWith: tr.
+
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    requiredArr notNil ifTrue: [payload at: 'required' put: requiredArr].
+
+    bbs outPinned: 'template' scope: 'system' identity: ident payload: payload
+  ]
+
+"=== IV1..IV4: WorkflowEngine required-params validation ==="
+TestIVRequired subclass: Object
+  classMethod: run: t [
+    | tempDir bbs engine raised params wfs |
+    '--- IV1: missing required param raises, writes nothing ---' println.
+    tempDir := IVHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    IVHelper seedTemplate: bbs identity: 'iv-tmpl-req' required: #('description').
+    engine := WorkflowEngine on: bbs.
+
+    raised := false.
+    [engine instantiate: 'iv-tmpl-req' scope: 'default' params: Dictionary new]
+      on: Exception do: [:e | raised := true].
+    t assert: raised message: 'IV1: missing required param must raise'.
+
+    wfs := bbs scanAll: 'workflow'.
+    t assert: wfs size = 0 message: 'IV1: no workflow tuple written on rejection'.
+
+    '--- IV2: empty-string required param is treated as missing ---' println.
+    tempDir := IVHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    IVHelper seedTemplate: bbs identity: 'iv-tmpl-req' required: #('description').
+    engine := WorkflowEngine on: bbs.
+
+    params := Dictionary new.
+    params at: 'description' put: ''.
+    raised := false.
+    [engine instantiate: 'iv-tmpl-req' scope: 'default' params: params]
+      on: Exception do: [:e | raised := true].
+    t assert: raised message: 'IV2: empty-string required param must raise'.
+
+    '--- IV3: non-empty required param -> instantiation succeeds ---' println.
+    tempDir := IVHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    IVHelper seedTemplate: bbs identity: 'iv-tmpl-req' required: #('description').
+    engine := WorkflowEngine on: bbs.
+
+    params := Dictionary new.
+    params at: 'description' put: 'do the real thing'.
+    raised := false.
+    [engine instantiate: 'iv-tmpl-req' scope: 'default' params: params]
+      on: Exception do: [:e | raised := true. ('IV3 unexpected raise: ', e messageText) println].
+    t assert: raised not message: 'IV3: non-empty required param must not raise'.
+    wfs := bbs scanAll: 'workflow'.
+    t assert: wfs size = 1 message: 'IV3: exactly one workflow tuple written'.
+
+    '--- IV4: template without `required` is back-compat ---' println.
+    tempDir := IVHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    IVHelper seedTemplate: bbs identity: 'iv-tmpl-noreq' required: nil.
+    engine := WorkflowEngine on: bbs.
+
+    raised := false.
+    [engine instantiate: 'iv-tmpl-noreq' scope: 'default' params: Dictionary new]
+      on: Exception do: [:e | raised := true. ('IV4 unexpected raise: ', e messageText) println].
+    t assert: raised not message: 'IV4: template without required must still instantiate'
+  ]
+
+"=== IV5: ClaudeHarness empty-prompt guard ==="
+TestIVHarnessEmptyPrompt subclass: Object
+  classMethod: run: t [
+    | tempDir bbs role harness payload reason |
+    '--- IV5: harness refuses empty task description ---' println.
+    tempDir := IVHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    "Seed a task tuple with an empty description."
+    payload := Dictionary new.
+    payload at: 'description' put: ''.
+    payload at: 'workitem' put: 'story-empty-desc'.
+    payload at: 'workflow_instance' put: 'wf-iv5'.
+    bbs outPinned: 'task' scope: 'default' identity: 'task-iv5' payload: payload.
+
+    role := Implementer new.
+    harness := ClaudeHarness new.
+    harness initRole: role task: 'task-iv5' scope: 'default' bbs: bbs.
+    harness workDir: tempDir.
+    harness run.
+
+    reason := harness failureReason.
+    t assert: reason notNil message: 'IV5a: harness must set a failureReason on empty description'.
+    reason notNil ifTrue: [
+      t assert: (reason startsWith: 'empty-task-description')
+        message: 'IV5b: failureReason must be tagged empty-task-description'.
+      t assert: ((reason indexOf: 'pp workitem update') >= 0)
+        message: 'IV5c: failureReason must include the fix hint'
+    ]
+  ]
+
+"=== Main ==="
+TestInputValidationStrictMain subclass: Object
+  classMethod: run [
+    | t |
+    t := IVRunner new.
+    [TestIVRequired run: t] on: Exception do: [:e |
+      ('TestIVRequired CRASHED: ', e messageText) println.
+      t assert: false message: 'TestIVRequired crashed'
+    ].
+    [TestIVHarnessEmptyPrompt run: t] on: Exception do: [:e |
+      ('TestIVHarnessEmptyPrompt CRASHED: ', e messageText) println.
+      t assert: false message: 'TestIVHarnessEmptyPrompt crashed'
+    ].
+    t report.
+    ^t failed
+  ]
