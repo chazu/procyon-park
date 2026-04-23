@@ -3,8 +3,12 @@
 MergeWorktreeAction subclass: WorkflowAction
 
   method: execute: transition instance: instanceId params: params [
-    "Merge the impl branch back into the feature branch, clean up the worktree."
-    | info payload repoPath featureBranch implBranch worktreeDir scope obsPayload |
+    "Merge the impl branch back into the feature branch, clean up the worktree.
+     For standalone workflows (story / story-lite / hotfix / etc.) also fast-
+     forward the feature branch into main so the work actually lands.
+     Wave-child workflows stop at the shared feature branch — their parent
+     pipeline owns the feature-branch -> main merge."
+    | info payload repoPath featureBranch implBranch worktreeDir scope obsPayload standalone |
 
     "Find scope from the workflow tuple"
     scope := engine scopeForInstance: instanceId.
@@ -21,6 +25,10 @@ MergeWorktreeAction subclass: WorkflowAction
     featureBranch := payload at: 'feature_branch'.
     implBranch := payload at: 'branch'.
     worktreeDir := payload at: 'workdir'.
+    "standalone defaults to 'false' for legacy signals (pipeline-level merges
+     and pre-upgrade wave-child signals) — only explicit 'true' triggers the
+     feature->main merge below."
+    standalone := payload at: 'standalone' ifAbsent: ['false'].
 
     "Pipeline-level merge: no impl branch, merge shared feature branch directly to main"
     implBranch isEmpty ifTrue: [
@@ -43,10 +51,16 @@ MergeWorktreeAction subclass: WorkflowAction
         ^self
       ].
       GitOps deleteBranch: featureBranch in: repoPath.
+      "Best-effort push origin/main so the work is actually visible."
+      [GitOps pushBranch: 'main' in: repoPath]
+        on: Exception do: [:e |
+          bbs logEngine: 'warn' component: 'merge-worktree' scope: scope message: ('git push origin main failed (non-fatal): ', e messageText)
+        ].
       obsPayload := Dictionary new.
       obsPayload at: 'detail' put: ('Pipeline merged ', featureBranch, ' into main').
       obsPayload at: 'repoPath' put: repoPath.
       obsPayload at: 'featureBranch' put: featureBranch.
+      obsPayload at: 'merged_to_main' put: 'true'.
       bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
       bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Pipeline merge complete — ', featureBranch, ' merged into main').
       ^self
@@ -82,19 +96,68 @@ MergeWorktreeAction subclass: WorkflowAction
     GitOps removeWorktree: worktreeDir in: repoPath.
     GitOps deleteBranch: implBranch in: repoPath.
 
-    "5. Checkout main so repo is not left on feature branch"
+    "5. Standalone workflow: also fast-forward feature branch into main so
+     the work actually lands. Without this step the feature branch is just
+     abandoned and 'merge-complete' is a lie (issue: agents report merged
+     but origin/main never moves)."
+    standalone = 'true' ifTrue: [
+      bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Standalone workflow — merging ', featureBranch, ' into main in ', repoPath).
+      [
+        GitOps checkoutBranch: 'main' in: repoPath
+      ] on: Exception do: [:e |
+        bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Checkout main failed: ', e messageText).
+        obsPayload := Dictionary new.
+        obsPayload at: 'detail' put: ('Could not checkout main for feature merge: ', e messageText).
+        bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
+        engine failWorkflow: instanceId reason: 'Merge failed: could not checkout main — ', e messageText.
+        ^self
+      ].
+      [
+        GitOps mergeBranch: featureBranch in: repoPath
+      ] on: Exception do: [:e |
+        bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Feature->main merge failed: ', e messageText).
+        obsPayload := Dictionary new.
+        obsPayload at: 'detail' put: ('Feature->main conflict: ', featureBranch, ' into main — ', e messageText).
+        bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
+        engine failWorkflow: instanceId reason: 'Feature->main conflict: ', featureBranch, ' into main — human intervention required'.
+        ^self
+      ].
+      GitOps deleteBranch: featureBranch in: repoPath.
+      "Best-effort push so origin/main advances. Do not fail the workflow on
+       push errors — not every repo has an origin, and ops may configure
+       pushes separately."
+      [GitOps pushBranch: 'main' in: repoPath]
+        on: Exception do: [:e |
+          bbs logEngine: 'warn' component: 'merge-worktree' scope: scope message: ('git push origin main failed (non-fatal): ', e messageText)
+        ].
+      obsPayload := Dictionary new.
+      obsPayload at: 'detail' put: ('Merged ', implBranch, ' into ', featureBranch, ' and ', featureBranch, ' into main').
+      obsPayload at: 'repoPath' put: repoPath.
+      obsPayload at: 'featureBranch' put: featureBranch.
+      obsPayload at: 'implBranch' put: implBranch.
+      obsPayload at: 'merged_to_main' put: 'true'.
+      bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
+      bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Complete — ', implBranch, ' -> ', featureBranch, ' -> main').
+      ^self
+    ].
+
+    "5b. Wave-child workflow: stop at feature branch. Parent pipeline owns
+     the feature->main merge. Checkout main so repo isn't left on feature."
     [GitOps checkoutBranch: 'main' in: repoPath]
       on: Exception do: [:e |
         bbs logEngine: 'warn' component: 'merge-worktree' scope: scope message: ('Checkout main warning: ', e messageText)
       ].
 
-    "6. Write observation recording the merge"
+    "6. Write observation recording the merge. merged_to_main=false makes
+     clear to downstream consumers that this did NOT reach main — the parent
+     pipeline's merge-worktree will do that."
     obsPayload := Dictionary new.
-    obsPayload at: 'detail' put: ('Merged ', implBranch, ' into ', featureBranch).
+    obsPayload at: 'detail' put: ('Merged ', implBranch, ' into ', featureBranch, ' (wave-child; parent pipeline will merge to main)').
     obsPayload at: 'repoPath' put: repoPath.
     obsPayload at: 'featureBranch' put: featureBranch.
     obsPayload at: 'implBranch' put: implBranch.
+    obsPayload at: 'merged_to_main' put: 'false'.
     bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
 
-    bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Complete — merged ', implBranch, ' into ', featureBranch)
+    bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Complete — merged ', implBranch, ' into ', featureBranch, ' (wave-child, parent merges to main)')
   ]
