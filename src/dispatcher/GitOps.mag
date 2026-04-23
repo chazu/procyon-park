@@ -56,3 +56,33 @@ GitOps subclass: Object
         ('GitOps warning: branch delete failed: ', e messageText) println
       ]
   ]
+
+  classMethod: deleteBranchForce: branchName in: repoPath [
+    "git branch -D <branchName>. Warns on failure (does not signal).
+     Used when cleaning up zero-commit branches left behind by failed workflows
+     — the branch may be 'not fully merged' from git's perspective even though
+     it has no unique commits."
+    [Shell runChecked: 'git -C "', repoPath, '" branch -D "', branchName, '"']
+      on: Exception do: [:e |
+        ('GitOps warning: branch force-delete failed: ', e messageText) println
+      ]
+  ]
+
+  classMethod: branchExists: branchName in: repoPath [
+    "Returns true if the local branch exists in the given repo."
+    | output |
+    output := Shell capture: 'git -C "', repoPath, '" rev-parse --verify --quiet "refs/heads/', branchName, '" && echo OK || echo MISSING'.
+    (output isNil or: [output isEmpty]) ifTrue: [^false].
+    ^output trimSeparators endsWith: 'OK'
+  ]
+
+  classMethod: commitsAheadOf: base on: branchName in: repoPath [
+    "Returns the number of commits on branchName that are not in base.
+     Returns 0 if the branch does not exist, or on any git error — callers
+     use this to decide whether a branch is worth preserving."
+    | output trimmed |
+    output := Shell capture: 'git -C "', repoPath, '" rev-list --count "', base, '..', branchName, '"'.
+    (output isNil or: [output isEmpty]) ifTrue: [^0].
+    trimmed := output trimSeparators.
+    ^[trimmed asInteger] on: Exception do: [:e | 0]
+  ]

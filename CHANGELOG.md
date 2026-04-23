@@ -8,6 +8,10 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `pp workitem show <id>` now lists related workflows with their status
+  (running / completed / failed). Failed entries include the failure
+  reason and a `retry: pp workitem run <id>` hint so operators notice
+  mid-run crashes and know how to re-dispatch.
 - `pp serve` now writes durable crash logs to `~/.pp/logs/crash-<epoch>.log`
   (plus a rolling append to `~/.pp/logs/pp-serve.log`) when the server
   exits abnormally. Previously a silent crash left no breadcrumb — operators
@@ -46,6 +50,14 @@ Semantic Versioning.
     the task failed with an actionable diagnostic ("run pp workitem
     update <id> --description ...") instead of letting the CLI exit 1
     and leaving the state machine to guess.
+- Failed workflows that never produced commits now clean up after
+  themselves: `WorkflowEngine>>failWorkflow:reason:` removes the worktree
+  and deletes `feature/<instance>` + `impl/<instance>` when both branches
+  are zero commits ahead of `main`. Previously a crash between
+  `create-worktree` and the first implementer commit left an empty
+  `feature/<instance>` behind, and re-dispatching the workitem hit
+  "branch already exists". Worktrees with unique commits are still
+  preserved for recovery.
 - `merge-worktree` on standalone story/story-lite/hotfix/spike workflows now
   fast-forwards the feature branch into `main` and pushes `origin/main`
   (best-effort) instead of leaving the commits stranded on `feature/<id>`.
