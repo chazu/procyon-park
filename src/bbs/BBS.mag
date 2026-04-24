@@ -133,6 +133,33 @@ BBS subclass: Object
     ^d at: 'id'
   ]
 
+  "--- Synchronous-flush wrappers (CLI-facing) ---
+   These exist so CLI entry points can guarantee durability before returning
+   to the caller. The default out:/inp: path stays async (dirty flag +
+   dispatcher tick) — switching every write to synchronous would serialize
+   the engine on disk I/O. Only callers whose crash-return window is
+   user-visible (i.e. CLI ops where a post-return crash looks like 'pp said
+   it worked but nothing is there on restart') should opt in."
+
+  method: outSync: category scope: scope identity: identity payload: payload [
+    "Synchronous-flush variant of out:. Writes the tuple via the normal path,
+     then forces flushIfDirty before returning. Returns the tuple id."
+    | id |
+    id := self out: category scope: scope identity: identity payload: payload.
+    self flushIfDirty.
+    ^id
+  ]
+
+  method: inpSync: category scope: scope identity: identity [
+    "Synchronous-flush variant of inp:. Consumes the tuple via the normal
+     path, then forces flushIfDirty before returning. Returns the matched
+     Dictionary or nil."
+    | result |
+    result := self inp: category scope: scope identity: identity.
+    self flushIfDirty.
+    ^result
+  ]
+
   "--- Core Read/Consume Operations ---"
 
   method: inp: category scope: scope identity: identity [
