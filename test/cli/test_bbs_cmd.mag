@@ -1,0 +1,252 @@
+"Tests for the `pp bbs` subcommand family (list/get/put/rm).
+
+ Spec source: design constraints on CliBBS.mag + new /api/bbs/* routes.
+
+ Invariants under test (contract between CLI + BBS + Server):
+   BC1  CLI cannot produce invalid tuples — Categories>>validate: rejects
+        unknown categories (put/rm must route through BBS out:/inp: which
+        invoke this validator). Constraint #1.
+   BC2  User-facing identity is the composite key (category, scope, identity).
+        rdp: with that composite key returns the tuple — never a UUID
+        lookup. Constraint #2.
+   BC3  `pp bbs rm` uses inp: with a matching template built from the
+        composite key. inp: returns the matched tuple and removes it from
+        the index. Constraint #3.
+   BC4  `pp bbs put` is upsert on composite key — after a raw out: plus a
+        second out: on the same composite key the index contains TWO
+        tuples (proving the CLI's put MUST do inp:+out: to achieve upsert,
+        not a bare out:). Constraint #3, negative scaffolding.
+   BC5  `pp bbs put` + flushIfDirty writes to disk before returning —
+        bbs.json on disk reflects the new tuple synchronously.
+        Constraint #4 (durability).
+   BC6  `pp bbs rm` + flushIfDirty persists the removal — bbs.json on disk
+        no longer contains the tuple. Constraint #4.
+   BC7  `pp bbs list` reuses /api/scan — server applyScanFilters: on a
+        scan result returns the tuples the CLI would render. Architecture.
+   BC8  `pp bbs get` reuses /api/rdp — bbs rdp: returns the tuple the CLI
+        would render, identified by composite key. Architecture.
+   BC9  After a successful inp: the dirty flag is set, so flushIfDirty
+        after rm: is meaningful (no silent flush-lag loss).
+   BC10 Non-durable categories (e.g. 'observation', 'event') are NOT
+        written to bbs.json even after flushIfDirty — prevents surprise
+        persistence of ephemeral tuples via the CLI.
+
+ Standalone runner at bottom (TestBBSCmdMain run)."
+
+TBCTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg,
+                           ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== pp bbs CLI Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue:  ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TBCHelper subclass: Object
+
+  classMethod: makeTempDir [
+    "Use a fixed-template dir rooted in /tmp. Avoid DateTime/identityHash
+     stringification which has been observed to hit FromSmallInt overflow
+     under some VM builds."
+    | base |
+    base := '/tmp/pp-test-bbs-cmd-run'.
+    Shell run: 'rm -rf "', base, '"'.
+    Shell run: 'mkdir -p "', base, '"'.
+    ^base
+  ]
+
+  classMethod: samplePayload [
+    | p |
+    p := Dictionary new.
+    p at: 'detail' put: 'hello'.
+    p at: 'actor' put: 'user:alice'.
+    ^p
+  ]
+
+"=== TestBBSCmd ==="
+TestBBSCmd subclass: Object
+
+  classMethod: run: t [
+    | bbs server tempDir caught payload id1 id2 tuple scanned filtered body
+      diskContents diskBefore diskAfter consumed postRm dirtyBefore |
+    '--- TestBBSCmd ---' println.
+    tempDir := TBCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := ApiServer on: 0 bbs: bbs.
+
+    "BC1: Invalid category is rejected by Categories>>validate:.
+     This is the same entry point BBS>>out:... uses; the CLI MUST
+     route through out: so it inherits this rejection."
+    caught := false.
+    [Categories validate: 'notacategory'] on: Exception do: [:e | caught := true].
+    t assert: caught
+      message: 'BC1: Categories validate: raises on unknown category'.
+
+    "And valid categories are accepted (smoke)."
+    caught := false.
+    [Categories validate: 'fact'] on: Exception do: [:e | caught := true].
+    t assert: caught not
+      message: 'BC1b: Categories validate: accepts fact'.
+
+    "BC2/BC8: rdp: locates a tuple by composite key (category, scope,
+     identity). This is the contract used by /api/rdp which the CLI's
+     `pp bbs get` reuses."
+    payload := TBCHelper samplePayload.
+    id1 := bbs out: 'signal' scope: 'demo' identity: 'sig-1' payload: payload.
+    tuple := bbs rdp: 'signal' scope: 'demo' identity: 'sig-1'.
+    t assert: tuple notNil
+      message: 'BC2/BC8: rdp: returns tuple for composite key'.
+    tuple notNil ifTrue: [
+      t assertEqual: (tuple at: 'category') to: 'signal'
+        message: 'BC2: rdp: returns tuple with requested category'.
+      t assertEqual: (tuple at: 'scope') to: 'demo'
+        message: 'BC2: rdp: returns tuple with requested scope'.
+      t assertEqual: (tuple at: 'identity') to: 'sig-1'
+        message: 'BC2: rdp: returns tuple with requested identity'
+    ].
+
+    "BC7: /api/scan path — bbs scan: + server applyScanFilters: returns
+     the same shape the CLI list command will render."
+    scanned := bbs scan: 'signal' scope: 'demo'.
+    t assert: scanned size >= 1
+      message: 'BC7: scan: returns at least the just-written tuple'.
+    body := Dictionary new.
+    body at: 'category' put: 'signal'.
+    body at: 'scope' put: 'demo'.
+    filtered := server applyScanFilters: scanned body: body.
+    t assertEqual: filtered size to: scanned size
+      message: 'BC7: applyScanFilters no-op when no filters configured'.
+
+    "BC4: Bare out: on same composite key does NOT upsert — two tuples
+     with the same composite key will exist in the index. This proves
+     the CLI's `pp bbs put` MUST do inp: then out: (or rely on an
+     endpoint that does so) — it cannot simply call out: twice."
+    id2 := bbs out: 'signal' scope: 'demo' identity: 'sig-1' payload: payload.
+    t assert: (id2 = id1) not
+      message: 'BC4: second out: assigns a fresh id (not merged with first)'.
+    scanned := bbs scan: 'signal' scope: 'demo'.
+    t assert: scanned size >= 2
+      message: 'BC4: bare out: accumulates — upsert must be implemented as inp:+out:'.
+
+    "BC3: inp: with matching composite key returns the tuple and removes
+     one copy from the index. This is what `pp bbs rm` calls through
+     the server."
+    consumed := bbs inp: 'signal' scope: 'demo' identity: 'sig-1'.
+    t assert: consumed notNil
+      message: 'BC3: inp: with composite key returns matching tuple'.
+    postRm := bbs scan: 'signal' scope: 'demo'.
+    t assertEqual: postRm size to: scanned size - 1
+      message: 'BC3: inp: removes exactly one tuple from the index'.
+
+    "BC5: Durability — put + flushIfDirty makes bbs.json reflect the
+     write before the HTTP response returns. We simulate that by
+     writing, then flushing, then reading bbs.json from disk."
+    "Start clean for this invariant — clean out any remaining sig-1 from
+     the prior BC4 bare out: and flush once so we see the baseline."
+    [bbs inp: 'signal' scope: 'demo' identity: 'sig-1'] on: Exception do: [:e | ].
+    bbs flushIfDirty.
+    diskBefore := File readFileContents: tempDir, '/bbs.json'.
+    bbs out: 'fact' scope: 'demo' identity: 'put-1' payload: payload.
+    "Before flush, the write may not be on disk yet (dirty-flag model).
+     After flush, it must be."
+    bbs flushIfDirty.
+    diskAfter := File readFileContents: tempDir, '/bbs.json'.
+    t assert: diskAfter notNil
+      message: 'BC5: bbs.json exists after flushIfDirty'.
+    t assert: (diskAfter includes: 'put-1')
+      message: 'BC5: flushIfDirty writes new tuple to bbs.json synchronously'.
+    t assert: (diskAfter = diskBefore) not
+      message: 'BC5: disk contents change after put + flush (not a no-op)'.
+
+    "BC6: Durability of removal — after inp: + flushIfDirty the tuple
+     must be gone from bbs.json too."
+    consumed := bbs inp: 'fact' scope: 'demo' identity: 'put-1'.
+    t assert: consumed notNil
+      message: 'BC6: inp: finds the just-written fact tuple'.
+    bbs flushIfDirty.
+    diskContents := File readFileContents: tempDir, '/bbs.json'.
+    t assert: (diskContents includes: 'put-1') not
+      message: 'BC6: flushIfDirty persists the removal — tuple gone from disk'.
+
+    "BC9: inp: marks the space dirty so flushIfDirty after rm is
+     meaningful (no silent flush-lag data-loss window). We verify the
+     flush actually does something by writing, flushing, consuming,
+     then checking the second flush changes disk."
+    bbs out: 'fact' scope: 'demo' identity: 'put-2' payload: payload.
+    bbs flushIfDirty.
+    diskBefore := File readFileContents: tempDir, '/bbs.json'.
+    bbs inp: 'fact' scope: 'demo' identity: 'put-2'.
+    bbs flushIfDirty.
+    diskAfter := File readFileContents: tempDir, '/bbs.json'.
+    t assert: (diskAfter = diskBefore) not
+      message: 'BC9: second flush after inp: reflects on disk (dirty tracking intact)'.
+
+    "BC10: Non-durable categories are not persisted. `observation` and
+     `event` must not leak to bbs.json — protects operators from
+     accidentally pinning ephemera via the CLI."
+    bbs out: 'observation' scope: 'demo' identity: 'obs-1' payload: payload.
+    bbs out: 'event' scope: 'demo' identity: 'evt-1' payload: payload.
+    "These categories do not trigger persistAfterChange via out:, so a
+     flush may be a no-op. Force a durable change then flush to ensure
+     saveToDisk ran at least once."
+    bbs out: 'fact' scope: 'demo' identity: 'durable-trigger' payload: payload.
+    bbs flushIfDirty.
+    diskContents := File readFileContents: tempDir, '/bbs.json'.
+    t assert: (diskContents includes: 'obs-1') not
+      message: 'BC10: observation category not persisted to bbs.json'.
+    t assert: (diskContents includes: 'evt-1') not
+      message: 'BC10: event category not persisted to bbs.json'.
+    t assert: (diskContents includes: 'durable-trigger')
+      message: 'BC10b: fact category IS persisted (sanity)'
+  ]
+
+"=== Main ==="
+TestBBSCmdMain subclass: Object
+
+  classMethod: run [
+    | t |
+    t := TBCTest new.
+    [TestBBSCmd run: t] on: Exception do: [:e |
+      ('TestBBSCmd CRASHED: ', e messageText) println.
+      t assert: false message: 'TestBBSCmd crashed'
+    ].
+    t report.
+    ^t failed
+  ]
