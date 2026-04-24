@@ -8,6 +8,17 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `pp bbs put <category> <scope> <identity> <payload>` and
+  `pp bbs rm <category> <scope> <identity>` CLI subcommands, implementing
+  the write half of `pp bbs`. `<payload>` accepts either inline JSON or
+  `@path/to/file.json`. Optional flags: `--pinned`, `--ttl SEC`,
+  `--modality <persistent|linear|affine>` (defaults driven by category —
+  pinned categories default to `persistent`). `put` prints
+  `<id> created|updated` on success; `rm` is idempotent and prints
+  `removed <cat>/<scope>/<identity>` or `no such tuple`. Invalid
+  categories surface the server's 400 message (including the valid
+  category list) and exit non-zero. `pp bbs` usage text updated to
+  document all four subcommands + flags.
 - `POST /api/bbs/put` and `POST /api/bbs/rm` — unsigned HTTP routes for local
   CLI inspection/ops. `put` performs an UPSERT (consumes any existing tuple
   with the same `(category, scope, identity)` triple before writing the new
