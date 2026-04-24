@@ -54,6 +54,7 @@ PP subclass: CLIBase
     cmd = 'session'   ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'usage'     ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'workitem'  ifTrue: [^WorkItemCLI new runWith: args].
+    cmd = 'bbs'       ifTrue: [^CliBBS new runWith: args].
     cmd = 'repo'      ifTrue: [^Repo new runWith: args].
     cmd = 'worktree'  ifTrue: [
       wtArgs := Array new: 0.

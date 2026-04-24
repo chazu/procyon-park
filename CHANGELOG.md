@@ -8,6 +8,11 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `pp bbs list` and `pp bbs get` read-only subcommands for direct BBS
+  tuplespace access. `list` supports `--category`, `--scope`, `--identity`,
+  and `--json` filters; invalid `--category` values fail fast with the
+  valid set listed. `put` and `rm` are stubbed (exit 2) pending
+  story:bbs-cli:write-cmds.
 - `pp workitem show <id>` now lists related workflows with their status
   (running / completed / failed). Failed entries include the failure
   reason and a `retry: pp workitem run <id>` hint so operators notice
