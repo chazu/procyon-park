@@ -1,0 +1,141 @@
+"Tests for BBS synchronous-flush wrappers (outSync: / inpSync:).
+
+ Invariants under test:
+   SF1  outSync: writes the tuple and clears the dirty flag before returning
+        (i.e. a flush happened synchronously, not on the next dispatcher tick).
+   SF2  After outSync:, a fresh BBS pointed at the same dataDir sees the
+        tuple on startup — this is the 'kill process without waiting for
+        tick, restart, tuple is present' acceptance-criteria scenario.
+   SF3  inpSync: consumes and flushes; the restart view does NOT see the
+        consumed tuple.
+   SF4  Default out: does NOT force a flush (behavior-preservation guard).
+        After a plain out: the dirty flag is still set and a fresh BBS on
+        the same dataDir will not see the tuple.
+
+ Standalone runner at bottom (BBSSyncFlushMain start)."
+
+SFRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== BBS Sync-Flush Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== TestBBSSyncFlush ==="
+TestBBSSyncFlush subclass: Object
+
+  classMethod: tempDir: tag [
+    | dir |
+    dir := '/tmp/pp-bbs-sync-test-', tag, '-', DateTime now epochSeconds printString.
+    Shell run: 'rm -rf "', dir, '" && mkdir -p "', dir, '"'.
+    ^dir
+  ]
+
+  classMethod: run: t [
+    | dir bbs payload id bbs2 found payload2 dir2 bbs3 bbs4 dir3 bbsA bbsB |
+    '--- TestBBSSyncFlush ---' println.
+
+    "=== SF1 + SF2: outSync: flushes and survives restart ==="
+    dir := self tempDir: 'sf12'.
+    bbs := BBS withDataDir: dir.
+    payload := Dictionary new.
+    payload at: 'body' put: 'hello sync'.
+    id := bbs outSync: 'fact' scope: 'r' identity: 'sync-1' payload: payload.
+    t assert: (id notNil) message: 'SF1: outSync: returns a tuple id'.
+
+    "SF2 — open a second BBS on the same dataDir without any tick/flush call
+     between. If outSync: truly flushed synchronously, this second instance
+     will restore the tuple from disk."
+    bbs2 := BBS withDataDir: dir.
+    found := bbs2 scan: 'fact' scope: 'r'.
+    t assertEqual: found size to: 1
+      message: 'SF2: restart after outSync: sees the tuple'.
+    found size > 0 ifTrue: [
+      payload2 := (found at: 0) at: 'payload'.
+      t assertEqual: (payload2 at: 'body') to: 'hello sync'
+        message: 'SF2: tuple payload round-trips through disk'
+    ].
+
+    "=== SF3: inpSync: removes tuple and persists removal ==="
+    dir2 := self tempDir: 'sf3'.
+    bbs3 := BBS withDataDir: dir2.
+    payload := Dictionary new.
+    payload at: 'body' put: 'to be consumed'.
+    bbs3 outSync: 'fact' scope: 'r' identity: 'sync-2' payload: payload.
+    (bbs3 inpSync: 'fact' scope: 'r' identity: 'sync-2') isNil
+      ifTrue: [t assert: false message: 'SF3: inpSync: returned nil for existing tuple'].
+    "Fresh view: tuple must be absent after sync-consume."
+    bbs4 := BBS withDataDir: dir2.
+    t assertEqual: (bbs4 scan: 'fact' scope: 'r') size to: 0
+      message: 'SF3: restart after inpSync: does not see consumed tuple'.
+
+    "=== SF4: plain out: does NOT flush (behavior preservation) ==="
+    dir3 := self tempDir: 'sf4'.
+    bbsA := BBS withDataDir: dir3.
+    payload := Dictionary new.
+    payload at: 'body' put: 'async write'.
+    bbsA out: 'fact' scope: 'r' identity: 'async-1' payload: payload.
+    "Without a flushIfDirty or dispatcher tick, a fresh BBS should NOT see it.
+     This proves the default path is still async — we did not accidentally
+     make every write synchronous."
+    bbsB := BBS withDataDir: dir3.
+    t assertEqual: (bbsB scan: 'fact' scope: 'r') size to: 0
+      message: 'SF4: plain out: does not flush — behavior preserved'.
+    "And after an explicit flushIfDirty, the fresh view DOES see it."
+    bbsA flushIfDirty.
+    bbsB := BBS withDataDir: dir3.
+    t assertEqual: (bbsB scan: 'fact' scope: 'r') size to: 1
+      message: 'SF4: explicit flushIfDirty persists the earlier out:'.
+
+    "Cleanup"
+    Shell run: 'rm -rf "', dir, '" "', dir2, '" "', dir3, '"'
+  ]
+
+"=== Main ==="
+BBSSyncFlushMain subclass: Object
+  classMethod: start [
+    | t |
+    t := SFRunner new.
+    TestBBSSyncFlush run: t.
+    t report.
+    ^t failed
+  ]

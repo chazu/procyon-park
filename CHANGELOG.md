@@ -8,6 +8,14 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `BBS>>outSync:scope:identity:payload:` and `BBS>>inpSync:scope:identity:` —
+  synchronous-flush variants of `out:` / `inp:` for CLI-facing mutations
+  that need durability before returning to the caller. Wrap the existing
+  async-dirty-flag path with a trailing `flushIfDirty`; the default path
+  is unchanged so the engine is not serialized on disk I/O. Chose new
+  selectors (option b) over a keyword `sync:` arg because `out:` already
+  has a dense stack of arities (actor:, launchedBy:, executedBy:) and
+  adding a boolean to every one would have doubled the surface area.
 - `pp workitem show <id>` now lists related workflows with their status
   (running / completed / failed). Failed entries include the failure
   reason and a `retry: pp workitem run <id>` hint so operators notice
