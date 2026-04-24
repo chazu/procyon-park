@@ -422,7 +422,143 @@ ApiServer subclass: Object
          do: [:body :actorCtx | self handleTaskClaim: body actor: actorCtx].
     self signedPost: '/api/tasks/available'
          fields: #('worker_id')
-         do: [:body :actorCtx | self handleTasksAvailable: body actor: actorCtx]
+         do: [:body :actorCtx | self handleTasksAvailable: body actor: actorCtx].
+    self registerBBSWriteRoutes
+  ]
+
+  method: registerBBSWriteRoutes [
+    "Unsigned BBS write routes for local CLI ops (pp bbs put / pp bbs rm).
+     Mirrors the unsigned posture of /api/rdp and /api/scan — these are
+     intended for local inspection/ops; auth hardening tracked separately.
+     Both use synchronous-flush BBS variants so the on-disk state is
+     durable before the HTTP response returns (kill-test invariant)."
+    self post: '/api/bbs/put'
+         fields: #('category' 'scope' 'identity' 'payload')
+         do: [:body | self handleBBSPut: body].
+    self post: '/api/bbs/rm'
+         fields: #('category' 'scope' 'identity')
+         do: [:body | self handleBBSRm: body]
+  ]
+
+  method: handleBBSPut: body [
+    "POST /api/bbs/put — UPSERT a tuple with sync-flush durability.
+     Body: {category, scope, identity, payload, modality?, pinned?, ttl?}.
+     The server picks the tuple id; any client-supplied id is ignored.
+     If a tuple with the same composite key already exists it is consumed
+     (inp:) before the replacement is written (out:); created=false in
+     that case, true otherwise. Returns 400 on validation failure with
+     the valid category list when the category is unknown."
+    | category scope identity payload modality pinned ttl
+      existing existed id resp validList errBody |
+    category := body at: 'category'.
+    scope := body at: 'scope'.
+    identity := body at: 'identity'.
+    payload := body at: 'payload'.
+
+    "Validate category against the canonical list."
+    (Categories isValid: category) ifFalse: [
+      validList := Categories valid.
+      errBody := Dictionary new.
+      errBody at: 'error' put: 'Invalid category: ', category printString.
+      errBody at: 'valid_categories' put: validList.
+      ^self jsonResponse: 400 body: errBody
+    ].
+
+    "Required-field type sanity (requireFields: only checks presence)."
+    ((scope isKindOf: String) and: [scope isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'scope must be a non-empty string'
+    ].
+    ((identity isKindOf: String) and: [identity isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'identity must be a non-empty string'
+    ].
+    (payload isKindOf: Dictionary) ifFalse: [
+      ^self errorResponse: 400 message: 'payload must be a JSON object'
+    ].
+
+    "Resolve modality. Explicit modality wins; else pinned/ttl flags;
+     else default to 'persistent' for pinned-by-default categories
+     (Categories isPinned:), 'linear' otherwise."
+    modality := body at: 'modality' ifAbsent: [nil].
+    pinned := body at: 'pinned' ifAbsent: [false].
+    ttl := body at: 'ttl' ifAbsent: [0].
+    modality isNil ifTrue: [
+      pinned = true ifTrue: [modality := 'persistent']
+      ifFalse: [
+        ttl > 0
+          ifTrue: [modality := 'affine']
+          ifFalse: [
+            modality := (Categories isPinned: category)
+              ifTrue: ['persistent']
+              ifFalse: ['linear']
+          ]
+      ]
+    ].
+    (#('persistent' 'linear' 'affine') includes: modality) ifFalse: [
+      ^self errorResponse: 400 message: 'invalid modality: ', modality printString
+    ].
+    (modality = 'affine' and: [ttl <= 0]) ifTrue: [
+      ^self errorResponse: 400 message: 'modality=affine requires ttl > 0'
+    ].
+
+    "UPSERT: consume any existing tuple with the same composite key.
+     The two operations both go through the BBS internal mutex; gross
+     atomicity is best-effort under the existing locking model."
+    existing := bbs findInIndex: category scope: scope identity: identity.
+    existed := existing notNil.
+    existed ifTrue: [
+      bbs inp: category scope: scope identity: identity
+    ].
+
+    "Write the new tuple; the BBS assigns the id (UUID equivalent).
+     Sync-flush below ensures durability before we ack the caller."
+    modality = 'persistent' ifTrue: [
+      id := bbs outPinned: category scope: scope identity: identity payload: payload actor: nil
+    ] ifFalse: [
+      modality = 'affine' ifTrue: [
+        id := bbs outAffine: category scope: scope identity: identity payload: payload ttl: ttl actor: nil
+      ] ifFalse: [
+        id := bbs out: category scope: scope identity: identity payload: payload actor: nil
+      ]
+    ].
+    bbs flushIfDirty.
+
+    resp := Dictionary new.
+    resp at: 'id' put: id.
+    resp at: 'status' put: 'ok'.
+    resp at: 'created' put: existed not.
+    ^self okResponse: resp
+  ]
+
+  method: handleBBSRm: body [
+    "POST /api/bbs/rm — consume a tuple by composite key, sync-flush.
+     Body: {category, scope, identity}. Idempotent: returns
+     {status:'ok', removed:false} when no matching tuple exists."
+    | category scope identity result resp validList errBody |
+    category := body at: 'category'.
+    scope := body at: 'scope'.
+    identity := body at: 'identity'.
+
+    (Categories isValid: category) ifFalse: [
+      validList := Categories valid.
+      errBody := Dictionary new.
+      errBody at: 'error' put: 'Invalid category: ', category printString.
+      errBody at: 'valid_categories' put: validList.
+      ^self jsonResponse: 400 body: errBody
+    ].
+    ((scope isKindOf: String) and: [scope isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'scope must be a non-empty string'
+    ].
+    ((identity isKindOf: String) and: [identity isEmpty not]) ifFalse: [
+      ^self errorResponse: 400 message: 'identity must be a non-empty string'
+    ].
+
+    result := bbs inp: category scope: scope identity: identity.
+    bbs flushIfDirty.
+
+    resp := Dictionary new.
+    resp at: 'status' put: 'ok'.
+    resp at: 'removed' put: result notNil.
+    ^self okResponse: resp
   ]
 
   method: handleWorkerDrain: body actor: actorCtx [

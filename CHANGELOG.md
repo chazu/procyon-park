@@ -8,6 +8,15 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `POST /api/bbs/put` and `POST /api/bbs/rm` — unsigned HTTP routes for local
+  CLI inspection/ops. `put` performs an UPSERT (consumes any existing tuple
+  with the same `(category, scope, identity)` triple before writing the new
+  one) and reports `created:true|false`; `rm` consumes by composite key and
+  reports `removed:true|false` (idempotent — repeated `rm` is not an error).
+  Both flush BBS state synchronously before responding so a SIGKILL after
+  the ack does not lose the mutation. Tuple ids are server-generated; any
+  client-supplied id is ignored. Match the unsigned posture of `/api/rdp`
+  and `/api/scan` — auth hardening tracked separately.
 - `BBS>>outSync:scope:identity:payload:` and `BBS>>inpSync:scope:identity:` —
   synchronous-flush variants of `out:` / `inp:` for CLI-facing mutations
   that need durability before returning to the caller. Wrap the existing
