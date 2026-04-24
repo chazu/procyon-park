@@ -140,6 +140,63 @@ pp -i <name> <command>                One-shot identity override
 PP_IDENTITY=<name> <command>          Env identity override
 ```
 
+## `pp bbs` — direct tuplespace access
+
+`pp bbs` is the operator-facing window into the BBS. Four subcommands:
+
+```
+pp bbs list [--category C] [--scope S] [--identity I] [--json]
+       List tuples; with no --category, scans every category.
+pp bbs get  <category> <scope> <identity>
+       Fetch a single tuple as JSON. Exits 1 if not found.
+pp bbs put  <category> <scope> <identity> <payload>
+            [--pinned] [--ttl SEC] [--modality persistent|linear|affine]
+       Upsert a tuple. <payload> is inline JSON or @path/to/file.json.
+pp bbs rm   <category> <scope> <identity>
+       Remove a tuple. Idempotent (exits 0 on no-such-tuple).
+```
+
+Payload sources for `put`: either an inline JSON literal, or `@path/to/file.json`
+(curl-style — the file contents are read and sent verbatim).
+
+Modality defaults to `persistent` for pinned categories (`fact`, `convention`,
+`template`, `rule`, `ingestion`, `artifact`, `link`, `decision`, `identity`) and
+`linear` otherwise. `--pinned` forces `persistent`; `--ttl SEC` forces `affine`
+with the given TTL; `--modality M` sets it explicitly.
+
+### Guarantees
+
+- **Server-side category validation.** The CLI cannot construct an invalid
+  tuple — the category enum is enforced by the server. Bad `--category`
+  values fail fast with the valid set listed, and the process exits
+  non-zero.
+- **Durable on return.** `put` and `rm` synchronously flush BBS state to
+  disk before the HTTP response is sent. A SIGKILL immediately after the
+  ack does not lose the mutation.
+- **`put` is UPSERT on `(category, scope, identity)`.** Any existing
+  tuple with the same triple is consumed before the new one is written;
+  the response reports `<id> created` or `<id> updated` accordingly.
+  Tuple ids are server-generated — any client-supplied id is ignored.
+- **`rm` is idempotent.** Removing a non-existent tuple prints
+  `no such tuple` and exits 0.
+
+### Worked examples
+
+```bash
+# Insert a fact (persistent by default because 'fact' is a pinned category).
+pp bbs put fact procyon-park:architecture bbs-durability \
+  '{"detail":"bbs writes are synchronously flushed on CLI put/rm"}'
+
+# List every task tuple across the whole tuplespace.
+pp bbs list --category task
+
+# Inspect a specific decision.
+pp bbs get decision global plan:command-palette-stories
+
+# Remove a stale signal tuple (safe to re-run — idempotent).
+pp bbs rm signal my-repo:feature/x worktree
+```
+
 ## Project Structure
 
 ```

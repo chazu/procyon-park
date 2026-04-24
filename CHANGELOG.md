@@ -8,6 +8,10 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `pp bbs` subcommand for tuplespace inspection and manipulation
+  (`list` / `get` / `put` / `rm`). See README → `pp bbs` for the full
+  surface, guarantees (durable writes, category validation, upsert,
+  idempotent rm), and worked examples.
 - `pp bbs put <category> <scope> <identity> <payload>` and
   `pp bbs rm <category> <scope> <identity>` CLI subcommands, implementing
   the write half of `pp bbs`. `<payload>` accepts either inline JSON or
