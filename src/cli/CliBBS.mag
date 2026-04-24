@@ -1,0 +1,394 @@
+"CliBBS — direct BBS tuplespace CLI (pp bbs).
+ `list` and `get` are read-only and hit the unsigned /api/scan and /api/rdp
+ endpoints. `put` and `rm` POST to /api/bbs/put and /api/bbs/rm which
+ perform sync-flush so the on-disk state is durable by the time the HTTP
+ call returns."
+
+CliBBS subclass: CLIBase
+
+  method: runWith: args [
+    "Dispatch a `pp bbs <sub>` command. `args` is the full argv including
+     the leading 'bbs' token at index 0, matching the pattern used by
+     WorkItemCLI and SystemCommands."
+    | sub |
+    args size < 2 ifTrue: [
+      self printUsage.
+      System exit: 1.
+      ^self
+    ].
+    sub := args at: 1.
+    (sub = '--help' or: [sub = '-h' or: [sub = 'help']]) ifTrue: [^self printUsage].
+    sub = 'list' ifTrue: [^self cmdList: args].
+    sub = 'get'  ifTrue: [^self cmdGet: args].
+    sub = 'put'  ifTrue: [^self cmdPut: args].
+    sub = 'rm'   ifTrue: [^self cmdRm: args].
+    ('Unknown bbs subcommand: ', sub) println.
+    self printUsage.
+    System exit: 1
+  ]
+
+  "--- list ---"
+
+  method: cmdList: args [
+    "pp bbs list [--category C] [--scope S] [--identity I] [--json]
+     Filters are optional and applied in combination. --category is the
+     only filter understood by the /api/scan endpoint directly; --scope
+     is pushed through as well, and --identity is applied client-side
+     post-scan. When no --category is supplied we fan out across every
+     known category so the default `pp bbs list` shows everything."
+    | catFlag scopeFlag identFlag jsonFlag tuples |
+    catFlag := self flagValue: '--category' in: args.
+    scopeFlag := self flagValue: '--scope' in: args.
+    identFlag := self flagValue: '--identity' in: args.
+    jsonFlag := (args indexOf: '--json') >= 0.
+
+    catFlag notNil ifTrue: [
+      (Categories isValid: catFlag) ifFalse: [
+        self printInvalidCategory: catFlag.
+        System exit: 1.
+        ^self
+      ]
+    ].
+
+    tuples := catFlag isNil
+      ifTrue: [self scanAllCategoriesScope: scopeFlag]
+      ifFalse: [self scanCategory: catFlag scope: scopeFlag].
+
+    tuples isNil ifTrue: [System exit: 1. ^self].
+
+    identFlag notNil ifTrue: [
+      tuples := tuples select: [:t | (t at: 'identity' ifAbsent: ['']) = identFlag]
+    ].
+
+    jsonFlag ifTrue: [
+      | out |
+      out := Dictionary new.
+      out at: 'tuples' put: tuples.
+      out at: 'count' put: tuples size.
+      (Json encodePretty: out) println.
+      ^self
+    ].
+
+    tuples isEmpty ifTrue: [
+      '(no tuples)' println.
+      ^self
+    ].
+
+    tuples do: [:t |
+      | cat sc id payload |
+      cat := t at: 'category' ifAbsent: ['?'].
+      sc := t at: 'scope' ifAbsent: ['?'].
+      id := t at: 'identity' ifAbsent: ['?'].
+      payload := t at: 'payload' ifAbsent: [Dictionary new].
+      (cat, ' | ', sc, ' | ', id, ' | ', (self shortPayload: payload)) println
+    ]
+  ]
+
+  method: scanCategory: category scope: aScope [
+    "Hit /api/scan for a single category. Returns the array of tuples,
+     or nil on transport/decode error (the caller should exit non-zero)."
+    | body response result |
+    body := Dictionary new.
+    body at: 'category' put: category.
+    aScope notNil ifTrue: [body at: 'scope' put: aScope].
+    response := self rawPost: '/api/scan' body: body.
+    response isNil ifTrue: [^nil].
+    [result := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      ^nil
+    ].
+    (result isKindOf: Dictionary) ifTrue: [
+      (result at: 'error' ifAbsent: [nil]) notNil ifTrue: [
+        ('Error: ', (result at: 'error') printString) println.
+        ^nil
+      ]
+    ].
+    ^result at: 'tuples' ifAbsent: [#()]
+  ]
+
+  method: scanAllCategoriesScope: aScope [
+    "No --category: scan every valid category. This is a convenience for
+     exploratory use; may be slow on a large space. Categories that
+     error out (e.g. transient network) are skipped silently."
+    | all |
+    all := Array new: 0.
+    Categories valid do: [:cat |
+      | body response result tuples |
+      body := Dictionary new.
+      body at: 'category' put: cat.
+      aScope notNil ifTrue: [body at: 'scope' put: aScope].
+      response := self rawPost: '/api/scan' body: body.
+      response notNil ifTrue: [
+        [
+          result := Json decode: response.
+          tuples := result at: 'tuples' ifAbsent: [#()].
+          tuples do: [:t | all := all copyWith: t]
+        ] on: Exception do: [:e | "skip this category"]
+      ]
+    ].
+    ^all
+  ]
+
+  "--- get ---"
+
+  method: cmdGet: args [
+    "pp bbs get <category> <scope> <identity>
+     All three are required — we do not default any of them because the
+     composite key is what uniquely identifies a tuple. Exit 1 when the
+     tuple does not exist (with a human message, not a stack trace)."
+    | cat sc id body response result tuple |
+    args size < 5 ifTrue: [
+      'Usage: pp bbs get <category> <scope> <identity>' println.
+      System exit: 1. ^self
+    ].
+    cat := args at: 2.
+    sc := args at: 3.
+    id := args at: 4.
+
+    (Categories isValid: cat) ifFalse: [
+      self printInvalidCategory: cat.
+      System exit: 1. ^self
+    ].
+
+    body := Dictionary new.
+    body at: 'category' put: cat.
+    body at: 'scope' put: sc.
+    body at: 'identity' put: id.
+    response := self rawPost: '/api/rdp' body: body.
+    response isNil ifTrue: [System exit: 1. ^self].
+    [result := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      System exit: 1. ^self
+    ].
+    (result isKindOf: Dictionary) ifTrue: [
+      (result at: 'error' ifAbsent: [nil]) notNil ifTrue: [
+        ('Error: ', (result at: 'error') printString) println.
+        System exit: 1. ^self
+      ]
+    ].
+    tuple := result at: 'tuple' ifAbsent: [nil].
+    tuple isNil ifTrue: [
+      ('Tuple not found: ', cat, '/', sc, '/', id) println.
+      System exit: 1. ^self
+    ].
+    (Json encodePretty: tuple) println
+  ]
+
+  "--- helpers ---"
+
+  method: rawPost: path body: dict [
+    "POST an unsigned JSON body and return the raw response string.
+     Unlike CLIBase>>unauthedPost:body:, does NOT auto-pretty-print the
+     response — the caller inspects it so it can shape output and set
+     exit codes. Returns nil on transport error (after printing a
+     diagnostic)."
+    | url jsonBody |
+    url := baseUrl, path.
+    jsonBody := Json encode: dict.
+    [^client post: url body: jsonBody contentType: 'application/json']
+      on: Exception do: [:e |
+        ('Error: ', e messageText) println.
+        ^nil
+      ]
+  ]
+
+  method: shortPayload: payload [
+    "Collapse a payload to a single-line preview, cut to ~60 chars."
+    | s |
+    s := Json encode: payload.
+    s size > 60 ifTrue: [^(s copyFrom: 0 to: 60), '…'].
+    ^s
+  ]
+
+  method: printInvalidCategory: bad [
+    ('Error: invalid category: ', bad) println.
+    'Valid categories:' println.
+    Categories valid do: [:c | ('  ', c) println]
+  ]
+
+  "--- put ---"
+
+  method: cmdPut: args [
+    "pp bbs put <category> <scope> <identity> <payload>
+                [--pinned] [--ttl SEC] [--modality M]
+
+     <payload> is either an inline JSON string or @path/to/file.json
+     (the @-prefix mirrors curl's --data-@file convention). When no
+     --modality / --pinned / --ttl flags are supplied the server picks
+     the default for the category (pinned categories get 'persistent',
+     others 'linear').
+
+     Writes unsigned to /api/bbs/put — matches the unsigned posture of
+     the other BBS endpoints; auth hardening tracked separately."
+    | cat sc id payloadArg payload pinnedFlag ttlFlag modalityFlag
+      body response result status statusCode created tupleId |
+    args size < 6 ifTrue: [
+      'Usage: pp bbs put <category> <scope> <identity> <payload>' println.
+      '                  [--pinned] [--ttl SEC] [--modality M]' println.
+      '  <payload> is inline JSON or @path/to/file.json' println.
+      System exit: 1. ^self
+    ].
+    cat := args at: 2.
+    sc := args at: 3.
+    id := args at: 4.
+    payloadArg := args at: 5.
+
+    pinnedFlag := (args indexOf: '--pinned') >= 0.
+    ttlFlag := self flagValue: '--ttl' in: args.
+    modalityFlag := self flagValue: '--modality' in: args.
+
+    "Client-side sanity — the server re-validates and its message wins
+     for the operator, but this lets us fail fast without a round-trip."
+    (Categories isValid: cat) ifFalse: [
+      self printInvalidCategory: cat.
+      System exit: 1. ^self
+    ].
+
+    payload := self resolvePayload: payloadArg.
+    payload isNil ifTrue: [System exit: 1. ^self].
+
+    body := Dictionary new.
+    body at: 'category' put: cat.
+    body at: 'scope' put: sc.
+    body at: 'identity' put: id.
+    body at: 'payload' put: payload.
+    pinnedFlag ifTrue: [body at: 'pinned' put: true].
+    ttlFlag notNil ifTrue: [body at: 'ttl' put: ttlFlag asInteger].
+    modalityFlag notNil ifTrue: [body at: 'modality' put: modalityFlag].
+
+    response := self rawPost: '/api/bbs/put' body: body.
+    response isNil ifTrue: [System exit: 1. ^self].
+
+    [result := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      response println.
+      System exit: 1. ^self
+    ].
+
+    "The server emits {error: ...} on 400. On 200 it emits
+     {status:'ok', id, created}. Since rawPost: only returns the body,
+     we detect failure by presence of 'error'."
+    (result isKindOf: Dictionary) ifFalse: [
+      'Error: unexpected response shape' println.
+      response println.
+      System exit: 1. ^self
+    ].
+    (result at: 'error' ifAbsent: [nil]) notNil ifTrue: [
+      (result at: 'error') println.
+      (result at: 'valid_categories' ifAbsent: [nil]) notNil ifTrue: [
+        'Valid categories:' println.
+        (result at: 'valid_categories') do: [:c | ('  ', c) println]
+      ].
+      System exit: 1. ^self
+    ].
+
+    status := result at: 'status' ifAbsent: ['ok'].
+    status = 'ok' ifFalse: [
+      ('Unexpected status: ', status printString) println.
+      response println.
+      System exit: 1. ^self
+    ].
+    tupleId := result at: 'id' ifAbsent: ['?'].
+    created := result at: 'created' ifAbsent: [false].
+    (tupleId printString, ' ', (created ifTrue: ['created'] ifFalse: ['updated'])) println
+  ]
+
+  method: resolvePayload: arg [
+    "Parse the <payload> positional. Either inline JSON or @path. Returns
+     a Dictionary (or Array) usable as the payload field, or nil after
+     printing a diagnostic on error."
+    | path contents result |
+    (arg startsWith: '@') ifTrue: [
+      path := arg copyFrom: 1 to: arg size.
+      path isEmpty ifTrue: [
+        'Error: @ must be followed by a file path' println.
+        ^nil
+      ].
+      contents := nil.
+      [contents := File readFileContents: path] on: Exception do: [:e |
+        ('Error reading payload file ', path, ': ', e messageText) println.
+        ^nil
+      ].
+      (contents isNil or: [(contents isKindOf: String) not]) ifTrue: [
+        ('Error: cannot read payload file: ', path) println.
+        ^nil
+      ].
+      [result := Json decode: contents] on: Exception do: [:e |
+        ('Error parsing JSON in ', path, ': ', e messageText) println.
+        ^nil
+      ].
+      ^result
+    ].
+    [result := Json decode: arg] on: Exception do: [:e |
+      ('Error parsing inline JSON payload: ', e messageText) println.
+      ^nil
+    ].
+    ^result
+  ]
+
+  "--- rm ---"
+
+  method: cmdRm: args [
+    "pp bbs rm <category> <scope> <identity>
+     Idempotent: exits 0 with 'no such tuple' when the composite key
+     does not match any existing tuple."
+    | cat sc id body response result |
+    args size < 5 ifTrue: [
+      'Usage: pp bbs rm <category> <scope> <identity>' println.
+      System exit: 1. ^self
+    ].
+    cat := args at: 2.
+    sc := args at: 3.
+    id := args at: 4.
+
+    (Categories isValid: cat) ifFalse: [
+      self printInvalidCategory: cat.
+      System exit: 1. ^self
+    ].
+
+    body := Dictionary new.
+    body at: 'category' put: cat.
+    body at: 'scope' put: sc.
+    body at: 'identity' put: id.
+
+    response := self rawPost: '/api/bbs/rm' body: body.
+    response isNil ifTrue: [System exit: 1. ^self].
+
+    [result := Json decode: response] on: Exception do: [:e |
+      ('Error decoding response: ', e messageText) println.
+      response println.
+      System exit: 1. ^self
+    ].
+    (result isKindOf: Dictionary) ifFalse: [
+      'Error: unexpected response shape' println.
+      response println.
+      System exit: 1. ^self
+    ].
+    (result at: 'error' ifAbsent: [nil]) notNil ifTrue: [
+      (result at: 'error') println.
+      System exit: 1. ^self
+    ].
+    (result at: 'removed' ifAbsent: [false])
+      ifTrue: [('removed ', cat, '/', sc, '/', id) println]
+      ifFalse: ['no such tuple' println]
+  ]
+
+  method: printUsage [
+    'pp bbs — direct BBS tuplespace access' println.
+    '' println.
+    'Commands:' println.
+    '  list [--category C] [--scope S] [--identity I] [--json]' println.
+    '       List tuples; with no --category scans every category.' println.
+    '  get  <category> <scope> <identity>' println.
+    '       Fetch a single tuple as JSON. Exits 1 if not found.' println.
+    '  put  <category> <scope> <identity> <payload>' println.
+    '       [--pinned] [--ttl SEC] [--modality M]' println.
+    '       UPSERT a tuple. <payload> is inline JSON or @path/to/file.json.' println.
+    '       Modality defaults: persistent for pinned categories (fact,' println.
+    '       convention, template, rule, ingestion, artifact, link,' println.
+    '       decision, identity), linear otherwise. --pinned forces' println.
+    '       persistent; --ttl SEC forces affine with the given TTL;' println.
+    '       --modality M sets modality explicitly (persistent|linear|affine).' println.
+    '  rm   <category> <scope> <identity>' println.
+    '       Remove a tuple. Idempotent (exits 0 on no-such-tuple).' println
+  ]

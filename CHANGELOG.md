@@ -8,6 +8,43 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `pp bbs` subcommand for tuplespace inspection and manipulation
+  (`list` / `get` / `put` / `rm`). See README → `pp bbs` for the full
+  surface, guarantees (durable writes, category validation, upsert,
+  idempotent rm), and worked examples.
+- `pp bbs put <category> <scope> <identity> <payload>` and
+  `pp bbs rm <category> <scope> <identity>` CLI subcommands, implementing
+  the write half of `pp bbs`. `<payload>` accepts either inline JSON or
+  `@path/to/file.json`. Optional flags: `--pinned`, `--ttl SEC`,
+  `--modality <persistent|linear|affine>` (defaults driven by category —
+  pinned categories default to `persistent`). `put` prints
+  `<id> created|updated` on success; `rm` is idempotent and prints
+  `removed <cat>/<scope>/<identity>` or `no such tuple`. Invalid
+  categories surface the server's 400 message (including the valid
+  category list) and exit non-zero. `pp bbs` usage text updated to
+  document all four subcommands + flags.
+- `POST /api/bbs/put` and `POST /api/bbs/rm` — unsigned HTTP routes for local
+  CLI inspection/ops. `put` performs an UPSERT (consumes any existing tuple
+  with the same `(category, scope, identity)` triple before writing the new
+  one) and reports `created:true|false`; `rm` consumes by composite key and
+  reports `removed:true|false` (idempotent — repeated `rm` is not an error).
+  Both flush BBS state synchronously before responding so a SIGKILL after
+  the ack does not lose the mutation. Tuple ids are server-generated; any
+  client-supplied id is ignored. Match the unsigned posture of `/api/rdp`
+  and `/api/scan` — auth hardening tracked separately.
+- `BBS>>outSync:scope:identity:payload:` and `BBS>>inpSync:scope:identity:` —
+  synchronous-flush variants of `out:` / `inp:` for CLI-facing mutations
+  that need durability before returning to the caller. Wrap the existing
+  async-dirty-flag path with a trailing `flushIfDirty`; the default path
+  is unchanged so the engine is not serialized on disk I/O. Chose new
+  selectors (option b) over a keyword `sync:` arg because `out:` already
+  has a dense stack of arities (actor:, launchedBy:, executedBy:) and
+  adding a boolean to every one would have doubled the surface area.
+- `pp bbs list` and `pp bbs get` read-only subcommands for direct BBS
+  tuplespace access. `list` supports `--category`, `--scope`, `--identity`,
+  and `--json` filters; invalid `--category` values fail fast with the
+  valid set listed. `put` and `rm` are stubbed (exit 2) pending
+  story:bbs-cli:write-cmds.
 - `pp workitem show <id>` now lists related workflows with their status
   (running / completed / failed). Failed entries include the failure
   reason and a `retry: pp workitem run <id>` hint so operators notice
