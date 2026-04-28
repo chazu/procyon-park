@@ -16,6 +16,12 @@ Semantic Versioning.
   synchronous `flushIfDirty` durability contract, but now wait on the
   same fence so the two writers can never race on `bbs.json.tmp`. See
   docs/scout-perf-survey-2026-04-28.md §1.3.
+- BBS history rotation no longer forks `stat` on every tuple write.
+  `appendHistory:` / `logEngine:` now track `history.jsonl` size in
+  memory, stat'ing once lazily on the first call after process start
+  and resetting the counter on rotation. Removes one fork+exec per
+  `out:` / `outPinned:` / `outAffine:` / `inp:` / `update:` call. See
+  `docs/scout-perf-survey-2026-04-28.md` §1.2.
 
 ### Added
 - `Shell run:timeout:`, `Shell capture:timeout:`, and
