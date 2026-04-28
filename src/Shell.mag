@@ -2,7 +2,16 @@
  for running shell commands. Provides three class methods:
    Shell run: cmd        — fire-and-forget (no output capture)
    Shell capture: cmd    — run and return stdout as a String
-   Shell runChecked: cmd — run and signal Error on non-zero exit"
+   Shell runChecked: cmd — run and signal Error on non-zero exit
+
+ Each method also has a `:timeout:` variant that takes a timeout in
+ seconds and wraps the command in a POSIX watchdog. If the command runs
+ longer than the timeout, the watchdog SIGTERMs (then SIGKILLs) the
+ child so the dispatcher tick is never blocked indefinitely on a stuck
+ git lock or paused NFS mount. Soft-fail semantics:
+   run:timeout:        — returns silently when timed out.
+   capture:timeout:    — returns whatever output was captured (often '').
+   runChecked:timeout: — signals Error on timeout (exit 124 by convention)."
 
 Shell subclass: Object
 
@@ -56,4 +65,42 @@ Shell subclass: Object
     proc isSuccess ifFalse: [
       Error signal: 'Shell command failed (exit ', proc exitCode printString, '): ', cmd
     ]
+  ]
+
+  "--- Timeout-bounded variants ---
+   These wrap the command with a POSIX watchdog so a stuck git lock /
+   NFS pause / hung child never stalls the dispatcher tick. Implemented
+   inline in /bin/sh (no dependency on GNU coreutils `timeout`)."
+
+  classMethod: wrapWithTimeout: cmd seconds: secs [
+    "Build a /bin/sh fragment that runs cmd with a watchdog.
+     On timeout, the watchdog sends SIGTERM, waits 1s, then SIGKILL.
+     The wrapper exits with the child's exit code (124 on timeout, by
+     convention matching GNU `timeout`)."
+    | secStr |
+    secStr := secs printString.
+    ^'( ', cmd, ' ) & __pp_pid=$!; '
+      , '( sleep ', secStr, '; kill -TERM $__pp_pid 2>/dev/null; '
+      , 'sleep 1; kill -KILL $__pp_pid 2>/dev/null ) >/dev/null 2>&1 & __pp_wd=$!; '
+      , 'wait $__pp_pid 2>/dev/null; __pp_ec=$?; '
+      , 'kill $__pp_wd 2>/dev/null; wait $__pp_wd 2>/dev/null; '
+      , 'if [ $__pp_ec -ge 128 ]; then exit 124; fi; exit $__pp_ec'
+  ]
+
+  classMethod: run: cmd timeout: secs [
+    "Fire-and-forget with a wall-clock cap. Soft-fails on timeout
+     (returns silently)."
+    self run: (self wrapWithTimeout: cmd seconds: secs)
+  ]
+
+  classMethod: capture: cmd timeout: secs [
+    "Capture stdout/stderr with a wall-clock cap. Soft-fails on timeout
+     (returns whatever output was written before the kill, usually '')."
+    ^self capture: (self wrapWithTimeout: cmd seconds: secs)
+  ]
+
+  classMethod: runChecked: cmd timeout: secs [
+    "Run with a wall-clock cap. Signals Error on non-zero exit (including
+     timeout, which surfaces as exit 124)."
+    self runChecked: (self wrapWithTimeout: cmd seconds: secs)
   ]

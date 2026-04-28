@@ -101,7 +101,13 @@ DispatchWavesAction subclass: WorkflowAction
 
     featureBranch := 'feature/', instanceId.
     "Create shared branch if it doesn't already exist (create-worktree may have made it)"
-    branchCheck := Shell capture: 'git -C "', repoPath, '" rev-parse --verify "', featureBranch, '" 2>/dev/null && echo exists || echo missing'.
+    "Bound by a 10s wall-clock cap so a stuck git lock or paused NFS
+     mount cannot stall the dispatcher tick. On timeout the result is
+     '' which falls through to the 'missing' branch below — safe because
+     createFeatureBranch: itself is idempotent enough to fail loudly if
+     the branch already exists."
+    branchCheck := Shell capture: 'git -C "', repoPath, '" rev-parse --verify "', featureBranch, '" 2>/dev/null && echo exists || echo missing'
+      timeout: 10.
     (branchCheck = 'missing') ifTrue: [
       [
         GitOps createFeatureBranch: featureBranch in: repoPath.

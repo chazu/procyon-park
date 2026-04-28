@@ -510,7 +510,8 @@ BBS subclass: Object
   "--- Persistence ---"
 
   method: ensureDataDir [
-    Shell run: 'mkdir -p "', dataDir, '"'
+    "Bounded so a paused NFS mount cannot stall startup or the tick path."
+    Shell run: 'mkdir -p "', dataDir, '"' timeout: 10
   ]
 
   method: saveToDisk [
@@ -533,7 +534,10 @@ BBS subclass: Object
 
     "Write atomically: write to .tmp then rename"
     File writeFileContents: tmpPath contents: json.
-    Shell run: 'mv "', tmpPath, '" "', filePath, '"'
+    "Bounded mv: an atomic rename should never take more than a fraction
+     of a second locally; the cap prevents a hung filesystem from stalling
+     the dispatcher flush."
+    Shell run: 'mv "', tmpPath, '" "', filePath, '"' timeout: 10
   ]
 
   method: loadFromDisk [
@@ -651,11 +655,14 @@ BBS subclass: Object
     "Rotate history.jsonl when it exceeds 10MB. Keeps one backup (.1)."
     | sizeStr size |
     (File exists: historyPath) ifFalse: [^self].
-    sizeStr := Shell capture: 'stat -f%z "', historyPath, '" 2>/dev/null || stat -c%s "', historyPath, '" 2>/dev/null'.
+    "Bounded stat + bounded rotation mv. On timeout we soft-fail: the
+     log just doesn't rotate this round, vs. blocking every BBS write."
+    sizeStr := Shell capture: 'stat -f%z "', historyPath, '" 2>/dev/null || stat -c%s "', historyPath, '" 2>/dev/null'
+      timeout: 5.
     sizeStr isEmpty ifTrue: [^self].
     [size := sizeStr asInteger] on: Exception do: [:e | ^self].
     size > 10485760 ifTrue: [
-      Shell run: 'mv "', historyPath, '" "', historyPath, '.1"'.
+      Shell run: 'mv "', historyPath, '" "', historyPath, '.1"' timeout: 10.
       ('BBS: rotated history log (', size printString, ' bytes)') println
     ]
   ]

@@ -8,6 +8,21 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `Shell run:timeout:`, `Shell capture:timeout:`, and
+  `Shell runChecked:timeout:` variants that wrap any shell command in a
+  POSIX watchdog (SIGTERM after N seconds, SIGKILL 1s later). Exits with
+  124 on timeout to match GNU `timeout` convention.
+
+### Fixed
+- Dispatcher tick no longer stalls indefinitely on a stuck `git` lock or
+  paused NFS mount. All inline `Shell run:` / `Shell capture:` calls on
+  the tick path now have wall-clock caps and fail soft: branch-existence
+  probe in `DispatchWavesAction` (10s), `GitOps` write/push operations
+  (30s/60s), worktree cleanup `rm -rf` in `WorkflowEngine` (30s), and
+  BBS persistence mkdir/mv/stat/rotation calls (5–10s). Reference:
+  docs/scout-perf-survey-2026-04-28.md §5.5.
+
+### Added
 - `pp bbs` subcommand for tuplespace inspection and manipulation
   (`list` / `get` / `put` / `rm`). See README → `pp bbs` for the full
   surface, guarantees (durable writes, category validation, upsert,

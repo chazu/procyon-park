@@ -1,42 +1,63 @@
 "GitOps — utility class wrapping common git operations for WorkflowEngine.
  Methods that are critical to workflow correctness signal Error on failure.
- Cleanup helpers only warn."
+ Cleanup helpers only warn.
+
+ Every git invocation is bounded by a wall-clock timeout via
+ `Shell runChecked:timeout:` / `Shell capture:timeout:` so a stuck repo
+ lock or paused NFS mount cannot stall the dispatcher tick. A timeout
+ surfaces as exit 124 and propagates as an Error on `runChecked:timeout:`
+ — callers already handle Exception and fail-soft / notify-operator."
 
 GitOps subclass: Object
+
+  "--- Default per-operation timeouts (seconds). Tuned to be generous
+   enough for cold-cache local repos but tight enough that a hung git
+   process never blocks the tick longer than ~30s. ---"
+
+  classMethod: defaultTimeoutFast [ ^10 ]
+  classMethod: defaultTimeoutWrite [ ^30 ]
+  classMethod: defaultTimeoutPush [ ^60 ]
 
   classMethod: createFeatureBranch: branchName in: repoPath [
     "git checkout -b <branchName> in repoPath. Signals Error on failure."
     Shell runChecked: 'git -C "', repoPath, '" checkout -b "', branchName, '"'
+      timeout: self defaultTimeoutWrite
   ]
 
   classMethod: createFeatureBranch: branchName from: startPoint in: repoPath [
     "git checkout -b <branchName> <startPoint> in repoPath. Signals Error on failure."
     Shell runChecked: 'git -C "', repoPath, '" checkout -b "', branchName, '" "', startPoint, '"'
+      timeout: self defaultTimeoutWrite
   ]
 
   classMethod: createWorktree: worktreeDir branch: implBranch from: startPoint in: repoPath [
     "Create parent dir and git worktree add from a specific start point. Signals Error on failure."
     Shell runChecked: 'mkdir -p "$(dirname "', worktreeDir, '")" && git -C "', repoPath, '" worktree add "', worktreeDir, '" -b "', implBranch, '" "', startPoint, '"'
+      timeout: self defaultTimeoutWrite
   ]
 
   classMethod: createWorktree: worktreeDir branch: implBranch in: repoPath [
     "Create parent dir and git worktree add. Signals Error on failure."
     Shell runChecked: 'mkdir -p "$(dirname "', worktreeDir, '")" && git -C "', repoPath, '" worktree add "', worktreeDir, '" -b "', implBranch, '"'
+      timeout: self defaultTimeoutWrite
   ]
 
   classMethod: checkoutBranch: branchName in: repoPath [
     "git checkout <branchName>. Signals Error on failure."
     Shell runChecked: 'git -C "', repoPath, '" checkout "', branchName, '"'
+      timeout: self defaultTimeoutWrite
   ]
 
   classMethod: mergeBranch: sourceBranch in: repoPath [
     "git merge <sourceBranch> --no-edit. Signals Error on failure."
     Shell runChecked: 'git -C "', repoPath, '" merge "', sourceBranch, '" --no-edit'
+      timeout: self defaultTimeoutWrite
   ]
 
   classMethod: removeWorktree: worktreeDir in: repoPath [
     "git worktree remove. Warns on failure (does not signal)."
-    [Shell runChecked: 'git -C "', repoPath, '" worktree remove "', worktreeDir, '"']
+    [Shell runChecked: 'git -C "', repoPath, '" worktree remove "', worktreeDir, '"'
+       timeout: self defaultTimeoutWrite]
       on: Exception do: [:e |
         ('GitOps warning: worktree remove failed: ', e messageText) println
       ]
@@ -47,11 +68,13 @@ GitOps subclass: Object
      catch so push failures don't break the workflow (not every repo has an
      origin configured)."
     Shell runChecked: 'git -C "', repoPath, '" push origin "', branchName, '"'
+      timeout: self defaultTimeoutPush
   ]
 
   classMethod: deleteBranch: branchName in: repoPath [
     "git branch -d <branchName>. Warns on failure (does not signal)."
-    [Shell runChecked: 'git -C "', repoPath, '" branch -d "', branchName, '"']
+    [Shell runChecked: 'git -C "', repoPath, '" branch -d "', branchName, '"'
+       timeout: self defaultTimeoutFast]
       on: Exception do: [:e |
         ('GitOps warning: branch delete failed: ', e messageText) println
       ]
@@ -62,7 +85,8 @@ GitOps subclass: Object
      Used when cleaning up zero-commit branches left behind by failed workflows
      — the branch may be 'not fully merged' from git's perspective even though
      it has no unique commits."
-    [Shell runChecked: 'git -C "', repoPath, '" branch -D "', branchName, '"']
+    [Shell runChecked: 'git -C "', repoPath, '" branch -D "', branchName, '"'
+       timeout: self defaultTimeoutFast]
       on: Exception do: [:e |
         ('GitOps warning: branch force-delete failed: ', e messageText) println
       ]
@@ -71,7 +95,8 @@ GitOps subclass: Object
   classMethod: branchExists: branchName in: repoPath [
     "Returns true if the local branch exists in the given repo."
     | output |
-    output := Shell capture: 'git -C "', repoPath, '" rev-parse --verify --quiet "refs/heads/', branchName, '" && echo OK || echo MISSING'.
+    output := Shell capture: 'git -C "', repoPath, '" rev-parse --verify --quiet "refs/heads/', branchName, '" && echo OK || echo MISSING'
+      timeout: self defaultTimeoutFast.
     (output isNil or: [output isEmpty]) ifTrue: [^false].
     ^output trimSeparators endsWith: 'OK'
   ]
@@ -81,7 +106,8 @@ GitOps subclass: Object
      Returns 0 if the branch does not exist, or on any git error — callers
      use this to decide whether a branch is worth preserving."
     | output trimmed |
-    output := Shell capture: 'git -C "', repoPath, '" rev-list --count "', base, '..', branchName, '"'.
+    output := Shell capture: 'git -C "', repoPath, '" rev-list --count "', base, '..', branchName, '"'
+      timeout: self defaultTimeoutFast.
     (output isNil or: [output isEmpty]) ifTrue: [^0].
     trimmed := output trimSeparators.
     ^[trimmed asInteger] on: Exception do: [:e | 0]
