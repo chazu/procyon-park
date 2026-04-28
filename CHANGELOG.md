@@ -70,6 +70,13 @@ Semantic Versioning.
   release.
 
 ### Fixed
+- `Scheduler>>checkCompleted` no longer raises `doesNotUnderstand` on every
+  drain of `task-complete:<id>` events. The site at `Scheduler.mag:256`
+  invoked `String>>copyFrom:` with a single argument; refactored to a
+  testable class method `Scheduler taskIdFromCompleteEvent:` using the
+  canonical `copyFrom:to:` form (0-indexed half-open). Adds unit coverage
+  in `test/dispatcher/test_scheduler_complete_event.mag`. Reference:
+  docs/scout-perf-survey-2026-04-28.md §5.2.
 - Strict input validation at every pp boundary (pp-input-validation-strict,
   umbrella for four child bugs):
   - `pp workitem run/show/update/comment` now require `--repo <scope>` (or
