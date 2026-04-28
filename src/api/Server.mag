@@ -715,12 +715,11 @@ ApiServer subclass: Object
                  message: 'worker name ', name, ' already claimed by a different operator'
       ].
       "Same operator re-registering — refresh path. Preserve drain and
-       registered_at, consume the old tuple, and fall through to write a
-       fresh one with the updated manifest."
+       registered_at; the outAffine: write below overwrites the old tuple
+       atomically (no separate inp: needed)."
       isRefresh := true.
       drainFlag := existingPayload at: 'drain' ifAbsent: [false].
-      regAt := existingPayload at: 'registered_at' ifAbsent: [nil].
-      bbs inp: 'worker' scope: '/' identity: identity
+      regAt := existingPayload at: 'registered_at' ifAbsent: [nil]
     ].
 
     "TTL = 3 * heartbeatInterval. Default heartbeat 30s → ttl 90s."
@@ -775,10 +774,8 @@ ApiServer subclass: Object
          operator-set fields).
        - Re-issue the affine tuple with the same identity, carrying the
          merged payload and a fresh 3 * heartbeat_interval TTL. BBS
-         outAffine: currently appends rather than overwriting (see
-         observation filed from D6.6 wave-4), so we inp: the existing
-         tuple first and then outAffine: the refreshed copy as a
-         workaround.
+         outAffine: now provides true overwrite semantics, so a single
+         outAffine: call replaces the prior tuple atomically.
        - On success: 200 {ok:true, ttl:N}."
     | name identity actorStr existing payload newPayload newManifest manifestErr ttl heartbeat result |
 
@@ -830,9 +827,6 @@ ApiServer subclass: Object
     heartbeat := self workerHeartbeatInterval.
     ttl := heartbeat * 3.
 
-    "Workaround for outAffine append-semantics: consume the existing
-     tuple first so the refresh truly overwrites instead of accumulating."
-    bbs inp: 'worker' scope: '/' identity: identity.
     bbs outAffine: 'worker' scope: '/' identity: identity
         payload: newPayload ttl: ttl actor: identity.
 
@@ -2066,9 +2060,8 @@ ApiServer subclass: Object
     ].
 
     identity := user, ':', wfId.
-    "Idempotent: drop any existing subscription for this (user, wfId)
-     pair before re-inserting with a fresh TTL."
-    bbs inp: 'watch' scope: '/' identity: identity.
+    "Idempotent: outAffine: overwrites any existing subscription for this
+     (user, wfId) pair with a fresh TTL."
 
     payload := Dictionary new.
     payload at: 'user' put: user.

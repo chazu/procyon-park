@@ -7,6 +7,17 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+- `BBS>>outAffine:` now provides true overwrite semantics: a write at an
+  existing `(category, scope, identity)` consumes the prior tuple before
+  appending the fresh one. Previously each call appended a new tuple and
+  callers (worker register/heartbeat, workflow watch) used a racy
+  `inp:`-then-`outAffine:` workaround that could leak duplicate tuples on
+  crash, double-counting workers in the dashboard presence panel. The
+  workarounds in `Server.mag` (handleWorkerRegister, handleWorkerHeartbeat,
+  handleWorkflowWatch) are removed. See
+  docs/scout-perf-survey-2026-04-28.md §5.3.
+
 ### Added
 - `pp bbs` subcommand for tuplespace inspection and manipulation
   (`list` / `get` / `put` / `rm`). See README → `pp bbs` for the full
