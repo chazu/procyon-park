@@ -245,6 +245,17 @@ Scheduler subclass: Object
         severity: 'warn'
   ]
 
+  classMethod: taskIdFromCompleteEvent: evtIdentity [
+    "Extract the bare task id from a 'task-complete:<taskId>' event identity.
+     Returns nil if the identity does not carry the expected prefix."
+    | prefix |
+    prefix := 'task-complete:'.
+    (evtIdentity startsWith: prefix) ifFalse: [^nil].
+    "copyFrom:to: is 0-indexed half-open [start, end) (Go-style). To strip the
+     prefix we start at index = prefix size, not prefix size + 1."
+    ^evtIdentity copyFrom: prefix size to: evtIdentity size
+  ]
+
   method: checkCompleted [
     "Check for task-complete events and free slots."
     | events |
@@ -252,8 +263,8 @@ Scheduler subclass: Object
     events do: [:evt |
       | evtIdentity taskId |
       evtIdentity := evt at: 'identity'.
-      (evtIdentity startsWith: 'task-complete:') ifTrue: [
-        taskId := evtIdentity copyFrom: 'task-complete:' size.
+      taskId := Scheduler taskIdFromCompleteEvent: evtIdentity.
+      taskId notNil ifTrue: [
         mutex critical: [activeSlots removeKey: taskId ifAbsent: [nil]]
       ]
     ]

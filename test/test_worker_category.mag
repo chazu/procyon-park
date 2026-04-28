@@ -172,10 +172,11 @@ TestWorkerCategory subclass: Object
       ]
     ].
 
-    "WC5: Re-write semantics. BBS>>outAffine is append-only — each call
-     assigns a fresh id and appends. This is documented behavior, not
-     replace-on-rewrite. The heartbeat story will decide how to evolve
-     this (e.g. an upsertAffine variant)."
+    "WC5: Re-write semantics. BBS>>outAffine now provides true overwrite
+     semantics — a second write at the same (category, scope, identity)
+     consumes the prior tuple before appending the new one. This lets the
+     worker register/heartbeat path drop its inp:-then-outAffine: workaround.
+     See docs/scout-perf-survey-2026-04-28.md §5.3."
     payload2 := TWCHelper samplePayload.
     payload2 at: 'drain' put: true.
     payload2 at: 'registered_at' put: '2026-04-19T12:05:00Z'.
@@ -188,14 +189,15 @@ TestWorkerCategory subclass: Object
     t assert: secondId notNil
       message: 'WC5: second outAffine returns an id'.
     t assert: (secondId = firstId) not
-      message: 'WC5: second outAffine assigns a NEW id (append-only — no replace)'.
+      message: 'WC5: second outAffine assigns a NEW id (the prior tuple was consumed first)'.
 
-    "Document the index shape: both writes live in the index. If this
-     assertion ever changes to 1, outAffine has become replace-on-rewrite
-     and the worker-heartbeat code path can rely on it."
+    "Index shape: only the most recent write survives. Overwrite means the
+     worker presence panel cannot show duplicate worker entries."
     workerTuples := bbs scan: 'worker' scope: scope.
-    t assertEqual: workerTuples size to: 2
-      message: 'WC5: outAffine is append-only — two writes leave two tuples in the index'
+    t assertEqual: workerTuples size to: 1
+      message: 'WC5: outAffine overwrites — second write leaves exactly one tuple in the index'.
+    t assertEqual: ((workerTuples first at: 'id')) to: secondId
+      message: 'WC5: surviving tuple is the second (newer) write'
   ]
 
 "=== Main ==="

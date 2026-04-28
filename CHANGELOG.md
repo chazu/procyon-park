@@ -7,6 +7,46 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+- Dispatcher tick no longer blocks on the BBS save-to-disk path. The 10s
+  tick now calls `bbs flushAsyncIfDirty`, which forks a fenced background
+  write so a multi-MB JSON encode + atomic rename can never stall the
+  scheduler / workflow-engine / reaper loop. CLI request paths
+  (`outSync:` / `inpSync:`, `/api/bbs/out`, `/api/bbs/rm`) keep their
+  synchronous `flushIfDirty` durability contract, but now wait on the
+  same fence so the two writers can never race on `bbs.json.tmp`. See
+  docs/scout-perf-survey-2026-04-28.md §1.3.
+- BBS history rotation no longer forks `stat` on every tuple write.
+  `appendHistory:` / `logEngine:` now track `history.jsonl` size in
+  memory, stat'ing once lazily on the first call after process start
+  and resetting the counter on rotation. Removes one fork+exec per
+  `out:` / `outPinned:` / `outAffine:` / `inp:` / `update:` call. See
+  `docs/scout-perf-survey-2026-04-28.md` §1.2.
+
+### Added
+- `Shell run:timeout:`, `Shell capture:timeout:`, and
+  `Shell runChecked:timeout:` variants that wrap any shell command in a
+  POSIX watchdog (SIGTERM after N seconds, SIGKILL 1s later). Exits with
+  124 on timeout to match GNU `timeout` convention.
+
+### Fixed
+- `BBS>>outAffine:` now provides true overwrite semantics: a write at an
+  existing `(category, scope, identity)` consumes the prior tuple before
+  appending the fresh one. Previously each call appended a new tuple and
+  callers (worker register/heartbeat, workflow watch) used a racy
+  `inp:`-then-`outAffine:` workaround that could leak duplicate tuples on
+  crash, double-counting workers in the dashboard presence panel. The
+  workarounds in `Server.mag` (handleWorkerRegister, handleWorkerHeartbeat,
+  handleWorkflowWatch) are removed. See
+  docs/scout-perf-survey-2026-04-28.md §5.3.
+- Dispatcher tick no longer stalls indefinitely on a stuck `git` lock or
+  paused NFS mount. All inline `Shell run:` / `Shell capture:` calls on
+  the tick path now have wall-clock caps and fail soft: branch-existence
+  probe in `DispatchWavesAction` (10s), `GitOps` write/push operations
+  (30s/60s), worktree cleanup `rm -rf` in `WorkflowEngine` (30s), and
+  BBS persistence mkdir/mv/stat/rotation calls (5–10s). Reference:
+  docs/scout-perf-survey-2026-04-28.md §5.5.
+
 ### Added
 - `pp bbs` subcommand for tuplespace inspection and manipulation
   (`list` / `get` / `put` / `rm`). See README → `pp bbs` for the full
@@ -70,6 +110,23 @@ Semantic Versioning.
   release.
 
 ### Fixed
+- Dispatcher tick loop is now resilient to malformed tuples. Each step
+  (`scheduler checkCompleted`, `workflowEngine advance`, `ruleEngine
+  evaluate`, `scheduler dispatch`, reapExpiredClaims, flushIfDirty,
+  reconcile, housekeep) runs inside its own `on: Exception do:` so a
+  single bad tuple no longer kills the entire tick — the remaining steps
+  still run. Added `ifAbsent:` defaults to `WorkflowEngine` reads of
+  `start_places`, workflow `payload`/`status`, template `payload`/
+  `transitions`, token `place`, and to `RuleEngine`'s `consumes` lookup
+  so missing keys degrade gracefully instead of raising. Refs:
+  docs/scout-perf-survey-2026-04-28.md §5.1.
+- `Scheduler>>checkCompleted` no longer raises `doesNotUnderstand` on every
+  drain of `task-complete:<id>` events. The site at `Scheduler.mag:256`
+  invoked `String>>copyFrom:` with a single argument; refactored to a
+  testable class method `Scheduler taskIdFromCompleteEvent:` using the
+  canonical `copyFrom:to:` form (0-indexed half-open). Adds unit coverage
+  in `test/dispatcher/test_scheduler_complete_event.mag`. Reference:
+  docs/scout-perf-survey-2026-04-28.md §5.2.
 - Strict input validation at every pp boundary (pp-input-validation-strict,
   umbrella for four child bugs):
   - `pp workitem run/show/update/comment` now require `--repo <scope>` (or

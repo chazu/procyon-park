@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex cueCtx startedAt index dataDir historyPath dirty
+  instanceVars: space nextId mutex cueCtx startedAt index dataDir historyPath dirty flushMutex flushInProgress historySize
 
   classMethod: new [
     ^super new initialize
@@ -42,6 +42,9 @@ BBS subclass: Object
 
     historyPath := dataDir, '/history.jsonl'.
     dirty := false.
+    flushMutex := Mutex new.
+    flushInProgress := false.
+    historySize := nil.  "lazy-init: stat once on first append; tracked in memory thereafter"
 
     "Ensure data directory exists"
     self ensureDataDir.
@@ -124,8 +127,14 @@ BBS subclass: Object
   ]
 
   method: outAffine: category scope: scope identity: identity payload: payload ttl: ttlSeconds actor: actor launchedBy: launchedBy executedBy: executedBy [
+    "True overwrite semantics: any prior tuple at the same (category,
+     scope, identity) is consumed before the new affine tuple is written.
+     This makes outAffine: an upsert; callers no longer need the
+     inp:-then-outAffine: workaround that races on crash. The drain loop
+     also collects any duplicates left behind by the legacy append path."
     | d |
     Categories validate: category.
+    [(self inp: category scope: scope identity: identity) notNil] whileTrue: [].
     d := Tuple affine: category scope: scope identity: identity payload: payload id: self assignId ttl: ttlSeconds actor: actor launchedBy: launchedBy executedBy: executedBy.
     space outAffine: d ttl: ttlSeconds.
     mutex critical: [index := index copyWith: d].
@@ -227,37 +236,30 @@ BBS subclass: Object
      payload.wave (default 1), tiebroken by identity. The single source
      of truth for 'children of X' is the child's parent field — the
      legacy denormalised children[] array is not consulted."
-    | filtered asArr sorted insertedAt i j temp |
+    | filtered |
     filtered := tuples select: [:t |
       | p |
       p := (t at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil].
       p = parentId
     ].
-    asArr := Array new: 0.
-    filtered do: [:t | asArr := asArr copyWith: t].
-    "Insertion sort by (wave asc, identity asc). Small lists; O(n^2) is fine."
-    sorted := Array new: 0.
-    asArr do: [:t |
-      i := 0.
-      insertedAt := nil.
-      [insertedAt isNil and: [i < sorted size]] whileTrue: [
-        (self workitemTuple: t precedesTuple: (sorted at: i))
-          ifTrue: [insertedAt := i]
-          ifFalse: [i := i + 1]
-      ].
-      insertedAt isNil ifTrue: [
-        sorted := sorted copyWith: t
-      ] ifFalse: [
-        "Shift tail right and insert at insertedAt."
-        temp := Array new: 0.
-        j := 0.
-        [j < insertedAt] whileTrue: [temp := temp copyWith: (sorted at: j). j := j + 1].
-        temp := temp copyWith: t.
-        [j < sorted size] whileTrue: [temp := temp copyWith: (sorted at: j). j := j + 1].
-        sorted := temp
+    "Single in-place sort by (wave asc, identity asc) — replaces the
+     previous O(n^2) insertion sort that allocated 2*n^2 intermediate
+     arrays via copyWith:."
+    filtered sort: [:a :b |
+      | wa wb ia ib |
+      wa := (a at: 'payload' ifAbsent: [Dictionary new]) at: 'wave' ifAbsent: [1].
+      wb := (b at: 'payload' ifAbsent: [Dictionary new]) at: 'wave' ifAbsent: [1].
+      wa < wb ifTrue: [-1] ifFalse: [
+        wa > wb ifTrue: [1] ifFalse: [
+          ia := a at: 'identity' ifAbsent: [''].
+          ib := b at: 'identity' ifAbsent: [''].
+          ia < ib ifTrue: [-1] ifFalse: [
+            ia > ib ifTrue: [1] ifFalse: [0]
+          ]
+        ]
       ]
     ].
-    ^sorted
+    ^filtered
   ]
 
   method: workitemTuple: a precedesTuple: b [
@@ -510,7 +512,8 @@ BBS subclass: Object
   "--- Persistence ---"
 
   method: ensureDataDir [
-    Shell run: 'mkdir -p "', dataDir, '"'
+    "Bounded so a paused NFS mount cannot stall startup or the tick path."
+    Shell run: 'mkdir -p "', dataDir, '"' timeout: 10
   ]
 
   method: saveToDisk [
@@ -533,7 +536,10 @@ BBS subclass: Object
 
     "Write atomically: write to .tmp then rename"
     File writeFileContents: tmpPath contents: json.
-    Shell run: 'mv "', tmpPath, '" "', filePath, '"'
+    "Bounded mv: an atomic rename should never take more than a fraction
+     of a second locally; the cap prevents a hung filesystem from stalling
+     the dispatcher flush."
+    Shell run: 'mv "', tmpPath, '" "', filePath, '"' timeout: 10
   ]
 
   method: loadFromDisk [
@@ -588,16 +594,66 @@ BBS subclass: Object
   ]
 
   method: persistAfterChange [
-    "Mark state as dirty. Actual write happens on flushIfDirty (dispatcher tick)."
-    dirty := true
+    "Mark state as dirty. Actual write happens on flushIfDirty / flushAsyncIfDirty.
+     The dispatcher tick path uses flushAsyncIfDirty so a multi-MB JSON
+     encode + rename never blocks the tick loop. CLI request paths that
+     ack durability still call the synchronous flushIfDirty."
+    flushMutex critical: [dirty := true]
   ]
 
   method: flushIfDirty [
-    "Write state to disk if any durable mutations occurred since last flush."
-    dirty ifTrue: [
-      self saveToDisk.
-      dirty := false
-    ]
+    "Synchronous flush — caller blocks until state is on disk. Coordinates
+     with any in-flight flushAsyncIfDirty via the flushInProgress fence so
+     two writers cannot race on the same .tmp/rename."
+    | needFlush savedException didError |
+    "Wait for any in-flight async flush to complete."
+    [flushMutex critical: [flushInProgress]] whileTrue: [
+      Process sleep: 10
+    ].
+    needFlush := false.
+    flushMutex critical: [
+      dirty ifTrue: [
+        flushInProgress := true.
+        dirty := false.
+        needFlush := true
+      ]
+    ].
+    needFlush ifFalse: [^self].
+    didError := false.
+    savedException := nil.
+    [self saveToDisk] on: Exception do: [:e |
+      didError := true.
+      savedException := e messageText.
+      flushMutex critical: [dirty := true]
+    ].
+    flushMutex critical: [flushInProgress := false].
+    didError ifTrue: [Error signal: 'BBS flushIfDirty failed: ', savedException]
+  ]
+
+  method: flushAsyncIfDirty [
+    "Non-blocking flush for the dispatcher tick path. If dirty and no
+     flush is currently in progress, claim the fence (flush bit) and fork
+     saveToDisk in a background process. If a flush is already running,
+     leave dirty=true so the next tick (or a CLI-driven flushIfDirty)
+     picks it up. Failure inside the background write re-marks dirty so
+     the data isn't silently lost."
+    | shouldRun |
+    shouldRun := false.
+    flushMutex critical: [
+      (dirty and: [flushInProgress not]) ifTrue: [
+        flushInProgress := true.
+        dirty := false.
+        shouldRun := true
+      ]
+    ].
+    shouldRun ifFalse: [^self].
+    [
+      [self saveToDisk] on: Exception do: [:e |
+        ('BBS: async flush failed: ', e messageText) println.
+        flushMutex critical: [dirty := true]
+      ].
+      flushMutex critical: [flushInProgress := false]
+    ] fork
   ]
 
   "--- Audit History ---"
@@ -605,7 +661,7 @@ BBS subclass: Object
   method: appendHistory: operation tuple: dict [
     "Append a compact JSONL audit entry to the history log.
      Rotates when file exceeds 10MB."
-    | entry jsonLine |
+    | entry jsonLine line |
     self rotateHistoryIfNeeded.
     entry := Dictionary new.
     entry at: 'ts' put: DateTime now epochSeconds.
@@ -616,7 +672,9 @@ BBS subclass: Object
     entry at: 'identity' put: (dict at: 'identity').
     entry at: 'modality' put: (dict at: 'modality' ifAbsent: ['']).
     jsonLine := Json encode: entry.
-    File appendToFile: historyPath contents: jsonLine, (Character lf asString)
+    line := jsonLine, (Character lf asString).
+    File appendToFile: historyPath contents: line.
+    historySize := historySize + line size
   ]
 
   method: logEngine: level component: component scope: aScope message: message [
@@ -644,18 +702,34 @@ BBS subclass: Object
     entry at: 'modality' put: levelStr.
     entry at: 'msg' put: msgStr.
     jsonLine := Json encode: entry.
-    File appendToFile: historyPath contents: jsonLine, (Character lf asString)
+    line := jsonLine, (Character lf asString).
+    File appendToFile: historyPath contents: line.
+    historySize := historySize + line size
   ]
 
   method: rotateHistoryIfNeeded [
-    "Rotate history.jsonl when it exceeds 10MB. Keeps one backup (.1)."
+    "Rotate history.jsonl when it exceeds 10MB. Keeps one backup (.1).
+     Tracks size in memory to avoid one fork+exec stat per tuple write
+     (see docs/scout-perf-survey-2026-04-28.md §1.2). Stat'd lazily on
+     the first call after init; thereafter we update the counter from
+     each append. Rotation resets the counter to 0."
     | sizeStr size |
-    (File exists: historyPath) ifFalse: [^self].
-    sizeStr := Shell capture: 'stat -f%z "', historyPath, '" 2>/dev/null || stat -c%s "', historyPath, '" 2>/dev/null'.
-    sizeStr isEmpty ifTrue: [^self].
-    [size := sizeStr asInteger] on: Exception do: [:e | ^self].
-    size > 10485760 ifTrue: [
-      Shell run: 'mv "', historyPath, '" "', historyPath, '.1"'.
+    historySize isNil ifTrue: [
+      "Lazy initial sync from disk — happens once per process. Bounded
+       stat: on timeout we soft-fail to 0 so the log just doesn't rotate
+       this round, vs. blocking every BBS write."
+      (File exists: historyPath) ifTrue: [
+        sizeStr := Shell capture: 'stat -f%z "', historyPath, '" 2>/dev/null || stat -c%s "', historyPath, '" 2>/dev/null'
+          timeout: 5.
+        (sizeStr notNil and: [sizeStr isEmpty not]) ifTrue: [
+          [historySize := sizeStr asInteger] on: Exception do: [:e | historySize := 0]
+        ] ifFalse: [historySize := 0]
+      ] ifFalse: [historySize := 0]
+    ].
+    historySize > 10485760 ifTrue: [
+      size := historySize.
+      Shell run: 'mv "', historyPath, '" "', historyPath, '.1"' timeout: 10.
+      historySize := 0.
       ('BBS: rotated history log (', size printString, ' bytes)') println
     ]
   ]

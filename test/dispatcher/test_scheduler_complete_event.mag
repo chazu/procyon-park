@@ -1,0 +1,108 @@
+"Tests for Scheduler>>taskIdFromCompleteEvent: — regression coverage for
+ the latent doesNotUnderstand on Scheduler.mag:256 where checkCompleted
+ invoked copyFrom: with a single argument instead of the canonical
+ copyFrom:to: pattern used elsewhere in the codebase (DashboardSSE.mag:162,
+ Server.mag:1796). Reference: docs/scout-perf-survey-2026-04-28.md §5.2.
+
+ Invariants under test:
+   SC1  A well-formed 'task-complete:<taskId>' identity yields the bare
+        task id with the prefix stripped.
+   SC2  An identity that does not start with the prefix returns nil.
+   SC3  An identity equal to the bare prefix yields an empty string
+        (no task id was present, but the call MUST NOT raise)."
+
+SCRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: assertNil: actual message: msg [
+    actual isNil ifTrue: [passed := passed + 1]
+                 ifFalse: [
+                   failed := failed + 1.
+                   failures := failures copyWith: msg.
+                   ('FAIL: ', msg, ' (got: ', actual printString, ')') println
+                 ]
+  ]
+
+  method: report [
+    '=== Scheduler taskIdFromCompleteEvent: Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== TestSchedulerCompleteEvent ==="
+TestSchedulerCompleteEvent subclass: Object
+
+  classMethod: run: t [
+    self testStripsPrefix: t.
+    self testNonMatchingReturnsNil: t.
+    self testBarePrefixYieldsEmpty: t.
+    self testEmbeddedColonPreserved: t
+  ]
+
+  classMethod: testStripsPrefix: t [
+    | result |
+    '--- SC1: well-formed identity yields bare task id ---' println.
+    result := Scheduler taskIdFromCompleteEvent: 'task-complete:foo-123'.
+    t assertEqual: result to: 'foo-123'
+      message: 'SC1: prefix stripped, task id returned'
+  ]
+
+  classMethod: testNonMatchingReturnsNil: t [
+    | result |
+    '--- SC2: non-matching identity returns nil ---' println.
+    result := Scheduler taskIdFromCompleteEvent: 'reap:foo-123'.
+    t assertNil: result message: 'SC2: non-prefixed identity returns nil'
+  ]
+
+  classMethod: testBarePrefixYieldsEmpty: t [
+    | result |
+    '--- SC3: bare prefix yields empty string (no DNU) ---' println.
+    result := Scheduler taskIdFromCompleteEvent: 'task-complete:'.
+    t assertEqual: result to: ''
+      message: 'SC3: bare prefix returns empty string without raising'
+  ]
+
+  classMethod: testEmbeddedColonPreserved: t [
+    | result |
+    '--- SC4: embedded colons in task id preserved ---' println.
+    result := Scheduler taskIdFromCompleteEvent: 'task-complete:user:wf-7'.
+    t assertEqual: result to: 'user:wf-7'
+      message: 'SC4: trailing colons inside the task id are preserved'
+  ]
+
+"=== Main ==="
+SchedulerCompleteEventMain subclass: Object
+  classMethod: start [
+    | t |
+    t := SCRunner new.
+    TestSchedulerCompleteEvent run: t.
+    t report.
+    ^t failed
+  ]

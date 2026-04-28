@@ -149,7 +149,7 @@ WorkflowEngine subclass: Object
 
     "Write initial tokens at start places"
     templatePayload := template at: 'payload'.
-    startPlaces := templatePayload at: 'start_places'.
+    startPlaces := templatePayload at: 'start_places' ifAbsent: [#()].
 
     startPlaces do: [:place |
       | tokenPayload |
@@ -177,8 +177,8 @@ WorkflowEngine subclass: Object
 
     workflows do: [:wf |
       | wfPayload status |
-      wfPayload := wf at: 'payload'.
-      status := wfPayload at: 'status'.
+      wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
+      status := wfPayload at: 'status' ifAbsent: [''].
       status = 'running' ifTrue: [
         self advanceInstance: wf
       ]
@@ -191,8 +191,9 @@ WorkflowEngine subclass: Object
 
     instanceId := wf at: 'identity'.
     scope := wf at: 'scope'.
-    wfPayload := wf at: 'payload'.
-    templateId := wfPayload at: 'template'.
+    wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
+    templateId := wfPayload at: 'template' ifAbsent: [nil].
+    templateId isNil ifTrue: [^self].
     "Recover launched_by stamped on the workflow tuple so child task tuples
      spawned as this workflow advances inherit the original signer."
     launchedBy := wf at: 'launched_by' ifAbsent: [nil].
@@ -204,8 +205,8 @@ WorkflowEngine subclass: Object
     ].
     template isNil ifTrue: [^self]. "Template missing — skip"
 
-    templatePayload := template at: 'payload'.
-    transitions := templatePayload at: 'transitions'.
+    templatePayload := template at: 'payload' ifAbsent: [Dictionary new].
+    transitions := templatePayload at: 'transitions' ifAbsent: [#()].
 
     "Promote waiting tokens whose tasks have completed"
     self promoteWaitingTokens: instanceId scope: scope.
@@ -220,7 +221,7 @@ WorkflowEngine subclass: Object
     ].
 
     "Collect current token places"
-    tokenPlaces := instanceTokens collect: [:t | (t at: 'payload') at: 'place'].
+    tokenPlaces := instanceTokens collect: [:t | (t at: 'payload') at: 'place' ifAbsent: ['']].
 
     "Check for completion: all tokens in terminal places"
     terminalPlaces := templatePayload at: 'terminal_places'.
@@ -1034,7 +1035,11 @@ WorkflowEngine subclass: Object
     home := System env: 'HOME'.
     (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
     worktreeDir := home, '/.pp/worktrees/', instanceId.
-    [Shell run: 'rm -rf "', worktreeDir, '"']
+    "30s wall-clock cap: rm -rf on a network mount can hang indefinitely
+     on a single stuck inode. Soft-fail (log warning) if the rm itself
+     errors — leaking a worktree dir is preferable to stalling every
+     workflow."
+    [Shell run: 'rm -rf "', worktreeDir, '"' timeout: 30]
       on: Exception do: [:e |
         bbs logEngine: 'warn' component: 'WorkflowEngine' scope: 'system' message: ('Could not clean up worktree for ', instanceId, ': ', e messageText)
       ]
