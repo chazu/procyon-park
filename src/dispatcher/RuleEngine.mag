@@ -42,7 +42,7 @@ RuleEngine subclass: Object
     (now - lastTime) < cooldown ifTrue: [^self].
 
     "Match consumes patterns"
-    consumes := payload at: 'consumes'.
+    consumes := payload at: 'consumes' ifAbsent: [#()].
     consumeMatches := Array new: 0.
     allMatched := true.
 

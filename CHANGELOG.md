@@ -70,6 +70,16 @@ Semantic Versioning.
   release.
 
 ### Fixed
+- Dispatcher tick loop is now resilient to malformed tuples. Each step
+  (`scheduler checkCompleted`, `workflowEngine advance`, `ruleEngine
+  evaluate`, `scheduler dispatch`, reapExpiredClaims, flushIfDirty,
+  reconcile, housekeep) runs inside its own `on: Exception do:` so a
+  single bad tuple no longer kills the entire tick — the remaining steps
+  still run. Added `ifAbsent:` defaults to `WorkflowEngine` reads of
+  `start_places`, workflow `payload`/`status`, template `payload`/
+  `transitions`, token `place`, and to `RuleEngine`'s `consumes` lookup
+  so missing keys degrade gracefully instead of raising. Refs:
+  docs/scout-perf-survey-2026-04-28.md §5.1.
 - Strict input validation at every pp boundary (pp-input-validation-strict,
   umbrella for four child bugs):
   - `pp workitem run/show/update/comment` now require `--repo <scope>` (or
