@@ -1035,7 +1035,11 @@ WorkflowEngine subclass: Object
     home := System env: 'HOME'.
     (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
     worktreeDir := home, '/.pp/worktrees/', instanceId.
-    [Shell run: 'rm -rf "', worktreeDir, '"']
+    "30s wall-clock cap: rm -rf on a network mount can hang indefinitely
+     on a single stuck inode. Soft-fail (log warning) if the rm itself
+     errors — leaking a worktree dir is preferable to stalling every
+     workflow."
+    [Shell run: 'rm -rf "', worktreeDir, '"' timeout: 30]
       on: Exception do: [:e |
         bbs logEngine: 'warn' component: 'WorkflowEngine' scope: 'system' message: ('Could not clean up worktree for ', instanceId, ': ', e messageText)
       ]
