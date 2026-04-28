@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex cueCtx startedAt index dataDir historyPath dirty
+  instanceVars: space nextId mutex cueCtx startedAt index dataDir historyPath dirty flushMutex flushInProgress
 
   classMethod: new [
     ^super new initialize
@@ -42,6 +42,8 @@ BBS subclass: Object
 
     historyPath := dataDir, '/history.jsonl'.
     dirty := false.
+    flushMutex := Mutex new.
+    flushInProgress := false.
 
     "Ensure data directory exists"
     self ensureDataDir.
@@ -592,16 +594,66 @@ BBS subclass: Object
   ]
 
   method: persistAfterChange [
-    "Mark state as dirty. Actual write happens on flushIfDirty (dispatcher tick)."
-    dirty := true
+    "Mark state as dirty. Actual write happens on flushIfDirty / flushAsyncIfDirty.
+     The dispatcher tick path uses flushAsyncIfDirty so a multi-MB JSON
+     encode + rename never blocks the tick loop. CLI request paths that
+     ack durability still call the synchronous flushIfDirty."
+    flushMutex critical: [dirty := true]
   ]
 
   method: flushIfDirty [
-    "Write state to disk if any durable mutations occurred since last flush."
-    dirty ifTrue: [
-      self saveToDisk.
-      dirty := false
-    ]
+    "Synchronous flush — caller blocks until state is on disk. Coordinates
+     with any in-flight flushAsyncIfDirty via the flushInProgress fence so
+     two writers cannot race on the same .tmp/rename."
+    | needFlush savedException didError |
+    "Wait for any in-flight async flush to complete."
+    [flushMutex critical: [flushInProgress]] whileTrue: [
+      Process sleep: 10
+    ].
+    needFlush := false.
+    flushMutex critical: [
+      dirty ifTrue: [
+        flushInProgress := true.
+        dirty := false.
+        needFlush := true
+      ]
+    ].
+    needFlush ifFalse: [^self].
+    didError := false.
+    savedException := nil.
+    [self saveToDisk] on: Exception do: [:e |
+      didError := true.
+      savedException := e messageText.
+      flushMutex critical: [dirty := true]
+    ].
+    flushMutex critical: [flushInProgress := false].
+    didError ifTrue: [Error signal: 'BBS flushIfDirty failed: ', savedException]
+  ]
+
+  method: flushAsyncIfDirty [
+    "Non-blocking flush for the dispatcher tick path. If dirty and no
+     flush is currently in progress, claim the fence (flush bit) and fork
+     saveToDisk in a background process. If a flush is already running,
+     leave dirty=true so the next tick (or a CLI-driven flushIfDirty)
+     picks it up. Failure inside the background write re-marks dirty so
+     the data isn't silently lost."
+    | shouldRun |
+    shouldRun := false.
+    flushMutex critical: [
+      (dirty and: [flushInProgress not]) ifTrue: [
+        flushInProgress := true.
+        dirty := false.
+        shouldRun := true
+      ]
+    ].
+    shouldRun ifFalse: [^self].
+    [
+      [self saveToDisk] on: Exception do: [:e |
+        ('BBS: async flush failed: ', e messageText) println.
+        flushMutex critical: [dirty := true]
+      ].
+      flushMutex critical: [flushInProgress := false]
+    ] fork
   ]
 
   "--- Audit History ---"
