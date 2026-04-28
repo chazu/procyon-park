@@ -60,22 +60,40 @@ Dispatcher subclass: Object
   method: onTick [
     tick := tick + 1.
 
-    "Every tick (10s): core operations"
-    scheduler checkCompleted.
-    workflowEngine advance.
-    ruleEngine evaluate.
-    scheduler dispatch.
-    self reapExpiredClaims.
-    bbs flushIfDirty.
+    "Every tick (10s): core operations. Each step is wrapped in its own
+     exception handler so a single malformed tuple in one step does not
+     kill the entire tick — the remaining steps still run."
+    [scheduler checkCompleted] on: Exception do: [:e |
+      ('Dispatcher tick step error (checkCompleted): ', e messageText) println
+    ].
+    [workflowEngine advance] on: Exception do: [:e |
+      ('Dispatcher tick step error (workflowEngine advance): ', e messageText) println
+    ].
+    [ruleEngine evaluate] on: Exception do: [:e |
+      ('Dispatcher tick step error (ruleEngine evaluate): ', e messageText) println
+    ].
+    [scheduler dispatch] on: Exception do: [:e |
+      ('Dispatcher tick step error (scheduler dispatch): ', e messageText) println
+    ].
+    [self reapExpiredClaims] on: Exception do: [:e |
+      ('Dispatcher tick step error (reapExpiredClaims): ', e messageText) println
+    ].
+    [bbs flushIfDirty] on: Exception do: [:e |
+      ('Dispatcher tick step error (flushIfDirty): ', e messageText) println
+    ].
 
     "Every 6th tick (~60s): reconciliation"
     (tick \\ 6) = 0 ifTrue: [
-      self reconcile
+      [self reconcile] on: Exception do: [:e |
+        ('Dispatcher tick step error (reconcile): ', e messageText) println
+      ]
     ].
 
     "Every 30th tick (~5min): housekeeping"
     (tick \\ 30) = 0 ifTrue: [
-      self housekeep
+      [self housekeep] on: Exception do: [:e |
+        ('Dispatcher tick step error (housekeep): ', e messageText) println
+      ]
     ]
   ]
 
