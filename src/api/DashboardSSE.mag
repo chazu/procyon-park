@@ -711,8 +711,13 @@ DashboardSSE subclass: Object
       s := s, '<div class="empty-state">No recent activity</div>'
     ] ifFalse: [
       s := s, '<ul>'.
-      recent do: [:n |
-        | p message severity createdAt ts scope workflow |
+      "Render newest-first: iterate the recent slice from tail to head.
+       bbs scanAll: 'notification' returns oldest→newest, and the
+       copyFrom: above keeps the trailing window of most-recent items;
+       walking that window in reverse puts the freshest entry on top."
+      recent size to: 1 by: -1 do: [:idx |
+        | n p message severity createdAt ts scope workflow |
+        n := recent at: idx.
         p := n at: 'payload' ifAbsent: [Dictionary new].
         message := p at: 'message' ifAbsent: [''].
         severity := p at: 'severity' ifAbsent: ['info'].

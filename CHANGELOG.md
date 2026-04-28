@@ -59,6 +59,9 @@ Semantic Versioning.
   `PP_SUPERVISOR_BURST_WINDOW` seconds) and per-run + rolling log capture.
 
 ### Changed
+- Dashboard "Recent Activity" list now renders newest-first instead of
+  newest-last, surfacing the most recent notification at the top of the
+  panel without forcing operators to scroll.
 - `Scheduler>>dispatchTask:` now wraps the entire post-dispatch sequence
   (harness run + scope validation + task-complete safety net + BBS status
   update + slot release) in a coarse exception handler. An uncaught fault
