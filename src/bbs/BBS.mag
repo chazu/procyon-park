@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex cueCtx startedAt index dataDir historyPath dirty
+  instanceVars: space nextId mutex cueCtx startedAt index dataDir historyPath dirty historySize
 
   classMethod: new [
     ^super new initialize
@@ -42,6 +42,7 @@ BBS subclass: Object
 
     historyPath := dataDir, '/history.jsonl'.
     dirty := false.
+    historySize := nil.  "lazy-init: stat once on first append; tracked in memory thereafter"
 
     "Ensure data directory exists"
     self ensureDataDir.
@@ -605,7 +606,7 @@ BBS subclass: Object
   method: appendHistory: operation tuple: dict [
     "Append a compact JSONL audit entry to the history log.
      Rotates when file exceeds 10MB."
-    | entry jsonLine |
+    | entry jsonLine line |
     self rotateHistoryIfNeeded.
     entry := Dictionary new.
     entry at: 'ts' put: DateTime now epochSeconds.
@@ -616,7 +617,9 @@ BBS subclass: Object
     entry at: 'identity' put: (dict at: 'identity').
     entry at: 'modality' put: (dict at: 'modality' ifAbsent: ['']).
     jsonLine := Json encode: entry.
-    File appendToFile: historyPath contents: jsonLine, (Character lf asString)
+    line := jsonLine, (Character lf asString).
+    File appendToFile: historyPath contents: line.
+    historySize := historySize + line size
   ]
 
   method: logEngine: level component: component scope: aScope message: message [
@@ -644,18 +647,31 @@ BBS subclass: Object
     entry at: 'modality' put: levelStr.
     entry at: 'msg' put: msgStr.
     jsonLine := Json encode: entry.
-    File appendToFile: historyPath contents: jsonLine, (Character lf asString)
+    line := jsonLine, (Character lf asString).
+    File appendToFile: historyPath contents: line.
+    historySize := historySize + line size
   ]
 
   method: rotateHistoryIfNeeded [
-    "Rotate history.jsonl when it exceeds 10MB. Keeps one backup (.1)."
+    "Rotate history.jsonl when it exceeds 10MB. Keeps one backup (.1).
+     Tracks size in memory to avoid one fork+exec stat per tuple write
+     (see docs/scout-perf-survey-2026-04-28.md §1.2). Stat'd lazily on
+     the first call after init; thereafter we update the counter from
+     each append. Rotation resets the counter to 0."
     | sizeStr size |
-    (File exists: historyPath) ifFalse: [^self].
-    sizeStr := Shell capture: 'stat -f%z "', historyPath, '" 2>/dev/null || stat -c%s "', historyPath, '" 2>/dev/null'.
-    sizeStr isEmpty ifTrue: [^self].
-    [size := sizeStr asInteger] on: Exception do: [:e | ^self].
-    size > 10485760 ifTrue: [
+    historySize isNil ifTrue: [
+      "Lazy initial sync from disk — happens once per process."
+      (File exists: historyPath) ifTrue: [
+        sizeStr := Shell capture: 'stat -f%z "', historyPath, '" 2>/dev/null || stat -c%s "', historyPath, '" 2>/dev/null'.
+        (sizeStr notNil and: [sizeStr isEmpty not]) ifTrue: [
+          [historySize := sizeStr asInteger] on: Exception do: [:e | historySize := 0]
+        ] ifFalse: [historySize := 0]
+      ] ifFalse: [historySize := 0]
+    ].
+    historySize > 10485760 ifTrue: [
+      size := historySize.
       Shell run: 'mv "', historyPath, '" "', historyPath, '.1"'.
+      historySize := 0.
       ('BBS: rotated history log (', size printString, ' bytes)') println
     ]
   ]

@@ -7,6 +7,14 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+- BBS history rotation no longer forks `stat` on every tuple write.
+  `appendHistory:` / `logEngine:` now track `history.jsonl` size in
+  memory, stat'ing once lazily on the first call after process start
+  and resetting the counter on rotation. Removes one fork+exec per
+  `out:` / `outPinned:` / `outAffine:` / `inp:` / `update:` call. See
+  `docs/scout-perf-survey-2026-04-28.md` §1.2.
+
 ### Added
 - `pp bbs` subcommand for tuplespace inspection and manipulation
   (`list` / `get` / `put` / `rm`). See README → `pp bbs` for the full
