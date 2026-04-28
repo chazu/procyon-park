@@ -127,8 +127,14 @@ BBS subclass: Object
   ]
 
   method: outAffine: category scope: scope identity: identity payload: payload ttl: ttlSeconds actor: actor launchedBy: launchedBy executedBy: executedBy [
+    "True overwrite semantics: any prior tuple at the same (category,
+     scope, identity) is consumed before the new affine tuple is written.
+     This makes outAffine: an upsert; callers no longer need the
+     inp:-then-outAffine: workaround that races on crash. The drain loop
+     also collects any duplicates left behind by the legacy append path."
     | d |
     Categories validate: category.
+    [(self inp: category scope: scope identity: identity) notNil] whileTrue: [].
     d := Tuple affine: category scope: scope identity: identity payload: payload id: self assignId ttl: ttlSeconds actor: actor launchedBy: launchedBy executedBy: executedBy.
     space outAffine: d ttl: ttlSeconds.
     mutex critical: [index := index copyWith: d].
