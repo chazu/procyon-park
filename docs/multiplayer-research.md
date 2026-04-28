@@ -31,7 +31,7 @@ it depends on cross-node tuplespace semantics that don't exist yet.
 
 ## 1. Maggie's Distributed Primitives — What Exists Today
 
-Surveyed `/Users/chazu/dev/go/maggie/lib/` and `/Users/chazu/dev/go/maggie/vm/`.
+Surveyed `<maggie-repo>/lib/` and `<maggie-repo>/vm/`.
 
 ### Present and usable
 
@@ -236,8 +236,8 @@ Nice-to-have:
 
 ## 6. Evidence Citations
 
-- Maggie distributed primitives: `/Users/chazu/dev/go/maggie/lib/{Cluster,Node,RemoteProcess,HashRing,DistributedSupervisor,TupleSpace}.mag`
-- Remote VM plumbing: `/Users/chazu/dev/go/maggie/vm/{remote_spawn,remote_channel,remote_monitor,remote_lifecycle}.go`
-- Wire/identity: `/Users/chazu/dev/go/maggie/vm/dist/{wire,identity,trust,chunker}.go`
-- Maggie gap assessment: `/Users/chazu/dev/go/maggie/docs/roadmaps/2026-02-03-distributed-runtime-roadmap.md`
+- Maggie distributed primitives: `<maggie-repo>/lib/{Cluster,Node,RemoteProcess,HashRing,DistributedSupervisor,TupleSpace}.mag`
+- Remote VM plumbing: `<maggie-repo>/vm/{remote_spawn,remote_channel,remote_monitor,remote_lifecycle}.go`
+- Wire/identity: `<maggie-repo>/vm/dist/{wire,identity,trust,chunker}.go`
+- Maggie gap assessment: `<maggie-repo>/docs/roadmaps/2026-02-03-distributed-runtime-roadmap.md`
 - PP coordination fabric: `src/bbs/BBS.mag`, `src/dispatcher/{Dispatcher,Scheduler}.mag`, `src/api/Server.mag`, `src/harness/ClaudeHarness.mag`

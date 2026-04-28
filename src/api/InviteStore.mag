@@ -27,7 +27,11 @@ InviteStore subclass: Object
   method: randomToken [
     "Generate a fresh Ed25519 keypair and take the hex pubkey as token.
      Pragmatic: the VM already exposes a CSPRNG via Identity generate,
-     and we need 32 bytes of randomness per invite."
+     and we need 32 bytes of randomness per invite.
+     TODO: replace with a dedicated RNG primitive (e.g. Bytes randomHex:)
+     once exposed by the VM. Using keygen as an RNG works because Ed25519
+     pulls from crypto/rand, but it conflates two concerns and wastes a
+     keypair per invite."
     | throwaway |
     throwaway := Identity generate.
     ^throwaway pubHex

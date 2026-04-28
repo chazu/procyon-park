@@ -85,7 +85,7 @@ git commit -m "feat(identity): add IdentityStore>>setCurrent: primitive"
 - [ ] **Step 1: Check how source files are loaded**
 
 ```bash
-grep -rn "CliIdentity" /Users/chazu/dev/maggie/procyon-park/src/Main.mag /Users/chazu/dev/maggie/procyon-park/maggie.toml
+grep -rn "CliIdentity" ./src/Main.mag ./maggie.toml
 ```
 
 If there's an explicit include list, we'll add the new files there. If it's directory-auto-discovery, nothing to do. (Expected: directory-based — Maggie's `mag build` discovers `.mag` files in the configured roots.)
@@ -646,7 +646,7 @@ git commit -m "feat(cli): add pp init for explicit first-time setup"
 Check `src/bbs/Categories.mag`:
 
 ```bash
-grep -n "'invite'\|valid\|pinned" /Users/chazu/dev/maggie/procyon-park/src/bbs/Categories.mag
+grep -n "'invite'\|valid\|pinned" ./src/bbs/Categories.mag
 ```
 
 Add `'invite'` to both the `valid` list and the `pinned` list (matching the pattern used for `'identity'`).
@@ -822,7 +822,7 @@ InviteStore subclass: Object
   ]
 ```
 
-Caveat on `randomToken`: using `Identity generate` as an RNG is a hack — it works because Ed25519 keygen pulls from a CSPRNG, but a dedicated primitive would be cleaner. Before finalising, grep `/Users/chazu/dev/go/maggie/vm/*.go` for `crypto/rand` — if a `Random bytes:` or `Bytes randomHex:` primitive exists, use it.
+Caveat on `randomToken`: using `Identity generate` as an RNG is a hack — it works because Ed25519 keygen pulls from a CSPRNG, but a dedicated primitive would be cleaner. Before finalising, grep `<maggie-repo>/vm/*.go` for `crypto/rand` — if a `Random bytes:` or `Bytes randomHex:` primitive exists, use it.
 
 - [ ] **Step 5: Run test, verify passes**
 
@@ -1133,7 +1133,7 @@ git commit -m "docs: rewrite README Quick Start around solo-by-default + invite 
 - [ ] **Step 1: Register `TestInviteStore` in the aggregate runner**
 
 ```bash
-grep -n "TestIdentityStore\|TestSignatureVerifier" /Users/chazu/dev/maggie/procyon-park/test/MultiplayerTestMain.mag
+grep -n "TestIdentityStore\|TestSignatureVerifier" ./test/MultiplayerTestMain.mag
 ```
 
 Add `TestInviteStore` following the established pattern.

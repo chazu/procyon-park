@@ -2,7 +2,10 @@
 *.image
 pp
 pp-full
+pp-int
+pp-test
+pp-test-*
 wrap/
 go
 .gitnexus
-pp-test
+.DS_Store

@@ -27,7 +27,7 @@ verifiable behaviors against named code surfaces:
 - CLI: `src/cli/PP.mag`, `src/cli/CliPP.mag`
 - Roles: `src/roles/*.mag`
 - Workflows: `workflows/*.cue`
-- Maggie Ed25519 primitives: `/Users/chazu/dev/go/maggie/vm/dist/identity.go`
+- Maggie Ed25519 primitives: `<maggie-repo>/vm/dist/identity.go`
 
 ---
 
@@ -705,7 +705,7 @@ natural attachment points:
   change is that `bbs` becomes an HTTP-backed proxy on workers.
 - `src/cli/CliPP.mag` — signing layer around every HTTP call.
 - `workflows/*.cue` — extend task schema with `affinity`.
-- `/Users/chazu/dev/go/maggie/vm/dist/identity.go` — reuse `NodeIdentity`,
+- `<maggie-repo>/vm/dist/identity.go` — reuse `NodeIdentity`,
   `Sign`, `Verify`, proquint helper. No Maggie changes required for v1.
 
 ---

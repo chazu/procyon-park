@@ -339,7 +339,7 @@ next tick.
     "base": "feat/foo",
     "head": "wi-1776655218-8260/impl",
     "branch": "wi-1776655218-8260/impl",
-    "workdir": "/Users/chazu/.pp/worktrees/wi-…/impl",
+    "workdir": "~/.pp/worktrees/wi-…/impl",
     "capturedAt": 1776655999,
     "stat": {
       "files": [
