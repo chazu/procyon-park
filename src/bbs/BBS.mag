@@ -227,37 +227,30 @@ BBS subclass: Object
      payload.wave (default 1), tiebroken by identity. The single source
      of truth for 'children of X' is the child's parent field — the
      legacy denormalised children[] array is not consulted."
-    | filtered asArr sorted insertedAt i j temp |
+    | filtered |
     filtered := tuples select: [:t |
       | p |
       p := (t at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil].
       p = parentId
     ].
-    asArr := Array new: 0.
-    filtered do: [:t | asArr := asArr copyWith: t].
-    "Insertion sort by (wave asc, identity asc). Small lists; O(n^2) is fine."
-    sorted := Array new: 0.
-    asArr do: [:t |
-      i := 0.
-      insertedAt := nil.
-      [insertedAt isNil and: [i < sorted size]] whileTrue: [
-        (self workitemTuple: t precedesTuple: (sorted at: i))
-          ifTrue: [insertedAt := i]
-          ifFalse: [i := i + 1]
-      ].
-      insertedAt isNil ifTrue: [
-        sorted := sorted copyWith: t
-      ] ifFalse: [
-        "Shift tail right and insert at insertedAt."
-        temp := Array new: 0.
-        j := 0.
-        [j < insertedAt] whileTrue: [temp := temp copyWith: (sorted at: j). j := j + 1].
-        temp := temp copyWith: t.
-        [j < sorted size] whileTrue: [temp := temp copyWith: (sorted at: j). j := j + 1].
-        sorted := temp
+    "Single in-place sort by (wave asc, identity asc) — replaces the
+     previous O(n^2) insertion sort that allocated 2*n^2 intermediate
+     arrays via copyWith:."
+    filtered sort: [:a :b |
+      | wa wb ia ib |
+      wa := (a at: 'payload' ifAbsent: [Dictionary new]) at: 'wave' ifAbsent: [1].
+      wb := (b at: 'payload' ifAbsent: [Dictionary new]) at: 'wave' ifAbsent: [1].
+      wa < wb ifTrue: [-1] ifFalse: [
+        wa > wb ifTrue: [1] ifFalse: [
+          ia := a at: 'identity' ifAbsent: [''].
+          ib := b at: 'identity' ifAbsent: [''].
+          ia < ib ifTrue: [-1] ifFalse: [
+            ia > ib ifTrue: [1] ifFalse: [0]
+          ]
+        ]
       ]
     ].
-    ^sorted
+    ^filtered
   ]
 
   method: workitemTuple: a precedesTuple: b [
