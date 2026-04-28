@@ -7,6 +7,16 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+- Dispatcher tick no longer blocks on the BBS save-to-disk path. The 10s
+  tick now calls `bbs flushAsyncIfDirty`, which forks a fenced background
+  write so a multi-MB JSON encode + atomic rename can never stall the
+  scheduler / workflow-engine / reaper loop. CLI request paths
+  (`outSync:` / `inpSync:`, `/api/bbs/out`, `/api/bbs/rm`) keep their
+  synchronous `flushIfDirty` durability contract, but now wait on the
+  same fence so the two writers can never race on `bbs.json.tmp`. See
+  docs/scout-perf-survey-2026-04-28.md §1.3.
+
 ### Added
 - `pp bbs` subcommand for tuplespace inspection and manipulation
   (`list` / `get` / `put` / `rm`). See README → `pp bbs` for the full
