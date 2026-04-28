@@ -8,6 +8,17 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Changed
+- BBS index restructured for O(1) lookup. The flat `index` array is
+  retained for `scan:` / `scanAll:` full scans, but write/remove paths
+  now also maintain three hash indices: `byId` (id → tuple), `byKey`
+  (`category|scope|identity` → tuples), and `byCatIdent`
+  (`category|identity` → tuples). `findInIndex:` is now an O(1) hash
+  lookup, and a new `findByCategory:identity:` resolves tuples whose
+  scope is unknown without scanning. Hot callers in `Server`,
+  `WorkflowEngine`, and `DispatchWavesAction` that previously did
+  `(bbs scanAll: …) detect: [:t | (t at: 'identity') = id]` now use the
+  hash lookup. Removes O(n) per-write/per-consume work from every BBS
+  mutation. See `docs/scout-perf-survey-2026-04-28.md` §1.1.
 - Dispatcher tick no longer blocks on the BBS save-to-disk path. The 10s
   tick now calls `bbs flushAsyncIfDirty`, which forks a fenced background
   write so a multi-MB JSON encode + atomic rename can never stall the

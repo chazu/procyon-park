@@ -727,21 +727,21 @@ WorkflowEngine subclass: Object
   method: scopeForInstance: instanceId [
     "Look up the scope for a workflow instance. Returns 'default' if not found."
     | wf |
-    wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
+    wf := bbs findByCategory: 'workflow' identity: instanceId.
     ^wf notNil ifTrue: [wf at: 'scope'] ifFalse: ['default']
   ]
 
   method: launchedByForInstance: instanceId [
     "Look up the launched_by stamp for a workflow instance, or nil if absent."
     | wf |
-    wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
+    wf := bbs findByCategory: 'workflow' identity: instanceId.
     ^wf notNil ifTrue: [wf at: 'launched_by' ifAbsent: [nil]] ifFalse: [nil]
   ]
 
   method: workflowStatus: instanceId [
     "Look up the current status of a workflow instance. Returns 'unknown' if not found."
     | wf |
-    wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = instanceId] ifNone: [nil].
+    wf := bbs findByCategory: 'workflow' identity: instanceId.
     ^wf notNil ifTrue: [(wf at: 'payload') at: 'status' ifAbsent: ['unknown']] ifFalse: ['unknown']
   ]
 
