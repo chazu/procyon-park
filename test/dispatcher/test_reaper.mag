@@ -177,7 +177,9 @@ TestReaper subclass: Object
     self testReapEventEmitted: t.
     self testLiveClaimUntouched: t.
     self testNonClaimedUntouched: t.
-    self testRependedNoOpOnNextSweep: t
+    self testRependedNoOpOnNextSweep: t.
+    self testStaleClaimedNoExpiryNoPanic: t.
+    self testCorruptExpiresAtNoPanic: t
   ]
 
   classMethod: testFirstSweepIncrementsOnly: t [
@@ -369,6 +371,58 @@ TestReaper subclass: Object
     events := RPHelper reapEventsFor: 'rp7' in: bbs.
     t assertEqual: events size to: 1
       message: 'RP7: only one reap event despite two sweeps'
+  ]
+
+  classMethod: testStaleClaimedNoExpiryNoPanic: t [
+    "RP8: A task tuple whose payload was concurrently mutated by another
+     code path (e.g. handleTaskComplete) leaves status='claimed' visible
+     in our snapshot but claim_expires_at=nil. The reaper MUST treat this
+     as a no-op without panicking on 'now > nil'."
+    | bbs dispatcher payload |
+    '--- RP8: stale claimed-but-no-expiry tuple is a no-op (no panic) ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    "Seed a task that LOOKS claimed but whose claim_expires_at was wiped
+     by a racing completion path."
+    RPHelper seedExpiredClaim: 'rp8' worker: 'worker:w8' claim: 'c8'
+             retry: 0 missed: 0 onBBS: bbs.
+    "Mutate via update: to simulate the race."
+    bbs update: 'task' scope: 'demo-scope' identity: 'rp8' do: [:p |
+      p at: 'claim_expires_at' put: nil
+    ].
+
+    [dispatcher reapExpiredClaims] on: Exception do: [:e |
+      t assert: false message: ('RP8: reaper panicked on stale tuple: ', e messageText)
+    ].
+
+    payload := RPHelper payloadOf: 'rp8' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'claimed'
+      message: 'RP8: stale tuple status untouched'.
+    t assertEqual: (payload at: 'missed_renewals') to: 0
+      message: 'RP8: missed_renewals not bumped on nil-expiry tuple'
+  ]
+
+  classMethod: testCorruptExpiresAtNoPanic: t [
+    "RP9: A type-confused claim_expires_at (e.g. String from a bad JSON
+     deser) MUST NOT panic the reaper — it should be skipped like a
+     missing expiry."
+    | bbs dispatcher payload |
+    '--- RP9: non-Number claim_expires_at is a no-op (no panic) ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    RPHelper seedExpiredClaim: 'rp9' worker: 'worker:w9' claim: 'c9'
+             retry: 0 missed: 0 onBBS: bbs.
+    bbs update: 'task' scope: 'demo-scope' identity: 'rp9' do: [:p |
+      p at: 'claim_expires_at' put: 'not-a-number'
+    ].
+
+    [dispatcher reapExpiredClaims] on: Exception do: [:e |
+      t assert: false message: ('RP9: reaper panicked on corrupt expiry: ', e messageText)
+    ].
+
+    payload := RPHelper payloadOf: 'rp9' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'claimed'
+      message: 'RP9: corrupt-expiry tuple status untouched'
   ]
 
 "=== Main ==="

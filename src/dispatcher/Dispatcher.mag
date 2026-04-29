@@ -129,13 +129,29 @@ Dispatcher subclass: Object
     now := DateTime now epochSeconds.
     tasks := bbs scanAll: 'task'.
     tasks do: [:t |
-      | payload status expiresAt |
-      payload := t at: 'payload' ifAbsent: [Dictionary new].
-      status := payload at: 'status' ifAbsent: [''].
-      expiresAt := payload at: 'claim_expires_at' ifAbsent: [nil].
-      (status = 'claimed'
-        and: [expiresAt notNil and: [now > expiresAt]]) ifTrue: [
-          self reapTask: t now: now
+      "Defensive per-tuple try/catch: scanAll: returns a snapshot of shared
+       index references; another goroutine (Server handleTaskComplete,
+       Scheduler checkCompleted) may concurrently rewrite a payload between
+       our read of 'payload' and our read of its fields. A single malformed
+       or concurrently-mutated tuple must NOT crash the whole sweep."
+      [
+        | payload status expiresAt |
+        payload := t at: 'payload' ifAbsent: [nil].
+        payload notNil ifTrue: [
+          status := payload at: 'status' ifAbsent: [''].
+          expiresAt := payload at: 'claim_expires_at' ifAbsent: [nil].
+          "Belt-and-braces guard: claim_expires_at is normally an Integer
+           epoch, but a stale snapshot (post-completion) carries nil and
+           a type-confused JSON deser could carry a non-comparable. The
+           outer try/catch upgrades any '>' panic to a skip."
+          (status = 'claimed'
+            and: [expiresAt notNil and: [now > expiresAt]]) ifTrue: [
+              self reapTask: t now: now
+          ]
+        ]
+      ] on: Exception do: [:e |
+        ('Dispatcher reapExpiredClaims tuple skip (',
+          (t at: 'identity' ifAbsent: ['?']), '): ', e messageText) println
       ]
     ]
   ]
@@ -159,6 +175,9 @@ Dispatcher subclass: Object
       | status expiresAt missed max retryCount |
       status := p at: 'status' ifAbsent: [''].
       expiresAt := p at: 'claim_expires_at' ifAbsent: [nil].
+      "Re-check inside the atomic update: the task may have completed or
+       been re-pended between scanAll: and here, in which case
+       claim_expires_at is now nil (or some non-Number) — skip cleanly."
       (status = 'claimed'
         and: [expiresAt notNil and: [now > expiresAt]]) ifTrue: [
           missed := (p at: 'missed_renewals' ifAbsent: [0]) + 1.
