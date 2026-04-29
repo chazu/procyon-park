@@ -152,14 +152,7 @@ WorkflowEngine subclass: Object
     startPlaces := templatePayload at: 'start_places' ifAbsent: [#()].
 
     startPlaces do: [:place |
-      | tokenPayload |
-      tokenPayload := Dictionary new.
-      tokenPayload at: 'workflow_instance' put: instanceId.
-      tokenPayload at: 'place' put: place.
-      tokenPayload at: 'status' put: 'positive'.
-      tokenPayload at: 'transition_id' put: ''.
-      tokenPayload at: 'modality' put: 'linear'.
-      bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
+      self writeToken: 'positive' at: place transition: '' instance: instanceId scope: scope launchedBy: launchedBy
     ].
 
     bbs logEngine: 'info' component: 'WorkflowEngine' scope: scope message: ('Workflow instantiated: ', instanceId).
@@ -282,6 +275,21 @@ WorkflowEngine subclass: Object
     transitions do: [:tr |
       consumedTokens := self tryFireTransition: tr instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity overrideAffinity: overrideAffinity
     ]
+  ]
+
+  "--- Token Writing ---"
+
+  method: writeToken: status at: place transition: tid instance: instanceId scope: scope launchedBy: launchedBy [
+    "Build a token payload + bbs out: it. Centralizes the 7-line shape that
+     used to be repeated at every transition-firing site (scout §1.8)."
+    | tokenPayload |
+    tokenPayload := Dictionary new.
+    tokenPayload at: 'workflow_instance' put: instanceId.
+    tokenPayload at: 'place' put: place.
+    tokenPayload at: 'status' put: status.
+    tokenPayload at: 'transition_id' put: tid.
+    tokenPayload at: 'modality' put: 'linear'.
+    bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
   ]
 
   "--- Token Promotion ---"
@@ -411,14 +419,7 @@ WorkflowEngine subclass: Object
       (action = 'spawn-workflow' or: [action = 'dispatch-waves']) ifTrue: [
         "Async actions: produce waiting tokens BEFORE execution (child completion promotes them)"
         outPlaces do: [:place |
-          | tokenPayload |
-          tokenPayload := Dictionary new.
-          tokenPayload at: 'workflow_instance' put: instanceId.
-          tokenPayload at: 'place' put: place.
-          tokenPayload at: 'status' put: 'waiting'.
-          tokenPayload at: 'transition_id' put: (transition at: 'id').
-          tokenPayload at: 'modality' put: 'linear'.
-          bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
+          self writeToken: 'waiting' at: place transition: (transition at: 'id') instance: instanceId scope: scope launchedBy: launchedBy
         ].
         [
           self executeAction: action transition: transition instance: instanceId params: params
@@ -443,14 +444,7 @@ WorkflowEngine subclass: Object
         ].
         "Action succeeded — produce positive output tokens"
         outPlaces do: [:place |
-          | tokenPayload |
-          tokenPayload := Dictionary new.
-          tokenPayload at: 'workflow_instance' put: instanceId.
-          tokenPayload at: 'place' put: place.
-          tokenPayload at: 'status' put: 'positive'.
-          tokenPayload at: 'transition_id' put: (transition at: 'id').
-          tokenPayload at: 'modality' put: 'linear'.
-          bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
+          self writeToken: 'positive' at: place transition: (transition at: 'id') instance: instanceId scope: scope launchedBy: launchedBy
         ]
       ].
       ^consumedTokens
@@ -459,26 +453,12 @@ WorkflowEngine subclass: Object
     "Role-bearing transitions: produce waiting tokens (promoted on task completion)"
     role notNil ifTrue: [
       outPlaces do: [:place |
-        | tokenPayload |
-        tokenPayload := Dictionary new.
-        tokenPayload at: 'workflow_instance' put: instanceId.
-        tokenPayload at: 'place' put: place.
-        tokenPayload at: 'status' put: 'waiting'.
-        tokenPayload at: 'transition_id' put: (transition at: 'id').
-        tokenPayload at: 'modality' put: 'linear'.
-        bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
+        self writeToken: 'waiting' at: place transition: (transition at: 'id') instance: instanceId scope: scope launchedBy: launchedBy
       ].
     ] ifFalse: [
       "No role, no action — produce positive tokens immediately"
       outPlaces do: [:place |
-        | tokenPayload |
-        tokenPayload := Dictionary new.
-        tokenPayload at: 'workflow_instance' put: instanceId.
-        tokenPayload at: 'place' put: place.
-        tokenPayload at: 'status' put: 'positive'.
-        tokenPayload at: 'transition_id' put: (transition at: 'id').
-        tokenPayload at: 'modality' put: 'linear'.
-        bbs out: 'token' scope: scope identity: (Identity token: instanceId place: place) payload: tokenPayload actor: nil launchedBy: launchedBy executedBy: nil
+        self writeToken: 'positive' at: place transition: (transition at: 'id') instance: instanceId scope: scope launchedBy: launchedBy
       ]
     ].
 
