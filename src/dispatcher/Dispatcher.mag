@@ -129,13 +129,23 @@ Dispatcher subclass: Object
     now := DateTime now epochSeconds.
     tasks := bbs scanAll: 'task'.
     tasks do: [:t |
-      | payload status expiresAt |
-      payload := t at: 'payload' ifAbsent: [Dictionary new].
-      status := payload at: 'status' ifAbsent: [''].
-      expiresAt := payload at: 'claim_expires_at' ifAbsent: [nil].
-      (status = 'claimed'
-        and: [expiresAt notNil and: [now > expiresAt]]) ifTrue: [
-          self reapTask: t now: now
+      "Per-tuple exception wrapper: a single malformed task tuple
+       (e.g. claim_expires_at typed as a string instead of a number)
+       must NOT abort the sweep — the remaining tasks still get a
+       chance to be reaped. Without this guard, one poison tuple
+       would silently strand every task scanned after it."
+      [
+        | payload status expiresAt |
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        status := payload at: 'status' ifAbsent: [''].
+        expiresAt := payload at: 'claim_expires_at' ifAbsent: [nil].
+        (status = 'claimed'
+          and: [expiresAt notNil and: [now > expiresAt]]) ifTrue: [
+            self reapTask: t now: now
+        ]
+      ] on: Exception do: [:e |
+        ('Dispatcher reapExpiredClaims: skipped malformed task tuple ',
+         (t at: 'identity' ifAbsent: ['<unknown>']), ': ', e messageText) println
       ]
     ]
   ]
