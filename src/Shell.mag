@@ -19,8 +19,7 @@ Shell subclass: Object
     "Fire-and-forget shell command. No output capture."
     | proc shellArgs |
     proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := #('-c').
     shellArgs := shellArgs copyWith: cmd.
     proc args: shellArgs.
     proc run
@@ -32,8 +31,7 @@ Shell subclass: Object
     | proc shellArgs tmpFile raw result |
     tmpFile := '/tmp/pp-shell-capture-', DateTime now epochSeconds printString.
     proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := #('-c').
     shellArgs := shellArgs copyWith: cmd, ' > "', tmpFile, '" 2>&1'.
     proc args: shellArgs.
     proc run.
@@ -57,8 +55,7 @@ Shell subclass: Object
      Returns nil on success."
     | proc shellArgs |
     proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := #('-c').
     shellArgs := shellArgs copyWith: cmd.
     proc args: shellArgs.
     proc run.

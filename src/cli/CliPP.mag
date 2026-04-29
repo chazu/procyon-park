@@ -3810,8 +3810,7 @@ PPEOF'.
     cmd := Cli::Command named: 'session' doc: 'View Claude session log for a task'.
     cmd run: [:runArgs |
       | callArgs sysCmd |
-      callArgs := Array new: 0.
-      callArgs := callArgs copyWith: 'session'.
+      callArgs := #('session').
       runArgs size >= 1 ifTrue: [
         callArgs := callArgs copyWith: (runArgs at: 0)
       ].
@@ -3834,8 +3833,7 @@ PPEOF'.
     cmd := Cli::Command named: 'usage' doc: 'Report current session token consumption'.
     cmd run: [:runArgs |
       | callArgs sysCmd i |
-      callArgs := Array new: 0.
-      callArgs := callArgs copyWith: 'usage'.
+      callArgs := #('usage').
       i := 0.
       [i < runArgs size] whileTrue: [
         callArgs := callArgs copyWith: (runArgs at: i).

@@ -560,8 +560,7 @@ PPEOF'.
     "Run a shell command (fire and forget, no output capture)."
     | proc shellArgs |
     proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := #('-c').
     shellArgs := shellArgs copyWith: cmd.
     proc args: shellArgs.
     proc run

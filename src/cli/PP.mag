@@ -57,8 +57,7 @@ PP subclass: CLIBase
     cmd = 'bbs'       ifTrue: [^CliBBS new runWith: args].
     cmd = 'repo'      ifTrue: [^Repo new runWith: args].
     cmd = 'worktree'  ifTrue: [
-      wtArgs := Array new: 0.
-      wtArgs := wtArgs copyWith: 'repo'.
+      wtArgs := #('repo').
       args do: [:a | wtArgs := wtArgs copyWith: a].
       ^Repo new runWith: wtArgs
     ].

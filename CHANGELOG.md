@@ -7,6 +7,15 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+- Replaced `Array new: 0` + sequential `copyWith:` build-up patterns
+  with array literal syntax `#('a' 'b' 'c')` where the leading elements
+  are static strings. Touches `WorkflowEngine>>buildAffinity:` (5-element
+  valid-keys list), `Shell` class methods (`run:`, `capture:`,
+  `runChecked:`), `Scheduler>>validateScope:` (4 shell-args sites), and
+  the `Main`/`PP`/`Repo`/`CliPP`/`WorkItemCLI` CLI dispatch helpers.
+  Pure refactor — no behavior change. Scout survey §1.4/§3.12.
+
 ### Fixed
 - Slice-by-prefix off-by-one in `ApiServer>>watchWorkflowsFor:` (Server.mag)
   and `DashboardSSE>>renderTodayWindow` (scope-violation aggregation): both
