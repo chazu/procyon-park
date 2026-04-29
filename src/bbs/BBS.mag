@@ -58,6 +58,25 @@ BBS subclass: Object
 
   method: startedAt [ ^startedAt ]
 
+  "Test-only introspection of the auxiliary hash indices. The flat `index`
+   array is exposed for cross-checks against scan:/scanAll:; byKey/byId/
+   byCatIdent are exposed to let test_bbs_index.mag distinguish 'key cleaned
+   up' from 'empty array left behind'. Production callers MUST go through
+   findInIndex:/findByCategory:identity: instead."
+  method: indexFlat [ ^mutex critical: [index copy] ]
+  method: byKeyMap [ ^byKey ]
+  method: byIdMap [ ^byId ]
+  method: byCatIdentMap [ ^byCatIdent ]
+  method: byKeyHasCategory: category scope: scope identity: identity [
+    ^mutex critical: [byKey includesKey: (self keyFor: category scope: scope identity: identity)]
+  ]
+  method: byCatIdentHasCategory: category identity: identity [
+    ^mutex critical: [byCatIdent includesKey: (self catIdentFor: category identity: identity)]
+  ]
+  method: byIdHas: tupleId [
+    ^mutex critical: [byId includesKey: tupleId]
+  ]
+
   "--- Notification pub/sub hook ---
    Server.mag installs a NotificationHub here so /api/notifications/stream
    can fan out new notifications to long-poll waiters without re-running
