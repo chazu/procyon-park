@@ -900,7 +900,7 @@ ApiServer subclass: Object
 
      Lease: task.max_runtime overrides body.lease_seconds, which defaults to
      600s (D6.2). Emits a 'claim' event tuple on success."
-    | taskId workerId claimId leaseSeconds actorHeader tasks task scope
+    | taskId workerId claimId leaseSeconds actorHeader task scope
       outcome now result expectedActor d workerTuple wPayload wManifest
       acceptFrom launchedBy |
 
@@ -934,9 +934,8 @@ ApiServer subclass: Object
              message: 'claim requires ', expectedActor, ' signer (got ', actorHeader printString, ')'
     ].
 
-    "Locate the task tuple — body carries no scope, so scan and match identity."
-    tasks := bbs scanAll: 'task'.
-    task := tasks detect: [:t | (t at: 'identity') = taskId] ifNone: [nil].
+    "Locate the task tuple — body carries no scope, so use O(1) byCatIdent lookup."
+    task := bbs findByCategory: 'task' identity: taskId.
     task isNil ifTrue: [
       ^self errorResponse: 404 message: 'task not found: ', taskId
     ].
@@ -1239,7 +1238,7 @@ ApiServer subclass: Object
       ^self errorResponse: 400 message: 'status must be completed or failed'
     ].
 
-    task := (bbs scanAll: 'task') detect: [:t | (t at: 'identity') = taskId] ifNone: [nil].
+    task := bbs findByCategory: 'task' identity: taskId.
     task isNil ifTrue: [^self errorResponse: 404 message: 'task not found: ', taskId].
     scope := task at: 'scope'.
     payload := task at: 'payload'.
@@ -1899,7 +1898,7 @@ ApiServer subclass: Object
     "Find the workflow — try given scope, then scan all"
     wf := bbs rdp: 'workflow' scope: scope identity: wfId.
     wf isNil ifTrue: [
-      wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = wfId] ifNone: [nil]
+      wf := bbs findByCategory: 'workflow' identity: wfId
     ].
     wf isNil ifTrue: [^self errorResponse: 404 message: 'workflow not found'].
 

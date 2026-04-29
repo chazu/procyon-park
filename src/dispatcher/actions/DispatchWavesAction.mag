@@ -278,7 +278,7 @@ DispatchWavesAction subclass: WorkflowAction
 
     allDone := true.
     childIds do: [:cid |
-      childWf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = cid] ifNone: [nil].
+      childWf := bbs findByCategory: 'workflow' identity: cid.
       childWf isNil ifTrue: [allDone := false].
       childWf notNil ifTrue: [
         childStatus := (childWf at: 'payload') at: 'status' ifAbsent: ['running'].

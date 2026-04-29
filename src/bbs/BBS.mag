@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex cueCtx startedAt index dataDir historyPath dirty flushMutex flushInProgress historySize
+  instanceVars: space nextId mutex cueCtx startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize
 
   classMethod: new [
     ^super new initialize
@@ -30,6 +30,9 @@ BBS subclass: Object
     cueCtx := CueContext new.
     startedAt := DateTime now.
     index := Array new: 0.
+    byId := Dictionary new.
+    byKey := Dictionary new.
+    byCatIdent := Dictionary new.
 
     "Set data directory"
     aPath notNil
@@ -75,6 +78,79 @@ BBS subclass: Object
     ^(ctx compileString: cue) value
   ]
 
+  "--- Auxiliary index helpers (caller MUST hold mutex) ---
+   The flat `index` array is retained for full-scan operations (scan:/scanAll:),
+   but write/remove paths additionally maintain three hash indices:
+     byId        — id (Integer) → tuple, used by removeFromIndices: for O(1) removal
+     byKey       — 'category|scope|identity' → Array of tuples, for O(1) findInIndex:
+     byCatIdent  — 'category|identity' → Array of tuples, for cross-scope lookup
+                   by callers that don't yet know the scope (e.g. workflow id lookup).
+   See docs/scout-perf-survey-2026-04-28.md §1.1."
+
+  method: keyFor: category scope: scope identity: identity [
+    ^category, '|', scope, '|', identity
+  ]
+
+  method: catIdentFor: category identity: identity [
+    ^category, '|', identity
+  ]
+
+  method: addToIndices: tuple [
+    "Caller MUST hold mutex. Adds tuple to flat index and all hash indices."
+    | tupleId k ck arr arr2 |
+    tupleId := tuple at: 'id'.
+    index := index copyWith: tuple.
+    byId at: tupleId put: tuple.
+    k := self keyFor: (tuple at: 'category') scope: (tuple at: 'scope') identity: (tuple at: 'identity').
+    arr := byKey at: k ifAbsent: [nil].
+    arr isNil
+      ifTrue: [byKey at: k put: (Array with: tuple)]
+      ifFalse: [byKey at: k put: (arr copyWith: tuple)].
+    ck := self catIdentFor: (tuple at: 'category') identity: (tuple at: 'identity').
+    arr2 := byCatIdent at: ck ifAbsent: [nil].
+    arr2 isNil
+      ifTrue: [byCatIdent at: ck put: (Array with: tuple)]
+      ifFalse: [byCatIdent at: ck put: (arr2 copyWith: tuple)]
+  ]
+
+  method: removeFromIndicesById: tupleId [
+    "Caller MUST hold mutex. Removes tuple by id from flat index + hash indices.
+     Returns the removed tuple or nil."
+    | tuple k ck arr arr2 |
+    tuple := byId at: tupleId ifAbsent: [nil].
+    tuple isNil ifTrue: [^nil].
+    byId removeKey: tupleId ifAbsent: [nil].
+    k := self keyFor: (tuple at: 'category') scope: (tuple at: 'scope') identity: (tuple at: 'identity').
+    arr := byKey at: k ifAbsent: [nil].
+    arr notNil ifTrue: [
+      arr := arr reject: [:t | (t at: 'id') = tupleId].
+      arr isEmpty
+        ifTrue: [byKey removeKey: k ifAbsent: [nil]]
+        ifFalse: [byKey at: k put: arr]
+    ].
+    ck := self catIdentFor: (tuple at: 'category') identity: (tuple at: 'identity').
+    arr2 := byCatIdent at: ck ifAbsent: [nil].
+    arr2 notNil ifTrue: [
+      arr2 := arr2 reject: [:t | (t at: 'id') = tupleId].
+      arr2 isEmpty
+        ifTrue: [byCatIdent removeKey: ck ifAbsent: [nil]]
+        ifFalse: [byCatIdent at: ck put: arr2]
+    ].
+    index := index reject: [:t | (t at: 'id') = tupleId].
+    ^tuple
+  ]
+
+  method: removeFromIndicesByKey: category scope: scope identity: identity [
+    "Caller MUST hold mutex. Remove ALL tuples matching (cat,scope,identity).
+     Used by upsert paths that drop duplicates."
+    | k arr ids |
+    k := self keyFor: category scope: scope identity: identity.
+    arr := byKey at: k ifAbsent: [nil].
+    arr isNil ifTrue: [^self].
+    ids := arr collect: [:t | t at: 'id'].
+    ids do: [:tid | self removeFromIndicesById: tid]
+  ]
+
   "--- Core Write Operations ---"
 
   method: out: category scope: scope identity: identity payload: payload [
@@ -93,7 +169,7 @@ BBS subclass: Object
     Categories validate: category.
     d := Tuple linear: category scope: scope identity: identity payload: payload id: self assignId actor: actor launchedBy: launchedBy executedBy: executedBy.
     space out: d.
-    mutex critical: [index := index copyWith: d].
+    mutex critical: [self addToIndices: d].
     self appendHistory: 'out' tuple: d.
     (self isDurableCategory: category) ifTrue: [self persistAfterChange].
     ^d at: 'id'
@@ -112,7 +188,7 @@ BBS subclass: Object
     Categories validate: category.
     d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor launchedBy: launchedBy executedBy: executedBy.
     space outPersistent: d.
-    mutex critical: [index := index copyWith: d].
+    mutex critical: [self addToIndices: d].
     self appendHistory: 'out-pinned' tuple: d.
     self persistAfterChange.
     ^d at: 'id'
@@ -137,7 +213,7 @@ BBS subclass: Object
     [(self inp: category scope: scope identity: identity) notNil] whileTrue: [].
     d := Tuple affine: category scope: scope identity: identity payload: payload id: self assignId ttl: ttlSeconds actor: actor launchedBy: launchedBy executedBy: executedBy.
     space outAffine: d ttl: ttlSeconds.
-    mutex critical: [index := index copyWith: d].
+    mutex critical: [self addToIndices: d].
     self appendHistory: 'out-affine' tuple: d.
     ^d at: 'id'
   ]
@@ -287,21 +363,32 @@ BBS subclass: Object
     | tupleId cat |
     tupleId := tuple at: 'id'.
     cat := tuple at: 'category' ifAbsent: [''].
-    mutex critical: [
-      index := index reject: [:t | (t at: 'id') = tupleId]
-    ].
+    mutex critical: [self removeFromIndicesById: tupleId].
     (self isDurableCategory: cat) ifTrue: [self persistAfterChange]
   ]
 
   method: findInIndex: category scope: scope identity: identity [
     "Look up a tuple from the index (not TupleSpace). Returns the tuple or nil.
-     Use this when you need the latest version of a pinned/upserted tuple."
+     Use this when you need the latest version of a pinned/upserted tuple.
+     O(1) hash lookup via byKey."
     ^mutex critical: [
-      index detect: [:t |
-        (t at: 'category') = category and:
-          [(t at: 'scope') = scope and:
-            [(t at: 'identity') = identity]]
-      ] ifNone: [nil]
+      | k arr |
+      k := self keyFor: category scope: scope identity: identity.
+      arr := byKey at: k ifAbsent: [nil].
+      (arr isNil or: [arr isEmpty]) ifTrue: [nil] ifFalse: [arr last]
+    ]
+  ]
+
+  method: findByCategory: category identity: identity [
+    "Look up a tuple by (category, identity) when scope is unknown.
+     Workflow / task identities are globally unique, so this returns
+     the last matching tuple — the standard case has exactly one.
+     O(1) hash lookup via byCatIdent."
+    ^mutex critical: [
+      | ck arr |
+      ck := self catIdentFor: category identity: identity.
+      arr := byCatIdent at: ck ifAbsent: [nil].
+      (arr isNil or: [arr isEmpty]) ifTrue: [nil] ifFalse: [arr last]
     ]
   ]
 
@@ -310,7 +397,7 @@ BBS subclass: Object
      Caller MUST hold the mutex. Does not trigger persistence."
     | tupleId |
     tupleId := tuple at: 'id'.
-    index := index reject: [:t | (t at: 'id') = tupleId]
+    self removeFromIndicesById: tupleId
   ]
 
   "--- Atomic Update Operations ---"
@@ -332,7 +419,7 @@ BBS subclass: Object
 
     d := Tuple linear: category scope: scope identity: identity payload: payload id: self assignId.
     space out: d.
-    mutex critical: [index := index copyWith: d].
+    mutex critical: [self addToIndices: d].
     self appendHistory: 'out' tuple: d.
     (self isDurableCategory: category) ifTrue: [self persistAfterChange].
     ^d at: 'id'
@@ -349,17 +436,11 @@ BBS subclass: Object
     aBlock value: payload.
 
     "Remove all matching from index, write new pinned tuple"
-    mutex critical: [
-      index := index reject: [:t |
-        (t at: 'category') = category and:
-          [(t at: 'scope') = scope and:
-            [(t at: 'identity') = identity]]
-      ]
-    ].
+    mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
 
     d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId.
     space outPersistent: d.
-    mutex critical: [index := index copyWith: d].
+    mutex critical: [self addToIndices: d].
     self appendHistory: 'upsert-pinned' tuple: d.
     self persistAfterChange.
     ^d at: 'id'
@@ -390,18 +471,12 @@ BBS subclass: Object
     Categories validate: category.
 
     "Remove all matching from index"
-    mutex critical: [
-      index := index reject: [:t |
-        (t at: 'category') = category and:
-          [(t at: 'scope') = scope and:
-            [(t at: 'identity') = identity]]
-      ]
-    ].
+    mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
 
     "Write new pinned tuple"
     d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor.
     space outPersistent: d.
-    mutex critical: [index := index copyWith: d].
+    mutex critical: [self addToIndices: d].
     self appendHistory: 'upsert-pinned' tuple: d.
     self persistAfterChange.
     ^d at: 'id'
@@ -565,8 +640,9 @@ BBS subclass: Object
         tupleId > maxId ifTrue: [maxId := tupleId].
         pinned := t at: 'pinned' ifAbsent: [false].
 
-        "Add to index"
-        index := index copyWith: t.
+        "Add to index (load is single-threaded during init, but use the
+         helper so all auxiliary hash indices are populated)."
+        self addToIndices: t.
 
         "Add to TupleSpace"
         pinned ifTrue: [
