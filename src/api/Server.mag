@@ -596,14 +596,10 @@ ApiServer subclass: Object
      bounded by the first successful call at the HTTP layer. The
      handler itself, invoked directly (as in tests), remains pure
      idempotent."
-    | name identity existing payload newPayload ttl heartbeat actorHeader d |
+    | name identity existing payload newPayload ttl heartbeat guard d |
 
-    actorCtx verified ifFalse: [
-      enforceSignatures
-        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
-        ifFalse: [^self errorResponse: 503
-                         message: 'enforce_signatures must be true for worker drain']
-    ].
+    guard := self requireVerified: actorCtx for: 'worker drain'.
+    guard notNil ifTrue: [^guard].
 
     name := body at: 'name'.
     (name isString and: [name isEmpty not]) ifFalse: [
@@ -614,10 +610,8 @@ ApiServer subclass: Object
 
     "Require the caller's actor header to name the same worker. A verified
      user: or admin: actor cannot drain a worker they don't own."
-    actorHeader := actorCtx actor.
-    actorHeader = identity ifFalse: [
-      ^self errorResponse: 403 message: 'drain requires worker:', name, ' signer (got ', actorHeader printString, ')'
-    ].
+    guard := self requireWorkerActor: actorCtx name: name verb: 'drain'.
+    guard notNil ifTrue: [^guard].
 
     existing := bbs rdp: 'worker' scope: '/' identity: identity.
     existing isNil ifTrue: [
@@ -667,14 +661,10 @@ ApiServer subclass: Object
      repo clone) without interrupting any in-flight claim or lease work,
      and without losing an operator-initiated drain. A mismatched
      operator_pubkey continues to return 409 (impersonation guard)."
-    | workerPub operatorPub nonce manifest name manifestErr existing existingOp existingPayload payload identity ttl heartbeat now opIdentityTuple opPayload actor drainFlag regAt isRefresh |
+    | workerPub operatorPub nonce manifest name manifestErr existing existingOp existingPayload payload identity ttl heartbeat now opIdentityTuple opPayload actor drainFlag regAt isRefresh guard |
 
-    actorCtx verified ifFalse: [
-      enforceSignatures
-        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
-        ifFalse: [^self errorResponse: 503
-                         message: 'enforce_signatures must be true for worker registration']
-    ].
+    guard := self requireVerified: actorCtx for: 'worker registration'.
+    guard notNil ifTrue: [^guard].
 
     workerPub := body at: 'worker_pubkey'.
     operatorPub := body at: 'operator_pubkey'.
@@ -790,14 +780,10 @@ ApiServer subclass: Object
          outAffine: now provides true overwrite semantics, so a single
          outAffine: call replaces the prior tuple atomically.
        - On success: 200 {ok:true, ttl:N}."
-    | name identity actorStr existing payload newPayload newManifest manifestErr ttl heartbeat result |
+    | name identity existing payload newPayload newManifest manifestErr ttl heartbeat result guard |
 
-    actorCtx verified ifFalse: [
-      enforceSignatures
-        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
-        ifFalse: [^self errorResponse: 503
-                         message: 'enforce_signatures must be true for worker heartbeat']
-    ].
+    guard := self requireVerified: actorCtx for: 'worker heartbeat'.
+    guard notNil ifTrue: [^guard].
 
     name := body at: 'name'.
     (name isString and: [name isEmpty not]) ifFalse: [
@@ -807,12 +793,8 @@ ApiServer subclass: Object
     identity := Identity worker: name.
 
     "Caller must have authenticated as this very worker."
-    actorStr := actorCtx actor.
-    actorStr = identity ifFalse: [
-      ^self errorResponse: 403
-               message: 'actor ', actorStr printString,
-                        ' does not match worker ', identity
-    ].
+    guard := self requireWorkerActor: actorCtx name: name verb: 'heartbeat'.
+    guard notNil ifTrue: [^guard].
 
     existing := bbs rdp: 'worker' scope: '/' identity: identity.
     existing isNil ifTrue: [
@@ -913,16 +895,12 @@ ApiServer subclass: Object
 
      Lease: task.max_runtime overrides body.lease_seconds, which defaults to
      600s (D6.2). Emits a 'claim' event tuple on success."
-    | taskId workerId claimId leaseSeconds actorHeader task scope
+    | taskId workerId claimId leaseSeconds task scope
       outcome now result expectedActor d workerTuple wPayload wManifest
-      acceptFrom launchedBy |
+      acceptFrom launchedBy guard |
 
-    actorCtx verified ifFalse: [
-      enforceSignatures
-        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
-        ifFalse: [^self errorResponse: 503
-                         message: 'enforce_signatures must be true for task claim']
-    ].
+    guard := self requireVerified: actorCtx for: 'task claim'.
+    guard notNil ifTrue: [^guard].
 
     taskId := body at: 'task_id'.
     workerId := body at: 'worker_id'.
@@ -941,11 +919,8 @@ ApiServer subclass: Object
     ].
 
     expectedActor := Identity worker: workerId.
-    actorHeader := actorCtx actor.
-    actorHeader = expectedActor ifFalse: [
-      ^self errorResponse: 403
-             message: 'claim requires ', expectedActor, ' signer (got ', actorHeader printString, ')'
-    ].
+    guard := self requireWorkerActor: actorCtx name: workerId verb: 'claim'.
+    guard notNil ifTrue: [^guard].
 
     "Locate the task tuple — body carries no scope, so use O(1) byCatIdent lookup."
     task := bbs findByCategory: 'task' identity: taskId.
@@ -1151,14 +1126,10 @@ ApiServer subclass: Object
      the offer→claim gap is a race window. Response is capped at ~20 tasks
      and returned synchronously (no long-poll for v1)."
     | workerId expectedActor actorHeader workerTuple payload manifest
-      roles repos models acceptFrom allTasks cap out d tp status role repo model |
+      roles repos models acceptFrom allTasks cap out d tp status role repo model guard |
 
-    actorCtx verified ifFalse: [
-      enforceSignatures
-        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
-        ifFalse: [^self errorResponse: 503
-                         message: 'enforce_signatures must be true for tasks/available']
-    ].
+    guard := self requireVerified: actorCtx for: 'tasks/available'.
+    guard notNil ifTrue: [^guard].
 
     workerId := body at: 'worker_id'.
     ((workerId isKindOf: String) and: [workerId isEmpty not]) ifFalse: [
@@ -1232,14 +1203,10 @@ ApiServer subclass: Object
            owns retry_count; regular failures are terminal unless the
            repo-not-available carveout applies.
      Emits a completion event tuple on branches (2)/(3)/(4)."
-    | taskId workerId claimId status reason task scope payload storedClaimId executedBy eventPayload actorStr updated d eventType |
+    | taskId workerId claimId status reason task scope payload storedClaimId executedBy eventPayload actorStr updated d eventType guard |
 
-    actorCtx verified ifFalse: [
-      enforceSignatures
-        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
-        ifFalse: [^self errorResponse: 503
-                         message: 'enforce_signatures must be true for task complete']
-    ].
+    guard := self requireVerified: actorCtx for: 'task complete'.
+    guard notNil ifTrue: [^guard].
 
     taskId := body at: 'task_id'.
     workerId := body at: 'worker_id'.
@@ -1582,6 +1549,36 @@ ApiServer subclass: Object
     actorCtx isNil ifTrue: [^nil].
     actorCtx verified ifFalse: [^nil].
     ^actorCtx actor
+  ]
+
+  method: requireVerified: actorCtx for: aVerb [
+    "Shared preamble for signed worker endpoints. Returns nil to allow the
+     caller to proceed, or an HttpResponse the caller must short-circuit
+     return. When signatures are enforced, an unverified context yields
+     401; when unenforced, 503 with a verb-specific message so operators
+     understand which endpoint is gated on enforce_signatures=true."
+    actorCtx verified ifFalse: [
+      enforceSignatures
+        ifTrue: [^self errorResponse: 401 message: 'signature verification failed']
+        ifFalse: [^self errorResponse: 503
+                         message: 'enforce_signatures must be true for ', aVerb]
+    ].
+    ^nil
+  ]
+
+  method: requireWorkerActor: actorCtx name: aName verb: aVerb [
+    "Shared guard: the verified actor must equal worker:<aName>. Returns nil
+     to allow the caller to proceed, or a 403 HttpResponse the caller must
+     short-circuit return. Error string is normalised across all call sites
+     into one shape: '<verb> requires <expected> signer (got <actor>)'."
+    | expected actorStr |
+    expected := Identity worker: aName.
+    actorStr := actorCtx actor.
+    actorStr = expected ifFalse: [
+      ^self errorResponse: 403
+             message: aVerb, ' requires ', expected, ' signer (got ', actorStr printString, ')'
+    ].
+    ^nil
   ]
 
   method: get: path do: aBlock [
