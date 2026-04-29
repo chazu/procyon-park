@@ -8,6 +8,13 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Changed
+- Unified the duplicated `maybePromoteParentOf:` (Server.mag) and
+  `maybePromoteParent:` (WorkflowEngine.mag) cascade-promotion methods
+  into a single `WorkflowEngine>>maybePromoteParent:scope:` impl.
+  `Server>>handleWorkitemUpdate:` now delegates via
+  `dispatcher workflowEngine maybePromoteParent:scope:`, and the
+  unified impl uses the new `BBS>>updatePinned:do:` helper. Net -27
+  source lines (deleted Server's 28-line duplicate). Scout survey §1.6.
 - Migrated 6 manual payload-clone + `upsertPinned:` sites to use the
   existing `BBS>>updatePinned:scope:identity:do:` block helper (which
   already does the safe payload-copy + atomic replace). Added an
