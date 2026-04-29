@@ -4,7 +4,7 @@
 ApiServer subclass: Object
   instanceVars: httpServer bbs port dispatcher dashboardSSE
                 adminList skewSeconds enforceSignatures signatureVerifier
-                queueMaxPending inviteStore
+                queueMaxPending inviteStore notificationHub
 
   classMethod: on: portNumber bbs: aBBS [
     ^super new initPort: portNumber bbs: aBBS dispatcher: nil
@@ -23,6 +23,10 @@ ApiServer subclass: Object
     self loadSecurityConfig.
     signatureVerifier := SignatureVerifier on: bbs.
     inviteStore := InviteStore new bbs: bbs.
+    "Notification pub/sub fan-out replaces the legacy 20×scanAll long-poll
+     loop in handleNotificationStream:. See docs/scout-perf-survey-2026-04-28.md §2."
+    notificationHub := NotificationHub new.
+    bbs notificationListener: [:tuple | notificationHub publish: tuple].
     self registerRoutes
   ]
 
@@ -1828,9 +1832,17 @@ ApiServer subclass: Object
   method: handleNotificationStream: req [
     "GET /api/notifications/stream?since=<epoch>&wait=<0|1> — long-polling notification stream.
      Returns notifications since the given epoch. If none found and wait!=0, holds
-     the request for up to 10 seconds, polling every 500ms.
-     Pass wait=0 to return immediately (used by --no-follow)."
-    | since wait notifications filtered mapped d i obj p identity watchSet |
+     the request for up to 10 seconds.
+
+     Implementation: an initial `scanAll: 'notification'` returns any
+     backlog matching `since`. If empty and wait>0 the handler subscribes
+     to the NotificationHub and sleeps on its own per-subscriber pending
+     queue (no further BBS scans). When a new notification is written,
+     BBS pushes it through the hub which evaluates each subscriber's
+     filter once and appends to the matching pending queues. This
+     replaces the prior 20× (scanAll:notification + scanAll:watch) loop
+     under the BBS mutex; see docs/scout-perf-survey-2026-04-28.md §2."
+    | since wait notifications filtered mapped d i obj p identity watchSet sub filterBlock pending |
     since := req queryParam: 'since'.
     since isNil ifTrue: [since := 0] ifFalse: [since := since asInteger].
     wait := req queryParam: 'wait'.
@@ -1839,27 +1851,31 @@ ApiServer subclass: Object
     identity := self notifyIdentityFor: req.
     watchSet := self watchWorkflowsFor: identity.
 
-    "Initial scan"
+    "Initial backlog scan (single scanAll, exactly as before)."
     notifications := bbs scanAll: 'notification'.
     filtered := notifications select: [:n |
       ((n at: 'created_at' ifAbsent: [0]) >= since)
         and: [self notification: n visibleTo: identity watches: watchSet]
     ].
 
-    "Long-poll: if no notifications yet and wait enabled, wait up to 10 seconds"
-    wait > 0 ifTrue: [
+    "Long-poll fan-out: subscribe and sleep on the hub. Filter captures
+     identity + watchSet at subscribe time; new watch tuples added mid-poll
+     surface on the next /stream request rather than scanning per-tick."
+    (filtered isEmpty and: [wait > 0]) ifTrue: [
+      filterBlock := [:n |
+        ((n at: 'created_at' ifAbsent: [0]) >= since)
+          and: [self notification: n visibleTo: identity watches: watchSet]].
+      sub := notificationHub subscribe: filterBlock.
       i := 0.
-      [filtered isEmpty and: [i < 20]] whileTrue: [
-        Process sleep: 500.
-        i := i + 1.
-        "Refresh watch set each tick so new subscriptions surface mid-poll."
-        watchSet := self watchWorkflowsFor: identity.
-        notifications := bbs scanAll: 'notification'.
-        filtered := notifications select: [:n |
-          ((n at: 'created_at' ifAbsent: [0]) >= since)
-            and: [self notification: n visibleTo: identity watches: watchSet]
-        ]
-      ]
+      "10s budget in 100ms cheap polls — no BBS scan, just a
+       per-subscription pending-array length check under the hub mutex."
+      [(notificationHub pendingFor: sub) isEmpty and: [i < 100]] whileTrue: [
+        Process sleep: 100.
+        i := i + 1
+      ].
+      pending := notificationHub drain: sub.
+      notificationHub unsubscribe: sub.
+      pending isEmpty ifFalse: [filtered := pending]
     ].
 
     "Map to response format — message and severity live inside payload"

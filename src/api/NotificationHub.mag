@@ -1,0 +1,99 @@
+"NotificationHub — pub/sub fan-out for notification tuples.
+
+ Replaces the previous pattern in `handleNotificationStream:` of polling
+ the BBS via `scanAll: 'notification'` + `scanAll: 'watch'` up to 20
+ times per blocked client. That polling loop held the BBS mutex across
+ two full-table scans every 500ms, so a handful of `pp watch` clients
+ could starve every other request.
+
+ Now: the BBS calls `publish:` once per notification tuple written.
+ `publish:` walks subscribers, applies each subscriber's filter block
+ once, and appends matching tuples to its own pending queue. Long-poll
+ stream handlers `subscribe:` with a filter that captures the caller's
+ identity + watchSet, then sleep on a tiny per-subscriber pending list
+ instead of full-table scanning the BBS.
+
+ Reference: docs/scout-perf-survey-2026-04-28.md §2."
+
+NotificationHub subclass: Object
+  instanceVars: mutex subscribers nextId
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: initialize [
+    mutex := Mutex new.
+    subscribers := Array new: 0.
+    nextId := 0.
+    ^self
+  ]
+
+  method: subscriberCount [
+    | snap |
+    mutex critical: [snap := subscribers].
+    ^snap size
+  ]
+
+  method: subscribe: filterBlock [
+    "Register a filter. Returns a subscription Dictionary; pass it back
+     to drain:/unsubscribe:. The filter block takes a tuple Dictionary
+     and returns true iff the tuple should be delivered to this
+     subscriber."
+    | sub id |
+    mutex critical: [
+      nextId := nextId + 1.
+      id := nextId
+    ].
+    sub := Dictionary new.
+    sub at: 'id' put: id.
+    sub at: 'filter' put: filterBlock.
+    sub at: 'pending' put: (Array new: 0).
+    mutex critical: [
+      subscribers := subscribers copyWith: sub
+    ].
+    ^sub
+  ]
+
+  method: unsubscribe: sub [
+    | targetId |
+    targetId := sub at: 'id'.
+    mutex critical: [
+      subscribers := subscribers reject: [:s | (s at: 'id') = targetId]
+    ]
+  ]
+
+  method: publish: tuple [
+    "Deliver tuple to every matching subscriber. Called by BBS after a
+     notification tuple is written. The filter block is invoked outside
+     the hub's mutex so a slow filter cannot block other publishers."
+    | snap |
+    mutex critical: [snap := subscribers].
+    snap do: [:sub |
+      | f matches |
+      f := sub at: 'filter'.
+      matches := false.
+      [matches := f value: tuple] on: Exception do: [:e | matches := false].
+      matches ifTrue: [
+        mutex critical: [
+          sub at: 'pending' put: ((sub at: 'pending') copyWith: tuple)
+        ]
+      ]
+    ]
+  ]
+
+  method: pendingFor: sub [
+    | snap |
+    mutex critical: [snap := sub at: 'pending'].
+    ^snap
+  ]
+
+  method: drain: sub [
+    "Atomically read and clear the subscription's pending queue."
+    | result |
+    mutex critical: [
+      result := sub at: 'pending'.
+      sub at: 'pending' put: (Array new: 0)
+    ].
+    ^result
+  ]

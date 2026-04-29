@@ -8,6 +8,16 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Changed
+- `/api/notifications/stream` long-poll replaced with pub/sub fan-out
+  via the new `NotificationHub`. Previously a blocked `pp watch` client
+  ran up to 20 iterations × 2 full-table scans (`scanAll: 'notification'`
+  + `scanAll: 'watch'`) per 10 s window under the BBS mutex, so a
+  handful of concurrent watchers could DOS the rest of the server. Now
+  the handler does one initial backlog `scanAll`, then subscribes a
+  filter block to `NotificationHub` and sleeps on its own per-subscriber
+  pending queue. BBS invokes the hub once per notification write
+  (outside the index mutex). See
+  `docs/scout-perf-survey-2026-04-28.md` §2.
 - Dashboard SSE broadcaster computes ONE snapshot per 2 s tick and fans
   it out to every subscriber. Previously each subscriber re-ran ~12 BBS
   full-index scans (`workflow`/`token`/`task`/`workitem`/`event`/

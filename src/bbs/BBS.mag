@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex cueCtx startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize
+  instanceVars: space nextId mutex cueCtx startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener
 
   classMethod: new [
     ^super new initialize
@@ -57,6 +57,29 @@ BBS subclass: Object
   ]
 
   method: startedAt [ ^startedAt ]
+
+  "--- Notification pub/sub hook ---
+   Server.mag installs a NotificationHub here so /api/notifications/stream
+   can fan out new notifications to long-poll waiters without re-running
+   `scanAll: 'notification'` + `scanAll: 'watch'` 20 times per blocked
+   client. The block, if set, is invoked once per successfully-written
+   notification tuple, OUTSIDE the BBS index mutex. See
+   docs/scout-perf-survey-2026-04-28.md §2."
+
+  method: notificationListener: aBlock [
+    notificationListener := aBlock
+  ]
+
+  method: emitNotificationListener: tuple [
+    "Caller MUST NOT hold mutex. Invokes the registered listener (if any)
+     after a notification tuple is written. Exceptions in the listener
+     are swallowed so a buggy listener cannot poison BBS writes."
+    notificationListener isNil ifTrue: [^self].
+    (tuple at: 'category' ifAbsent: ['']) = 'notification' ifFalse: [^self].
+    [notificationListener value: tuple] on: Exception do: [:e |
+      ('Warning: notification listener failed: ', e messageText) println
+    ]
+  ]
 
   "--- ID Generation ---"
 
@@ -172,6 +195,7 @@ BBS subclass: Object
     mutex critical: [self addToIndices: d].
     self appendHistory: 'out' tuple: d.
     (self isDurableCategory: category) ifTrue: [self persistAfterChange].
+    self emitNotificationListener: d.
     ^d at: 'id'
   ]
 
@@ -191,6 +215,7 @@ BBS subclass: Object
     mutex critical: [self addToIndices: d].
     self appendHistory: 'out-pinned' tuple: d.
     self persistAfterChange.
+    self emitNotificationListener: d.
     ^d at: 'id'
   ]
 
