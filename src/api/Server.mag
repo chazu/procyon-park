@@ -267,7 +267,7 @@ ApiServer subclass: Object
       self okResponse: d
     ].
     self get: '/api/notifications' do: [:req | self handleNotifications: req].
-    self get: '/api/notifications/stream' do: [:req | self handleNotificationStream: req].
+    self asyncGet: '/api/notifications/stream' do: [:req | self handleNotificationStream: req].
     self registerWorkflowRoutes
   ]
 
@@ -1583,6 +1583,13 @@ ApiServer subclass: Object
   method: get: path do: aBlock [
     "Register a GET route. aBlock receives the request."
     httpServer route: path method: 'GET' handler: [:req | aBlock value: req]
+  ]
+
+  method: asyncGet: path do: aBlock [
+    "Register a GET route whose handler runs in a forked goroutine, not the
+     dispatch queue. Use for handlers that block inside Maggie (e.g. the
+     long-poll notification stream) so they cannot stall other requests."
+    httpServer asyncRoute: path method: 'GET' handler: [:req | aBlock value: req]
   ]
 
   method: makeResult: key value: val [
