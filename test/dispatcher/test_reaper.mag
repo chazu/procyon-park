@@ -20,7 +20,19 @@
         touched by the reaper.
    RP7  The reaper clears claim_expires_at on re-pend, so a subsequent
         sweep immediately after the re-pend is a no-op until a new claim
-        stamps a fresh expiry."
+        stamps a fresh expiry.
+   RP8  Poison-tuple resilience: when one task tuple has a malformed
+        payload (e.g. claim_expires_at typed as a string instead of a
+        number), reapExpiredClaims MUST NOT abort the sweep — every
+        OTHER expired-claimed tuple in the same scan still gets reaped.
+   RP9  Renew race: if a worker renews the lease between scanAll: 'task'
+        and the update: re-check inside reapTask:, the atomic update:
+        block re-reads the payload and observes a fresh (future)
+        claim_expires_at, so it MUST NOT re-pend or bump retry_count.
+   RP10 Retry-cap boundary: when this sweep's retry_count bump lands at
+        max-1 (still under max), the task re-pends and lives to fight
+        another claim cycle. Only after a fresh claim+expiry+two more
+        sweeps does retry_count reach max and the task fail terminally."
 
 RPRunner subclass: Object
   instanceVars: passed failed failures
@@ -133,6 +145,56 @@ RPHelper subclass: Object
         actor: 'user:alice' launchedBy: 'user:alice' executedBy: 'worker:live'
   ]
 
+  classMethod: seedPoisonExpiredClaim: identity onBBS: bbs [
+    "Seed a task tuple in claimed state where claim_expires_at is a
+     string instead of a number — comparing now > 'soon' will throw."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: 'claimed'.
+    payload at: 'description' put: 'poison task'.
+    payload at: 'worker_id' put: 'worker:poison'.
+    payload at: 'claim_id' put: 'c-poison'.
+    payload at: 'executed_by' put: 'worker:poison'.
+    payload at: 'claim_expires_at' put: 'soon'.
+    payload at: 'renewed_at' put: 1.
+    payload at: 'missed_renewals' put: 0.
+    payload at: 'retry_count' put: 0.
+    payload at: 'max_retries' put: 3.
+    bbs out: 'task' scope: 'demo-scope' identity: identity payload: payload
+        actor: 'user:alice' launchedBy: 'user:alice' executedBy: 'worker:poison'
+  ]
+
+  classMethod: renewClaim: identity onBBS: bbs [
+    "Simulate a worker renewing a lease — push claim_expires_at out
+     to the far future and clear missed_renewals as a real renew
+     would. Used to model the renew-race window between scanAll: and
+     update:."
+    | farFuture |
+    farFuture := DateTime now epochSeconds + 3600.
+    bbs update: 'task' scope: 'demo-scope' identity: identity do: [:p |
+      p at: 'claim_expires_at' put: farFuture.
+      p at: 'renewed_at' put: farFuture - 100.
+      p at: 'missed_renewals' put: 0
+    ]
+  ]
+
+  classMethod: reclaimExpired: identity worker: wid claim: cid onBBS: bbs [
+    "Simulate the scheduler claiming a re-pended task and the lease
+     immediately expiring (claim_expires_at in the past). Used in the
+     retry-cap boundary test to drive a fresh reap cycle on a task
+     that already has retry_count > 0."
+    bbs update: 'task' scope: 'demo-scope' identity: identity do: [:p |
+      p at: 'status' put: 'claimed'.
+      p at: 'worker_id' put: wid.
+      p at: 'claim_id' put: cid.
+      p at: 'executed_by' put: wid.
+      p at: 'claim_expires_at' put: 1.
+      p at: 'renewed_at' put: 1.
+      p at: 'missed_renewals' put: 0
+    ]
+  ]
+
   classMethod: seedStatus: identity status: status onBBS: bbs [
     "Seed a task tuple with an arbitrary non-claimed status."
     | payload |
@@ -179,7 +241,10 @@ TestReaper subclass: Object
     self testNonClaimedUntouched: t.
     self testRependedNoOpOnNextSweep: t.
     self testStaleClaimedNoExpiryNoPanic: t.
-    self testCorruptExpiresAtNoPanic: t
+    self testCorruptExpiresAtNoPanic: t.
+    self testPoisonTupleSkippedOthersReaped: t.
+    self testRenewRaceWinsOverReap: t.
+    self testRetryCapBoundaryRependsThenFails: t
   ]
 
   classMethod: testFirstSweepIncrementsOnly: t [
@@ -423,6 +488,131 @@ TestReaper subclass: Object
     payload := RPHelper payloadOf: 'rp9' in: bbs.
     t assertEqual: (payload at: 'status') to: 'claimed'
       message: 'RP9: corrupt-expiry tuple status untouched'
+  ]
+
+  classMethod: testPoisonTupleSkippedOthersReaped: t [
+    | bbs dispatcher poisonPayload goodPayload events |
+    '--- RP8: poison tuple does not strand other expired tasks ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    "One bad: claim_expires_at is a string. One good: ready to re-pend."
+    RPHelper seedPoisonExpiredClaim: 'rp8-bad' onBBS: bbs.
+    RPHelper seedExpiredClaim: 'rp8-good' worker: 'worker:w8' claim: 'c8'
+             retry: 0 missed: 1 onBBS: bbs.
+
+    "Sweep MUST NOT throw — the per-tuple wrapper swallows the
+     malformed comparison in the outer guard (or any throw inside
+     reapTask:) and continues to the next tuple."
+    dispatcher reapExpiredClaims.
+
+    poisonPayload := RPHelper payloadOf: 'rp8-bad' in: bbs.
+    t assertEqual: (poisonPayload at: 'status') to: 'claimed'
+      message: 'RP8: poison task left untouched (status still claimed)'.
+    t assertEqual: (poisonPayload at: 'retry_count') to: 0
+      message: 'RP8: poison task retry_count untouched'.
+
+    goodPayload := RPHelper payloadOf: 'rp8-good' in: bbs.
+    t assertEqual: (goodPayload at: 'status') to: 'pending'
+      message: 'RP8: sibling task still re-pended despite poison sibling'.
+    t assertEqual: (goodPayload at: 'retry_count') to: 1
+      message: 'RP8: sibling task retry_count bumped'.
+    t assert: ((goodPayload at: 'worker_id') isNil)
+      message: 'RP8: sibling task worker_id cleared'.
+
+    events := RPHelper reapEventsFor: 'rp8-good' in: bbs.
+    t assertEqual: events size to: 1
+      message: 'RP8: reap event still emitted for the healthy sibling'
+  ]
+
+  classMethod: testRenewRaceWinsOverReap: t [
+    | bbs dispatcher staleSnapshot now payload events |
+    '--- RP9: renew between scan and update wins (no re-pend) ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    "Seed an expired claim that is one sweep away from action."
+    RPHelper seedExpiredClaim: 'rp9' worker: 'worker:w9' claim: 'c9'
+             retry: 0 missed: 1 onBBS: bbs.
+
+    "Capture the stale tuple as scanAll: would have returned it."
+    staleSnapshot := RPHelper findTask: 'rp9' in: bbs.
+    now := DateTime now epochSeconds.
+
+    "Worker renews lease — race window between the dispatcher's
+     scanAll: 'task' and the per-tuple update: re-check."
+    RPHelper renewClaim: 'rp9' onBBS: bbs.
+
+    "Now the dispatcher proceeds with its stale snapshot. The atomic
+     update: block at Dispatcher.mag:163 re-reads the payload and
+     observes the fresh expiry — no action must fire."
+    dispatcher reapTask: staleSnapshot now: now.
+
+    payload := RPHelper payloadOf: 'rp9' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'claimed'
+      message: 'RP9: renewed claim survives the racing reap'.
+    t assertEqual: (payload at: 'retry_count') to: 0
+      message: 'RP9: retry_count NOT bumped despite stale snapshot'.
+    t assertEqual: (payload at: 'missed_renewals') to: 0
+      message: 'RP9: missed_renewals NOT bumped (renewal cleared it)'.
+    t assertEqual: (payload at: 'worker_id') to: 'worker:w9'
+      message: 'RP9: worker_id preserved through the race'.
+
+    events := RPHelper reapEventsFor: 'rp9' in: bbs.
+    t assertEqual: events size to: 0
+      message: 'RP9: no reap event emitted when renewal wins the race'
+  ]
+
+  classMethod: testRetryCapBoundaryRependsThenFails: t [
+    | bbs dispatcher payload events |
+    '--- RP10: retry_count bumping to max-1 re-pends; max fails ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    "max_retries=3 (default). Seed retry_count=max-2=1, missed=1.
+     This sweep brings retry_count to max-1=2, which is still under
+     max → must re-pend (NOT fail)."
+    RPHelper seedExpiredClaim: 'rp10' worker: 'worker:w10' claim: 'c10'
+             retry: 1 missed: 1 onBBS: bbs.
+
+    dispatcher reapExpiredClaims.
+
+    payload := RPHelper payloadOf: 'rp10' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'pending'
+      message: 'RP10: retry_count=max-1 re-pends (does not fail)'.
+    t assertEqual: (payload at: 'retry_count') to: 2
+      message: 'RP10: retry_count bumped to max-1 (=2)'.
+    t assert: ((payload at: 'last_failure_reason') isNil)
+      message: 'RP10: no terminal failure reason recorded'.
+
+    events := RPHelper reapEventsFor: 'rp10' in: bbs.
+    t assertEqual: events size to: 1
+      message: 'RP10: re-pend reap event emitted'.
+    t assertEqual: (((events at: 0) at: 'payload') at: 'terminal') to: false
+      message: 'RP10: re-pend reap event terminal=false'.
+
+    "Simulate a fresh claim cycle: scheduler re-claims, lease
+     immediately expires. Two sweeps later the task hits retry_count=max
+     and fails terminally."
+    RPHelper reclaimExpired: 'rp10' worker: 'worker:w10b' claim: 'c10b'
+             onBBS: bbs.
+
+    dispatcher reapExpiredClaims.
+    payload := RPHelper payloadOf: 'rp10' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'claimed'
+      message: 'RP10: first sweep of fresh cycle does not fire action'.
+    t assertEqual: (payload at: 'missed_renewals') to: 1
+      message: 'RP10: first sweep of fresh cycle bumps missed_renewals to 1'.
+
+    dispatcher reapExpiredClaims.
+    payload := RPHelper payloadOf: 'rp10' in: bbs.
+    t assertEqual: (payload at: 'status') to: 'failed'
+      message: 'RP10: second sweep of fresh cycle lands terminal failure'.
+    t assertEqual: (payload at: 'retry_count') to: 3
+      message: 'RP10: retry_count reaches max on terminal failure'.
+    t assertEqual: (payload at: 'last_failure_reason') to: 'reaped'
+      message: 'RP10: terminal failure reason=reaped'.
+
+    events := RPHelper reapEventsFor: 'rp10' in: bbs.
+    t assertEqual: events size to: 2
+      message: 'RP10: two reap events total (re-pend + terminal)'
   ]
 
 "=== Main ==="
