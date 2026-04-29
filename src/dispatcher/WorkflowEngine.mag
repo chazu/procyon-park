@@ -362,21 +362,6 @@ WorkflowEngine subclass: Object
 
   "--- Transition Firing ---"
 
-  method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens [
-    "Back-compat entry — no launched_by attribution, no workflow-root affinity."
-    ^self tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: nil wfAffinity: nil
-  ]
-
-  method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy [
-    "Back-compat entry — no workflow-root affinity."
-    ^self tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: nil
-  ]
-
-  method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity [
-    "Back-compat entry — no CLI override affinity."
-    ^self tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity overrideAffinity: nil
-  ]
-
   method: tryFireTransition: transition instance: instanceId scope: scope params: params tokenPlaces: tokenPlaces consumed: consumedTokens launchedBy: launchedBy wfAffinity: wfAffinity overrideAffinity: overrideAffinity [
     "Try to fire a single transition. Checks input places, preconditions, then fires.
      Returns updated consumedTokens array.

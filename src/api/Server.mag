@@ -349,7 +349,6 @@ ApiServer subclass: Object
 
   method: registerDashboardRoutes2 [
     "More work item routes + dashboard."
-    self signedRouteOnly: '/api/workitem/add-child' do: [:req :actorCtx | self handleWorkitemAddChild: req actor: actorCtx].
     self signedRouteOnly: '/api/workitem/run' do: [:req :actorCtx | self handleWorkitemRun: req actor: actorCtx].
     self get: '/api/dashboard' do: [:req | self handleDashboard: req].
     self get: '/api/history' do: [:req | self handleHistory: req].
@@ -2360,41 +2359,6 @@ ApiServer subclass: Object
     ^self okResponse: (self okWithCount: 'comments' count: comments size)
   ]
 
-  method: handleWorkitemAddChild: req actor: actorCtx [
-    "POST /api/workitem/add-child — DEPRECATED compat shim.
-     Parent-child linkage is now stored only on the child (payload.parent).
-     This endpoint no longer mutates any tuple. It verifies that the child
-     exists and that its parent matches the requested parent, then returns.
-     Plan removal in a follow-up; a deprecation log entry is emitted so
-     the few remaining callers are visible in history."
-    | body scope identity child parentItem childItem childParent |
-    body := self parseBody: req.
-    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
-
-    identity := body at: 'identity' ifAbsent: [nil].
-    identity isNil ifTrue: [^self errorResponse: 400 message: 'identity required'].
-    scope := body at: 'scope' ifAbsent: ['default'].
-    child := body at: 'child' ifAbsent: [nil].
-    child isNil ifTrue: [^self errorResponse: 400 message: 'child required'].
-
-    bbs logEngine: 'warn' component: 'workitem-add-child'
-        scope: scope
-        message: ('/api/workitem/add-child is deprecated — set payload.parent on create/update instead. parent=', identity, ' child=', child).
-
-    parentItem := bbs findInIndex: 'workitem' scope: scope identity: identity.
-    parentItem isNil ifTrue: [^self errorResponse: 404 message: 'parent work item not found'].
-
-    childItem := bbs findInIndex: 'workitem' scope: scope identity: child.
-    childItem isNil ifTrue: [^self errorResponse: 404 message: 'child work item not found'].
-
-    childParent := (childItem at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil].
-    childParent = identity ifFalse: [
-      ^self errorResponse: 409 message: ('child ', child, ' has parent=', childParent printString, '; expected ', identity, '. Re-parent via /api/workitem/update is not supported; recreate the child.')
-    ].
-
-    ^self okResponse: (self okWithIdentity: child)
-  ]
-
   method: handleWorkitemRun: req actor: actorCtx [
     "POST /api/workitem/run — execute a work item via workflow.
      For stories: starts a story/story-lite workflow.
@@ -2438,7 +2402,7 @@ ApiServer subclass: Object
       type = 'epic' ifTrue: ['full-pipeline'] ifFalse: ['story']
     ].
     [
-      instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams launchedBy: (self actorOf: actorCtx).
+      instanceId := dispatcher instantiateWorkflow: template scope: scope params: wfParams launchedBy: (self actorOf: actorCtx) overrideAffinity: nil.
       ^self okResponse: (self okWithWorkflow: instanceId type: type)
     ] on: Exception do: [:e |
       ^self errorResponse: 400 message: e messageText
