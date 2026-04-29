@@ -724,25 +724,43 @@ WorkflowEngine subclass: Object
 
   "--- Workflow Completion ---"
 
-  method: scopeForInstance: instanceId [
-    "Look up the scope for a workflow instance. Returns 'default' if not found."
-    | wf |
-    wf := bbs findByCategory: 'workflow' identity: instanceId.
+  "wf-accepting variants — preferred when the caller already has the
+   workflow tuple in scope. Each old `*ForInstance:` / `workflowStatus:`
+   method below performs a `findByCategory:` lookup; routing through wf
+   avoids the redundant BBS-mutex hash hit when the engine is in the
+   middle of advancing a workflow it just loaded. See
+   docs/scout-perf-survey-2026-04-28.md §3.2."
+  method: scopeFor: wf [
+    "Return the scope of a workflow tuple, or 'default' if wf is nil."
     ^wf notNil ifTrue: [wf at: 'scope'] ifFalse: ['default']
   ]
 
-  method: launchedByForInstance: instanceId [
-    "Look up the launched_by stamp for a workflow instance, or nil if absent."
-    | wf |
-    wf := bbs findByCategory: 'workflow' identity: instanceId.
+  method: launchedByFor: wf [
+    "Return the launched_by stamp from a workflow tuple, or nil if absent."
     ^wf notNil ifTrue: [wf at: 'launched_by' ifAbsent: [nil]] ifFalse: [nil]
   ]
 
-  method: workflowStatus: instanceId [
-    "Look up the current status of a workflow instance. Returns 'unknown' if not found."
-    | wf |
-    wf := bbs findByCategory: 'workflow' identity: instanceId.
+  method: statusOf: wf [
+    "Return the current status from a workflow tuple, or 'unknown' if absent."
     ^wf notNil ifTrue: [(wf at: 'payload') at: 'status' ifAbsent: ['unknown']] ifFalse: ['unknown']
+  ]
+
+  method: scopeForInstance: instanceId [
+    "Look up the scope for a workflow instance. Returns 'default' if not found.
+     Prefer `scopeFor: wf` when the caller already has the workflow tuple."
+    ^self scopeFor: (bbs findByCategory: 'workflow' identity: instanceId)
+  ]
+
+  method: launchedByForInstance: instanceId [
+    "Look up the launched_by stamp for a workflow instance, or nil if absent.
+     Prefer `launchedByFor: wf` when the caller already has the workflow tuple."
+    ^self launchedByFor: (bbs findByCategory: 'workflow' identity: instanceId)
+  ]
+
+  method: workflowStatus: instanceId [
+    "Look up the current status of a workflow instance. Returns 'unknown' if not found.
+     Prefer `statusOf: wf` when the caller already has the workflow tuple."
+    ^self statusOf: (bbs findByCategory: 'workflow' identity: instanceId)
   ]
 
   method: failWorkflow: instanceId reason: reason [
@@ -757,8 +775,9 @@ WorkflowEngine subclass: Object
          (the next dispatch hits 'branch already exists').
        - Otherwise preserve the worktree and branches so the operator can
          recover uncommitted work. Clean up with `pp worktree clean`."
-    | scope info payload repoPath featureBranch implBranch worktreeDir standalone featureCommits implCommits cleanedUp |
-    scope := self scopeForInstance: instanceId.
+    | wf scope info payload repoPath featureBranch implBranch worktreeDir standalone featureCommits implCommits cleanedUp |
+    wf := bbs findByCategory: 'workflow' identity: instanceId.
+    scope := self scopeFor: wf.
 
     bbs logEngine: 'error' component: 'WorkflowEngine' scope: scope message: ('Workflow FAILED: ', instanceId, ' — ', reason).
 
