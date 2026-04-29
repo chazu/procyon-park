@@ -2288,41 +2288,10 @@ ApiServer subclass: Object
 
     "Auto-promote parent epic when this item moves to done and all siblings are done."
     ((fields includesKey: 'status') and: [(fields at: 'status') = 'done']) ifTrue: [
-      self maybePromoteParentOf: newPayload scope: scope
+      dispatcher workflowEngine maybePromoteParent: newPayload scope: scope
     ].
 
     ^self okResponse: (self okWithIdentity: identity)
-  ]
-
-  method: maybePromoteParentOf: payload scope: aScope [
-    "If `payload` has a parent, and all of that parent's children are now 'done',
-     auto-promote the parent to 'done' and recurse upward. No-op if parent is
-     missing, has no children, or is already done."
-    | parentId parentItem parentPayload children allDone newParentPayload |
-    parentId := payload at: 'parent' ifAbsent: [nil].
-    parentId isNil ifTrue: [^self].
-    (parentId isString and: [parentId isEmpty]) ifTrue: [^self].
-    parentItem := bbs findInIndex: 'workitem' scope: aScope identity: parentId.
-    parentItem isNil ifTrue: [^self].
-    parentPayload := parentItem at: 'payload'.
-    (parentPayload at: 'status' ifAbsent: ['']) = 'done' ifTrue: [^self].
-    "Derive children by scanning workitems in scope — child.parent is the source of truth."
-    children := bbs scanChildrenOf: parentId scope: aScope.
-    children isEmpty ifTrue: [^self].
-    allDone := true.
-    children do: [:child |
-      | cStatus |
-      cStatus := (child at: 'payload') at: 'status' ifAbsent: [''].
-      cStatus = 'done' ifFalse: [allDone := false]
-    ].
-    allDone ifFalse: [^self].
-    newParentPayload := Dictionary new.
-    parentPayload keysAndValuesDo: [:k :v | newParentPayload at: k put: v].
-    newParentPayload at: 'status' put: 'done'.
-    newParentPayload at: 'updated_at' put: DateTime now epochSeconds.
-    bbs upsertPinned: 'workitem' scope: aScope identity: parentId payload: newParentPayload.
-    "Recurse upward in case this completes a grandparent."
-    self maybePromoteParentOf: newParentPayload scope: aScope
   ]
 
   method: handleWorkitemComment: req actor: actorCtx [

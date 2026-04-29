@@ -863,7 +863,10 @@ WorkflowEngine subclass: Object
   ]
 
   method: maybePromoteParent: payload scope: scope [
-    "Promote parent epic to done when all children are done. Recurses upward."
+    "Promote parent epic to done when all children are done. Recurses upward.
+     If `payload` has no parent, no children, or any sibling is not done,
+     this is a no-op. The same impl serves Server>>handleWorkitemUpdate:
+     and Dispatcher>>workflow-end paths so the cascade rule is unified."
     | parentId parentItem parentPayload children allDone newParentPayload |
     parentId := payload at: 'parent' ifAbsent: [nil].
     parentId isNil ifTrue: [^self].
@@ -882,11 +885,12 @@ WorkflowEngine subclass: Object
       cStatus = 'done' ifFalse: [allDone := false]
     ].
     allDone ifFalse: [^self].
-    newParentPayload := Dictionary new.
-    parentPayload keysAndValuesDo: [:k :v | newParentPayload at: k put: v].
-    newParentPayload at: 'status' put: 'done'.
-    newParentPayload at: 'updated_at' put: DateTime now epochSeconds.
-    bbs upsertPinned: 'workitem' scope: scope identity: parentId payload: newParentPayload.
+    newParentPayload := nil.
+    bbs updatePinned: 'workitem' scope: scope identity: parentId do: [:p |
+      p at: 'status' put: 'done'.
+      p at: 'updated_at' put: DateTime now epochSeconds.
+      newParentPayload := p
+    ].
     self maybePromoteParent: newParentPayload scope: scope
   ]
 
