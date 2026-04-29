@@ -437,7 +437,10 @@ BBS subclass: Object
     mutex critical: [self removeFromIndicesById: (result at: 'id')].
     self appendHistory: 'consume' tuple: result.
 
-    payload := result at: 'payload'.
+    "Copy payload so the block's mutation can't race with an in-flight
+     flushAsyncIfDirty whose snapshot still references the old tuple's
+     payload Dictionary. See dispatcher reapExpiredClaims panic 2026-04-29."
+    payload := (result at: 'payload') copy.
     aBlock value: payload.
 
     d := Tuple linear: category scope: scope identity: identity payload: payload id: self assignId.
@@ -455,7 +458,7 @@ BBS subclass: Object
     existing := self findInIndex: category scope: scope identity: identity.
     existing isNil ifTrue: [^nil].
 
-    payload := existing at: 'payload'.
+    payload := (existing at: 'payload') copy.
     aBlock value: payload.
 
     "Remove all matching from index, write new pinned tuple"
