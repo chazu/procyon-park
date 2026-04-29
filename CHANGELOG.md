@@ -8,6 +8,13 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Performance
+- `WorkflowEngine` failure path no longer triggers redundant
+  `scanAll: 'workflow'` calls. Added wf-accepting variants
+  (`scopeFromWf:`, `launchedByFromWf:`, `workflowStatusFromWf:`) and a
+  `failWorkflow:scope:reason:` overload; `tryFireTransition:` action
+  exception handlers and the post-action status check now use scope-aware
+  rdp lookups instead of full-table scans. See
+  `docs/scout-perf-survey-2026-04-28.md` §3.2.
 - Memoised four hot paths flagged in
   `docs/scout-perf-survey-2026-04-28.md` §6:
   - `TemplateLoader>>reloadTemplate:into:` now caches parsed payloads
