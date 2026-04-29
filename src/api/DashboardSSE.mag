@@ -1,8 +1,19 @@
 "DashboardSSE — SSE dashboard broadcasting for the web UI.
- Separated from ApiServer to avoid Maggie compiler bytecode limits."
+ Separated from ApiServer to avoid Maggie compiler bytecode limits.
+
+ Per docs/scout-perf-survey-2026-04-28.md §4: each tick computes ONE
+ snapshot (workflow/token/task/notification/worker/workitem/event/watch
+ scans + pre-rendered identity-independent HTML) and fans it out to every
+ subscriber. Previously each subscriber triggered ~12 full-index scans
+ plus N synchronous session-file reads per 2 s tick.
+
+ Token totals are also moved off the broadcast hot path: a background
+ [self tokenCacheLoop] fork periodically reads $HOME/.pp/sessions/*.jsonl
+ and rebuilds an in-memory taskId -> {input,output} cache. The SSE tick
+ reads only from that cache (no disk I/O)."
 
 DashboardSSE subclass: Object
-  instanceVars: bbs sseSubscribers
+  instanceVars: bbs sseSubscribers tokenCache
 
   classMethod: on: aBBS [
     ^super new initBBS: aBBS
@@ -10,7 +21,9 @@ DashboardSSE subclass: Object
 
   method: initBBS: aBBS [
     bbs := aBBS.
-    sseSubscribers := #()
+    sseSubscribers := #().
+    tokenCache := Dictionary new.
+    [self tokenCacheLoop] fork
   ]
 
   method: onConnect: conn [
@@ -73,15 +86,20 @@ DashboardSSE subclass: Object
   ]
 
   method: tick [
-    | live |
+    "Per-tick fan-out. Build ONE snapshot of the BBS state + pre-rendered
+     identity-independent HTML, then walk every subscriber and enqueue.
+     Identity-dependent rendering (notifications filtered by watches) is
+     still per-subscriber but reuses the cached scans from the snapshot."
+    | live snapshot |
     sseSubscribers isEmpty ifTrue: [^self].
+    snapshot := self computeSnapshot.
     live := Array new: 0.
     sseSubscribers do: [:entry |
       | conn q |
       conn := entry at: 'conn'.
       q := entry at: 'queue'.
       ((conn isOpen) and: [q isClosed not]) ifTrue: [
-        [self broadcastTo: entry] on: Exception do: [:e |
+        [self broadcastTo: entry snapshot: snapshot] on: Exception do: [:e |
           ('SSE error: ', e messageText) println
         ].
         "broadcastTo: may have closed the queue on overflow —
@@ -92,13 +110,44 @@ DashboardSSE subclass: Object
     sseSubscribers := live
   ]
 
-  method: broadcastTo: entry [
-    self sendWorkflows: entry.
-    self sendCompletions: entry.
-    self sendWorkitems: entry.
-    self sendScopeViolations: entry.
-    self sendPresence: entry.
-    self sendNotifs: entry
+  method: computeSnapshot [
+    "Run all index scans once and pre-render every identity-independent
+     HTML fragment. Returns a Dictionary the broadcast loop hands to each
+     subscriber. With S subscribers the tick now does ~8 BBS scans total
+     instead of 6S+. Anonymous subscribers also reuse a single cached
+     notifications HTML; signed identities still pay one filter+render
+     pass per subscriber, but reuse the cached notification + watch arrays."
+    | snap |
+    snap := Dictionary new.
+    snap at: 'now' put: DateTime now epochSeconds.
+    snap at: 'workflows' put: (bbs scanAll: 'workflow').
+    snap at: 'tokens' put: (bbs scanAll: 'token').
+    snap at: 'tasks' put: (bbs scanAll: 'task').
+    snap at: 'workitems' put: (bbs scanAll: 'workitem').
+    snap at: 'events' put: (bbs scanAll: 'event').
+    snap at: 'workers' put: (bbs scanAll: 'worker').
+    snap at: 'notifications' put: (bbs scanAll: 'notification').
+    snap at: 'watches' put: (bbs scanAll: 'watch').
+    snap at: 'workflowsHtml' put: (self renderWorkflowsHtml: snap).
+    snap at: 'completionsHtml' put: (self renderCompletionsHtml: snap).
+    snap at: 'workitemsHtml' put: (self renderWorkitemsHtml: snap).
+    snap at: 'scopeViolationsHtml' put: (self renderScopeViolationsHtml: snap).
+    snap at: 'presenceHtml' put: (self renderPresenceHtml: snap).
+    snap at: 'notificationsAnonHtml' put:
+      (self renderNotificationsHtml: (snap at: 'notifications')).
+    ^snap
+  ]
+
+  method: broadcastTo: entry snapshot: snap [
+    "Enqueue every panel for one subscriber. All non-notification panels
+     reuse pre-rendered HTML from the snapshot; notifications are filtered
+     per-identity but built from the cached scan arrays."
+    self sendElements: (snap at: 'workflowsHtml') to: entry.
+    self sendElements: (snap at: 'completionsHtml') to: entry.
+    self sendElements: (snap at: 'workitemsHtml') to: entry.
+    self sendElements: (snap at: 'scopeViolationsHtml') to: entry.
+    self sendElements: (snap at: 'presenceHtml') to: entry.
+    self sendNotifsTo: entry snapshot: snap
   ]
 
   method: sendElements: html to: entry [
@@ -124,15 +173,15 @@ DashboardSSE subclass: Object
     ^true
   ]
 
-  method: sendScopeViolations: entry [
+  method: renderScopeViolationsHtml: snap [
     "Aggregate scope-violation events per role so operators can spot systematic
      prompt issues (e.g. one role consistently editing outside its workdir).
      Each scope-violation event emitted by Scheduler>>validateScope:taskId:scope:
      has identity 'scope-violation:<taskId>' and summary '<n> file(s) modified
      outside workdir'. We join events to tasks by id to recover role."
     | s events tasks taskRoles roleCounts roleFiles roleTasks totalViolations totalFiles prefix |
-    events := bbs scanAll: 'event'.
-    tasks := bbs scanAll: 'task'.
+    events := snap at: 'events'.
+    tasks := snap at: 'tasks'.
 
     "Build taskId -> role map"
     taskRoles := Dictionary new.
@@ -163,7 +212,7 @@ DashboardSSE subclass: Object
           ifFalse: [eid].
         role := taskRoles at: taskId ifAbsent: ['unknown'].
 
-        "Count files from summary leading integer (e.g. '3 file(s) modified...')"
+        "Count files from summary leading integer (e.g. '3 file(s) ...')"
         summary := ep at: 'summary' ifAbsent: [''].
         fileCount := self leadingInteger: summary.
         totalFiles := totalFiles + fileCount.
@@ -204,37 +253,37 @@ DashboardSSE subclass: Object
       s := s, '</ul>'
     ].
     s := s, '</div>'.
-    ^self sendElements: s to: entry
+    ^s
   ]
 
-  method: sendPresence: entry [
+  method: renderPresenceHtml: snap [
     "Render the two-column presence panel: humans currently connected to
      the SSE stream (live sseSubscribers) on the left, affine worker tuples
      (active heartbeat, scope='/') on the right. Workers are rendered with
      manifest capability summary (slots, models, drain, operator) and any
      budget state surfaced in the worker payload. §4.7, D6.7."
-    | s humanCounts human workers humanCount workerCount now |
-    now := DateTime now epochSeconds.
+    | s humanCounts workers humanCount workerCount now |
+    now := snap at: 'now'.
     humanCounts := Dictionary new.
-    sseSubscribers do: [:entry |
+    sseSubscribers do: [:sub |
       | id existing |
-      id := entry at: 'identity' ifAbsent: ['anonymous'].
+      id := sub at: 'identity' ifAbsent: ['anonymous'].
       existing := humanCounts at: id ifAbsent: [nil].
       existing isNil ifTrue: [
         | r |
         r := Dictionary new.
         r at: 'count' put: 1.
-        r at: 'subscribedAt' put: (entry at: 'subscribedAt' ifAbsent: [now]).
+        r at: 'subscribedAt' put: (sub at: 'subscribedAt' ifAbsent: [now]).
         humanCounts at: id put: r
       ] ifFalse: [
         existing at: 'count' put: (existing at: 'count') + 1.
-        ((entry at: 'subscribedAt' ifAbsent: [now]) < (existing at: 'subscribedAt'))
-          ifTrue: [existing at: 'subscribedAt' put: (entry at: 'subscribedAt')]
+        ((sub at: 'subscribedAt' ifAbsent: [now]) < (existing at: 'subscribedAt'))
+          ifTrue: [existing at: 'subscribedAt' put: (sub at: 'subscribedAt')]
       ]
     ].
     humanCount := humanCounts size.
 
-    workers := bbs scanAll: 'worker'.
+    workers := snap at: 'workers'.
     workerCount := workers size.
 
     s := '<section id="dashboard-presence" class="presence"><h2>Presence</h2>'.
@@ -308,7 +357,7 @@ DashboardSSE subclass: Object
     s := s, '</div>'.
 
     s := s, '</div></section>'.
-    ^self sendElements: s to: entry
+    ^s
   ]
 
   method: array: anArray includesString: aString [
@@ -332,11 +381,11 @@ DashboardSSE subclass: Object
     ^n
   ]
 
-  method: sendWorkitems: entry [
+  method: renderWorkitemsHtml: snap [
     "Broadcast work items grouped by status as a Kanban-style board.
      Columns: backlog, ready, in-progress, done, blocked."
     | s workitems statuses buckets |
-    workitems := bbs scanAll: 'workitem'.
+    workitems := snap at: 'workitems'.
     statuses := #('backlog' 'ready' 'in-progress' 'done' 'blocked').
     buckets := Dictionary new.
     statuses do: [:st | buckets at: st put: Array new].
@@ -381,15 +430,15 @@ DashboardSSE subclass: Object
       s := s, '</div>'
     ].
     s := s, '</div></div>'.
-    ^self sendElements: s to: entry
+    ^s
   ]
 
-  method: sendWorkflows: entry [
+  method: renderWorkflowsHtml: snap [
     | s workflows allTokens allTasks now |
-    workflows := bbs scanAll: 'workflow'.
-    allTokens := bbs scanAll: 'token'.
-    allTasks := bbs scanAll: 'task'.
-    now := DateTime now epochSeconds.
+    workflows := snap at: 'workflows'.
+    allTokens := snap at: 'tokens'.
+    allTasks := snap at: 'tasks'.
+    now := snap at: 'now'.
     s := '<div id="dashboard-workflows"><h2>Active Workflows</h2>'.
     workflows do: [:w |
       | p status template wfId desc label places activeTask taskLine tokenTotals tokenLine launchedBy launchedByLine executedByAttr |
@@ -442,32 +491,87 @@ DashboardSSE subclass: Object
       ]
     ].
     s := s, '</div>'.
-    ^self sendElements: s to: entry
+    ^s
   ]
 
   method: tokenTotalsFor: wfId in: allTasks [
-    "Aggregate input_tokens + output_tokens across every session JSONL file
-     for tasks belonging to this workflow instance. Session files live in
-     $HOME/.pp/sessions/<taskId>.jsonl (see ClaudeHarness#run)."
-    | home sessionsDir prefix result |
-    home := System env: 'HOME'.
-    (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
-    sessionsDir := home, '/.pp/sessions'.
+    "Sum input/output tokens for every task belonging to this workflow
+     instance, drawing exclusively from the in-memory tokenCache. The
+     cache is rebuilt by tokenCacheLoop in a background fork (see
+     refreshTokenCache) so this hot path does ZERO disk I/O — it only
+     iterates allTasks and looks up taskId in tokenCache.
+
+     Per docs/scout-perf-survey-2026-04-28.md §4: previously this method
+     read $HOME/.pp/sessions/<taskId>.jsonl synchronously per workflow per
+     subscriber per 2 s tick, stalling every subscriber on a slow disk."
+    | prefix result cache |
     prefix := wfId, ':task:'.
     result := Dictionary new.
     result at: 'input' put: 0.
     result at: 'output' put: 0.
+    "Snapshot the cache reference once; the background loop swaps in a
+     fresh Dictionary atomically (single var write), so we read a stable
+     map even if the loop fires mid-iteration."
+    cache := tokenCache.
     allTasks do: [:t |
-      | tid filePath |
+      | tid totals |
       tid := t at: 'identity' ifAbsent: [''].
       (tid startsWith: prefix) ifTrue: [
-        filePath := sessionsDir, '/', tid, '.jsonl'.
-        (File exists: filePath) ifTrue: [
-          self accumulateTokensFrom: filePath into: result
+        totals := cache at: tid ifAbsent: [nil].
+        totals notNil ifTrue: [
+          result at: 'input' put: (result at: 'input') + (totals at: 'input' ifAbsent: [0]).
+          result at: 'output' put: (result at: 'output') + (totals at: 'output' ifAbsent: [0])
         ]
       ]
     ].
     ^result
+  ]
+
+  method: tokenCacheLoop [
+    "Background loop: every 5 s, rebuild the per-task token totals cache by
+     reading $HOME/.pp/sessions/<taskId>.jsonl for every task tuple. The
+     fresh Dictionary is swapped into tokenCache in a single var assignment
+     (so concurrent SSE readers always see a consistent map). Errors are
+     logged but never propagate — a single malformed session must not stall
+     the cache.
+
+     Why a separate loop and not the SSE tick? File I/O latency is
+     unpredictable (NFS, fsync stalls); doing it on the broadcast path
+     blocks every subscriber. Rebuild rate (5 s) is a balance between
+     freshness on the dashboard and CPU/disk load."
+    [true] whileTrue: [
+      [self refreshTokenCache] on: Exception do: [:e |
+        ('SSE token cache refresh failed: ', e messageText) println
+      ].
+      Process sleep: 5000
+    ]
+  ]
+
+  method: refreshTokenCache [
+    "Build a fresh taskId -> {input, output} cache by walking every task
+     tuple and parsing its session JSONL file. Only commits the new cache
+     once fully built, so readers never see a partial map."
+    | tasks home sessionsDir newCache |
+    home := System env: 'HOME'.
+    (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
+    sessionsDir := home, '/.pp/sessions'.
+    tasks := bbs scanAll: 'task'.
+    newCache := Dictionary new.
+    tasks do: [:t |
+      | tid filePath totals |
+      tid := t at: 'identity' ifAbsent: [''].
+      tid isEmpty ifFalse: [
+        filePath := sessionsDir, '/', tid, '.jsonl'.
+        (File exists: filePath) ifTrue: [
+          totals := Dictionary new.
+          totals at: 'input' put: 0.
+          totals at: 'output' put: 0.
+          self accumulateTokensFrom: filePath into: totals.
+          newCache at: tid put: totals
+        ]
+      ]
+    ].
+    tokenCache := newCache
   ]
 
   method: accumulateTokensFrom: filePath into: result [
@@ -594,18 +698,18 @@ DashboardSSE subclass: Object
     ^s
   ]
 
-  method: sendCompletions: entry [
+  method: renderCompletionsHtml: snap [
     "Broadcast the most recent completed/failed/cancelled workflows with duration.
-     Running workflows are handled by sendWorkflows: and disappear from the active
-     list on completion, so this section gives operators a short-lived record of
-     terminal workflows so they don't vanish without a trace."
+     Running workflows are handled by renderWorkflowsHtml: and disappear from the
+     active list on completion, so this section gives operators a short-lived
+     record of terminal workflows so they don't vanish without a trace."
     | s workflows topN maxCount allTasks |
     maxCount := 10.
-    workflows := bbs scanAll: 'workflow'.
-    allTasks := bbs scanAll: 'task'.
+    workflows := snap at: 'workflows'.
+    allTasks := snap at: 'tasks'.
     topN := Array new: 0.
     workflows do: [:w |
-      | p status endedAt startedAt entry |
+      | p status endedAt startedAt rec |
       p := w at: 'payload' ifAbsent: [Dictionary new].
       status := p at: 'status' ifAbsent: ['?'].
       (status = 'completed' or: [status = 'failed' or: [status = 'cancelled']]) ifTrue: [
@@ -615,27 +719,27 @@ DashboardSSE subclass: Object
           ]
         ].
         startedAt := p at: 'started_at' ifAbsent: [0].
-        entry := Dictionary new.
-        entry at: 'wf' put: w.
-        entry at: 'status' put: status.
-        entry at: 'endedAt' put: endedAt.
-        entry at: 'startedAt' put: startedAt.
-        topN := self insertEntry: entry into: topN maxSize: maxCount
+        rec := Dictionary new.
+        rec at: 'wf' put: w.
+        rec at: 'status' put: status.
+        rec at: 'endedAt' put: endedAt.
+        rec at: 'startedAt' put: startedAt.
+        topN := self insertEntry: rec into: topN maxSize: maxCount
       ]
     ].
     s := '<div id="dashboard-completions"><h2>Recent Completions</h2>'.
     topN isEmpty ifTrue: [
       s := s, '<div class="empty-state">No recent completions</div>'
     ] ifFalse: [
-      topN do: [:entry |
+      topN do: [:rec |
         | wf p template wfId status endedAt startedAt duration durationStr tokenTotals tokenLine |
-        wf := entry at: 'wf'.
+        wf := rec at: 'wf'.
         p := wf at: 'payload' ifAbsent: [Dictionary new].
         template := p at: 'template' ifAbsent: ['?'].
         wfId := wf at: 'identity' ifAbsent: ['?'].
-        status := entry at: 'status'.
-        endedAt := entry at: 'endedAt'.
-        startedAt := entry at: 'startedAt'.
+        status := rec at: 'status'.
+        endedAt := rec at: 'endedAt'.
+        startedAt := rec at: 'startedAt'.
         duration := (startedAt > 0 and: [endedAt > 0])
           ifTrue: [endedAt - startedAt]
           ifFalse: [-1].
@@ -649,7 +753,7 @@ DashboardSSE subclass: Object
       ]
     ].
     s := s, '</div>'.
-    ^self sendElements: s to: entry
+    ^s
   ]
 
   method: insertEntry: entry into: topN maxSize: maxSize [
@@ -688,21 +792,30 @@ DashboardSSE subclass: Object
     ^(seconds // 86400) printString, 'd ', ((seconds \\ 86400) // 3600) printString, 'h'
   ]
 
-  method: sendNotifs: entry [
-    | s notifications recent identity watchSet visible |
-    notifications := bbs scanAll: 'notification'.
+  method: sendNotifsTo: entry snapshot: snap [
+    "Per-subscriber notification fan-out. Anonymous identities get the
+     pre-rendered cached HTML (notificationsAnonHtml). Signed identities
+     filter the cached notifications array against their watch set, then
+     render. Either way, no BBS scans happen here — both the notifications
+     and watches arrays come from the snapshot built in computeSnapshot."
+    | notifications identity watchSet visible html |
     identity := entry at: 'identity' ifAbsent: ['anonymous'].
-    "§4.8 (F8.1): filter per connection by signed identity. Unsigned
-     (--local) connections keep the legacy broadcast semantics so the
-     dashboard still works without an identity store."
     (identity isNil or: [identity = 'anonymous']) ifTrue: [
-      visible := notifications
-    ] ifFalse: [
-      watchSet := self watchWorkflowsFor: identity.
-      visible := notifications select: [:n |
-        self notification: n visibleTo: identity watches: watchSet
-      ]
+      ^self sendElements: (snap at: 'notificationsAnonHtml') to: entry
     ].
+    notifications := snap at: 'notifications'.
+    watchSet := self watchWorkflowsFor: identity in: (snap at: 'watches').
+    visible := notifications select: [:n |
+      self notification: n visibleTo: identity watches: watchSet
+    ].
+    html := self renderNotificationsHtml: visible.
+    ^self sendElements: html to: entry
+  ]
+
+  method: renderNotificationsHtml: visible [
+    "Render the activity list HTML from a pre-filtered notifications array.
+     Caller is responsible for any per-identity filtering."
+    | s recent |
     recent := visible size > 30
       ifTrue: [visible copyFrom: (visible size - 30)]
       ifFalse: [visible].
@@ -741,16 +854,16 @@ DashboardSSE subclass: Object
       s := s, '</ul>'
     ].
     s := s, '</div>'.
-    ^self sendElements: s to: entry
+    ^s
   ]
 
-  method: watchWorkflowsFor: identity [
-    "Resolve active workflow subscriptions for the given identity. Mirrors
-     ApiServer>>watchWorkflowsFor: so SSE filtering matches long-poll
-     filtering one-for-one. Returns an empty Array for anonymous/nil."
-    | watches result prefix |
+  method: watchWorkflowsFor: identity in: watches [
+    "Resolve active workflow subscriptions for the given identity from a
+     pre-fetched watches array. Mirrors ApiServer>>watchWorkflowsFor: so
+     SSE filtering matches long-poll filtering one-for-one. Returns an
+     empty Array for anonymous/nil."
+    | result prefix |
     (identity isNil or: [identity isEmpty]) ifTrue: [^Array new: 0].
-    watches := bbs scanAll: 'watch'.
     result := Array new: 0.
     prefix := identity, ':'.
     watches do: [:w |
@@ -770,10 +883,16 @@ DashboardSSE subclass: Object
     ^result
   ]
 
+  method: watchWorkflowsFor: identity [
+    "Backwards-compatible variant that does its own scan. The hot tick
+     path goes through watchWorkflowsFor:in: with snapshot-cached watches."
+    ^self watchWorkflowsFor: identity in: (bbs scanAll: 'watch')
+  ]
+
   method: notification: n visibleTo: identity watches: watchSet [
     "§4.8 (F8.1) per-identity visibility predicate. identity must be a
      verified signed actor (never nil here — anonymous connections
-     bypass this predicate in sendNotifs:)."
+     bypass this predicate in sendNotifsTo:snapshot:)."
     | p launchedBy observers scope workflow |
     launchedBy := n at: 'launched_by' ifAbsent: [nil].
     launchedBy = identity ifTrue: [^true].

@@ -8,6 +8,23 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Changed
+- Dashboard SSE broadcaster computes ONE snapshot per 2 s tick and fans
+  it out to every subscriber. Previously each subscriber re-ran ~12 BBS
+  full-index scans (`workflow`/`token`/`task`/`workitem`/`event`/
+  `worker`/`notification`/`watch`) and N synchronous session-file reads.
+  `DashboardSSE>>tick` now runs all scans once, pre-renders every
+  identity-independent panel (workflows/completions/workitems/scope-
+  violations/presence/anonymous-notifs), and `broadcastTo:snapshot:`
+  enqueues the cached HTML for each subscriber. Per-identity notification
+  filtering still runs per signed subscriber but reuses the snapshot's
+  cached `notifications` and `watch` arrays. See
+  `docs/scout-perf-survey-2026-04-28.md` §4.
+- `DashboardSSE>>tokenTotalsFor:in:` no longer reads
+  `$HOME/.pp/sessions/<taskId>.jsonl` from disk on the broadcast hot
+  path. A background `[self tokenCacheLoop] fork` (started in
+  `initBBS:`) rebuilds an in-memory taskId → {input, output} cache every
+  5 s; `tokenTotalsFor:in:` now sums cache entries with zero I/O. A slow
+  filesystem can no longer stall every SSE subscriber's update.
 - BBS index restructured for O(1) lookup. The flat `index` array is
   retained for `scan:` / `scanAll:` full scans, but write/remove paths
   now also maintain three hash indices: `byId` (id → tuple), `byKey`
