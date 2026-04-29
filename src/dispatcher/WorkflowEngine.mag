@@ -425,7 +425,7 @@ WorkflowEngine subclass: Object
         ] on: Exception do: [:e |
           bbs logEngine: 'error' component: 'WorkflowEngine' scope: scope message: ('Async action ', action, ' failed: ', e messageText, ' (instance: ', instanceId, ')').
           bbs notify: ('Async action ', action, ' failed: ', e messageText) scope: scope severity: 'urgent'.
-          self failWorkflow: instanceId reason: ('Async action ', action, ' failed: ', e messageText)
+          self failWorkflow: instanceId scope: scope reason: ('Async action ', action, ' failed: ', e messageText)
         ]
       ] ifFalse: [
         "Synchronous actions: execute FIRST, produce positive tokens only on success"
@@ -433,11 +433,12 @@ WorkflowEngine subclass: Object
           self executeAction: action transition: transition instance: instanceId params: params
         ] on: Exception do: [:e |
           bbs logEngine: 'error' component: 'WorkflowEngine' scope: scope message: ('Action ', action, ' failed: ', e messageText, ' (instance: ', instanceId, ')').
-          self failWorkflow: instanceId reason: ('Action ', action, ' failed: ', e messageText).
+          self failWorkflow: instanceId scope: scope reason: ('Action ', action, ' failed: ', e messageText).
           ^consumedTokens
         ].
-        "Check if the action internally called failWorkflow"
-        ((self workflowStatus: instanceId) = 'failed') ifTrue: [
+        "Check if the action internally called failWorkflow — use scoped rdp
+         (avoids scanAll, see scout-perf-survey §3.2)"
+        ((self workflowStatusFromWf: (bbs rdp: 'workflow' scope: scope identity: instanceId)) = 'failed') ifTrue: [
           ^consumedTokens
         ].
         "Action succeeded — produce positive output tokens"
@@ -724,28 +725,57 @@ WorkflowEngine subclass: Object
 
   "--- Workflow Completion ---"
 
-  method: scopeForInstance: instanceId [
-    "Look up the scope for a workflow instance. Returns 'default' if not found."
-    | wf |
-    wf := bbs findByCategory: 'workflow' identity: instanceId.
+  "wf-accepting variants — preferred when the engine already has the workflow
+   tuple in scope (e.g. inside tryFireTransition:, action exception handlers,
+   failWorkflow:). Avoids a full scanAll: 'workflow' per call. See
+   docs/scout-perf-survey-2026-04-28.md §3.2."
+
+  method: scopeFromWf: wf [
+    "Extract scope from a workflow tuple. Returns 'default' if wf is nil."
     ^wf notNil ifTrue: [wf at: 'scope'] ifFalse: ['default']
   ]
 
-  method: launchedByForInstance: instanceId [
-    "Look up the launched_by stamp for a workflow instance, or nil if absent."
-    | wf |
-    wf := bbs findByCategory: 'workflow' identity: instanceId.
+  method: launchedByFromWf: wf [
+    "Extract launched_by stamp from a workflow tuple, or nil if absent."
     ^wf notNil ifTrue: [wf at: 'launched_by' ifAbsent: [nil]] ifFalse: [nil]
   ]
 
-  method: workflowStatus: instanceId [
-    "Look up the current status of a workflow instance. Returns 'unknown' if not found."
-    | wf |
-    wf := bbs findByCategory: 'workflow' identity: instanceId.
+  method: workflowStatusFromWf: wf [
+    "Extract current status from a workflow tuple. Returns 'unknown' if absent."
     ^wf notNil ifTrue: [(wf at: 'payload') at: 'status' ifAbsent: ['unknown']] ifFalse: ['unknown']
   ]
 
+  method: scopeForInstance: instanceId [
+    "Look up the scope for a workflow instance. Returns 'default' if not found.
+     Prefer scopeFromWf: when the wf tuple is already loaded."
+    | wf |
+    wf := bbs findByCategory: 'workflow' identity: instanceId.
+    ^self scopeFromWf: wf
+  ]
+
+  method: launchedByForInstance: instanceId [
+    "Look up the launched_by stamp for a workflow instance, or nil if absent.
+     Prefer launchedByFromWf: when the wf tuple is already loaded."
+    | wf |
+    wf := bbs findByCategory: 'workflow' identity: instanceId.
+    ^self launchedByFromWf: wf
+  ]
+
+  method: workflowStatus: instanceId [
+    "Look up the current status of a workflow instance. Returns 'unknown' if not found.
+     Prefer workflowStatusFromWf: when the wf tuple is already loaded."
+    | wf |
+    wf := bbs findByCategory: 'workflow' identity: instanceId.
+    ^self workflowStatusFromWf: wf
+  ]
+
   method: failWorkflow: instanceId reason: reason [
+    "Mark a workflow as failed. Looks up scope via scanAll. Prefer
+     failWorkflow:scope:reason: when scope is already known."
+    ^self failWorkflow: instanceId scope: (self scopeForInstance: instanceId) reason: reason
+  ]
+
+  method: failWorkflow: instanceId scope: scope reason: reason [
     "Mark a workflow as failed. Consumes output tokens at current places
      so downstream transitions cannot fire.
 
@@ -757,9 +787,7 @@ WorkflowEngine subclass: Object
          (the next dispatch hits 'branch already exists').
        - Otherwise preserve the worktree and branches so the operator can
          recover uncommitted work. Clean up with `pp worktree clean`."
-    | scope info payload repoPath featureBranch implBranch worktreeDir standalone featureCommits implCommits cleanedUp |
-    scope := self scopeForInstance: instanceId.
-
+    | info payload repoPath featureBranch implBranch worktreeDir standalone featureCommits implCommits cleanedUp |
     bbs logEngine: 'error' component: 'WorkflowEngine' scope: scope message: ('Workflow FAILED: ', instanceId, ' — ', reason).
 
     "Atomically update workflow status to failed"
