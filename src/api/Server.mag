@@ -2519,7 +2519,7 @@ ApiServer subclass: Object
 
   method: startSSETick [
     [[true] whileTrue: [
-      Process sleep: 2000.
+      Process sleep: 5000.
       dashboardSSE tick
     ]] fork
   ]

@@ -5,7 +5,7 @@
  snapshot (workflow/token/task/notification/worker/workitem/event/watch
  scans + pre-rendered identity-independent HTML) and fans it out to every
  subscriber. Previously each subscriber triggered ~12 full-index scans
- plus N synchronous session-file reads per 2 s tick.
+ plus N synchronous session-file reads per 5 s tick.
 
  Token totals are also moved off the broadcast hot path: a background
  [self tokenCacheLoop] fork periodically reads $HOME/.pp/sessions/*.jsonl
@@ -79,7 +79,7 @@ DashboardSSE subclass: Object
       evt isNil ifTrue: [
         (q isClosed or: [conn isOpen not])
           ifTrue: [done := true]
-          ifFalse: [Process sleep: 50]
+          ifFalse: [Process sleep: 200]
       ] ifFalse: [
         [conn send: (evt at: 'data') event: (evt at: 'event')]
           on: Exception do: [:e |
