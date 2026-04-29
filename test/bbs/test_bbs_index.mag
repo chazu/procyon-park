@@ -1,0 +1,200 @@
+"Tests for the BBS auxiliary hash indices (commit 7c20120, perf survey §1.1).
+
+ The flat `index` Array is retained for full scans, but every write/remove
+ path additionally maintains three Dictionaries:
+   byId        — id (Integer) → tuple
+   byKey       — 'category|scope|identity' → Array of tuples
+   byCatIdent  — 'category|identity'        → Array of tuples (cross-scope)
+
+ Invariants under test:
+   IX1  out: populates byId / byKey / byCatIdent.
+   IX2  inp: (→ removeFromIndicesById:) removes from all three maps.
+   IX3  upsertPinned: (→ removeFromIndicesByKey:) drains all matching tuples
+        and replaces them with the new pinned tuple.
+   IX4  findInIndex: returns the latest tuple when multiple have shared a key
+        across upsert cycles.
+   IX5  findByCategory:identity: finds a tuple without knowing the scope.
+   IX6  After the last tuple at a (cat,scope,identity) is removed, the byKey
+        Dictionary has NO entry for that key (verifies key cleanup, not just
+        an empty array left behind). Same for byCatIdent.
+   IX7  scan:/scanAll: stay consistent with the hash indices through
+        interleaved out:/inp:/upsertPinned: traffic.
+
+ Standalone runner at bottom (BBSIndexMain start)."
+
+IXRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== BBS Index Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== TestBBSIndex ==="
+TestBBSIndex subclass: Object
+
+  classMethod: tempDir: tag [
+    | dir |
+    dir := '/tmp/pp-bbs-index-test-', tag, '-', DateTime now epochSeconds printString.
+    Shell run: 'rm -rf "', dir, '" && mkdir -p "', dir, '"'.
+    ^dir
+  ]
+
+  classMethod: payload: body [
+    | p |
+    p := Dictionary new.
+    p at: 'body' put: body.
+    ^p
+  ]
+
+  classMethod: run: t [
+    | dir bbs id1 id2 id3 found arr scanResult cross dir2 bbsX scanAfter beforeIds |
+    '--- TestBBSIndex ---' println.
+    dir := self tempDir: 'idx'.
+    bbs := BBS withDataDir: dir.
+
+    "=== IX1: addToIndices: populates all three maps ==="
+    id1 := bbs out: 'observation' scope: 'r' identity: 'obs-1' payload: (self payload: 'first').
+    t assert: (bbs byIdHas: id1)
+      message: 'IX1: byId contains id after out:'.
+    t assert: (bbs byKeyHasCategory: 'observation' scope: 'r' identity: 'obs-1')
+      message: 'IX1: byKey contains the cat|scope|identity key after out:'.
+    t assert: (bbs byCatIdentHasCategory: 'observation' identity: 'obs-1')
+      message: 'IX1: byCatIdent contains the cat|identity key after out:'.
+    t assertEqual: (bbs indexFlat) size to: 1
+      message: 'IX1: flat index has exactly one entry'.
+
+    "=== IX5: findByCategory:identity: cross-scope lookup ===
+     Caller does not know the scope is 'r' — global identity suffices."
+    cross := bbs findByCategory: 'observation' identity: 'obs-1'.
+    t assert: (cross notNil) message: 'IX5: findByCategory:identity: returns the tuple'.
+    cross notNil ifTrue: [
+      t assertEqual: (cross at: 'scope') to: 'r'
+        message: 'IX5: cross-scope lookup recovered the scope'
+    ].
+
+    "=== IX4: findInIndex: returns last tuple on multiple upserts ===
+     upsertPinned: writes a new pinned tuple after draining matching keys.
+     With the same (cat,scope,identity) hit twice, findInIndex: must
+     yield the latest payload — the post-upsert tuple."
+    id2 := bbs upsertPinned: 'decision' scope: 'r' identity: 'dec-1' payload: (self payload: 'v1').
+    id3 := bbs upsertPinned: 'decision' scope: 'r' identity: 'dec-1' payload: (self payload: 'v2').
+    found := bbs findInIndex: 'decision' scope: 'r' identity: 'dec-1'.
+    t assert: (found notNil) message: 'IX4: findInIndex: returns a tuple after two upserts'.
+    found notNil ifTrue: [
+      t assertEqual: ((found at: 'payload') at: 'body') to: 'v2'
+        message: 'IX4: findInIndex: returns the LATEST tuple (post-upsert)'.
+      t assertEqual: (found at: 'id') to: id3
+        message: 'IX4: returned tuple id matches the most recent upsert id'
+    ].
+
+    "=== IX3: upsertPinned: drained all matching tuples in byKey ==="
+    arr := (bbs byKeyMap) at: ('decision|r|dec-1') ifAbsent: [Array new: 0].
+    t assertEqual: arr size to: 1
+      message: 'IX3: byKey has exactly one tuple after two upserts (older drained)'.
+    "And the flat index agrees — should have id1 (obs-1) + id3 (dec-1 v2), not id2."
+    scanResult := bbs scanAll: 'decision'.
+    t assertEqual: scanResult size to: 1
+      message: 'IX3: scanAll: shows exactly one decision tuple after upsert drain'.
+    scanResult size = 1 ifTrue: [
+      t assertEqual: ((scanResult at: 0) at: 'id') to: id3
+        message: 'IX3: scanAll survivor is the latest upsert tuple'
+    ].
+
+    "=== IX7: interleaved out:/inp:/upsertPinned: keep flat 'index' consistent ===
+     We capture flat-index ids and cross-check against the byId map."
+    beforeIds := (bbs indexFlat) collect: [:tup | tup at: 'id'].
+    beforeIds do: [:tid |
+      t assert: (bbs byIdHas: tid)
+        message: 'IX7: every id in flat index is present in byId'
+    ].
+    t assertEqual: beforeIds size to: (bbs byIdMap) size
+      message: 'IX7: byId size equals flat index size'.
+
+    "=== IX2: inp: removes from byId / byKey / byCatIdent ==="
+    (bbs inp: 'observation' scope: 'r' identity: 'obs-1') isNil
+      ifTrue: [t assert: false message: 'IX2: inp: returned nil for live tuple'].
+    t assert: (bbs byIdHas: id1) not
+      message: 'IX2: byId no longer contains id1 after inp:'.
+    t assert: (bbs byKeyHasCategory: 'observation' scope: 'r' identity: 'obs-1') not
+      message: 'IX2: byKey no longer contains key after inp:'.
+    t assert: (bbs byCatIdentHasCategory: 'observation' identity: 'obs-1') not
+      message: 'IX2: byCatIdent no longer contains key after inp:'.
+
+    "=== IX6: empty-array branch — verify the KEY is dropped, not just emptied.
+     Decision dec-1 was reduced to a single tuple (id3) by upsertPinned:.
+     We can't inp: a pinned tuple — drive removal via the same removeFromIndex:
+     path that production removal goes through (e.g. via removeFromIndex:).
+     For pinned tuples we simulate consume by direct removeFromIndex:.
+     If the key were left behind as an empty array, byKeyHasCategory: would
+     still be true. Verifying the negative ensures the cleanup branch ran."
+    bbs removeFromIndex: found.
+    t assert: (bbs byKeyHasCategory: 'decision' scope: 'r' identity: 'dec-1') not
+      message: 'IX6: byKey has NO key after removing the last tuple at that key'.
+    t assert: (bbs byCatIdentHasCategory: 'decision' identity: 'dec-1') not
+      message: 'IX6: byCatIdent has NO key after removing the last tuple'.
+    t assert: (bbs byIdHas: id3) not
+      message: 'IX6: byId has no entry for the removed tuple id'.
+
+    "=== IX7 (continued): after all the churn, scan:/scanAll: stay consistent ==="
+    scanAfter := bbs scanAll: 'decision'.
+    t assertEqual: scanAfter size to: 0
+      message: 'IX7: scanAll decision is empty after final remove'.
+    t assertEqual: (bbs scan: 'observation' scope: 'r') size to: 0
+      message: 'IX7: scan observation r is empty after inp:'.
+    t assertEqual: (bbs indexFlat) size to: 0
+      message: 'IX7: flat index drained to zero — no leaked tuples'.
+    t assertEqual: (bbs byIdMap) size to: 0
+      message: 'IX7: byId drained to zero'.
+    t assertEqual: (bbs byKeyMap) size to: 0
+      message: 'IX7: byKey drained to zero'.
+    t assertEqual: (bbs byCatIdentMap) size to: 0
+      message: 'IX7: byCatIdent drained to zero'.
+
+    "Cleanup."
+    Shell run: 'rm -rf "', dir, '"'
+  ]
+
+"=== Main ==="
+BBSIndexMain subclass: Object
+  classMethod: start [
+    | t |
+    t := IXRunner new.
+    TestBBSIndex run: t.
+    t report.
+    ^t failed
+  ]
