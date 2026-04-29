@@ -106,6 +106,12 @@ MultiplayerTestMain subclass: Object
         failures := failures copyWith: ('SSEQueueTestMain CRASHED: ', e messageText).
         ('CRASH: SSEQueueTestMain: ', e messageText) println].
 
+    [totalFailed := totalFailed + NotificationHubTestMain start. ranSuites := ranSuites + 1]
+      on: Exception do: [:e |
+        failedSuites := failedSuites + 1.
+        failures := failures copyWith: ('NotificationHubTestMain CRASHED: ', e messageText).
+        ('CRASH: NotificationHubTestMain: ', e messageText) println].
+
     [totalFailed := totalFailed + TaskAffinityMain start. ranSuites := ranSuites + 1]
       on: Exception do: [:e |
         failedSuites := failedSuites + 1.
@@ -177,6 +183,12 @@ MultiplayerTestMain subclass: Object
         failedSuites := failedSuites + 1.
         failures := failures copyWith: ('TestBBSCmdMain CRASHED: ', e messageText).
         ('CRASH: TestBBSCmdMain: ', e messageText) println].
+
+    [totalFailed := totalFailed + TestStringUtilMain run. ranSuites := ranSuites + 1]
+      on: Exception do: [:e |
+        failedSuites := failedSuites + 1.
+        failures := failures copyWith: ('TestStringUtilMain CRASHED: ', e messageText).
+        ('CRASH: TestStringUtilMain: ', e messageText) println].
 
     "--- Pending suites (documented reasons, not invoked) ---"
     '' println.

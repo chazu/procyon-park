@@ -7,6 +7,15 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+- Slice-by-prefix off-by-one in `ApiServer>>watchWorkflowsFor:` (Server.mag)
+  and `DashboardSSE>>renderTodayWindow` (scope-violation aggregation): both
+  used `prefix size + 1` against Maggie's exclusive `copyFrom:to:` upper
+  bound, dropping the first character of the suffix. Centralised the slice
+  in a new `StringUtil>>stripPrefix:from:` helper and replaced all three
+  sites (the third was the already-correct
+  `Scheduler>>taskIdFromCompleteEvent:`). See scout survey §1.9.
+
 ### Performance
 - `WorkflowEngine` failure path no longer triggers redundant
   `scanAll: 'workflow'` calls. Added wf-accepting variants

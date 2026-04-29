@@ -1,0 +1,31 @@
+"StringUtil — small helpers for String slicing operations.
+
+ Maggie's String>>copyFrom:to: uses 0-indexed half-open [start, end)
+ (Go-style) — the upper bound is EXCLUSIVE. This is a frequent
+ off-by-one source when stripping a known prefix off a tagged identity
+ such as 'task-complete:<taskId>' or '<user>:<wfId>'.
+
+ stripPrefix:from: centralises the correct slice so callers never have
+ to think about the index convention again. It returns:
+   * the suffix (possibly empty) when the receiver starts with the prefix
+   * nil when the prefix does not match (so callers can branch)
+
+ Empty prefix is a no-op: it always 'matches' and the original string
+ is returned unchanged. Empty input combined with a non-empty prefix
+ returns nil — the prefix cannot match a shorter string."
+
+StringUtil subclass: Object
+
+  classMethod: stripPrefix: prefix from: s [
+    "Return the suffix of s after prefix, or nil when prefix is not a
+     prefix of s. Empty prefix returns s unchanged. Nil receiver
+     returns nil."
+    s isNil ifTrue: [^nil].
+    prefix isNil ifTrue: [^s].
+    prefix isEmpty ifTrue: [^s].
+    (s startsWith: prefix) ifFalse: [^nil].
+    "copyFrom:to: is 0-indexed half-open [start, end) (Go-style). To
+     strip the prefix we start at index = prefix size, not prefix size
+     + 1, and end at s size."
+    ^s copyFrom: prefix size to: s size
+  ]

@@ -1,0 +1,208 @@
+"Tests for NotificationHub — pub/sub fan-out replacing the old BBS
+ polling pattern (see src/api/NotificationHub.mag header).
+
+ Invariants under test:
+   NH1  subscribe → publish → drain delivers to all matching subscribers
+        in publish order; non-matching subscribers stay empty.
+   NH2  A subscriber whose filter raises does not poison delivery for
+        peers (NotificationHub.mag:76 swallows filter exceptions).
+   NH3  publish concurrent with unsubscribe leaves no zombie entries:
+        after both forks finish, subscribers Array is consistent and
+        the unsubscribed subscriber receives no further deliveries.
+   NH4  After 1000 subscribe/unsubscribe pairs, subscriberCount returns
+        to its baseline (no leaks in the subscribers Array).
+   NH5  drain: atomically reads-and-clears pending; the second drain on
+        the same subscription returns an empty Array."
+
+NHRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                       ifFalse: [
+                         failed := failed + 1.
+                         failures := failures copyWith: msg.
+                         ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println]
+  ]
+
+  method: report [
+    '=== NotificationHub Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0 ifTrue: ['ALL TESTS PASSED' println]
+              ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TestNotificationHub subclass: Object
+
+  classMethod: run: t [
+    self testFanoutOrder: t.
+    self testFilterException: t.
+    self testUnsubscribeContention: t.
+    self testSubscribeUnsubscribeChurn: t.
+    self testDrainAtomic: t
+  ]
+
+  classMethod: makeTuple: cat ident: ident [
+    | tup |
+    tup := Dictionary new.
+    tup at: 'category' put: cat.
+    tup at: 'identity' put: ident.
+    ^tup
+  ]
+
+  classMethod: testFanoutOrder: t [
+    "NH1: every subscriber whose filter accepts the tuple receives it
+     in publish order; non-matching subscribers receive nothing."
+    | hub subA subB subC tA tB tC pendA pendB pendC |
+    hub := NotificationHub new.
+    subA := hub subscribe: [:tup | (tup at: 'category') = 'notification'].
+    subB := hub subscribe: [:tup | (tup at: 'category') = 'notification'].
+    subC := hub subscribe: [:tup | (tup at: 'category') = 'never-matches'].
+    tA := self makeTuple: 'notification' ident: 'a'.
+    tB := self makeTuple: 'notification' ident: 'b'.
+    tC := self makeTuple: 'notification' ident: 'c'.
+    hub publish: tA.
+    hub publish: tB.
+    hub publish: tC.
+    pendA := hub drain: subA.
+    pendB := hub drain: subB.
+    pendC := hub drain: subC.
+    t assertEqual: pendA size to: 3 message: 'NH1: subA got 3 tuples'.
+    t assertEqual: pendB size to: 3 message: 'NH1: subB got 3 tuples'.
+    t assertEqual: pendC size to: 0 message: 'NH1: subC got 0 tuples'.
+    t assertEqual: ((pendA at: 0) at: 'identity') to: 'a'
+      message: 'NH1: subA[0] = a (publish order)'.
+    t assertEqual: ((pendA at: 1) at: 'identity') to: 'b'
+      message: 'NH1: subA[1] = b'.
+    t assertEqual: ((pendA at: 2) at: 'identity') to: 'c'
+      message: 'NH1: subA[2] = c'.
+    t assertEqual: ((pendB at: 0) at: 'identity') to: 'a'
+      message: 'NH1: subB[0] = a (publish order)'
+  ]
+
+  classMethod: testFilterException: t [
+    "NH2: a filter that raises must not stop later subscribers from
+     receiving the tuple. Hub.mag:76 wraps the filter in on:do:."
+    | hub subBad subGood tup pendBad pendGood |
+    hub := NotificationHub new.
+    subBad  := hub subscribe: [:tup | tup explode].
+    subGood := hub subscribe: [:tup | true].
+    tup := self makeTuple: 'notification' ident: 'survivor'.
+    hub publish: tup.
+    pendBad  := hub drain: subBad.
+    pendGood := hub drain: subGood.
+    t assertEqual: pendBad size to: 0
+      message: 'NH2: bad-filter subscriber got nothing (treated as no-match)'.
+    t assertEqual: pendGood size to: 1
+      message: 'NH2: good-filter subscriber still got the tuple'.
+    t assertEqual: ((pendGood at: 0) at: 'identity') to: 'survivor'
+      message: 'NH2: good subscriber received correct tuple'
+  ]
+
+  classMethod: testUnsubscribeContention: t [
+    "NH3: publish + unsubscribe in parallel must leave the hub
+     consistent — no zombie subscriber entries, doomed subscriber
+     receives no deliveries after unsubscribe completes.
+     We use a flag-flip to coordinate fork completion (no WaitGroup)."
+    | hub doomed live doneFlag tup deliveredToLive iter |
+    hub := NotificationHub new.
+    doomed := hub subscribe: [:t1 | true].
+    live   := hub subscribe: [:t1 | true].
+    doneFlag := Array new: 2.
+    doneFlag at: 0 put: false.
+    doneFlag at: 1 put: false.
+    tup := self makeTuple: 'notification' ident: 'race'.
+    [200 timesRepeat: [hub publish: tup].
+     doneFlag at: 0 put: true] fork.
+    [Process sleep: 1.
+     hub unsubscribe: doomed.
+     doneFlag at: 1 put: true] fork.
+    iter := 0.
+    [((doneFlag at: 0) and: [doneFlag at: 1]) not and: [iter < 200]]
+      whileTrue: [Process sleep: 10. iter := iter + 1].
+    t assert: (doneFlag at: 0) message: 'NH3: publisher fork finished'.
+    t assert: (doneFlag at: 1) message: 'NH3: unsubscriber fork finished'.
+    t assertEqual: hub subscriberCount to: 1
+      message: 'NH3: only one subscriber remains (no zombie)'.
+    "Post-race: drain both, then publish 'after' — only live should
+     see it. Note that doomed may have caught race-window tuples
+     before unsubscribe completed; we only assert no NEW deliveries."
+    deliveredToLive := hub drain: live.
+    hub drain: doomed.
+    t assert: deliveredToLive size > 0
+      message: 'NH3: live subscriber received some tuples during race'.
+    hub publish: (self makeTuple: 'notification' ident: 'after').
+    t assertEqual: (hub drain: doomed) size to: 0
+      message: 'NH3: doomed subscriber got nothing post-unsubscribe'.
+    t assertEqual: (((hub drain: live) at: 0) at: 'identity')
+      to: 'after'
+      message: 'NH3: live still receives after the race'
+  ]
+
+  classMethod: testSubscribeUnsubscribeChurn: t [
+    "NH4: 1000 paired subscribe/unsubscribe leaves subscriberCount at
+     the original baseline. Detects leaks in the subscribers Array."
+    | hub baseline i sub |
+    hub := NotificationHub new.
+    baseline := hub subscriberCount.
+    i := 0.
+    [i < 1000] whileTrue: [
+      sub := hub subscribe: [:tup | true].
+      hub unsubscribe: sub.
+      i := i + 1
+    ].
+    t assertEqual: hub subscriberCount to: baseline
+      message: 'NH4: subscriberCount returns to baseline after 1000 churn'
+  ]
+
+  classMethod: testDrainAtomic: t [
+    "NH5: drain returns the pending list and resets it to empty;
+     a second drain on the same sub returns size 0."
+    | hub sub first second |
+    hub := NotificationHub new.
+    sub := hub subscribe: [:tup | true].
+    hub publish: (self makeTuple: 'notification' ident: 'x').
+    hub publish: (self makeTuple: 'notification' ident: 'y').
+    first := hub drain: sub.
+    second := hub drain: sub.
+    t assertEqual: first size to: 2
+      message: 'NH5: first drain returns both pending tuples'.
+    t assertEqual: second size to: 0
+      message: 'NH5: second drain returns empty (atomic clear)'.
+    t assertEqual: (hub pendingFor: sub) size to: 0
+      message: 'NH5: pendingFor: confirms cleared state'
+  ]
+
+"=== Main ==="
+NotificationHubTestMain subclass: Object
+  classMethod: start [
+    | t |
+    t := NHRunner new.
+    TestNotificationHub run: t.
+    t report.
+    ^t failed
+  ]
