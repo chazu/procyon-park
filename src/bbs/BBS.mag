@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex cueCtx startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener
+  instanceVars: space nextId mutex startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener
 
   classMethod: new [
     ^super new initialize
@@ -27,7 +27,6 @@ BBS subclass: Object
     space := TupleSpace new.
     nextId := 0.
     mutex := Mutex new.
-    cueCtx := CueContext new.
     startedAt := DateTime now.
     index := Array new: 0.
     byId := Dictionary new.
@@ -363,18 +362,6 @@ BBS subclass: Object
     ^filtered
   ]
 
-  method: workitemTuple: a precedesTuple: b [
-    "Ordering helper: (wave asc, identity asc)."
-    | wa wb ia ib |
-    wa := (a at: 'payload' ifAbsent: [Dictionary new]) at: 'wave' ifAbsent: [1].
-    wb := (b at: 'payload' ifAbsent: [Dictionary new]) at: 'wave' ifAbsent: [1].
-    wa < wb ifTrue: [^true].
-    wa > wb ifTrue: [^false].
-    ia := a at: 'identity' ifAbsent: [''].
-    ib := b at: 'identity' ifAbsent: [''].
-    ^ia < ib
-  ]
-
   method: scanChildrenOf: parentId scope: aScope [
     "Scan workitems in scope and return the children of parentId,
      ordered by wave/identity. Convenience for callers that haven't
@@ -417,14 +404,6 @@ BBS subclass: Object
     ]
   ]
 
-  method: removeFromIndexUnsafe: tuple [
-    "Remove a tuple from the index without acquiring the mutex.
-     Caller MUST hold the mutex. Does not trigger persistence."
-    | tupleId |
-    tupleId := tuple at: 'id'.
-    self removeFromIndicesById: tupleId
-  ]
-
   "--- Atomic Update Operations ---"
 
   method: update: category scope: scope identity: identity do: aBlock [
@@ -436,7 +415,7 @@ BBS subclass: Object
     result := space tryIn: tmpl.
     result isNil ifTrue: [^nil].
 
-    mutex critical: [self removeFromIndexUnsafe: result].
+    mutex critical: [self removeFromIndicesById: (result at: 'id')].
     self appendHistory: 'consume' tuple: result.
 
     payload := result at: 'payload'.

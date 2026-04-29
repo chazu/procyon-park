@@ -7,6 +7,23 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Removed
+- Dead code per scout §3 cleanup:
+  - `Dispatcher>>reconcile` (empty placeholder) and its onTick caller.
+  - `Dispatcher>>expireAffineTuples` (empty placeholder) and its
+    housekeep caller — TupleSpace already handles affine TTLs natively.
+  - `BBS>>workitemTuple:precedesTuple:` (unused after `childrenOfParent:`
+    was switched to `sort:`).
+  - `BBS` `cueCtx` instance variable — assigned but never read.
+  - `BBS>>removeFromIndexUnsafe:` — inlined into its sole caller
+    (`update:scope:identity:do:`).
+  - Deprecated `Server>>handleWorkitemAddChild:` and the
+    `/api/workitem/add-child` route — no in-tree callers remained.
+  - Back-compat overload ladders for
+    `Dispatcher>>instantiateWorkflow:scope:params:...` and
+    `WorkflowEngine>>tryFireTransition:...` — only the widest signature
+    is kept; in-tree callers were migrated.
+
 ### Performance
 - `WorkflowEngine` failure path no longer triggers redundant
   `scanAll: 'workflow'` calls. Added wf-accepting variants

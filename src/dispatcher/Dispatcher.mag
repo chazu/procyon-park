@@ -86,13 +86,6 @@ Dispatcher subclass: Object
       ('Dispatcher tick step error (flushAsyncIfDirty): ', e messageText) println
     ].
 
-    "Every 6th tick (~60s): reconciliation"
-    (tick \\ 6) = 0 ifTrue: [
-      [self reconcile] on: Exception do: [:e |
-        ('Dispatcher tick step error (reconcile): ', e messageText) println
-      ]
-    ].
-
     "Every 30th tick (~5min): housekeeping"
     (tick \\ 30) = 0 ifTrue: [
       [self housekeep] on: Exception do: [:e |
@@ -204,25 +197,12 @@ Dispatcher subclass: Object
     ]
   ]
 
-  "--- Reconciliation ---"
-
-  method: reconcile [
-    "Periodic reconciliation tasks."
-    "MVP: no-op. Future: reconcile rules from CUE files, slot state."
-  ]
-
   "--- Housekeeping ---"
 
   method: housekeep [
-    "Periodic housekeeping: expire affine tuples, clean up completed workflows."
-    self expireAffineTuples.
+    "Periodic housekeeping: clean up completed workflows.
+     (Affine-tuple expiry is handled natively by TupleSpace's outAffine:ttl:.)"
     self cleanCompletedWorkflows
-  ]
-
-  method: expireAffineTuples [
-    "Scan for expired affine tuples. The TupleSpace handles TTL natively,
-     but we check for any that slipped through."
-    "MVP: TupleSpace's outAffine:ttl: handles this natively."
   ]
 
   method: cleanCompletedWorkflows [
@@ -248,17 +228,6 @@ Dispatcher subclass: Object
   ]
 
   "--- Direct Operations ---"
-
-  method: instantiateWorkflow: templateId scope: scope params: params [
-    "Convenience: directly instantiate a workflow. No launched_by attribution."
-    ^workflowEngine instantiate: templateId scope: scope params: params launchedBy: nil
-  ]
-
-  method: instantiateWorkflow: templateId scope: scope params: params launchedBy: launchedBy [
-    "Convenience: directly instantiate a workflow, stamping every tuple with
-     launchedBy (typically the verified user:<name> or admin:<hex> signer)."
-    ^workflowEngine instantiate: templateId scope: scope params: params launchedBy: launchedBy
-  ]
 
   method: instantiateWorkflow: templateId scope: scope params: params launchedBy: launchedBy overrideAffinity: overrideAffinity [
     "F4.3: instantiate a workflow with a CLI-provided affinity override that
