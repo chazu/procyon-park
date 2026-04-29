@@ -1,0 +1,232 @@
+"Tests for the BBS async-flush fence (BBS>>flushAsyncIfDirty and the
+ in-flight coordination with flushIfDirty). See BBS.mag:734-758.
+
+ Invariants under test:
+   FA1  Two flushAsyncIfDirty calls in a tight loop, against a single
+        dirty tuple, result in EXACTLY ONE saveToDisk invocation. The
+        fence (flushInProgress + dirty) must dedup; we must not see two
+        forked writers racing on the same .tmp/rename.
+   FA2  A flushIfDirty issued while an async flush is in-flight blocks
+        until the fork clears the fence, then performs its own save (if
+        the BBS was re-dirtied between the two calls). Net: no overlap,
+        no .tmp clash, both writes counted.
+   FA3  When saveToDisk fails inside the background fork, dirty is
+        re-set so the next flush call retries (data is not silently
+        lost).
+   FA4  flushAsyncIfDirty against a clean (non-dirty) BBS is a no-op:
+        no fork, no saveToDisk invocation.
+
+ Test injection:
+   These tests install a saveToDiskHook (added in BBS.mag) that lets the
+   test count invocations and inject sleeps / failures without touching
+   real disk. The hook is the minimal seam that lets us observe fork
+   behaviour from outside; production code must NOT install one."
+
+"=== FlushProbe — thread-safe call-counter / latency injector ==="
+FlushProbe subclass: Object
+  instanceVars: count mtx sleepMs raiseOnce raiseAlways
+
+  classMethod: new [ ^super new initProbe ]
+
+  method: initProbe [
+    count := 0.
+    mtx := Mutex new.
+    sleepMs := 0.
+    raiseOnce := false.
+    raiseAlways := false.
+    ^self
+  ]
+
+  method: count [ ^mtx critical: [count] ]
+  method: bump [ mtx critical: [count := count + 1] ]
+  method: sleepMs: ms [ sleepMs := ms ]
+  method: raiseOnce: b [ raiseOnce := b ]
+  method: raiseAlways: b [ raiseAlways := b ]
+
+  method: invoke: bbs [
+    "Simulated saveToDisk body. Returns nothing meaningful; tests inspect
+     the counter via count."
+    self bump.
+    sleepMs > 0 ifTrue: [Process sleep: sleepMs].
+    raiseAlways ifTrue: [Error signal: 'simulated saveToDisk failure (always)'].
+    raiseOnce ifTrue: [
+      raiseOnce := false.
+      Error signal: 'simulated saveToDisk failure (once)'
+    ]
+  ]
+
+"=== FARunner ==="
+FARunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== BBS Async-Flush Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== TestBBSFlushAsync ==="
+TestBBSFlushAsync subclass: Object
+
+  classMethod: tempDir: tag [
+    | dir |
+    dir := '/tmp/pp-bbs-flush-async-', tag, '-', DateTime now epochSeconds printString.
+    Shell run: 'rm -rf "', dir, '" && mkdir -p "', dir, '"'.
+    ^dir
+  ]
+
+  classMethod: writeDurable: bbs body: body identity: ident [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'body' put: body.
+    bbs out: 'fact' scope: 'r' identity: ident payload: payload
+  ]
+
+  classMethod: waitForFenceClear: bbs maxMs: maxMs [
+    "Poll until no async flush is in flight. We can't read the fence
+     ivar directly, but flushIfDirty's own wait loop encodes the same
+     wait. As a proxy we sleep in 10ms increments up to maxMs. This is
+     a test-only convenience; production callers use flushIfDirty."
+    | waited |
+    waited := 0.
+    [waited < maxMs] whileTrue: [
+      Process sleep: 10.
+      waited := waited + 10
+    ]
+  ]
+
+  classMethod: run: t [
+    | dir1 bbs1 probe1 dir2 bbs2 probe2 dir3 bbs3 probe3 countAfterFirst dir4 bbs4 probe4 |
+    '--- TestBBSFlushAsync ---' println.
+
+    "=== FA1: tight-loop double-flushAsyncIfDirty → exactly one saveToDisk ==="
+    dir1 := self tempDir: 'fa1'.
+    bbs1 := BBS withDataDir: dir1.
+    probe1 := FlushProbe new.
+    probe1 sleepMs: 150.  "Hold the fork in saveToDisk so the second call sees flushInProgress=true."
+    bbs1 saveToDiskHook: [:b | probe1 invoke: b].
+    self writeDurable: bbs1 body: 'tight-loop' identity: 'fa1-1'.
+    "Tight loop: two calls back-to-back. Even one of them firing the
+     fork is enough to clear dirty; the second must dedup."
+    bbs1 flushAsyncIfDirty.
+    bbs1 flushAsyncIfDirty.
+    "Wait for the fork to complete (sleep 150ms + slack)."
+    Process sleep: 400.
+    t assertEqual: probe1 count to: 1
+      message: 'FA1: two tight-loop flushAsyncIfDirty calls invoke saveToDisk exactly once'.
+
+    "=== FA2: flushIfDirty mid-flight waits for async fork ===
+     Sequence:
+       1. dirty tuple A → flushAsyncIfDirty starts a slow fork
+       2. dirty tuple B (re-marks dirty while fork is in flight)
+       3. flushIfDirty must wait for the fork to clear the fence, then
+          perform its own synchronous save → count goes 1 → 2.
+     Without the fence, two writers would clobber the same bbs.json.tmp."
+    dir2 := self tempDir: 'fa2'.
+    bbs2 := BBS withDataDir: dir2.
+    probe2 := FlushProbe new.
+    probe2 sleepMs: 200.
+    bbs2 saveToDiskHook: [:b | probe2 invoke: b].
+    self writeDurable: bbs2 body: 'mid-flight-A' identity: 'fa2-A'.
+    bbs2 flushAsyncIfDirty.
+    "Re-dirty BEFORE the fork finishes — flushIfDirty must then both
+     wait for the fence AND emit its own save."
+    Process sleep: 20.
+    self writeDurable: bbs2 body: 'mid-flight-B' identity: 'fa2-B'.
+    bbs2 flushIfDirty.
+    "By the time flushIfDirty returns, both invocations must be done.
+     No additional sleep needed: flushIfDirty is synchronous on its own
+     save and its preamble waits the fork out."
+    t assertEqual: probe2 count to: 2
+      message: 'FA2: flushIfDirty mid-flight serializes after the async fork (count=2)'.
+
+    "=== FA3: saveToDisk failure re-sets dirty for retry ===
+     Inject a one-shot failure. After the failed fork settles, dirty
+     must be true again. We prove this by issuing a second flushAsyncIfDirty
+     and observing that saveToDisk fires a SECOND time — it would not
+     fire if the failure had silently cleared dirty."
+    dir3 := self tempDir: 'fa3'.
+    bbs3 := BBS withDataDir: dir3.
+    probe3 := FlushProbe new.
+    probe3 raiseOnce: true.
+    bbs3 saveToDiskHook: [:b | probe3 invoke: b].
+    self writeDurable: bbs3 body: 'will-fail' identity: 'fa3-1'.
+    bbs3 flushAsyncIfDirty.
+    "Wait for the fork to raise + clear flushInProgress. The exception
+     is caught inside the fork; dirty := true is the recovery."
+    Process sleep: 100.
+    countAfterFirst := probe3 count.
+    t assertEqual: countAfterFirst to: 1
+      message: 'FA3: failing fork still invoked saveToDisk once'.
+    "Retry — should fire because dirty was re-set."
+    bbs3 flushAsyncIfDirty.
+    Process sleep: 100.
+    t assertEqual: probe3 count to: 2
+      message: 'FA3: dirty re-set after failure; next flushAsyncIfDirty retries'.
+
+    "=== FA4: idempotence — flushAsyncIfDirty when not dirty is a no-op ==="
+    dir4 := self tempDir: 'fa4'.
+    bbs4 := BBS withDataDir: dir4.
+    probe4 := FlushProbe new.
+    bbs4 saveToDiskHook: [:b | probe4 invoke: b].
+    "Brand-new BBS, no writes ⇒ dirty = false."
+    bbs4 flushAsyncIfDirty.
+    bbs4 flushAsyncIfDirty.
+    bbs4 flushAsyncIfDirty.
+    Process sleep: 50.
+    t assertEqual: probe4 count to: 0
+      message: 'FA4: flushAsyncIfDirty against clean BBS is a no-op'.
+
+    "Cleanup"
+    Shell run: 'rm -rf "', dir1, '" "', dir2, '" "', dir3, '" "', dir4, '"'
+  ]
+
+"=== Main ==="
+BBSFlushAsyncMain subclass: Object
+  classMethod: start [
+    | t |
+    t := FARunner new.
+    [TestBBSFlushAsync run: t]
+      on: Exception do: [:e |
+        ('CRASH: TestBBSFlushAsync: ', e messageText) println.
+        ^1].
+    t report.
+    ^t failed
+  ]

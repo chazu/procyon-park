@@ -178,6 +178,12 @@ MultiplayerTestMain subclass: Object
         failures := failures copyWith: ('TestBBSCmdMain CRASHED: ', e messageText).
         ('CRASH: TestBBSCmdMain: ', e messageText) println].
 
+    [totalFailed := totalFailed + BBSFlushAsyncMain start. ranSuites := ranSuites + 1]
+      on: Exception do: [:e |
+        failedSuites := failedSuites + 1.
+        failures := failures copyWith: ('BBSFlushAsyncMain CRASHED: ', e messageText).
+        ('CRASH: BBSFlushAsyncMain: ', e messageText) println].
+
     "--- Pending suites (documented reasons, not invoked) ---"
     '' println.
     '--- Pending multiplayer suites (skipped, tracked separately) ---' println.

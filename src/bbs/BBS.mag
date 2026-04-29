@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex cueCtx startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener
+  instanceVars: space nextId mutex cueCtx startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener saveToDiskHook
 
   classMethod: new [
     ^super new initialize
@@ -616,11 +616,24 @@ BBS subclass: Object
     Shell run: 'mkdir -p "', dataDir, '"' timeout: 10
   ]
 
+  method: saveToDiskHook: aBlock [
+    "Test-only injection point. When set, replaces the body of saveToDisk:
+     the block is invoked with the receiver and its return value is
+     ignored. Tests use this to count fork invocations or simulate write
+     failures (an exception raised in the block is propagated normally).
+     Pass nil to restore the default disk-writer. Production code MUST
+     NOT install a hook — see test/bbs/test_bbs_flush_async.mag."
+    saveToDiskHook := aBlock
+  ]
+
   method: saveToDisk [
     "Persist durable tuples to disk. Only saves tuples in categories that
      should survive a restart (conventions, decisions, facts, templates,
      rules, signals, artifacts, links). Skips ephemeral data."
     | durable json filePath tmpPath |
+    "Test injection point: a hook installed via saveToDiskHook: shadows
+     the default writer. See note on saveToDiskHook:."
+    saveToDiskHook notNil ifTrue: [^saveToDiskHook value: self].
     filePath := dataDir, '/bbs.json'.
     tmpPath := filePath, '.tmp'.
 
