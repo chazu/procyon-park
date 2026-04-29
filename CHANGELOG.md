@@ -8,6 +8,16 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Changed
+- Migrated 6 manual payload-clone + `upsertPinned:` sites to use the
+  existing `BBS>>updatePinned:scope:identity:do:` block helper (which
+  already does the safe payload-copy + atomic replace). Added an
+  `actor:do:` overload so the 4 sites that needed actor attribution
+  (`handleWorkitemUpdate:`, `handleWorkitemComment:`, `handleUserRevoke:`,
+  `handleUserRotate:`) can also use it. Sites in `Server.mag`
+  (`updateWorkitemStatus:`, `handleWorkitemUpdate:` plus its child
+  cascade, `handleWorkitemComment:`, `handleUserRevoke:`,
+  `handleUserRotate:`) and `WorkflowEngine.mag` (`markWorkitemDone:`).
+  Net diff: -36 source lines. Scout survey §1.3.
 - Replaced `Array new: 0` + sequential `copyWith:` build-up patterns
   with array literal syntax `#('a' 'b' 'c')` where the leading elements
   are static strings. Touches `WorkflowEngine>>buildAffinity:` (5-element

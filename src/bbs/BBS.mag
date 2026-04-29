@@ -452,8 +452,14 @@ BBS subclass: Object
   ]
 
   method: updatePinned: category scope: scope identity: identity do: aBlock [
+    ^self updatePinned: category scope: scope identity: identity actor: nil do: aBlock
+  ]
+
+  method: updatePinned: category scope: scope identity: identity actor: actor do: aBlock [
     "Atomically replace a pinned tuple after applying aBlock to its payload.
-     Returns the new tuple id, or nil if no matching tuple was found."
+     Returns the new tuple id, or nil if no matching tuple was found.
+     The cloned payload is yielded to aBlock for in-place mutation; callers
+     that need the post-mutation payload can capture it via closure."
     | existing payload d |
     existing := self findInIndex: category scope: scope identity: identity.
     existing isNil ifTrue: [^nil].
@@ -464,7 +470,9 @@ BBS subclass: Object
     "Remove all matching from index, write new pinned tuple"
     mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
 
-    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId.
+    d := actor isNil
+      ifTrue: [Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId]
+      ifFalse: [Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor].
     space outPersistent: d.
     mutex critical: [self addToIndices: d].
     self appendHistory: 'upsert-pinned' tuple: d.
