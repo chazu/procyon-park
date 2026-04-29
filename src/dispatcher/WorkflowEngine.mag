@@ -853,11 +853,12 @@ WorkflowEngine subclass: Object
     item isNil ifTrue: [^self].
     payload := item at: 'payload'.
     (payload at: 'status' ifAbsent: ['']) = 'done' ifTrue: [^self].
-    newPayload := Dictionary new.
-    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
-    newPayload at: 'status' put: 'done'.
-    newPayload at: 'updated_at' put: DateTime now epochSeconds.
-    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload.
+    newPayload := nil.
+    bbs updatePinned: 'workitem' scope: scope identity: identity do: [:p |
+      p at: 'status' put: 'done'.
+      p at: 'updated_at' put: DateTime now epochSeconds.
+      newPayload := p
+    ].
     self maybePromoteParent: newPayload scope: scope
   ]
 

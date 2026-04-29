@@ -2230,7 +2230,7 @@ ApiServer subclass: Object
   method: handleWorkitemUpdate: req actor: actorCtx [
     "POST /api/workitem/update — update fields on a work item.
      Body: {identity, scope, fields: {status, title, ...}, cascade?}"
-    | body scope identity fields cascade item payload newPayload actor |
+    | body scope identity fields cascade item newPayload actor |
     actor := self actorOf: actorCtx.
     body := self parseBody: req.
     body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
@@ -2261,34 +2261,28 @@ ApiServer subclass: Object
       fields removeKey: 'parent' ifAbsent: [nil]
     ].
 
-    "Merge fields into existing payload"
-    payload := item at: 'payload'.
-    newPayload := Dictionary new.
-    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
-    fields keysAndValuesDo: [:k :v | newPayload at: k put: v].
-    "Also strip any legacy 'children' field from the stored payload itself
-     so rewrites of older tuples eliminate stale data opportunistically."
-    (newPayload includesKey: 'children') ifTrue: [
-      newPayload removeKey: 'children' ifAbsent: [nil]
+    "Merge fields into existing payload. Also strip any legacy 'children'
+     field from the stored payload itself so rewrites of older tuples
+     eliminate stale data opportunistically."
+    newPayload := nil.
+    bbs updatePinned: 'workitem' scope: scope identity: identity actor: actor do: [:p |
+      fields keysAndValuesDo: [:k :v | p at: k put: v].
+      (p includesKey: 'children') ifTrue: [p removeKey: 'children' ifAbsent: [nil]].
+      newPayload := p
     ].
-
-    "Atomically replace"
-    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload actor: actor.
 
     "Cascade status to children if requested. Children are derived from
      payload.parent — scan workitems in scope rather than trusting a
      denormalised children[] field."
     (cascade and: [fields includesKey: 'status']) ifTrue: [
-      | children childPayload newChildPayload childId |
+      | children childId |
       children := bbs scanChildrenOf: identity scope: scope.
       children do: [:childItem |
         childId := childItem at: 'identity'.
-        childPayload := childItem at: 'payload'.
-        newChildPayload := Dictionary new.
-        childPayload keysAndValuesDo: [:k :v | newChildPayload at: k put: v].
-        newChildPayload at: 'status' put: (fields at: 'status').
-        newChildPayload at: 'updated_at' put: DateTime now epochSeconds.
-        bbs upsertPinned: 'workitem' scope: scope identity: childId payload: newChildPayload actor: actor
+        bbs updatePinned: 'workitem' scope: scope identity: childId actor: actor do: [:p |
+          p at: 'status' put: (fields at: 'status').
+          p at: 'updated_at' put: DateTime now epochSeconds
+        ]
       ]
     ].
 
@@ -2333,7 +2327,7 @@ ApiServer subclass: Object
 
   method: handleWorkitemComment: req actor: actorCtx [
     "POST /api/workitem/comment — add a comment to a work item."
-    | body scope identity author text item payload comments comment newPayload |
+    | body scope identity author text item comments comment |
     body := self parseBody: req.
     body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
 
@@ -2346,8 +2340,7 @@ ApiServer subclass: Object
     item := bbs findInIndex: 'workitem' scope: scope identity: identity.
     item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
 
-    payload := item at: 'payload'.
-    comments := payload at: 'comments' ifAbsent: [#()].
+    comments := (item at: 'payload') at: 'comments' ifAbsent: [#()].
 
     comment := Dictionary new.
     comment at: 'author' put: author.
@@ -2355,13 +2348,10 @@ ApiServer subclass: Object
     comment at: 'timestamp' put: DateTime now epochSeconds.
     comments := comments copyWith: comment.
 
-    "Rewrite with new comments"
-    newPayload := Dictionary new.
-    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
-    newPayload at: 'comments' put: comments.
-    newPayload at: 'updated_at' put: DateTime now epochSeconds.
-
-    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload actor: (self actorOf: actorCtx).
+    bbs updatePinned: 'workitem' scope: scope identity: identity actor: (self actorOf: actorCtx) do: [:p |
+      p at: 'comments' put: comments.
+      p at: 'updated_at' put: DateTime now epochSeconds
+    ].
 
     ^self okResponse: (self okWithCount: 'comments' count: comments size)
   ]
@@ -2418,15 +2408,10 @@ ApiServer subclass: Object
 
   method: updateWorkitemStatus: identity scope: scope status: newStatus [
     "Helper: update a work item's status."
-    | item payload newPayload |
-    item := bbs findInIndex: 'workitem' scope: scope identity: identity.
-    item isNil ifTrue: [^self].
-    payload := item at: 'payload'.
-    newPayload := Dictionary new.
-    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
-    newPayload at: 'status' put: newStatus.
-    newPayload at: 'updated_at' put: DateTime now epochSeconds.
-    bbs upsertPinned: 'workitem' scope: scope identity: identity payload: newPayload
+    bbs updatePinned: 'workitem' scope: scope identity: identity do: [:p |
+      p at: 'status' put: newStatus.
+      p at: 'updated_at' put: DateTime now epochSeconds
+    ]
   ]
 
   "--- History ---"
@@ -2563,7 +2548,7 @@ ApiServer subclass: Object
     "POST /api/user/revoke — admin-gated. Body: {name}.
      Flips the identity payload's status to 'revoked'. Prior history is
      retained by BBS history log for audit."
-    | name existing payload newPayload actor |
+    | name existing |
     actorCtx isAdmin ifFalse: [
       ^self errorResponse: 401 message: 'admin signature required'
     ].
@@ -2572,13 +2557,10 @@ ApiServer subclass: Object
     existing isNil ifTrue: [
       ^self errorResponse: 404 message: 'identity not found for ', name
     ].
-    payload := existing at: 'payload' ifAbsent: [Dictionary new].
-    newPayload := Dictionary new.
-    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
-    newPayload at: 'status' put: 'revoked'.
-    newPayload at: 'revoked_at' put: DateTime now epochSeconds.
-    actor := self actorOf: actorCtx.
-    bbs upsertPinned: 'identity' scope: '/' identity: 'user:', name payload: newPayload actor: actor.
+    bbs updatePinned: 'identity' scope: '/' identity: 'user:', name actor: (self actorOf: actorCtx) do: [:p |
+      p at: 'status' put: 'revoked'.
+      p at: 'revoked_at' put: DateTime now epochSeconds
+    ].
     ^self okResponse: (self okWithIdentity: 'user:', name)
   ]
 
@@ -2587,7 +2569,7 @@ ApiServer subclass: Object
      Verifier must confirm the signature was produced with old_pub AND that
      old_pub is the currently-registered key for the actor. On success,
      overwrites payload.pubkey and emits an event tuple key-rotated:<actor>."
-    | body err oldPub newPub actorHeader actorCtx existing payload newPayload actorName actor |
+    | body err oldPub newPub actorHeader actorCtx existing payload actorName actor |
     body := self parseBody: req.
     body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
     err := self requireFields: #('old_pub' 'new_pub') in: body.
@@ -2622,14 +2604,13 @@ ApiServer subclass: Object
     (payload at: 'pubkey' ifAbsent: [nil]) = oldPub ifFalse: [
       ^self errorResponse: 401 message: 'old_pub does not match registered key'
     ].
-    newPayload := Dictionary new.
-    payload keysAndValuesDo: [:k :v | newPayload at: k put: v].
-    newPayload at: 'pubkey' put: newPub.
-    newPayload at: 'rotated_at' put: DateTime now epochSeconds.
     actorName := 'user:', actorHeader.
     actor := self actorOf: actorCtx.
     actor isNil ifTrue: [actor := actorName].
-    bbs upsertPinned: 'identity' scope: '/' identity: actorName payload: newPayload actor: actor.
+    bbs updatePinned: 'identity' scope: '/' identity: actorName actor: actor do: [:p |
+      p at: 'pubkey' put: newPub.
+      p at: 'rotated_at' put: DateTime now epochSeconds
+    ].
     bbs emitEvent: '/' identity: 'key-rotated:', actorName type: 'key-rotated' summary: 'Key rotated' actor: actor.
     ^self okResponse: (self okWithIdentity: actorName)
   ]
