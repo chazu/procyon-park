@@ -15,6 +15,19 @@ Semantic Versioning.
   in a new `StringUtil>>stripPrefix:from:` helper and replaced all three
   sites (the third was the already-correct
   `Scheduler>>taskIdFromCompleteEvent:`). See scout survey §1.9.
+- `Dispatcher>>reapExpiredClaims` no longer crashes the tick when it
+  observes a stale `task` tuple snapshot. `BBS>>scanAll:` returns shared
+  index references, so a payload mutated by a racing
+  `Server>>handleTaskComplete` or `Scheduler>>checkCompleted`
+  (status='completed', claim_expires_at=nil) could surface to the reaper
+  mid-iteration and a `now > nil` comparison or a missing `payload`
+  would panic with "invalid memory address or nil pointer dereference",
+  killing the entire sweep. The per-tuple body is now wrapped in a
+  defensive try/catch that logs and skips, and the comparison guard
+  re-checks `payload notNil` and `expiresAt notNil` before reading.
+  Mirrored inside `reapTask:`'s atomic `update:` block. Adds RP8/RP9
+  unit tests covering the post-completion stale-tuple and corrupt
+  (non-Number) `claim_expires_at` cases.
 
 ### Performance
 - `WorkflowEngine` failure path no longer triggers redundant
