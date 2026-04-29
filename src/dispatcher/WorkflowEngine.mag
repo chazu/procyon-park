@@ -555,12 +555,7 @@ WorkflowEngine subclass: Object
       ^result
     ].
 
-    validKeys := Array new: 0.
-    validKeys := validKeys copyWith: 'launcher_only'.
-    validKeys := validKeys copyWith: 'workers'.
-    validKeys := validKeys copyWith: 'model'.
-    validKeys := validKeys copyWith: 'repo'.
-    validKeys := validKeys copyWith: 'team'.
+    validKeys := #('launcher_only' 'workers' 'model' 'repo' 'team').
 
     validKeys do: [:k |
       | v |

@@ -548,10 +548,7 @@ WorkItemCLI subclass: Object
     scope isNil ifTrue: [scope := 'default'].
 
     "List items whose parent matches"
-    listArgs := Array new: 0.
-    listArgs := listArgs copyWith: 'workitem'.
-    listArgs := listArgs copyWith: 'list'.
-    listArgs := listArgs copyWith: '--parent'.
+    listArgs := #('workitem' 'list' '--parent').
     listArgs := listArgs copyWith: identity.
     listArgs := listArgs copyWith: '--repo'.
     listArgs := listArgs copyWith: scope.

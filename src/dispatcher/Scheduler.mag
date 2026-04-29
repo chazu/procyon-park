@@ -152,8 +152,7 @@ Scheduler subclass: Object
     | proc shellArgs diffOutput lines violations |
 
     proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := #('-c').
     shellArgs := shellArgs copyWith: 'cd "', expectedDir, '" && git diff --name-only HEAD 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null'.
     proc args: shellArgs.
     proc dir: expectedDir.
@@ -165,8 +164,7 @@ Scheduler subclass: Object
 
     "Use temp file to capture output since ExternalProcess may not expose stdout"
     proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := #('-c').
     shellArgs := shellArgs copyWith: 'cd "', expectedDir, '" && (git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null) | while read f; do realpath "$f" 2>/dev/null; done > /tmp/pp-scope-check-', aTaskId.
     proc args: shellArgs.
     proc dir: expectedDir.
@@ -178,8 +176,7 @@ Scheduler subclass: Object
 
     "Clean up temp file"
     proc := ExternalProcess command: '/bin/sh'.
-    shellArgs := Array new: 0.
-    shellArgs := shellArgs copyWith: '-c'.
+    shellArgs := #('-c').
     shellArgs := shellArgs copyWith: 'rm -f /tmp/pp-scope-check-', aTaskId.
     proc args: shellArgs.
     proc run.
@@ -205,8 +202,7 @@ Scheduler subclass: Object
       violations do: [:v |
         bbs logEngine: 'info' component: 'Scheduler' scope: aScope message: ('Reverting out-of-scope change: ', v).
         proc := ExternalProcess command: '/bin/sh'.
-        shellArgs := Array new: 0.
-        shellArgs := shellArgs copyWith: '-c'.
+        shellArgs := #('-c').
         shellArgs := shellArgs copyWith: 'cd "', expectedDir, '" && git checkout -- "', v, '" 2>/dev/null'.
         proc args: shellArgs.
         proc dir: expectedDir.

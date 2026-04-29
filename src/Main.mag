@@ -67,17 +67,14 @@ Main subclass: Object
     "Repo management"
     cmd = 'repo' ifTrue: [^Repo new runWith: args].
     cmd = 'clean-branches' ifTrue: [
-      wtArgs := Array new: 0.
-      wtArgs := wtArgs copyWith: 'repo'.
-      wtArgs := wtArgs copyWith: 'clean-branches'.
+      wtArgs := #('repo' 'clean-branches').
       args size > 1 ifTrue: [
         (args copyFrom: 1) do: [:a | wtArgs := wtArgs copyWith: a]
       ].
       ^Repo new runWith: wtArgs
     ].
     cmd = 'worktree' ifTrue: [
-      wtArgs := Array new: 0.
-      wtArgs := wtArgs copyWith: 'repo'.
+      wtArgs := #('repo').
       args do: [:a | wtArgs := wtArgs copyWith: a].
       ^Repo new runWith: wtArgs
     ].
