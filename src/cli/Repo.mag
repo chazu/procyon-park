@@ -3,10 +3,19 @@
  Worktrees are managed at ~/.pp/worktrees/."
 
 Repo subclass: Object
+  classVars: CachedConfigs CachedExpiries
   instanceVars: ppDir reposDir worktreesDir
 
   classMethod: new [
     ^super new initialize
+  ]
+
+  classMethod: invalidateRepoCache [
+    "Drop the repoForName: TTL cache. Called from cmdAdd:/cmdRemove:
+     so config changes take effect immediately rather than waiting
+     for the cache TTL to expire."
+    CachedConfigs := nil.
+    CachedExpiries := nil
   ]
 
   method: initialize [
@@ -118,6 +127,7 @@ Repo subclass: Object
 ', (Json encodePretty: config), '
 PPEOF'.
 
+    Repo invalidateRepoCache.
     ('Registered repository: ', repoName) println.
     ('  Path: ', absPath) println.
     ('  Config: ', configPath) println
@@ -184,6 +194,7 @@ PPEOF'.
     ].
 
     self shellRun: 'rm "', configPath, '"'.
+    Repo invalidateRepoCache.
     ('Removed repository: ', repoName) println
   ]
 
@@ -509,12 +520,38 @@ PPEOF'.
   ]
 
   method: repoForName: aName [
-    "Look up a registered repo by name. Returns config Dictionary or nil."
-    | configPath contents |
+    "Look up a registered repo by name. Returns config Dictionary or nil.
+
+     §6 hot-path: called from Scheduler>>dispatch (per task),
+     WorkflowEngine>>instantiate:, CreateWorktreeAction>>execute:, and
+     DispatchWavesAction>>execute:. Each call previously forked a
+     stat (via File exists:) plus a JSON parse. We back the lookup with
+     a class-side TTL cache (5 s) — repo config files change rarely so
+     stale reads are bounded and `Repo invalidateRepoCache` is called
+     from add/remove paths."
+    | configPath contents now expires cached |
+    CachedConfigs isNil ifTrue: [CachedConfigs := Dictionary new].
+    CachedExpiries isNil ifTrue: [CachedExpiries := Dictionary new].
+    now := DateTime now epochSeconds.
+    expires := CachedExpiries at: aName ifAbsent: [nil].
+    (expires notNil and: [now < expires]) ifTrue: [
+      cached := CachedConfigs at: aName ifAbsent: [nil].
+      "cached may be nil meaning 'known not present'"
+      ^cached
+    ].
     configPath := reposDir, '/', aName, '.json'.
-    (File exists: configPath) ifFalse: [^nil].
-    contents := File readFileContents: configPath.
-    ^Json decode: contents
+    (File exists: configPath) ifFalse: [
+      CachedConfigs at: aName put: nil.
+      CachedExpiries at: aName put: now + 5.
+      ^nil
+    ].
+    [
+      contents := File readFileContents: configPath.
+      cached := Json decode: contents
+    ] on: Exception do: [:e | cached := nil].
+    CachedConfigs at: aName put: cached.
+    CachedExpiries at: aName put: now + 5.
+    ^cached
   ]
 
   "--- Helpers ---"

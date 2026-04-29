@@ -7,6 +7,25 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Performance
+- Memoised four hot paths flagged in
+  `docs/scout-perf-survey-2026-04-28.md` §6:
+  - `TemplateLoader>>reloadTemplate:into:` now caches parsed payloads
+    keyed by template identity + file mtime. WorkflowEngine ticks no
+    longer re-parse and re-pin the same CUE template every tick.
+  - `ApiServer>>watchWorkflowsFor:` and
+    `DashboardSSE>>watchWorkflowsFor:in:` cache the resolved workflow-id
+    Array per identity for 2 s, halving the per-request /
+    per-subscriber walk over the watches set.
+  - `Repo>>repoForName:` is now backed by a class-side TTL cache (5 s)
+    with explicit invalidation from `pp repo add` / `pp repo remove`,
+    eliminating repeated `~/.pp/repos/<name>.json` reads on the
+    Scheduler / WorkflowEngine / CreateWorktreeAction /
+    DispatchWavesAction hot paths.
+  - `SignatureVerifier>>verify:` caches resolved `ActorContext` keyed by
+    `(actor, signature)`. Skew is still checked on every hit; rotation-
+    mode (`requireOldPub:`) calls deliberately bypass the cache.
+
 ### Changed
 - `/api/notifications/stream` long-poll replaced with pub/sub fan-out
   via the new `NotificationHub`. Previously a blocked `pp watch` client

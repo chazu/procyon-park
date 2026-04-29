@@ -14,6 +14,7 @@
 
 DashboardSSE subclass: Object
   instanceVars: bbs sseSubscribers tokenCache
+                watchSetCache watchSetCacheExpiry
 
   classMethod: on: aBBS [
     ^super new initBBS: aBBS
@@ -23,6 +24,13 @@ DashboardSSE subclass: Object
     bbs := aBBS.
     sseSubscribers := #().
     tokenCache := Dictionary new.
+    "§6 watch-set TTL cache: every SSE tick walks the snapshot watches
+     array once per subscriber. Two browsers belonging to the same user
+     resolve identical results — cache by identity for 2 s so the
+     per-tick cost is paid once per (identity, tick) pair instead of
+     per-subscriber."
+    watchSetCache := Dictionary new.
+    watchSetCacheExpiry := Dictionary new.
     [self tokenCacheLoop] fork
   ]
 
@@ -861,9 +869,20 @@ DashboardSSE subclass: Object
     "Resolve active workflow subscriptions for the given identity from a
      pre-fetched watches array. Mirrors ApiServer>>watchWorkflowsFor: so
      SSE filtering matches long-poll filtering one-for-one. Returns an
-     empty Array for anonymous/nil."
-    | result prefix |
+     empty Array for anonymous/nil.
+
+     §6 short-TTL cache: many subscribers can share the same identity
+     (same user, multiple tabs). Cache the resolved Array for 2 s so
+     concurrent broadcasts within a single tick window only walk the
+     watches array once per identity."
+    | result prefix now expires cached |
     (identity isNil or: [identity isEmpty]) ifTrue: [^Array new: 0].
+    now := DateTime now epochSeconds.
+    expires := watchSetCacheExpiry at: identity ifAbsent: [nil].
+    (expires notNil and: [now < expires]) ifTrue: [
+      cached := watchSetCache at: identity ifAbsent: [nil].
+      cached notNil ifTrue: [^cached]
+    ].
     result := Array new: 0.
     prefix := identity, ':'.
     watches do: [:w |
@@ -879,6 +898,12 @@ DashboardSSE subclass: Object
       (matches and: [wfId notNil and: [wfId isEmpty not]]) ifTrue: [
         result := result copyWith: wfId
       ]
+    ].
+    watchSetCache at: identity put: result.
+    watchSetCacheExpiry at: identity put: now + 2.
+    watchSetCache size > 1024 ifTrue: [
+      watchSetCache := Dictionary new.
+      watchSetCacheExpiry := Dictionary new
     ].
     ^result
   ]

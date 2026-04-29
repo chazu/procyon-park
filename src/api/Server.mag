@@ -5,6 +5,7 @@ ApiServer subclass: Object
   instanceVars: httpServer bbs port dispatcher dashboardSSE
                 adminList skewSeconds enforceSignatures signatureVerifier
                 queueMaxPending inviteStore notificationHub
+                watchCache watchCacheExpiry
 
   classMethod: on: portNumber bbs: aBBS [
     ^super new initPort: portNumber bbs: aBBS dispatcher: nil
@@ -27,6 +28,14 @@ ApiServer subclass: Object
      loop in handleNotificationStream:. See docs/scout-perf-survey-2026-04-28.md §2."
     notificationHub := NotificationHub new.
     bbs notificationListener: [:tuple | notificationHub publish: tuple].
+    "§6 watch-set TTL cache. watchWorkflowsFor: is called per HTTP
+     request (handleNotificationStream:, handleNotifications:) and runs
+     a full scanAll: 'watch'. Cache the resolved Array per identity for
+     2 seconds — long enough to amortize bursts of polls from the same
+     client, short enough that newly-added watches are picked up
+     promptly."
+    watchCache := Dictionary new.
+    watchCacheExpiry := Dictionary new.
     self registerRoutes
   ]
 
@@ -1777,9 +1786,20 @@ ApiServer subclass: Object
 
   method: watchWorkflowsFor: identity [
     "Collect the set of workflow_ids the given identity has an active watch
-     tuple for. Returns an empty Array for nil/empty identities."
-    | watches result prefix |
+     tuple for. Returns an empty Array for nil/empty identities.
+
+     §6 short-TTL per-identity cache: handleNotificationStream: and
+     handleNotifications: each call this once per request and the result
+     is reused immediately within the request — but back-to-back polls
+     from the same client redo the full scanAll: 'watch'. Cache for 2 s."
+    | watches result prefix now expires cached |
     (identity isNil or: [identity isEmpty]) ifTrue: [^Array new: 0].
+    now := DateTime now epochSeconds.
+    expires := watchCacheExpiry at: identity ifAbsent: [nil].
+    (expires notNil and: [now < expires]) ifTrue: [
+      cached := watchCache at: identity ifAbsent: [nil].
+      cached notNil ifTrue: [^cached]
+    ].
     watches := bbs scanAll: 'watch'.
     result := Array new: 0.
     prefix := identity, ':'.
@@ -1797,6 +1817,13 @@ ApiServer subclass: Object
       (matches and: [wfId notNil and: [wfId isEmpty not]]) ifTrue: [
         result := result copyWith: wfId
       ]
+    ].
+    watchCache at: identity put: result.
+    watchCacheExpiry at: identity put: now + 2.
+    "Bound cache size — wholesale clear on overflow."
+    watchCache size > 1024 ifTrue: [
+      watchCache := Dictionary new.
+      watchCacheExpiry := Dictionary new
     ].
     ^result
   ]

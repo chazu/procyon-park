@@ -18,14 +18,25 @@
  route."
 
 SignatureVerifier subclass: Object
-  instanceVars: bbs
+  instanceVars: bbs verifyCache
 
   classMethod: on: aBBS [
     ^super new initBBS: aBBS
   ]
 
   method: initBBS: aBBS [
-    bbs := aBBS
+    bbs := aBBS.
+    "§6 verify-cache: keyed by (actorHeader|sigHeader) → ActorContext.
+     Each request uniquely re-derives a signature from method/path/ts/body,
+     so a cache hit means the exact same canonical request was already
+     verified once. We still re-check skew on every hit so expired hits
+     fail closed. Avoids the BBS rdp: 'identity'/'worker' lookup and the
+     ed25519 verify on duplicate requests within the skew window."
+    verifyCache := Dictionary new
+  ]
+
+  method: cacheKeyFor: actorHeader sig: sigHeader [
+    ^actorHeader, '|', sigHeader
   ]
 
   method: verify: req adminList: admins skewSeconds: skew [
@@ -45,7 +56,7 @@ SignatureVerifier subclass: Object
   ]
 
   method: doVerify: req adminList: admins skewSeconds: skew requireOldPub: oldPub [
-    | actorHeader tsHeader sigHeader ts now delta body canonical pubkey isAdmin resolvedActor idTuple payload status method path drainFlag |
+    | actorHeader tsHeader sigHeader ts now delta body canonical pubkey isAdmin resolvedActor idTuple payload status method path drainFlag cacheKey cached actorContext |
     actorHeader := req header: 'X-PP-Actor'.
     tsHeader := req header: 'X-PP-Timestamp'.
     sigHeader := req header: 'X-PP-Signature'.
@@ -59,6 +70,17 @@ SignatureVerifier subclass: Object
     delta := now - ts.
     delta < 0 ifTrue: [delta := delta negated].
     delta > skew ifTrue: [^nil].
+
+    "§6 keyed cache fast-path: same actor+sig already verified within
+     this server's lifetime. Skew has been re-checked above, so a cached
+     ActorContext can short-circuit BBS lookup + ed25519 verify. Bypass
+     when a rotation-mode oldPub is supplied — the rotation gate must
+     re-confirm the registry value."
+    oldPub isNil ifTrue: [
+      cacheKey := self cacheKeyFor: actorHeader sig: sigHeader.
+      cached := verifyCache at: cacheKey ifAbsent: [nil].
+      cached notNil ifTrue: [^cached]
+    ].
 
     "Resolve pubkey + actor"
     body := req body.
@@ -120,7 +142,16 @@ SignatureVerifier subclass: Object
     (Identity verify: sigHeader fromHex data: canonical pub: pubkey fromHex)
       ifFalse: [^nil].
 
-    ^ActorContext actor: resolvedActor timestamp: ts verified: true isAdmin: isAdmin
+    actorContext := ActorContext actor: resolvedActor timestamp: ts verified: true isAdmin: isAdmin.
+    "Populate cache (oldPub-rotation requests intentionally skip cache)."
+    oldPub isNil ifTrue: [
+      verifyCache at: (self cacheKeyFor: actorHeader sig: sigHeader) put: actorContext.
+      "Bound cache size — drop entries wholesale if grown unbounded. Each
+       entry lives at most skew seconds; a busy server with many distinct
+       (actor, sig) pairs is the only way to exceed this."
+      verifyCache size > 4096 ifTrue: [verifyCache := Dictionary new]
+    ].
+    ^actorContext
   ]
 
   method: isMissing: aString [

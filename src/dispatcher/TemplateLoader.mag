@@ -12,6 +12,7 @@
 
 TemplateLoader subclass: Object
   instanceVars: cueCtx ppDir workflowsDir builtinDir
+                payloadCache mtimeCache pathCache
 
   classMethod: new [
     ^super new initialize
@@ -26,7 +27,14 @@ TemplateLoader subclass: Object
     cueCtx := CueContext new.
     ppDir := home, '/.pp'.
     workflowsDir := ppDir, '/workflows'.
-    builtinDir := File workingDirectory, '/workflows'
+    builtinDir := File workingDirectory, '/workflows'.
+    "§6 reload-template mtime cache: avoid re-parsing the CUE file and
+     re-pinning the BBS template tuple on every dispatcher tick when the
+     source file has not changed. Keyed by template identity, valued by
+     the last observed file mtime + parsed payload + resolved path."
+    payloadCache := Dictionary new.
+    mtimeCache := Dictionary new.
+    pathCache := Dictionary new
   ]
 
   method: workflowsDir [ ^workflowsDir ]
@@ -126,8 +134,28 @@ TemplateLoader subclass: Object
   method: reloadTemplate: identity into: bbs [
     "Reload a single template from disk by identity name.
      Searches system workflows dir first, then repo workflows dirs.
-     Updates the BBS template tuple in-place. Returns the payload or nil."
-    | path payload repos repoWorkflowsDir repoPath repoName |
+     Updates the BBS template tuple in-place. Returns the payload or nil.
+
+     §6 hot-path: callers (WorkflowEngine>>advanceInstance) hit this
+     once per workflow per tick. Uses an mtime cache to short-circuit
+     re-parsing + re-pinning when the source file is unchanged. We
+     still stat the file (cheap fork) but skip the CUE load + BBS
+     write, which are the actual expensive steps."
+    | path payload repos repoWorkflowsDir repoPath repoName cachedPath cachedMtime curMtime |
+
+    "Fast-path: if we have a cached path for this identity, stat it
+     first; if mtime is unchanged, return the cached payload."
+    cachedPath := pathCache at: identity ifAbsent: [nil].
+    cachedPath notNil ifTrue: [
+      curMtime := self mtimeOf: cachedPath.
+      (curMtime notNil) ifTrue: [
+        cachedMtime := mtimeCache at: identity ifAbsent: [nil].
+        (cachedMtime notNil and: [cachedMtime = curMtime]) ifTrue: [
+          payload := payloadCache at: identity ifAbsent: [nil].
+          payload notNil ifTrue: [^payload]
+        ]
+      ]
+    ].
 
     "Try system workflows first"
     path := workflowsDir, '/', identity, '.cue'.
@@ -136,6 +164,7 @@ TemplateLoader subclass: Object
       payload notNil ifTrue: [
         bbs outPinned: 'template' scope: 'system' identity: identity payload: payload.
         ('Reloaded template from disk: ', identity) println.
+        self cacheTemplate: identity payload: payload path: path.
         ^payload
       ]
     ].
@@ -153,6 +182,7 @@ TemplateLoader subclass: Object
           payload notNil ifTrue: [
             bbs outPinned: 'template' scope: repoName identity: identity payload: payload.
             ('Reloaded template from disk: ', identity, ' (repo: ', repoName, ')') println.
+            self cacheTemplate: identity payload: payload path: path.
             ^payload
           ]
         ]
@@ -160,6 +190,26 @@ TemplateLoader subclass: Object
     ].
 
     ^nil
+  ]
+
+  method: mtimeOf: path [
+    "Return the mtime of path as a string ('' on missing). Used by the
+     reload mtime cache. A single `stat` fork — significantly cheaper
+     than `cueCtx loadFile:` + `bbs outPinned:`."
+    | out |
+    out := Shell capture: 'stat -f %m "', path, '" 2>/dev/null'.
+    (out isNil or: [out isEmpty]) ifTrue: [^nil].
+    ^out
+  ]
+
+  method: cacheTemplate: identity payload: payload path: path [
+    | mtime |
+    mtime := self mtimeOf: path.
+    mtime notNil ifTrue: [
+      payloadCache at: identity put: payload.
+      mtimeCache at: identity put: mtime.
+      pathCache at: identity put: path
+    ]
   ]
 
   method: loadTemplateFile: path [
