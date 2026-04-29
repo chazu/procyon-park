@@ -215,9 +215,7 @@ DashboardSSE subclass: Object
       etype = 'scope-violation' ifTrue: [
         totalViolations := totalViolations + 1.
         eid := e at: 'identity' ifAbsent: [''].
-        taskId := (eid startsWith: prefix)
-          ifTrue: [eid copyFrom: prefix size + 1 to: eid size]
-          ifFalse: [eid].
+        taskId := (StringUtil stripPrefix: prefix from: eid) ifNil: [eid].
         role := taskRoles at: taskId ifAbsent: ['unknown'].
 
         "Count files from summary leading integer (e.g. '3 file(s) ...')"

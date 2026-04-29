@@ -248,12 +248,7 @@ Scheduler subclass: Object
   classMethod: taskIdFromCompleteEvent: evtIdentity [
     "Extract the bare task id from a 'task-complete:<taskId>' event identity.
      Returns nil if the identity does not carry the expected prefix."
-    | prefix |
-    prefix := 'task-complete:'.
-    (evtIdentity startsWith: prefix) ifFalse: [^nil].
-    "copyFrom:to: is 0-indexed half-open [start, end) (Go-style). To strip the
-     prefix we start at index = prefix size, not prefix size + 1."
-    ^evtIdentity copyFrom: prefix size to: evtIdentity size
+    ^StringUtil stripPrefix: 'task-complete:' from: evtIdentity
   ]
 
   method: checkCompleted [

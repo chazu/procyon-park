@@ -1810,7 +1810,7 @@ ApiServer subclass: Object
       wfId := p at: 'workflow_id' ifAbsent: [nil].
       (wfId isNil and: [wid startsWith: prefix]) ifTrue: [
         "Fallback: parse identity tuple '<user>:<wfId>'."
-        wfId := wid copyFrom: prefix size + 1 to: wid size
+        wfId := StringUtil stripPrefix: prefix from: wid
       ].
       owner := p at: 'user' ifAbsent: [nil].
       matches := (owner = identity) or: [wid startsWith: prefix].

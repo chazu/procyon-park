@@ -1,0 +1,129 @@
+"Tests for StringUtil — small helpers for String slicing operations.
+
+ Covers stripPrefix:from: across the canonical cases:
+   * prefix matches      -> returns the suffix
+   * prefix doesn't match -> returns nil
+   * prefix equals string -> returns empty string
+   * empty prefix         -> returns receiver unchanged
+   * empty input          -> returns empty (empty prefix) or nil (non-empty)"
+
+TestStringUtil subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [
+    | t |
+    t := super new.
+    t init.
+    ^t
+  ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg,
+                             ' (got ', actual printString,
+                             ' expected ', expected printString, ')') println
+                         ]
+  ]
+
+  method: run [
+    self testPrefixMatches.
+    self testPrefixDoesNotMatch.
+    self testPrefixEqualsString.
+    self testEmptyPrefix.
+    self testEmptyInput.
+    self testNilInput.
+    ^self report
+  ]
+
+  "--- tests ------------------------------------------------------------"
+
+  method: testPrefixMatches [
+    "Canonical happy path mirrors the three call-sites we replaced."
+    self assertEqual: (StringUtil stripPrefix: 'task-complete:' from: 'task-complete:abc123')
+      to: 'abc123'
+      message: 'task-complete prefix yields the bare task id'.
+    self assertEqual: (StringUtil stripPrefix: 'alice:' from: 'alice:wf-42')
+      to: 'wf-42'
+      message: 'user prefix yields the workflow id'.
+    self assertEqual: (StringUtil stripPrefix: 'a' from: 'abc')
+      to: 'bc'
+      message: 'single-char prefix yields the rest'
+  ]
+
+  method: testPrefixDoesNotMatch [
+    self assert: (StringUtil stripPrefix: 'foo:' from: 'bar:baz') isNil
+      message: 'non-matching prefix returns nil'.
+    self assert: (StringUtil stripPrefix: 'task-complete:' from: 'task-claim:abc') isNil
+      message: 'similar-but-different prefix returns nil'.
+    self assert: (StringUtil stripPrefix: 'longer-than-input' from: 'short') isNil
+      message: 'prefix longer than input returns nil'
+  ]
+
+  method: testPrefixEqualsString [
+    "When prefix == receiver, the suffix is empty (not nil)."
+    self assertEqual: (StringUtil stripPrefix: 'exact' from: 'exact')
+      to: ''
+      message: 'prefix equals string yields empty suffix'.
+    self assertEqual: (StringUtil stripPrefix: 'task-complete:' from: 'task-complete:')
+      to: ''
+      message: 'prefix-only identity yields empty task id'
+  ]
+
+  method: testEmptyPrefix [
+    "Empty prefix is a vacuous match; return the receiver unchanged."
+    self assertEqual: (StringUtil stripPrefix: '' from: 'anything')
+      to: 'anything'
+      message: 'empty prefix returns receiver unchanged'.
+    self assertEqual: (StringUtil stripPrefix: '' from: '')
+      to: ''
+      message: 'empty prefix on empty input returns empty'
+  ]
+
+  method: testEmptyInput [
+    self assert: (StringUtil stripPrefix: 'foo' from: '') isNil
+      message: 'non-empty prefix on empty input returns nil'
+  ]
+
+  method: testNilInput [
+    self assert: (StringUtil stripPrefix: 'foo' from: nil) isNil
+      message: 'nil receiver returns nil'
+  ]
+
+  "--- reporting --------------------------------------------------------"
+
+  method: report [
+    '=== StringUtil Tests ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      failures do: [:f | ('  - ', f) println]
+    ].
+    ^failed
+  ]
+
+
+TestStringUtilMain subclass: Object
+
+  classMethod: run [
+    | t |
+    t := TestStringUtil new.
+    ^t run
+  ]
