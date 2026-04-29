@@ -11,8 +11,8 @@
 
  This class is intentionally minimal: no internal signalling primitive
  (Maggie lacks Channel), so the drainer polls with a short sleep when
- the queue is empty. In practice the tick cadence (≈2s) dwarfs the
- poll interval (50ms) so latency is dominated by enqueue frequency."
+ the queue is empty. In practice the tick cadence (≈5s) dwarfs the
+ poll interval (200ms) so latency is dominated by enqueue frequency."
 
 SSEQueue subclass: Object
   instanceVars: items cap closed droppedCount
