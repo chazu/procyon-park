@@ -114,6 +114,19 @@ WRHelper subclass: Object
     ^WorkflowEngine on: bbs
   ]
 
+  classMethod: storyParams [
+    "Minimum-valid params for instantiating the story template. The
+     template CUE manifest declares required: [description], and
+     WorkflowEngine>>validateRequiredParams: hard-fails on missing or
+     empty values (pp-workflow-empty-params-dispatch — no silent empty-
+     prompt dispatch). The string content is irrelevant here; these
+     tests only exercise the petri-net mechanics."
+    | p |
+    p := Dictionary new.
+    p at: 'description' put: 'test fixture story'.
+    ^p
+  ]
+
   classMethod: findTokens: instanceId in: bbs [
     "Return all tokens for a workflow instance."
     | allTokens |
@@ -677,7 +690,7 @@ TestWorkdirThreading subclass: Object
     WRHelper seedStoryTemplate: bbs.
 
     engine := WRHelper makeEngine: bbs.
-    instanceId := engine instantiate: 'story' scope: 'default' params: (Dictionary new).
+    instanceId := engine instantiate: 'story' scope: 'default' params: WRHelper storyParams.
 
     "Advance — T1 setup fires (action). Then T2 implement should fire (no preconditions)"
     engine advance.
@@ -715,7 +728,7 @@ TestStoryIntegration subclass: Object
     engine := WRHelper makeEngine: bbs.
 
     "WR31: Spec says instantiate story creates initial token at 'request'"
-    instanceId := engine instantiate: 'story' scope: 'default' params: (Dictionary new).
+    instanceId := engine instantiate: 'story' scope: 'default' params: WRHelper storyParams.
     tokens := WRHelper findTokens: instanceId in: bbs.
     t assertEqual: tokens size to: 1 message: 'WR31a: instantiation must create exactly 1 token'.
     tokens size > 0 ifTrue: [
