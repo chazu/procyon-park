@@ -78,6 +78,9 @@ Dispatcher subclass: Object
     [self reapExpiredClaims] on: Exception do: [:e |
       ('Dispatcher tick step error (reapExpiredClaims): ', e messageText) println
     ].
+    [self reapStuckDispatched] on: Exception do: [:e |
+      ('Dispatcher tick step error (reapStuckDispatched): ', e messageText) println
+    ].
     "Async, fenced flush — multi-MB JSON encode + rename must NOT block the
      tick loop. CLI request paths (outSync:/inpSync:, /api/bbs/out, /api/bbs/rm)
      still use the synchronous flushIfDirty when they need durability before ack.
@@ -118,28 +121,50 @@ Dispatcher subclass: Object
                  missed_renewals=0.
            Emit a reap event tuple with the previous worker_id and the
            (new) retry_count."
-    | now tasks |
+    | now tasks claimed |
     now := DateTime now epochSeconds.
     tasks := bbs scanAll: 'task'.
+
+    "Pre-filter to status='claimed' BEFORE per-tuple processing. Of ~500
+     task tuples typically only a handful are claimed, so iterating all
+     of them is wasteful and — more importantly — exposes us to panics
+     from non-task-shaped payload reads on completed/cancelled tuples
+     (see observation procyon-park:src/dispatcher about scanAll-touches-
+     completed-tuples). The select itself is wrapped per-tuple so a
+     single corrupt payload cannot kill the filter."
+    claimed := Array new: 0.
     tasks do: [:t |
+      [
+        | payload |
+        payload := t at: 'payload' ifAbsent: [nil].
+        (payload notNil
+          and: [(payload at: 'status' ifAbsent: ['']) = 'claimed'])
+            ifTrue: [claimed := claimed copyWith: t]
+      ] on: Exception do: [:e |
+        ('Dispatcher reapExpiredClaims filter skip (',
+          (t at: 'identity' ifAbsent: ['?']), '): ', e messageText) println
+      ]
+    ].
+
+    claimed do: [:t |
       "Defensive per-tuple try/catch: scanAll: returns a snapshot of shared
        index references; another goroutine (Server handleTaskComplete,
        Scheduler checkCompleted) may concurrently rewrite a payload between
        our read of 'payload' and our read of its fields. A single malformed
        or concurrently-mutated tuple must NOT crash the whole sweep."
       [
-        | payload status expiresAt |
+        | payload expiresAt |
         payload := t at: 'payload' ifAbsent: [nil].
         payload notNil ifTrue: [
-          status := payload at: 'status' ifAbsent: [''].
           expiresAt := payload at: 'claim_expires_at' ifAbsent: [nil].
           "Belt-and-braces guard: claim_expires_at is normally an Integer
            epoch, but a stale snapshot (post-completion) carries nil and
            a type-confused JSON deser could carry a non-comparable. The
-           outer try/catch upgrades any '>' panic to a skip."
-          (status = 'claimed'
-            and: [expiresAt notNil and: [now > expiresAt]]) ifTrue: [
-              self reapTask: t now: now
+           outer try/catch upgrades any '>' panic to a skip. Status was
+           already filtered to 'claimed' upstream — re-check inside
+           reapTask:'s atomic update guards against TOCTOU races."
+          (expiresAt notNil and: [now > expiresAt]) ifTrue: [
+            self reapTask: t now: now
           ]
         ]
       ] on: Exception do: [:e |
@@ -213,6 +238,161 @@ Dispatcher subclass: Object
       bbs out: 'event' scope: scope
           identity: 'reap:', taskId
           payload: eventPayload actor: nil
+    ]
+  ]
+
+  "--- Stuck-Dispatched Reaper ---"
+
+  method: stuckDispatchedThresholdSeconds [
+    "Tasks that sit in status='dispatched' with no worker for longer than
+     this are considered orphaned. The local Scheduler forks a harness
+     synchronously and marks the task 'completed' on success; in
+     multiplayer mode a remote worker takes the task to 'claimed' via
+     /api/tasks/claim. Either way, a healthy task should leave the
+     'dispatched' state within a few seconds. 300s is a generous floor
+     to avoid racing slow harness starts."
+    ^300
+  ]
+
+  method: dispatchOrphanStaleSeconds [
+    "Beyond this age, an orphaned dispatched task is considered too stale
+     to safely re-pend (the work it described is likely obsolete and
+     re-running it would burn API tokens on irrelevant work — observed
+     when stuck tasks accumulated over a multi-day server outage and the
+     reaper resurrection spun up Claude sessions on long-resolved
+     stories). At/above this age the task is marked failed with reason
+     'dispatch-orphan-stale' instead of being re-pended."
+    ^4 * 3600
+  ]
+
+  method: reapStuckDispatched [
+    "Sweep task tuples that have been status='dispatched' with no
+     worker_id for longer than stuckDispatchedThresholdSeconds.
+
+     Why this exists: the claim-expiry reaper (reapExpiredClaims) only
+     handles 'claimed' tasks, because the original design assumed the
+     local scheduler's fork would always either complete the task or
+     fail it via the wrap-up handler at Scheduler.mag:131-143. In
+     practice, harness forks have been observed to die in ways that
+     escape that handler (NLR out of fork, panic in primitives, etc.),
+     leaving the task permanently in 'dispatched' state — workflows
+     wait forever on tokens that never produce. This sweeper closes
+     that gap with the same retry semantics as reapExpiredClaims.
+
+     Detection signal: status='dispatched' AND worker_id is nil AND
+     dispatched_at older than threshold. We do NOT consult the
+     Scheduler's activeSlots map because (a) the dispatcher and
+     scheduler are separate objects without a clean coupling for that
+     query and (b) by the time the threshold elapses, any healthy fork
+     would have advanced the task past 'dispatched'."
+    | now threshold tasks orphans |
+    now := DateTime now epochSeconds.
+    threshold := self stuckDispatchedThresholdSeconds.
+    tasks := bbs scanAll: 'task'.
+
+    "Pre-filter to dispatched + orphan candidates BEFORE per-tuple work.
+     Same defensive iteration pattern as reapExpiredClaims."
+    orphans := Array new: 0.
+    tasks do: [:t |
+      [
+        | payload status workerId dispatchedAt |
+        payload := t at: 'payload' ifAbsent: [nil].
+        payload notNil ifTrue: [
+          status := payload at: 'status' ifAbsent: [''].
+          workerId := payload at: 'worker_id' ifAbsent: [nil].
+          dispatchedAt := payload at: 'dispatched_at' ifAbsent: [nil].
+          (status = 'dispatched'
+            and: [workerId isNil
+            and: [dispatchedAt notNil
+            and: [(now - dispatchedAt) > threshold]]])
+              ifTrue: [orphans := orphans copyWith: t]
+        ]
+      ] on: Exception do: [:e |
+        ('Dispatcher reapStuckDispatched filter skip (',
+          (t at: 'identity' ifAbsent: ['?']), '): ', e messageText) println
+      ]
+    ].
+
+    orphans do: [:t |
+      [self reapStuckDispatchedTask: t now: now]
+        on: Exception do: [:e |
+          ('Dispatcher reapStuckDispatched tuple skip (',
+            (t at: 'identity' ifAbsent: ['?']), '): ', e messageText) println
+        ]
+    ]
+  ]
+
+  method: reapStuckDispatchedTask: taskTuple now: now [
+    "Reap a single orphaned dispatched task. Mirrors reapTask:'s retry
+     state machine but driven by the dispatch-orphan signal rather than
+     claim expiry. Atomic re-check inside the BBS update guards against
+     a worker claiming the task between the snapshot and the rewrite."
+    | scope taskId outcome threshold |
+    scope := taskTuple at: 'scope'.
+    taskId := taskTuple at: 'identity'.
+    threshold := self stuckDispatchedThresholdSeconds.
+    outcome := Dictionary new.
+    outcome at: 'reaped' put: false.
+    outcome at: 'terminal' put: false.
+    outcome at: 'retry_count' put: 0.
+
+    bbs update: 'task' scope: scope identity: taskId do: [:p |
+      | status workerId dispatchedAt retryCount max staleCutoff |
+      status := p at: 'status' ifAbsent: [''].
+      workerId := p at: 'worker_id' ifAbsent: [nil].
+      dispatchedAt := p at: 'dispatched_at' ifAbsent: [nil].
+      staleCutoff := self dispatchOrphanStaleSeconds.
+      (status = 'dispatched'
+        and: [workerId isNil
+        and: [dispatchedAt notNil
+        and: [(now - dispatchedAt) > threshold]]]) ifTrue: [
+          retryCount := (p at: 'retry_count' ifAbsent: [0]) + 1.
+          max := p at: 'max_retries' ifAbsent: [3].
+          outcome at: 'reaped' put: true.
+          outcome at: 'retry_count' put: retryCount.
+          p at: 'retry_count' put: retryCount.
+          "Staleness short-circuit: orphans older than dispatchOrphanStaleSeconds
+           skip the retry ladder entirely and fail terminally. Prevents the
+           reaper from resurrecting work that is no longer relevant after a
+           long outage."
+          ((now - dispatchedAt) > staleCutoff) ifTrue: [
+            p at: 'status' put: 'failed'.
+            p at: 'last_failure_reason' put: 'dispatch-orphan-stale'.
+            p at: 'failed_at' put: now.
+            outcome at: 'terminal' put: true
+          ] ifFalse: [
+            retryCount >= max ifTrue: [
+              p at: 'status' put: 'failed'.
+              p at: 'last_failure_reason' put: 'dispatch-orphan'.
+              p at: 'failed_at' put: now.
+              outcome at: 'terminal' put: true
+            ] ifFalse: [
+              "Re-pend so the scheduler can take another swing at it."
+              p at: 'status' put: 'pending'.
+              p at: 'dispatched_at' put: nil.
+              p at: 'claim_id' put: nil.
+              p at: 'claim_expires_at' put: nil.
+              p at: 'renewed_at' put: nil.
+              p at: 'missed_renewals' put: 0
+            ]
+          ]
+      ]
+    ].
+
+    (outcome at: 'reaped') ifTrue: [
+      | eventPayload |
+      eventPayload := Dictionary new.
+      eventPayload at: 'type' put: 'reap'.
+      eventPayload at: 'cause' put: 'dispatch-orphan'.
+      eventPayload at: 'task_id' put: taskId.
+      eventPayload at: 'retry_count' put: (outcome at: 'retry_count').
+      eventPayload at: 'terminal' put: (outcome at: 'terminal').
+      bbs out: 'event' scope: scope
+          identity: 'reap:', taskId
+          payload: eventPayload actor: nil.
+      bbs notify: ('Reaped orphaned dispatched task: ', taskId,
+                   ' (retry ', (outcome at: 'retry_count') printString, ')')
+        scope: scope severity: 'warn'
     ]
   ]
 
