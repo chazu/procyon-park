@@ -58,11 +58,20 @@ Dispatcher subclass: Object
   ]
 
   method: onTick [
+    | taskSnapshot |
     tick := tick + 1.
 
     "Every tick (10s): core operations. Each step is wrapped in its own
      exception handler so a single malformed tuple in one step does not
-     kill the entire tick — the remaining steps still run."
+     kill the entire tick — the remaining steps still run.
+
+     We take ONE `bbs scanAll: 'task'` snapshot here and thread it through
+     scheduler.dispatch / reapExpiredClaims / reapStuckDispatched. Prior
+     code took three independent snapshots per tick; under load each scan
+     held the BBS mutex while building an O(N) result. Sharing the
+     snapshot is safe because the reaper paths re-check status atomically
+     inside `bbs update:` — a stale read from the snapshot can only cause
+     a no-op update, never an incorrect mutation."
     [scheduler checkCompleted] on: Exception do: [:e |
       ('Dispatcher tick step error (checkCompleted): ', e messageText) println
     ].
@@ -72,13 +81,17 @@ Dispatcher subclass: Object
     [ruleEngine evaluate] on: Exception do: [:e |
       ('Dispatcher tick step error (ruleEngine evaluate): ', e messageText) println
     ].
-    [scheduler dispatch] on: Exception do: [:e |
+    taskSnapshot := nil.
+    [taskSnapshot := bbs scanAll: 'task'] on: Exception do: [:e |
+      ('Dispatcher tick step error (task snapshot): ', e messageText) println
+    ].
+    [scheduler dispatchTasks: taskSnapshot] on: Exception do: [:e |
       ('Dispatcher tick step error (scheduler dispatch): ', e messageText) println
     ].
-    [self reapExpiredClaims] on: Exception do: [:e |
+    [self reapExpiredClaimsIn: taskSnapshot] on: Exception do: [:e |
       ('Dispatcher tick step error (reapExpiredClaims): ', e messageText) println
     ].
-    [self reapStuckDispatched] on: Exception do: [:e |
+    [self reapStuckDispatchedIn: taskSnapshot] on: Exception do: [:e |
       ('Dispatcher tick step error (reapStuckDispatched): ', e messageText) println
     ].
     "Async, fenced flush — multi-MB JSON encode + rename must NOT block the
@@ -121,9 +134,20 @@ Dispatcher subclass: Object
                  missed_renewals=0.
            Emit a reap event tuple with the previous worker_id and the
            (new) retry_count."
+    ^self reapExpiredClaimsIn: nil
+  ]
+
+  method: reapExpiredClaimsIn: maybeTasks [
+    "Snapshot-aware variant. If `maybeTasks` is nil, fetches its own
+     scanAll: 'task'; otherwise reuses the caller's snapshot (typically
+     the per-tick snapshot taken in onTick). Sharing the snapshot is safe
+     because the per-tuple state change happens inside `bbs update:`,
+     which re-checks status atomically."
     | now tasks claimed |
     now := DateTime now epochSeconds.
-    tasks := bbs scanAll: 'task'.
+    tasks := maybeTasks isNil
+      ifTrue: [bbs scanAll: 'task']
+      ifFalse: [maybeTasks].
 
     "Pre-filter to status='claimed' BEFORE per-tuple processing. Of ~500
      task tuples typically only a handful are claimed, so iterating all
@@ -131,15 +155,19 @@ Dispatcher subclass: Object
      from non-task-shaped payload reads on completed/cancelled tuples
      (see observation procyon-park:src/dispatcher about scanAll-touches-
      completed-tuples). The select itself is wrapped per-tuple so a
-     single corrupt payload cannot kill the filter."
-    claimed := Array new: 0.
+     single corrupt payload cannot kill the filter.
+
+     GrowableArray (amortized O(1) add:) replaces the prior
+     copyWith: accumulator that allocated a fresh Array on every match —
+     O(K^2) on K matches."
+    claimed := GrowableArray new.
     tasks do: [:t |
       [
         | payload |
         payload := t at: 'payload' ifAbsent: [nil].
         (payload notNil
           and: [(payload at: 'status' ifAbsent: ['']) = 'claimed'])
-            ifTrue: [claimed := claimed copyWith: t]
+            ifTrue: [claimed add: t]
       ] on: Exception do: [:e |
         ('Dispatcher reapExpiredClaims filter skip (',
           (t at: 'identity' ifAbsent: ['?']), '): ', e messageText) println
@@ -285,14 +313,22 @@ Dispatcher subclass: Object
      scheduler are separate objects without a clean coupling for that
      query and (b) by the time the threshold elapses, any healthy fork
      would have advanced the task past 'dispatched'."
+    ^self reapStuckDispatchedIn: nil
+  ]
+
+  method: reapStuckDispatchedIn: maybeTasks [
+    "Snapshot-aware variant. See reapExpiredClaimsIn: for rationale."
     | now threshold tasks orphans |
     now := DateTime now epochSeconds.
     threshold := self stuckDispatchedThresholdSeconds.
-    tasks := bbs scanAll: 'task'.
+    tasks := maybeTasks isNil
+      ifTrue: [bbs scanAll: 'task']
+      ifFalse: [maybeTasks].
 
     "Pre-filter to dispatched + orphan candidates BEFORE per-tuple work.
-     Same defensive iteration pattern as reapExpiredClaims."
-    orphans := Array new: 0.
+     Same defensive iteration pattern as reapExpiredClaims. GrowableArray
+     replaces the O(K^2) copyWith: accumulator."
+    orphans := GrowableArray new.
     tasks do: [:t |
       [
         | payload status workerId dispatchedAt |
@@ -305,7 +341,7 @@ Dispatcher subclass: Object
             and: [workerId isNil
             and: [dispatchedAt notNil
             and: [(now - dispatchedAt) > threshold]]])
-              ifTrue: [orphans := orphans copyWith: t]
+              ifTrue: [orphans add: t]
         ]
       ] on: Exception do: [:e |
         ('Dispatcher reapStuckDispatched filter skip (',
@@ -399,30 +435,284 @@ Dispatcher subclass: Object
   "--- Housekeeping ---"
 
   method: housekeep [
-    "Periodic housekeeping: clean up completed workflows.
+    "Periodic housekeeping. Single-pass design:
+
+       1. One scanAll: per relevant category (workflow/token/task/signal).
+       2. Classify workflow ids into liveWfIds and terminalWfIds.
+       3. Bucket tokens/tasks by payload.workflow_instance and signals by
+          scope (signals are scoped to the workflow instance directly).
+       4. For each terminal workflow id: cascade-delete its bucket plus
+          the workflow tuple itself.
+       5. Orphan sweep: tuples whose owning workflow id is in neither set
+          get removed (covers historical accumulation predating cascade).
+       6. Terminal-task orphan sweep: tasks in terminal state whose
+          workflow is gone and which are older than the age threshold.
+
+     Why single-pass: the prior implementation issued 3 scanAll: calls per
+     terminal workflow (one per category) inside cleanWorkflowCascade:; with
+     N terminal workflows and M tuples this was O(N*M). Now it's O(M) total
+     plus O(N) bucket lookups.
+
      (Affine-tuple expiry is handled natively by TupleSpace's outAffine:ttl:.)"
-    self cleanCompletedWorkflows
+    | now threshold workflows tokens tasks signals
+      liveWfIds terminalWfIds wfScope tokensByWf tasksByWf signalsByScope |
+    now := DateTime now epochSeconds.
+    threshold := self housekeepWorkflowAgeSeconds.
+
+    workflows := bbs scanAll: 'workflow'.
+    tokens    := bbs scanAll: 'token'.
+    tasks     := bbs scanAll: 'task'.
+    signals   := bbs scanAll: 'signal'.
+
+    liveWfIds     := Set new.
+    terminalWfIds := Set new.
+    wfScope       := Dictionary new.
+    workflows do: [:wf |
+      [self classifyWorkflow: wf
+            now: now
+            threshold: threshold
+            liveSet: liveWfIds
+            terminalSet: terminalWfIds
+            scopeMap: wfScope]
+        on: Exception do: [:e |
+          ('Dispatcher housekeep classify skip (',
+            (wf at: 'identity' ifAbsent: ['?']), '): ', e messageText) println
+        ]
+    ].
+
+    tokensByWf     := self bucketTuples: tokens    byPayloadField: 'workflow_instance'.
+    tasksByWf      := self bucketTuples: tasks     byPayloadField: 'workflow_instance'.
+    signalsByScope := self bucketTuples: signals   byTupleField:    'scope'.
+
+    "Cascade: terminal workflows + their tokens / tasks / signals."
+    terminalWfIds do: [:wfId |
+      self cascadeRemove: (tokensByWf     at: wfId ifAbsent: [nil]) category: 'token'.
+      self cascadeRemove: (tasksByWf      at: wfId ifAbsent: [nil]) category: 'task'.
+      self cascadeRemove: (signalsByScope at: wfId ifAbsent: [nil]) category: 'signal'.
+      [bbs inp: 'workflow' scope: (wfScope at: wfId ifAbsent: ['default']) identity: wfId]
+        on: Exception do: [:_ | nil]
+    ].
+
+    "Orphan sweep: workflow_instance points at a workflow id that no longer
+     exists (and wasn't in this tick's terminal set, since those are already
+     gone). Same for signal scopes that look like workflow instance ids."
+    tokensByWf keysDo: [:wfId |
+      (self isOrphanWf: wfId live: liveWfIds terminal: terminalWfIds) ifTrue: [
+        self cascadeRemove: (tokensByWf at: wfId) category: 'token'
+      ]
+    ].
+    signalsByScope keysDo: [:sScope |
+      ((self looksLikeWorkflowInstanceId: sScope)
+        and: [self isOrphanWf: sScope live: liveWfIds terminal: terminalWfIds])
+        ifTrue: [
+          self cascadeRemove: (signalsByScope at: sScope) category: 'signal'
+        ]
+    ].
+
+    "Terminal-task orphan sweep: tasks in terminal status whose workflow
+     is gone (or never set) AND whose terminal timestamp is older than the
+     age threshold. Tasks bound to live workflows are preserved as audit
+     history until the workflow itself is cleaned up."
+    tasks do: [:t |
+      [self maybeRemoveTerminalOrphanTask: t
+            now: now
+            threshold: threshold
+            live: liveWfIds
+            terminal: terminalWfIds]
+        on: Exception do: [:_ | nil]
+    ]
   ]
 
-  method: cleanCompletedWorkflows [
-    "Clean up workflows that have been completed for a while."
-    | workflows now |
-    workflows := bbs scanAll: 'workflow'.
-    now := DateTime now epochSeconds.
+  method: housekeepWorkflowAgeSeconds [
+    "Workflows in a terminal state older than this are removed (along with
+     their tokens, signals, and tasks). 24h gives observers a comfortable
+     window to inspect a recently-failed workflow before it disappears,
+     while still preventing unbounded accumulation across a multi-day
+     server uptime."
+    ^24 * 3600
+  ]
 
-    workflows do: [:wf |
-      | payload status terminalAt |
-      payload := wf at: 'payload'.
-      status := payload at: 'status' ifAbsent: [''].
-      (status = 'completed' or: [status = 'cancelled']) ifTrue: [
-        terminalAt := status = 'completed'
-          ifTrue: [payload at: 'completed_at' ifAbsent: [now]]
-          ifFalse: [payload at: 'cancelled_at' ifAbsent: [now]].
-        "Clean up after 1 hour"
-        (now - terminalAt) > 3600 ifTrue: [
-          bbs inp: 'workflow' scope: (wf at: 'scope') identity: (wf at: 'identity')
+  method: classifyWorkflow: wf now: now threshold: threshold
+          liveSet: liveSet terminalSet: terminalSet scopeMap: scopeMap [
+    "Mutates liveSet/terminalSet/scopeMap. A workflow is terminal-aged-out
+     iff its status is completed/cancelled/failed AND the corresponding
+     terminal timestamp is older than `threshold`. Workflows missing a
+     payload (data corruption) are conservatively treated as live so we
+     don't cascade-delete based on bad input."
+    | wfId payload status terminalAt |
+    wfId := wf at: 'identity'.
+    scopeMap at: wfId put: (wf at: 'scope' ifAbsent: ['default']).
+    payload := wf at: 'payload' ifAbsent: [nil].
+    payload isNil ifTrue: [liveSet add: wfId. ^self].
+    status := payload at: 'status' ifAbsent: [''].
+    (status = 'completed' or: [status = 'cancelled' or: [status = 'failed']])
+      ifFalse: [liveSet add: wfId. ^self].
+    terminalAt := nil.
+    status = 'completed' ifTrue: [terminalAt := payload at: 'completed_at' ifAbsent: [nil]].
+    status = 'cancelled' ifTrue: [terminalAt := payload at: 'cancelled_at' ifAbsent: [nil]].
+    status = 'failed'    ifTrue: [terminalAt := payload at: 'failed_at'    ifAbsent: [nil]].
+    terminalAt isNil ifTrue: [terminalAt := wf at: 'created_at' ifAbsent: [now]].
+    (now - terminalAt) > threshold
+      ifTrue:  [terminalSet add: wfId]
+      ifFalse: [liveSet     add: wfId]
+  ]
+
+  method: bucketTuples: tuples byPayloadField: field [
+    "Group `tuples` into a Dictionary keyed by the value of payload[field].
+     Tuples whose payload is missing or whose field is nil are skipped (no
+     bucket key — they cannot be reasoned about as belonging to a workflow).
+     Each bucket value is a GrowableArray (amortized O(1) append, replaces
+     the legacy `victims := victims copyWith: t` accumulator that was
+     O(N^2) on large categories)."
+    | buckets |
+    buckets := Dictionary new.
+    tuples do: [:t |
+      [
+        | p key bucket |
+        p := t at: 'payload' ifAbsent: [nil].
+        p notNil ifTrue: [
+          key := p at: field ifAbsent: [nil].
+          key notNil ifTrue: [
+            bucket := buckets at: key ifAbsent: [nil].
+            bucket isNil ifTrue: [
+              bucket := GrowableArray new.
+              buckets at: key put: bucket
+            ].
+            bucket add: t
+          ]
         ]
-      ]
+      ] on: Exception do: [:_ | nil]
+    ].
+    ^buckets
+  ]
+
+  method: bucketTuples: tuples byTupleField: field [
+    "Like bucketTuples:byPayloadField: but the bucket key comes from a
+     top-level tuple field (e.g. 'scope'), not from the payload."
+    | buckets |
+    buckets := Dictionary new.
+    tuples do: [:t |
+      [
+        | key bucket |
+        key := t at: field ifAbsent: [nil].
+        key notNil ifTrue: [
+          bucket := buckets at: key ifAbsent: [nil].
+          bucket isNil ifTrue: [
+            bucket := GrowableArray new.
+            buckets at: key put: bucket
+          ].
+          bucket add: t
+        ]
+      ] on: Exception do: [:_ | nil]
+    ].
+    ^buckets
+  ]
+
+  method: cascadeRemove: bucket category: category [
+    "Issue an inp: per tuple in the bucket. Each call is wrapped so a
+     single failure does not abort the rest of the cascade. Bucket may
+     be a GrowableArray (from bucketTuples:) or nil (no matching tuples)."
+    bucket isNil ifTrue: [^self].
+    bucket do: [:t |
+      [bbs inp: category
+           scope: (t at: 'scope')
+           identity: (t at: 'identity')]
+        on: Exception do: [:_ | nil]
+    ]
+  ]
+
+  method: isOrphanWf: wfId live: liveSet terminal: terminalSet [
+    "True iff `wfId` is neither a live workflow nor one we just removed
+     this tick. Used by the orphan sweep to find tuples whose owning
+     workflow vanished in a prior session (legacy accumulation)."
+    ^(liveSet includes: wfId) not and: [(terminalSet includes: wfId) not]
+  ]
+
+  method: maybeRemoveTerminalOrphanTask: t now: now threshold: threshold
+          live: liveSet terminal: terminalSet [
+    "Remove `t` if it is in terminal state, its workflow is gone (or its
+     workflow_instance was never set), and its terminal timestamp is older
+     than `threshold`. The terminal-set check skips tasks already cleaned
+     up by the workflow cascade above (cheap: bucket lookup happens
+     elsewhere; here we just consult the precomputed sets)."
+    | p status wfRef terminalAt belongsToLive |
+    p := t at: 'payload' ifAbsent: [nil].
+    p isNil ifTrue: [^self].
+    status := p at: 'status' ifAbsent: [''].
+    (status = 'completed' or: [status = 'cancelled' or: [status = 'failed']])
+      ifFalse: [^self].
+    wfRef := p at: 'workflow_instance' ifAbsent: [nil].
+    "If the task is bound to a live workflow we keep it as audit history."
+    belongsToLive := wfRef notNil and: [liveSet includes: wfRef].
+    belongsToLive ifTrue: [^self].
+    "Already cleaned up via the workflow cascade — don't double-remove."
+    (wfRef notNil and: [terminalSet includes: wfRef]) ifTrue: [^self].
+    terminalAt := nil.
+    status = 'completed' ifTrue: [terminalAt := p at: 'completed_at' ifAbsent: [nil]].
+    status = 'cancelled' ifTrue: [terminalAt := p at: 'cancelled_at' ifAbsent: [nil]].
+    status = 'failed'    ifTrue: [terminalAt := p at: 'failed_at'    ifAbsent: [nil]].
+    terminalAt isNil ifTrue: [terminalAt := t at: 'created_at' ifAbsent: [now]].
+    (now - terminalAt) > threshold ifTrue: [
+      [bbs inp: 'task' scope: (t at: 'scope') identity: (t at: 'identity')]
+        on: Exception do: [:_ | nil]
+    ]
+  ]
+
+  method: looksLikeWorkflowInstanceId: aString [
+    "Heuristic: workflow ids look like 'story-1776355979-3325',
+     'full-pipeline-1776355403-3195', etc. — at least two hyphens and
+     contains a digit. Conservative; system scopes (default, system,
+     scope:foo) won't match."
+    | hyphens hasDigit |
+    aString isNil ifTrue: [^false].
+    aString isString ifFalse: [^false].
+    hyphens := 0.
+    hasDigit := false.
+    aString do: [:c |
+      c = $- ifTrue: [hyphens := hyphens + 1].
+      (c >= $0 and: [c <= $9]) ifTrue: [hasDigit := true]
+    ].
+    ^(hyphens >= 2) and: [hasDigit]
+  ]
+
+  method: cleanTerminalOrphanTasks [
+    "Remove terminal tasks (status in completed/cancelled/failed) whose
+     owning workflow is already gone. Tasks bound to live workflows are
+     preserved as audit history until the workflow itself is cleaned up
+     (cleanWorkflowCascade handles those when the workflow is removed)."
+    | workflows wfIds tasks now ageThreshold |
+    workflows := bbs scanAll: 'workflow'.
+    wfIds := Set new.
+    workflows do: [:wf | wfIds add: (wf at: 'identity')].
+    tasks := bbs scanAll: 'task'.
+    now := DateTime now epochSeconds.
+    "Same age window as workflows so reasoning about retention is
+     uniform — terminal task lingers up to 24h after workflow vanishes."
+    ageThreshold := self housekeepWorkflowAgeSeconds.
+
+    tasks do: [:t |
+      [
+        | p status wfRef terminalAt |
+        p := t at: 'payload' ifAbsent: [nil].
+        p notNil ifTrue: [
+          status := p at: 'status' ifAbsent: [''].
+          ((status = 'completed' or: [status = 'cancelled' or: [status = 'failed']])
+            and: [
+              wfRef := p at: 'workflow_instance' ifAbsent: [nil].
+              wfRef isNil or: [(wfIds includes: wfRef) not]])
+          ifTrue: [
+            terminalAt := nil.
+            status = 'completed' ifTrue: [terminalAt := p at: 'completed_at' ifAbsent: [nil]].
+            status = 'cancelled' ifTrue: [terminalAt := p at: 'cancelled_at' ifAbsent: [nil]].
+            status = 'failed' ifTrue: [terminalAt := p at: 'failed_at' ifAbsent: [nil]].
+            terminalAt isNil ifTrue: [terminalAt := t at: 'created_at' ifAbsent: [now]].
+            (now - terminalAt) > ageThreshold ifTrue: [
+              [bbs inp: 'task' scope: (t at: 'scope') identity: (t at: 'identity')]
+                on: Exception do: [:_ | nil]
+            ]
+          ]
+        ]
+      ] on: Exception do: [:_ | nil]
     ]
   ]
 

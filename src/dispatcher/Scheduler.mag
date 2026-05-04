@@ -30,10 +30,21 @@ Scheduler subclass: Object
 
   method: dispatch [
     "Scan for pending tasks and dispatch them to available slots."
+    ^self dispatchTasks: nil
+  ]
+
+  method: dispatchTasks: maybeTasks [
+    "Snapshot-aware variant. If `maybeTasks` is nil, fetches its own
+     scanAll: 'task'; otherwise reuses the per-tick snapshot threaded
+     down from Dispatcher>>onTick. Sharing the snapshot is safe because
+     bbs update: re-checks status='pending' atomically inside the
+     update block — a stale read just means the claim attempt no-ops."
     | allTasks pendingTasks count pending |
     self availableSlots <= 0 ifTrue: [^self].
 
-    allTasks := bbs scanAll: 'task'.
+    allTasks := maybeTasks isNil
+      ifTrue: [bbs scanAll: 'task']
+      ifFalse: [maybeTasks].
 
     "Filter to pending"
     pending := GrowableArray new.

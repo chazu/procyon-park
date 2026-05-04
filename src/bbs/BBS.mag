@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener saveToDiskHook
+  instanceVars: space nextId mutex upsertMutex startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener saveToDiskHook
 
   classMethod: new [
     ^super new initialize
@@ -27,8 +27,18 @@ BBS subclass: Object
     space := TupleSpace new.
     nextId := 0.
     mutex := Mutex new.
+    "upsertMutex serializes RMW upsert paths (updatePinned:, upsertPinned:,
+     upsertSignal:) so two concurrent upserts on the same key cannot lose
+     updates or leave duplicate tuples. Distinct from the index `mutex`
+     because the upsert path internally re-enters BBS methods that take
+     `mutex`, and Mutex critical: is not re-entrant."
+    upsertMutex := Mutex new.
     startedAt := DateTime now.
-    index := Array new: 0.
+    "Flat index uses ArrayList so add: is O(1) amortized rather than the
+     O(N) array copy that copyWith: was doing on every write. Removal is
+     still O(N) (find + shift) but no longer allocates a fresh N-element
+     array per inp:."
+    index := ArrayList new.
     byId := Dictionary new.
     byKey := Dictionary new.
     byCatIdent := Dictionary new.
@@ -62,7 +72,7 @@ BBS subclass: Object
    byCatIdent are exposed to let test_bbs_index.mag distinguish 'key cleaned
    up' from 'empty array left behind'. Production callers MUST go through
    findInIndex:/findByCategory:identity: instead."
-  method: indexFlat [ ^mutex critical: [index copy] ]
+  method: indexFlat [ ^mutex critical: [index asArray] ]
   method: byKeyMap [ ^byKey ]
   method: byIdMap [ ^byId ]
   method: byCatIdentMap [ ^byCatIdent ]
@@ -140,7 +150,9 @@ BBS subclass: Object
     "Caller MUST hold mutex. Adds tuple to flat index and all hash indices."
     | tupleId k ck arr arr2 |
     tupleId := tuple at: 'id'.
-    index := index copyWith: tuple.
+    "ArrayList add: is O(1) amortized — was O(N) when index was an Array
+     and we copyWith:'d on every write."
+    index add: tuple.
     byId at: tupleId put: tuple.
     k := self keyFor: (tuple at: 'category') scope: (tuple at: 'scope') identity: (tuple at: 'identity').
     arr := byKey at: k ifAbsent: [nil].
@@ -177,8 +189,24 @@ BBS subclass: Object
         ifTrue: [byCatIdent removeKey: ck ifAbsent: [nil]]
         ifFalse: [byCatIdent at: ck put: arr2]
     ].
-    index := index reject: [:t | (t at: 'id') = tupleId].
+    "Linear scan + removeAt: on the ArrayList — O(N) worst case but no
+     fresh array allocation. Stops at first match: tuple ids are unique."
+    self removeFromFlatIndexById: tupleId.
     ^tuple
+  ]
+
+  method: removeFromFlatIndexById: tupleId [
+    "Caller MUST hold mutex. Walk the flat ArrayList index and remove the
+     first entry whose id matches. No-op if not present."
+    | n i found |
+    n := index size.
+    i := 0.
+    found := -1.
+    [(found < 0) and: [i < n]] whileTrue: [
+      ((index at: i) at: 'id') = tupleId ifTrue: [found := i].
+      i := i + 1
+    ].
+    found >= 0 ifTrue: [index removeAt: found]
   ]
 
   method: removeFromIndicesByKey: category scope: scope identity: identity [
@@ -253,12 +281,42 @@ BBS subclass: Object
      also collects any duplicates left behind by the legacy append path."
     | d |
     Categories validate: category.
-    [(self inp: category scope: scope identity: identity) notNil] whileTrue: [].
+    "Drain any prior tuples at this key. Bounded to a small cap with a
+     yield between attempts so a pathological writer cannot pin a CPU
+     core on a tight inp: spin loop. In practice the loop body runs at
+     most once or twice (legacy duplicates from the pre-overwrite era);
+     the cap is defensive."
+    self drainTuplesAt: category scope: scope identity: identity max: 1024.
     d := Tuple affine: category scope: scope identity: identity payload: payload id: self assignId ttl: ttlSeconds actor: actor launchedBy: launchedBy executedBy: executedBy.
     space outAffine: d ttl: ttlSeconds.
     mutex critical: [self addToIndices: d].
     self appendHistory: 'out-affine' tuple: d.
     ^d at: 'id'
+  ]
+
+  method: drainTuplesAt: category scope: scope identity: identity max: cap [
+    "Consume up to `cap` tuples at the given (category, scope, identity).
+     Yields between iterations after the first to avoid a tight CPU spin
+     under any adversarial-write scenario. Logs and returns when the cap
+     is reached so a runaway writer does not block the caller forever."
+    | drained |
+    drained := 0.
+    [drained < cap
+      and: [(self inp: category scope: scope identity: identity) notNil]]
+      whileTrue: [
+        drained := drained + 1.
+        "Yield once per pass after the first so a pathological producer
+         cannot pin a core. 1ms is short enough to be invisible on the
+         single-tuple normal case (where the loop exits immediately the
+         first iteration)."
+        drained >= 2 ifTrue: [Process sleep: 1]
+      ].
+    drained >= cap ifTrue: [
+      ('BBS: drainTuplesAt cap (', cap printString,
+       ') reached for ', category, '|', scope, '|', identity,
+       ' — possible runaway writer') println
+    ].
+    ^drained
   ]
 
   "--- Synchronous-flush wrappers (CLI-facing) ---
@@ -332,18 +390,31 @@ BBS subclass: Object
   "--- Scan Operations (index-based, no drain-and-restore) ---"
 
   method: scan: category scope: scope [
-    "Return all tuples matching category + scope."
+    "Return all tuples matching category + scope. Returns a fresh Array so
+     callers can JSON-encode the result and so iteration is safe outside
+     the mutex (the underlying ArrayList may be mutated concurrently by
+     other writers)."
     ^mutex critical: [
-      index select: [:t |
-        (t at: 'category') = category and: [(t at: 'scope') = scope]
-      ]
+      | result |
+      result := ArrayList new.
+      index do: [:t |
+        ((t at: 'category') = category and: [(t at: 'scope') = scope])
+          ifTrue: [result add: t]
+      ].
+      result asArray
     ]
   ]
 
   method: scanAll: category [
-    "Return all tuples in a category (any scope)."
+    "Return all tuples in a category (any scope). Returns a fresh Array
+     for the same reasons as scan:scope:."
     ^mutex critical: [
-      index select: [:t | (t at: 'category') = category]
+      | result |
+      result := ArrayList new.
+      index do: [:t |
+        (t at: 'category') = category ifTrue: [result add: t]
+      ].
+      result asArray
     ]
   ]
 
@@ -459,25 +530,32 @@ BBS subclass: Object
     "Atomically replace a pinned tuple after applying aBlock to its payload.
      Returns the new tuple id, or nil if no matching tuple was found.
      The cloned payload is yielded to aBlock for in-place mutation; callers
-     that need the post-mutation payload can capture it via closure."
-    | existing payload d |
-    existing := self findInIndex: category scope: scope identity: identity.
-    existing isNil ifTrue: [^nil].
+     that need the post-mutation payload can capture it via closure.
 
-    payload := (existing at: 'payload') copy.
-    aBlock value: payload.
-
-    "Remove all matching from index, write new pinned tuple"
-    mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
-
-    d := actor isNil
-      ifTrue: [Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId]
-      ifFalse: [Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor].
-    space outPersistent: d.
-    mutex critical: [self addToIndices: d].
-    self appendHistory: 'upsert-pinned' tuple: d.
-    self persistAfterChange.
-    ^d at: 'id'
+     Serialised through upsertMutex so two concurrent updaters cannot both
+     read the same baseline and lose one another's changes. The block is
+     evaluated INSIDE upsertMutex, so it must be quick and must not call
+     back into another upsert path on the same key (would deadlock the
+     non-reentrant Mutex)."
+    ^upsertMutex critical: [
+      | existing payload d |
+      existing := self findInIndex: category scope: scope identity: identity.
+      existing isNil
+        ifTrue: [nil]
+        ifFalse: [
+          payload := (existing at: 'payload') copy.
+          aBlock value: payload.
+          mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
+          d := actor isNil
+            ifTrue: [Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId]
+            ifFalse: [Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor].
+          space outPersistent: d.
+          mutex critical: [self addToIndices: d].
+          self appendHistory: 'upsert-pinned' tuple: d.
+          self persistAfterChange.
+          d at: 'id'
+        ]
+    ]
   ]
 
   "--- Signal Operations ---"
@@ -488,9 +566,16 @@ BBS subclass: Object
 
   method: upsertSignal: scope identity: identity payload: payload actor: actor [
     "Remove any existing signal with this identity, then write a new one.
-     Uses linear (not pinned) tuples so inp: can consume them properly."
-    self inp: 'signal' scope: scope identity: identity.
-    ^self out: 'signal' scope: scope identity: identity payload: payload actor: actor
+     Uses linear (not pinned) tuples so inp: can consume them properly.
+
+     Serialised through upsertMutex so two concurrent emitters racing on
+     the same identity cannot both observe no-prior-signal and both write,
+     leaving duplicate signal tuples. The inp+out pair runs as a single
+     critical section."
+    ^upsertMutex critical: [
+      self inp: 'signal' scope: scope identity: identity.
+      self out: 'signal' scope: scope identity: identity payload: payload actor: actor
+    ]
   ]
 
   method: upsertPinned: category scope: scope identity: identity payload: payload [
@@ -500,20 +585,23 @@ BBS subclass: Object
   method: upsertPinned: category scope: scope identity: identity payload: payload actor: actor [
     "Atomically replace a pinned tuple. Removes ALL existing tuples matching
      category/scope/identity from the index, then writes a new pinned tuple.
-     The index is authoritative for scan/list operations."
-    | d |
+     The index is authoritative for scan/list operations.
+
+     Serialised through upsertMutex so the remove+write pair is atomic with
+     respect to other upsert paths; without this, two concurrent upserts
+     could both pass the remove step and both write, leaving duplicate
+     pinned tuples that scan: would surface as separate entries."
     Categories validate: category.
-
-    "Remove all matching from index"
-    mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
-
-    "Write new pinned tuple"
-    d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor.
-    space outPersistent: d.
-    mutex critical: [self addToIndices: d].
-    self appendHistory: 'upsert-pinned' tuple: d.
-    self persistAfterChange.
-    ^d at: 'id'
+    ^upsertMutex critical: [
+      | d |
+      mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
+      d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor.
+      space outPersistent: d.
+      mutex critical: [self addToIndices: d].
+      self appendHistory: 'upsert-pinned' tuple: d.
+      self persistAfterChange.
+      d at: 'id'
+    ]
   ]
 
   "--- Convenience Operations ---"
@@ -646,12 +734,29 @@ BBS subclass: Object
     filePath := dataDir, '/bbs.json'.
     tmpPath := filePath, '.tmp'.
 
+    "Build a self-contained snapshot inside the critical block. Each
+     surviving tuple is shallow-copied AND its payload Dictionary is
+     shallow-copied so the post-unlock JSON encode cannot race against
+     any future code path that mutates a tuple's payload in place. The
+     `update:` path already copies payload before yielding it to the
+     update block (BBS.mag:443), but there's no language-level
+     enforcement of that invariant — copying here makes the snapshot
+     safe regardless. Cost: ~2 dict copies per durable tuple per flush
+     (every 10s under steady load). Negligible vs. JSON encode itself."
     durable := mutex critical: [
-      index select: [:t |
-        | cat |
+      | snap |
+      snap := ArrayList new.
+      index do: [:t |
+        | cat clone p |
         cat := t at: 'category' ifAbsent: [''].
-        (self isDurableCategory: cat)
-      ]
+        (self isDurableCategory: cat) ifTrue: [
+          clone := t copy.
+          p := clone at: 'payload' ifAbsent: [nil].
+          p notNil ifTrue: [clone at: 'payload' put: p copy].
+          snap add: clone
+        ]
+      ].
+      snap asArray
     ].
 
     json := Json encode: durable.

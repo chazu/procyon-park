@@ -7,7 +7,42 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+- BBS pinned-upsert paths (`updatePinned:do:`, `upsertPinned:`,
+  `upsertSignal:`) had read-modify-write races: two concurrent updaters
+  on the same key could lose updates or leave duplicate signal tuples.
+  Serialised through a new `upsertMutex` distinct from the index `mutex`
+  so the find/remove/write sequence runs as one critical section without
+  reentering the non-reentrant index lock.
+- BBS `outAffine:` drained legacy duplicates with a tight
+  `[(self inp: ...) notNil] whileTrue: []` spin loop. A pathological
+  writer could pin a CPU core indefinitely. Replaced with a bounded
+  drain (cap 1024) that yields between iterations.
+
 ### Changed
+- BBS flat `index` switched from `Array` (with O(N) `copyWith:` per write)
+  to `ArrayList` (amortized O(1) `add:`). Public `scan:`/`scanAll:`
+  still return a fresh `Array` so JSON encoding and existing callers
+  are unaffected.
+- BBS `saveToDisk` snapshot is now self-contained: each durable tuple
+  and its payload are shallow-copied inside the index critical block
+  before the JSON encode runs unlocked. Removes the unstated invariant
+  that no caller may mutate a payload Dictionary in place.
+- Dispatcher housekeeping is now single-pass: one `scanAll:` per
+  category (`workflow`/`token`/`task`/`signal`) with tuples bucketed
+  by `workflow_instance` (or scope, for signals). Prior implementation
+  issued 3 `scanAll:` per terminal workflow inside `cleanWorkflowCascade:`
+  — O(N*M) in (terminal workflows × tuples). Now O(M).
+- Dispatcher `onTick` takes ONE `bbs scanAll: 'task'` snapshot per tick
+  and threads it through `Scheduler>>dispatchTasks:`,
+  `reapExpiredClaimsIn:`, and `reapStuckDispatchedIn:`. Prior code took
+  three independent task scans every tick. The original `dispatch`,
+  `reapExpiredClaims`, and `reapStuckDispatched` selectors remain as
+  no-arg trampolines for callers that don't have a snapshot.
+- Replaced `victims := victims copyWith: t` accumulators in the
+  housekeeping cascade and both reaper filter loops with
+  `GrowableArray` (amortized O(1) append) — was O(K²) on K matches.
+
 - Unified the duplicated `maybePromoteParentOf:` (Server.mag) and
   `maybePromoteParent:` (WorkflowEngine.mag) cascade-promotion methods
   into a single `WorkflowEngine>>maybePromoteParent:scope:` impl.
