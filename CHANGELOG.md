@@ -30,6 +30,20 @@ Semantic Versioning.
   escape hatches.
 
 ### Fixed
+- `CLIBase>>silentInp:scope:identity:` was posting to the signed
+  `/api/inp` route, which silently failed for `task`/`token`/`signal`
+  removals (root cause not yet diagnosed; `/api/inp` works fine
+  unsigned via curl, and `pp bbs rm` works fine via the unsigned
+  `/api/bbs/rm` route). Effect: `pp gc` printed `[orphan task] …`
+  and `[orphan signal] …` lines but the live tuple count never
+  moved — the workflow-children sweep and the new orphan sweep
+  were no-ops in practice. Switched the helper to the unsigned
+  `/api/bbs/rm` endpoint that `pp bbs rm` already uses; that
+  endpoint also sync-flushes, so a server restart between `pp gc`
+  and the next async flush no longer resurrects the tuples.
+  Verified end-to-end: a single `pp gc` dropped a stale tuplespace
+  from 1,294 to 504 tuples and `~/.pp/worktrees` from 1.5 GB to 0.
+
 - DashboardSSE `tokenCacheLoop` ran every 5 s reading every
   `~/.pp/sessions/<task>.jsonl` (~127 MB / 413 files on the survey
   host) regardless of whether any dashboard client was connected,

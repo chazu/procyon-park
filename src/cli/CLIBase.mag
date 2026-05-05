@@ -302,26 +302,31 @@ CLIBase subclass: Object
   ]
 
   method: silentInp: category scope: aScope identity: anIdentity [
-    "Remove a tuple from the BBS silently (no output). /api/inp is a
-     mutating endpoint, so this signs the request when an identity is
-     available; otherwise it silently drops to an unsigned send (which
-     the server rejects when enforce_signatures is on — silently, as
-     the helper's name promises)."
-    | body rec |
+    "Remove a tuple from the BBS silently (no output).
+
+     Switched from the signed /api/inp route to the unsigned /api/bbs/rm
+     route on 2026-05-05: under signed posts the gc path was silently
+     failing — `pp gc` would print '[orphan task] ...' but the tuple
+     count never moved. Direct curl to /api/inp (unsigned) AND
+     `pp bbs rm` (which uses /api/bbs/rm unsigned) both worked, so the
+     signed-/api/inp path is the broken one. Root cause not yet
+     diagnosed; tracked separately. Until then, gc operations route
+     through the unsigned ops endpoint that pp bbs rm already uses.
+
+     /api/bbs/rm is also sync-flush — the tuple is durable on disk
+     before the response returns — which is what we want for `pp gc`.
+     /api/inp was async-flush (relies on the dispatcher tick). On a
+     server restart between `pp gc` and the next flush, the tuple
+     would have re-appeared from disk."
+    | body |
     body := Dictionary new.
     body at: 'category' put: category.
     body at: 'scope' put: aScope.
     body at: 'identity' put: anIdentity.
-    rec := self currentIdentity.
-    [
-      rec isNil
-        ifTrue: [
-          client post: baseUrl, '/api/inp' body: (Json encode: body) contentType: 'application/json'
-        ]
-        ifFalse: [
-          self silentSignedPost: '/api/inp' body: body asActor: (rec at: 'name') signer: (rec at: 'identity')
-        ]
-    ] on: Exception do: [:e | "ignore" ]
+    [client post: baseUrl, '/api/bbs/rm'
+            body: (Json encode: body)
+            contentType: 'application/json']
+      on: Exception do: [:e | "ignore" ]
   ]
 
   method: silentSignedPost: path body: dict asActor: actorHeader signer: anIdentity [
