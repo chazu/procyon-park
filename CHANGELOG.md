@@ -7,7 +7,48 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+- `pp gc` is now the single command for cleaning up everything stale.
+  In addition to the prior behaviour (terminal workflows + their
+  associated tuples, merged `feature/*` branches), the default sweep
+  now also covers:
+    - **Orphan tuples** — tasks/tokens/events whose
+      `payload.workflow_instance` references a workflow that no longer
+      exists, plus signals whose scope matches the workflow-id
+      convention (`<template>-<epoch>-<id>`) but isn't in the live set.
+      Survey snapshot found 793 of 1,290 tuples (~62%) were unreachable
+      junk because the legacy walk could only reach tuples through an
+      existing workflow.
+    - **Worktrees** — folds in `pp worktree clean`, the largest
+      consumer of `~/.pp` disk (~88 MB per task dir).
+    - **Session files** — orphan `~/.pp/sessions/<task>.jsonl` older
+      than `--older-than` hours (default 24). Was opt-in via
+      `--sessions`, now default-on (use `--no-sessions` to skip).
+    - **bbs.json backup rotation** — keeps the newest
+      `--keep-backups N` (default 2) and removes the rest.
+  Use `--dry-run` to preview, `--no-sessions` / `--no-worktrees` as
+  escape hatches.
+
 ### Fixed
+- DashboardSSE `tokenCacheLoop` ran every 5 s reading every
+  `~/.pp/sessions/<task>.jsonl` (~127 MB / 413 files on the survey
+  host) regardless of whether any dashboard client was connected,
+  burning ~25 MB/s of allocations the Go heap couldn't return to the
+  OS fast enough. Over a few hours pp serve drifted to 32 G of
+  committed pages with macOS compressing 12 G of them — system-wide
+  memory pressure from a closed dashboard. Fixed three ways:
+    - The refresh now early-returns when `sseSubscribers isEmpty`.
+    - Per-file mtime cache (`tokenCacheMtimes`) so unchanged session
+      files aren't re-parsed.
+    - The dedicated `tokenCacheLoop` fork is gone; the work runs
+      inline in `tick`, which is already gated on subscribers and
+      already runs every 5 s. Permanent goroutine count drops from 3
+      to 2.
+
+  Combined with the upstream maggie `petermattis/goid` arm64 fast-path
+  upgrade, idle CPU went from ~200% to ~0% and `top` memory from 32 G
+  to 1.5 G.
+
 - BBS pinned-upsert paths (`updatePinned:do:`, `upsertPinned:`,
   `upsertSignal:`) had read-modify-write races: two concurrent updaters
   on the same key could lose updates or leave duplicate signal tuples.

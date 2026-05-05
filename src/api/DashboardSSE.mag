@@ -13,7 +13,7 @@
  reads only from that cache (no disk I/O)."
 
 DashboardSSE subclass: Object
-  instanceVars: bbs sseSubscribers tokenCache
+  instanceVars: bbs sseSubscribers tokenCache tokenCacheMtimes
                 watchSetCache watchSetCacheExpiry
 
   classMethod: on: aBBS [
@@ -24,6 +24,7 @@ DashboardSSE subclass: Object
     bbs := aBBS.
     sseSubscribers := #().
     tokenCache := Dictionary new.
+    tokenCacheMtimes := Dictionary new.
     "§6 watch-set TTL cache: every SSE tick walks the snapshot watches
      array once per subscriber. Two browsers belonging to the same user
      resolve identical results — cache by identity for 2 s so the
@@ -31,7 +32,13 @@ DashboardSSE subclass: Object
      per-subscriber."
     watchSetCache := Dictionary new.
     watchSetCacheExpiry := Dictionary new.
-    [self tokenCacheLoop] fork
+    "Token cache refresh used to run in its own [self tokenCacheLoop] fork.
+     With petermattis/goid carrying an arm64 ASM fast path the cost of an
+     extra permanent goroutine is small, but the work itself (file I/O for
+     every task) is wasted whenever no dashboard is connected. We now
+     piggy-back refreshTokenCache on the SSE broadcast tick (Server>>startSSETick
+     calls #tick which calls #refreshTokenCache) so both share one goroutine
+     and both early-return when sseSubscribers is empty."
   ]
 
   method: onConnect: conn [
@@ -100,6 +107,13 @@ DashboardSSE subclass: Object
      still per-subscriber but reuses the cached scans from the snapshot."
     | live snapshot |
     sseSubscribers isEmpty ifTrue: [^self].
+    "Refresh token totals inline now that tokenCacheLoop is gone. The
+     mtime cache makes a no-op refresh cheap; both this and the broadcast
+     are gated on subscribers, so an idle server with no dashboard open
+     does zero work here."
+    [self refreshTokenCache] on: Exception do: [:e |
+      ('SSE token cache refresh failed: ', e messageText) println
+    ].
     snapshot := self computeSnapshot.
     live := Array new: 0.
     sseSubscribers do: [:entry |
@@ -533,51 +547,51 @@ DashboardSSE subclass: Object
     ^result
   ]
 
-  method: tokenCacheLoop [
-    "Background loop: every 5 s, rebuild the per-task token totals cache by
-     reading $HOME/.pp/sessions/<taskId>.jsonl for every task tuple. The
-     fresh Dictionary is swapped into tokenCache in a single var assignment
-     (so concurrent SSE readers always see a consistent map). Errors are
-     logged but never propagate — a single malformed session must not stall
-     the cache.
-
-     Why a separate loop and not the SSE tick? File I/O latency is
-     unpredictable (NFS, fsync stalls); doing it on the broadcast path
-     blocks every subscriber. Rebuild rate (5 s) is a balance between
-     freshness on the dashboard and CPU/disk load."
-    [true] whileTrue: [
-      [self refreshTokenCache] on: Exception do: [:e |
-        ('SSE token cache refresh failed: ', e messageText) println
-      ].
-      Process sleep: 5000
-    ]
-  ]
-
   method: refreshTokenCache [
-    "Build a fresh taskId -> {input, output} cache by walking every task
-     tuple and parsing its session JSONL file. Only commits the new cache
-     once fully built, so readers never see a partial map."
-    | tasks home sessionsDir newCache |
+    "Update the per-task token totals cache by walking task tuples and
+     parsing their session JSONL files.
+
+     Two short-circuits that turned this from a memory leak into a
+     near-no-op at idle:
+
+     1. Caller (#tick) already gates on sseSubscribers being non-empty,
+        so when no dashboard is connected we never get here — previously
+        this loop ran every 5 s in its own fork (#tokenCacheLoop) regardless,
+        re-reading 400+ session files (~127 MB) per pass. The Go heap
+        couldn't return the allocations to the OS fast enough and pp serve
+        drifted to 30 GB+ of committed pages over a few hours.
+
+     2. Per-file mtime cache: re-parsing a session file whose mtime hasn't
+        changed wastes the same CPU and produces the same totals. Skip it.
+
+     Updates the existing tokenCache in place. Per-tid entries are
+     independent, so a concurrent SSE reader can at worst see the old
+     totals for one task while a new entry is being written — fine for
+     a dashboard."
+    | tasks home sessionsDir |
     home := System env: 'HOME'.
     (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
     sessionsDir := home, '/.pp/sessions'.
     tasks := bbs scanAll: 'task'.
-    newCache := Dictionary new.
     tasks do: [:t |
-      | tid filePath totals |
+      | tid filePath curMtime cachedMtime totals |
       tid := t at: 'identity' ifAbsent: [''].
       tid isEmpty ifFalse: [
         filePath := sessionsDir, '/', tid, '.jsonl'.
         (File exists: filePath) ifTrue: [
-          totals := Dictionary new.
-          totals at: 'input' put: 0.
-          totals at: 'output' put: 0.
-          self accumulateTokensFrom: filePath into: totals.
-          newCache at: tid put: totals
+          curMtime := File modificationTime: filePath.
+          cachedMtime := tokenCacheMtimes at: tid ifAbsent: [nil].
+          (curMtime notNil and: [cachedMtime = curMtime]) ifFalse: [
+            totals := Dictionary new.
+            totals at: 'input' put: 0.
+            totals at: 'output' put: 0.
+            self accumulateTokensFrom: filePath into: totals.
+            tokenCache at: tid put: totals.
+            curMtime notNil ifTrue: [tokenCacheMtimes at: tid put: curMtime]
+          ]
         ]
       ]
-    ].
-    tokenCache := newCache
+    ]
   ]
 
   method: accumulateTokensFrom: filePath into: result [

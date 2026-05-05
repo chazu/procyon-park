@@ -1112,7 +1112,13 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     "Port of SystemCommands>>cmdGc:. The --all flag relaxes the status
      filter so every workflow (including running ones) is considered
      for removal — useful in test environments where long-lived
-     workflows need to be wiped."
+     workflows need to be wiped.
+
+     TODO(2026-05-05): the legacy SystemCommands>>cmdGc: was extended
+     with orphan-tuple sweep, worktree clean, bbs.json.bak rotation,
+     and default-on session cleanup. This CliPP port is missing those.
+     Until parity is restored, users wanting the full sweep must run
+     with PP_USE_CLI unset."
     | count |
     'Procyon Park GC' println.
     dryRun ifTrue: ['(dry-run)' println].

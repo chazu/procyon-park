@@ -354,31 +354,55 @@ Dashboard:     ', baseUrl, '/dashboard/
   "--- Garbage Collection ---"
 
   method: cmdGc: args [
-    "pp gc — clean up finished workflows and merged branches.
+    "pp gc — sweep everything stale: terminal workflows, orphan tuples,
+     merged branches, completed worktrees, old session files, old bbs.json
+     backups. Default behaviour cleans everything; use --dry-run to preview.
+
      Flags:
-       --dry-run                 show what would be removed, do not modify state
-       --sessions                also clean orphaned session JSONL files
-       --older-than <hours>      (with --sessions) only remove session files whose
-                                 mtime is older than N hours (default: 24)"
-    | dryRun count sessionsFlag olderThanStr olderThanHours sessionCount |
+       --dry-run             preview without modifying state
+       --no-sessions         skip the session-jsonl sweep
+       --no-worktrees        skip the worktree sweep (~/.pp/worktrees can be GB-scale)
+       --older-than <hours>  session-file age threshold (default: 24)
+       --keep-backups <N>    bbs.json.bak-* files to retain (default: 2)
+
+     Default-on for sessions and worktrees as of 2026-05-05: pp serve was
+     drifting to 30 GB+ committed pages with hundreds of orphan signal
+     tuples in bbs.json (workflow tuples GC'd, but their child tuples
+     unreachable from the legacy workflow-walk). The orphan sweep is the
+     fix; rolling everything else into one command is a usability call so
+     `pp gc` is the single answer to 'why is .pp so big.'"
+    | dryRun count sessionCount orphanCount backupCount keepBackupsStr keepBackups
+      olderThanStr olderThanHours sessionsFlag worktreesFlag |
     dryRun := (args indexOf: '--dry-run') >= 0.
-    sessionsFlag := (args indexOf: '--sessions') >= 0.
+    sessionsFlag := (args indexOf: '--no-sessions') < 0.
+    worktreesFlag := (args indexOf: '--no-worktrees') < 0.
     olderThanStr := self flagValue: '--older-than' in: args.
     olderThanHours := olderThanStr notNil
       ifTrue: [olderThanStr asInteger]
       ifFalse: [24].
+    keepBackupsStr := self flagValue: '--keep-backups' in: args.
+    keepBackups := keepBackupsStr notNil
+      ifTrue: [keepBackupsStr asInteger]
+      ifFalse: [2].
+
     'Procyon Park GC' println.
     dryRun ifTrue: ['(dry-run)' println].
+
     count := self gcWorkflows: dryRun.
+    orphanCount := self gcOrphanTuples: dryRun.
     self gcBranches: dryRun.
-    sessionCount := 0.
-    sessionsFlag ifTrue: [
-      sessionCount := self gcSessionsOlderThanHours: olderThanHours dryRun: dryRun
-    ].
-    ('Done. Removed ', count printString, ' workflows.') println.
-    sessionsFlag ifTrue: [
-      ('       Removed ', sessionCount printString, ' session file(s).') println
-    ]
+    sessionCount := sessionsFlag
+      ifTrue: [self gcSessionsOlderThanHours: olderThanHours dryRun: dryRun]
+      ifFalse: [0].
+    worktreesFlag ifTrue: [self gcWorktrees: dryRun].
+    backupCount := self gcBbsBackups: dryRun keep: keepBackups.
+
+    '' println.
+    ('Done. workflows=', count printString,
+      ' orphan-tuples=', orphanCount printString,
+      ' sessions=', sessionCount printString,
+      ' bbs-backups=', backupCount printString,
+      (dryRun ifTrue: [' (dry-run)'] ifFalse: [''])) println
   ]
 
   method: gcWorkflows: dryRun [
@@ -554,6 +578,136 @@ Dashboard:     ', baseUrl, '/dashboard/
       ('Error cleaning sessions: ', e messageText) println
     ].
     ^removedCount
+  ]
+
+  method: gcOrphanTuples: dryRun [
+    "Sweep tuples whose owning workflow tuple has been GC'd. The legacy
+     gcWorkflows path only walks *existing* workflow tuples — once a
+     workflow is removed, any tasks/signals/tokens still pointing at it
+     are unreachable. Snapshot of bbs.json on 2026-05-05: 546 of 548
+     signals were orphans, 400 of 405 tasks were orphans. ~73% of the
+     tuplespace was unreachable junk.
+
+     Detection: build the live-workflow set from category=workflow, then
+     sweep:
+       - tasks/tokens/events whose payload.workflow_instance is set but
+         is not in the live set
+       - signals whose scope `looksLikeWorkflowId` and is not in the live
+         set (signals don't carry payload.workflow_instance — they're
+         workflow-scoped via the scope field)
+
+     Returns the total number of orphans removed."
+    | wfTuples liveSet removedCount |
+    removedCount := 0.
+    wfTuples := self safeScan: 'workflow' scope: nil.
+    liveSet := Dictionary new.
+    wfTuples do: [:wf |
+      | wfId |
+      wfId := wf at: 'identity' ifAbsent: [''].
+      wfId isEmpty ifFalse: [liveSet at: wfId put: true]
+    ].
+
+    'Sweeping orphan tuples (workflow no longer exists)...' println.
+    removedCount := removedCount + (self gcOrphansIn: 'task' liveSet: liveSet by: 'wi' dryRun: dryRun).
+    removedCount := removedCount + (self gcOrphansIn: 'token' liveSet: liveSet by: 'wi' dryRun: dryRun).
+    removedCount := removedCount + (self gcOrphansIn: 'event' liveSet: liveSet by: 'wi' dryRun: dryRun).
+    removedCount := removedCount + (self gcOrphansIn: 'signal' liveSet: liveSet by: 'scope' dryRun: dryRun).
+    ^removedCount
+  ]
+
+  method: gcOrphansIn: cat liveSet: liveSet by: hintField dryRun: dryRun [
+    "hintField selects how to derive the owning workflow id:
+       'wi'    — payload.workflow_instance (tasks, tokens, events)
+       'scope' — the tuple's scope IFF it looks like a workflow id
+                 (signals)"
+    | tuples removedCount |
+    removedCount := 0.
+    tuples := self safeScan: cat scope: nil.
+    tuples do: [:t |
+      | hint payload sc |
+      hint := nil.
+      hintField = 'wi' ifTrue: [
+        payload := t at: 'payload' ifAbsent: [Dictionary new].
+        hint := payload at: 'workflow_instance' ifAbsent: [nil]
+      ] ifFalse: [
+        sc := t at: 'scope' ifAbsent: [nil].
+        (self looksLikeWorkflowId: sc) ifTrue: [hint := sc]
+      ].
+      (hint notNil and: [hint isEmpty not and: [(liveSet includesKey: hint) not]]) ifTrue: [
+        | tScope tIdentity |
+        tScope := t at: 'scope' ifAbsent: ['default'].
+        tIdentity := t at: 'identity' ifAbsent: [''].
+        ('  [orphan ', cat, '] ', tScope, '/', tIdentity) println.
+        dryRun ifFalse: [
+          self silentInp: cat scope: tScope identity: tIdentity
+        ].
+        removedCount := removedCount + 1
+      ]
+    ].
+    ^removedCount
+  ]
+
+  method: looksLikeWorkflowId: scope [
+    "True iff scope matches the convention <template-name>-<epoch>-<id>,
+     where epoch is at least 10 digits (Unix seconds) and id is digits.
+     Catches story-, story-lite-, full-pipeline-, scout-mission-, etc.
+     Rejects bare repo/cluster scopes like 'mu', 'loosh', 'procyon-park'."
+    | parts last middle |
+    scope isNil ifTrue: [^false].
+    scope isEmpty ifTrue: [^false].
+    parts := scope split: '-'.
+    parts size < 3 ifTrue: [^false].
+    last := parts at: parts size - 1.
+    middle := parts at: parts size - 2.
+    middle size < 10 ifTrue: [^false].
+    last isEmpty ifTrue: [^false].
+    "asInteger round-trip detects all-digits with no leading zeros — fine
+     here since epochs and ids never have leading zeros."
+    (last asInteger printString = last) ifFalse: [^false].
+    (middle asInteger printString = middle) ifFalse: [^false].
+    ^true
+  ]
+
+  method: gcWorktrees: dryRun [
+    "Run the same algorithm as `pp worktree clean`: probe each ~/.pp/worktrees/<task>
+     against the workflow status API and rm -rf the ones whose workflow is
+     completed or missing. Worktrees are typically the largest consumer of
+     ~/.pp disk (88 MB per task dir × N tasks). Folded into `pp gc` so the
+     user has one command for everything."
+    | wtArgs |
+    'Sweeping worktrees (~/.pp/worktrees)...' println.
+    wtArgs := dryRun ifTrue: [#('--dry-run')] ifFalse: [#()].
+    [Repo new cmdWorktreeClean: wtArgs] on: Exception do: [:e |
+      ('Worktree clean error: ', e messageText) println
+    ]
+  ]
+
+  method: gcBbsBackups: dryRun keep: keepN [
+    "Rotate ~/.pp/data/bbs.json.bak-* — keep the newest keepN, delete the
+     rest. The backups are written by the BBS persistence path before each
+     full snapshot rewrite; without rotation they accumulate forever (5
+     stale files = 9 MB on the survey machine)."
+    | dataDir lsOut files keep removed lf |
+    dataDir := (System env: 'HOME'), '/.pp/data'.
+    "ls -t sorts by mtime, newest first."
+    lsOut := Shell capture: 'ls -t "', dataDir, '"/bbs.json.bak-* 2>/dev/null'.
+    (lsOut isNil or: [lsOut isEmpty]) ifTrue: [^0].
+    lf := Character lf asString.
+    files := (lsOut split: lf) select: [:f | f isEmpty not].
+    files size <= keepN ifTrue: [^0].
+    keep := keepN max: 0.
+    removed := 0.
+    "Indices keep..files.size-1 are the older backups to delete."
+    keep to: files size - 1 do: [:i |
+      | f |
+      f := files at: i.
+      ('  bbs backup: ', f) println.
+      dryRun ifFalse: [
+        Shell run: 'rm -f "', f, '"'
+      ].
+      removed := removed + 1
+    ].
+    ^removed
   ]
 
   "--- Session Viewer ---"
