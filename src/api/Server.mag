@@ -2488,9 +2488,15 @@ ApiServer subclass: Object
   ]
 
   method: startSSETick [
+    "Outer rescue is load-bearing: the tick body fans out per-subscriber HTML
+     renders against live BBS tuples. A single malformed payload that trips
+     a renderer must not terminate this goroutine — if it does, every
+     dashboard goes dark until the server is restarted (observed 2026-05-06)."
     [[true] whileTrue: [
       Process sleep: 5000.
-      dashboardSSE tick
+      [dashboardSSE tick] on: Exception do: [:e |
+        ('SSE tick crashed (loop continues): ', e messageText) println
+      ]
     ]] fork
   ]
 

@@ -114,7 +114,14 @@ DashboardSSE subclass: Object
     [self refreshTokenCache] on: Exception do: [:e |
       ('SSE token cache refresh failed: ', e messageText) println
     ].
-    snapshot := self computeSnapshot.
+    "computeSnapshot pre-renders every panel against live BBS tuples; a single
+     malformed payload that throws here used to take down the broadcast fork
+     entirely. Skip this tick on failure and let the next one try again."
+    snapshot := [self computeSnapshot] on: Exception do: [:e |
+      ('SSE snapshot failed (skipping tick): ', e messageText) println.
+      nil
+    ].
+    snapshot isNil ifTrue: [^self].
     live := Array new: 0.
     sseSubscribers do: [:entry |
       | conn q |
@@ -150,14 +157,38 @@ DashboardSSE subclass: Object
     snap at: 'workers' put: (bbs scanAll: 'worker').
     snap at: 'notifications' put: (bbs scanAll: 'notification').
     snap at: 'watches' put: (bbs scanAll: 'watch').
-    snap at: 'workflowsHtml' put: (self renderWorkflowsHtml: snap).
-    snap at: 'completionsHtml' put: (self renderCompletionsHtml: snap).
-    snap at: 'workitemsHtml' put: (self renderWorkitemsHtml: snap).
-    snap at: 'scopeViolationsHtml' put: (self renderScopeViolationsHtml: snap).
-    snap at: 'presenceHtml' put: (self renderPresenceHtml: snap).
+    "Each render is wrapped independently so a single bad tuple only
+     blanks one panel — not the whole dashboard. The fallback HTML uses
+     the same root id the dashboard JS expects so the SSE patch still
+     replaces the placeholder cleanly."
+    snap at: 'workflowsHtml' put:
+      (self safeRender: 'workflows' rootId: 'dashboard-workflows' do: [self renderWorkflowsHtml: snap]).
+    snap at: 'completionsHtml' put:
+      (self safeRender: 'completions' rootId: 'dashboard-completions' do: [self renderCompletionsHtml: snap]).
+    snap at: 'workitemsHtml' put:
+      (self safeRender: 'workitems' rootId: 'dashboard-workitems' do: [self renderWorkitemsHtml: snap]).
+    snap at: 'scopeViolationsHtml' put:
+      (self safeRender: 'scope-violations' rootId: 'dashboard-scope-violations' do: [self renderScopeViolationsHtml: snap]).
+    snap at: 'presenceHtml' put:
+      (self safeRender: 'presence' rootId: 'dashboard-presence' do: [self renderPresenceHtml: snap]).
     snap at: 'notificationsAnonHtml' put:
-      (self renderNotificationsHtml: (snap at: 'notifications')).
+      (self safeRender: 'notifications' rootId: 'dashboard-notifications' do: [self renderNotificationsHtml: (snap at: 'notifications')]).
     ^snap
+  ]
+
+  method: safeRender: name rootId: rootId do: aBlock [
+    "Run a render block; on failure, log which panel and return a
+     fallback fragment with the expected root id so the dashboard
+     panel renders an error instead of staying stuck on 'Connecting…'.
+     Logs include the message text so the offending render is obvious
+     from server logs without dashboard guessing."
+    ^[aBlock value] on: Exception do: [:e |
+      ('SSE render failed for ', name, ': ', e messageText) println.
+      '<div id="', rootId, '"><h2>', name, '</h2>',
+        '<div class="empty-state">render error: ',
+        (self htmlEscape: e messageText),
+        '</div></div>'
+    ]
   ]
 
   method: broadcastTo: entry snapshot: snap [
@@ -838,7 +869,7 @@ DashboardSSE subclass: Object
      Caller is responsible for any per-identity filtering."
     | s recent |
     recent := visible size > 30
-      ifTrue: [visible copyFrom: (visible size - 30)]
+      ifTrue: [visible copyFrom: (visible size - 30) to: visible size]
       ifFalse: [visible].
     s := '<div id="dashboard-notifications"><h2>Recent Activity</h2>'.
     recent isEmpty ifTrue: [
@@ -846,31 +877,49 @@ DashboardSSE subclass: Object
     ] ifFalse: [
       s := s, '<ul>'.
       "Render newest-first: iterate the recent slice from tail to head.
-       bbs scanAll: 'notification' returns oldest→newest, and the
-       copyFrom: above keeps the trailing window of most-recent items;
-       walking that window in reverse puts the freshest entry on top."
-      recent size to: 1 by: -1 do: [:idx |
-        | n p message severity createdAt ts scope workflow |
-        n := recent at: idx.
-        p := n at: 'payload' ifAbsent: [Dictionary new].
-        message := p at: 'message' ifAbsent: [''].
-        severity := p at: 'severity' ifAbsent: ['info'].
-        createdAt := p at: 'created_at' ifAbsent: [0].
-        scope := n at: 'scope' ifAbsent: [''].
-        scope isNil ifTrue: [scope := ''].
-        workflow := (scope startsWith: 'wf-')
-          ifTrue: [scope]
-          ifFalse: [p at: 'workflow_instance' ifAbsent: ['']].
-        workflow isNil ifTrue: [workflow := ''].
-        ts := createdAt > 0
-          ifTrue: [(DateTime fromEpoch: createdAt) format: '15:04:05']
-          ifFalse: [''].
-        s := s, '<li class="notif-item sev-', (self htmlEscape: severity),
-              '" data-scope="', (self htmlEscape: scope),
-              '" data-workflow="', (self htmlEscape: workflow),
-              '" data-severity="', (self htmlEscape: severity), '">',
-              ts, ' <span class="notif-scope">', (self htmlEscape: scope), '</span>',
-              ' [', (self htmlEscape: severity), '] ', (self htmlEscape: message), '</li>'
+       Maggie arrays are 0-indexed half-open, so the valid range is
+       [0, size). Off-by-one regression here was producing a nil at the
+       top of the list and silently dropping the freshest notification."
+      (recent size - 1) to: 0 by: -1 do: [:idx |
+        | n p message severity createdAt ts scope workflow line |
+        line := [
+          n := recent at: idx.
+          (n isKindOf: Dictionary) ifFalse: [
+            ('notif render: tuple not Dictionary at idx=', idx printString,
+              ' type=', n class name) println.
+            n := Dictionary new
+          ].
+          p := n at: 'payload' ifAbsent: [Dictionary new].
+          (p isKindOf: Dictionary) ifFalse: [
+            ('notif render: payload not Dictionary id=',
+              (n at: 'identity' ifAbsent: ['?']),
+              ' type=', p class name) println.
+            p := Dictionary new
+          ].
+          message := p at: 'message' ifAbsent: [''].
+          severity := p at: 'severity' ifAbsent: ['info'].
+          createdAt := n at: 'created_at' ifAbsent: [p at: 'created_at' ifAbsent: [0]].
+          scope := n at: 'scope' ifAbsent: [''].
+          (scope isNil or: [(scope isKindOf: String) not]) ifTrue: [scope := ''].
+          workflow := (scope startsWith: 'wf-')
+            ifTrue: [scope]
+            ifFalse: [p at: 'workflow_instance' ifAbsent: ['']].
+          workflow isNil ifTrue: [workflow := ''].
+          ts := ((createdAt isKindOf: Integer) and: [createdAt > 0])
+            ifTrue: [(DateTime fromEpoch: createdAt) format: '15:04:05']
+            ifFalse: [''].
+          '<li class="notif-item sev-', (self htmlEscape: severity),
+            '" data-scope="', (self htmlEscape: scope),
+            '" data-workflow="', (self htmlEscape: workflow),
+            '" data-severity="', (self htmlEscape: severity), '">',
+            ts, ' <span class="notif-scope">', (self htmlEscape: scope), '</span>',
+            ' [', (self htmlEscape: severity), '] ', (self htmlEscape: message), '</li>'
+        ] on: Exception do: [:e |
+          ('notif render: row idx=', idx printString,
+            ' failed: ', e messageText) println.
+          ''
+        ].
+        s := s, line
       ].
       s := s, '</ul>'
     ].

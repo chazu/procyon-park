@@ -30,6 +30,28 @@ Semantic Versioning.
   escape hatches.
 
 ### Fixed
+- Dashboard "Recent Activity" panel was silently dropping the newest
+  notification and producing a `Message not understood: at:ifAbsent:`
+  on every SSE tick, which (combined with the unrescued tick loop)
+  blacked out the entire dashboard. `renderNotificationsHtml:` iterated
+  `recent size to: 1 by: -1`, treating the slice as 1-indexed; Maggie
+  arrays are 0-indexed half-open (same convention as `copyFrom:to:`,
+  see commit 7c182d6). Loop now walks `(recent size - 1) to: 0 by: -1`,
+  reads `created_at` from the tuple top-level (the prior code looked
+  inside `payload`, where it never lives, so timestamps were always
+  empty), and uses the two-arg `copyFrom:to:` form for the >30
+  trim. Each row is wrapped in its own rescue so one malformed
+  notification can no longer void the whole panel.
+- Dashboard SSE broadcast goroutine no longer dies permanently on a
+  single bad tuple. `Server>>startSSETick` now wraps each `tick`
+  invocation in `on: Exception do:`, `DashboardSSE>>tick` rescues
+  `computeSnapshot` independently, and `computeSnapshot` runs each
+  panel's render in its own `safeRender:rootId:do:` so a single failing
+  panel falls back to a render-error fragment instead of blanking the
+  whole dashboard. Prior behaviour: a single throw permanently killed
+  the broadcast fork, leaving every panel stuck on "Connecting…" with
+  the HTTP server still running and `/api/dashboard` still returning
+  fresh data — fault localised to the broadcast loop.
 - `CLIBase>>silentInp:scope:identity:` was posting to the signed
   `/api/inp` route, which silently failed for `task`/`token`/`signal`
   removals (root cause not yet diagnosed; `/api/inp` works fine
