@@ -160,6 +160,14 @@ ApiServer subclass: Object
     httpServer sseRoute: '/api/sse/dashboard' handler: [:conn :req |
       self handleSSEDashboard: conn request: req
     ].
+    "Root redirect: / → /dashboard/ so bookmarks and bare-host URLs land
+     on the web UI instead of a 404."
+    self get: '/' do: [:req |
+      | resp |
+      resp := HttpResponse new: 302 body: ''.
+      resp header: 'Location' value: '/dashboard/'.
+      resp
+    ].
     self startSSETick.
     httpServer start
   ]
@@ -368,7 +376,8 @@ ApiServer subclass: Object
       self handleUserRotate: req
     ].
     self registerInviteRoutes.
-    self registerWorkerRoutes
+    self registerWorkerRoutes.
+    self get: '/api/whoami' do: [:req | self handleWhoami: req]
   ]
 
   method: registerInviteRoutes [
@@ -2582,5 +2591,21 @@ ApiServer subclass: Object
     ].
     bbs emitEvent: '/' identity: 'key-rotated:', actorName type: 'key-rotated' summary: 'Key rotated' actor: actor.
     ^self okResponse: (self okWithIdentity: actorName)
+  ]
+
+  "--- Whoami ---"
+
+  method: handleWhoami: req [
+    "GET /api/whoami — return the authenticated identity from request
+     signature headers, or 'anonymous' if unsigned/invalid. Used by the
+     web dashboard to resolve the viewer identity for card-scope filtering."
+    | actorCtx identity d |
+    actorCtx := signatureVerifier verify: req adminList: adminList skewSeconds: skewSeconds.
+    actorCtx isNil ifTrue: [actorCtx := ActorContext anonymous].
+    identity := actorCtx actor.
+    identity isNil ifTrue: [identity := 'anonymous'].
+    d := Dictionary new.
+    d at: 'identity' put: identity.
+    ^self okResponse: d
   ]
 

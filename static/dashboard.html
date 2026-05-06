@@ -853,9 +853,9 @@
       60% { transform: translate(-1px,1px); opacity: 1; }
       100%{ transform: translate(0,0); }
     }
-    .wf-card, .wi-card, .sv-list li, #dashboard-notifications li{
-      animation: press-in .18s ease-out;
-    }
+    /* press-in animation removed from cards — it replayed every 5s SSE
+       tick because outerHTML replacement re-triggers CSS animations,
+       causing visual nausea. See scout-dashboard-cuteness §2.5 item 5. */
   </style>
 </head>
 <body>

@@ -264,7 +264,8 @@ DashboardSSE subclass: Object
           count >= 2 ifTrue: ['sv-repeat'] ifFalse: ['sv-single']
         ].
         s := s, '<li class="sv-role ', severity, '">',
-              '<b>', role, '</b> ',
+              '<b>', role, '</b>',
+              '<img class="role-badge" src="/dashboard/roles/role-', role, '.png" alt="" onerror="this.style.display=''none''"> ',
               '<span class="sv-count">', count printString, ' violation(s)</span>',
               ' <small>', taskCount printString, ' task(s), ',
               files printString, ' file(s) reverted</small>',
@@ -358,7 +359,7 @@ DashboardSSE subclass: Object
               (modelsStr isEmpty ifTrue: [''] ifFalse: [' <small>models=', modelsStr, '</small>']),
               (drain = true ifTrue: [' <span class="presence-badge-drain">drain</span>'] ifFalse: ['']),
               (digest isEmpty ifTrue: [''] ifFalse: [' <small class="presence-digest">',
-                 (digest size > 12 ifTrue: [digest copyFrom: 1 to: 12] ifFalse: [digest]), '</small>']).
+                 (digest size > 12 ifTrue: [digest copyFrom: 0 to: 12] ifFalse: [digest]), '</small>']).
         (budget notNil and: [budget isKindOf: Dictionary]) ifTrue: [
           | bState bRem bLimit |
           bState := budget at: 'state' ifAbsent: [budget at: 'status' ifAbsent: ['']].
@@ -437,12 +438,12 @@ DashboardSSE subclass: Object
           type := p at: 'type' ifAbsent: ['story'].
           repo := p at: 'repo' ifAbsent: [w at: 'scope' ifAbsent: ['']].
           wid := identity.
-          title size > 60 ifTrue: [title := (title copyFrom: 1 to: 60), '...'].
-          s := s, '<div class="wi-card wi-', type, '" data-repo="', repo, '">',
-                '<div class="wi-title">', title, '</div>',
-                '<div class="wi-meta"><span class="wi-type">', type, '</span> ',
-                '<small>', wid, '</small>',
-                (repo isEmpty ifTrue: [''] ifFalse: [' <small class="wi-repo">', repo, '</small>']),
+          title size > 60 ifTrue: [title := (title copyFrom: 0 to: 60), '...'].
+          s := s, '<div class="wi-card wi-', (self htmlEscape: type), '" data-repo="', (self htmlEscape: repo), '">',
+                '<div class="wi-title">', (self htmlEscape: title), '</div>',
+                '<div class="wi-meta"><span class="wi-type">', (self htmlEscape: type), '</span> ',
+                '<small>', (self htmlEscape: wid), '</small>',
+                (repo isEmpty ifTrue: [''] ifFalse: [' <small class="wi-repo">', (self htmlEscape: repo), '</small>']),
                 '</div>',
                 '</div>'
         ]
@@ -468,7 +469,7 @@ DashboardSSE subclass: Object
         template := p at: 'template' ifAbsent: ['?'].
         wfId := w at: 'identity' ifAbsent: ['?'].
         desc := (p at: 'params' ifAbsent: [Dictionary new]) at: 'description' ifAbsent: [''].
-        desc size > 100 ifTrue: [desc := (desc copyFrom: 1 to: 100), '...'].
+        desc size > 100 ifTrue: [desc := (desc copyFrom: 0 to: 100), '...'].
         label := desc isEmpty ifTrue: [wfId] ifFalse: [desc].
         places := self placesFor: wfId in: allTokens.
         launchedBy := w at: 'launched_by' ifAbsent: [p at: 'launched_by' ifAbsent: [nil]].
@@ -864,12 +865,12 @@ DashboardSSE subclass: Object
         ts := createdAt > 0
           ifTrue: [(DateTime fromEpoch: createdAt) format: '15:04:05']
           ifFalse: [''].
-        s := s, '<li class="notif-item sev-', severity,
-              '" data-scope="', scope,
-              '" data-workflow="', workflow,
-              '" data-severity="', severity, '">',
-              ts, ' <span class="notif-scope">', scope, '</span>',
-              ' [', severity, '] ', message, '</li>'
+        s := s, '<li class="notif-item sev-', (self htmlEscape: severity),
+              '" data-scope="', (self htmlEscape: scope),
+              '" data-workflow="', (self htmlEscape: workflow),
+              '" data-severity="', (self htmlEscape: severity), '">',
+              ts, ' <span class="notif-scope">', (self htmlEscape: scope), '</span>',
+              ' [', (self htmlEscape: severity), '] ', (self htmlEscape: message), '</li>'
       ].
       s := s, '</ul>'
     ].
