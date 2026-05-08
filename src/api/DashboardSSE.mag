@@ -122,7 +122,7 @@ DashboardSSE subclass: Object
       nil
     ].
     snapshot isNil ifTrue: [^self].
-    live := Array new: 0.
+    live := GrowableArray new.
     sseSubscribers do: [:entry |
       | conn q |
       conn := entry at: 'conn'.
@@ -133,10 +133,10 @@ DashboardSSE subclass: Object
         ].
         "broadcastTo: may have closed the queue on overflow —
          re-check before keeping the subscriber."
-        q isClosed ifFalse: [live := live copyWith: entry]
+        q isClosed ifFalse: [live add: entry]
       ]
     ].
-    sseSubscribers := live
+    sseSubscribers := live asArray
   ]
 
   method: computeSnapshot [

@@ -163,23 +163,33 @@ WorkflowEngine subclass: Object
   "--- Workflow Advancement ---"
 
   method: advance [
-    "The core Petri net step. Scan tokens, find enabled transitions, fire them."
+    "The core Petri net step. Scan tokens once, find enabled transitions, fire them.
+     A single scanAll:'token' snapshot is taken here and threaded into
+     promoteWaitingTokens: and advanceInstance: so we do O(1) BBS token
+     scans per tick instead of O(2W) for W running workflows."
 
-    | workflows |
+    | workflows allTokens |
     workflows := bbs scanAll: 'workflow'.
+    allTokens := bbs scanAll: 'token'.
 
     workflows do: [:wf |
       | wfPayload status |
       wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
       status := wfPayload at: 'status' ifAbsent: [''].
       status = 'running' ifTrue: [
-        self advanceInstance: wf
+        self advanceInstance: wf tokens: allTokens
       ]
     ]
   ]
 
   method: advanceInstance: wf [
-    "Advance a single workflow instance."
+    "Back-compat entry point — scans tokens internally."
+    ^self advanceInstance: wf tokens: nil
+  ]
+
+  method: advanceInstance: wf tokens: maybeTokens [
+    "Advance a single workflow instance. If maybeTokens is non-nil it
+     is reused as the token snapshot (avoiding a redundant scanAll:)."
     | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params maxCycles cycleSignal cycleCount verdictPayload launchedBy wfAffinity overrideAffinity |
 
     instanceId := wf at: 'identity'.
@@ -202,10 +212,13 @@ WorkflowEngine subclass: Object
     transitions := templatePayload at: 'transitions' ifAbsent: [#()].
 
     "Promote waiting tokens whose tasks have completed"
-    self promoteWaitingTokens: instanceId scope: scope.
+    self promoteWaitingTokens: instanceId scope: scope tokens: maybeTokens.
 
-    "Scan all tokens for this instance"
-    allTokens := bbs scanAll: 'token'.
+    "Reuse the token snapshot passed in from advance, or scan if called
+     via the back-compat entry point."
+    allTokens := maybeTokens isNil
+      ifTrue: [bbs scanAll: 'token']
+      ifFalse: [maybeTokens].
     instanceTokens := allTokens select: [:t |
       | wfInst tokStatus |
       wfInst := (t at: 'payload') at: 'workflow_instance' ifAbsent: [''].
@@ -295,10 +308,18 @@ WorkflowEngine subclass: Object
   "--- Token Promotion ---"
 
   method: promoteWaitingTokens: instanceId scope: scope [
+    "Back-compat entry point — scans tokens internally."
+    ^self promoteWaitingTokens: instanceId scope: scope tokens: nil
+  ]
+
+  method: promoteWaitingTokens: instanceId scope: scope tokens: maybeTokens [
     "Find tokens with status=waiting and check if their spawning transition's
-     task has a task-complete event. If so, promote to positive."
+     task has a task-complete event. If so, promote to positive.
+     Reuses the caller's token snapshot when non-nil."
     | allTokens waitingTokens |
-    allTokens := bbs scanAll: 'token'.
+    allTokens := maybeTokens isNil
+      ifTrue: [bbs scanAll: 'token']
+      ifFalse: [maybeTokens].
     waitingTokens := allTokens select: [:t |
       | wfInst tokStatus |
       wfInst := (t at: 'payload') at: 'workflow_instance' ifAbsent: [''].

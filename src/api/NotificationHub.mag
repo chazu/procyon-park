@@ -48,7 +48,7 @@ NotificationHub subclass: Object
     sub := Dictionary new.
     sub at: 'id' put: id.
     sub at: 'filter' put: filterBlock.
-    sub at: 'pending' put: (Array new: 0).
+    sub at: 'pending' put: (GrowableArray new).
     mutex critical: [
       subscribers := subscribers copyWith: sub
     ].
@@ -76,7 +76,7 @@ NotificationHub subclass: Object
       [matches := f value: tuple] on: Exception do: [:e | matches := false].
       matches ifTrue: [
         mutex critical: [
-          sub at: 'pending' put: ((sub at: 'pending') copyWith: tuple)
+          (sub at: 'pending') add: tuple
         ]
       ]
     ]
@@ -89,11 +89,13 @@ NotificationHub subclass: Object
   ]
 
   method: drain: sub [
-    "Atomically read and clear the subscription's pending queue."
+    "Atomically read and clear the subscription's pending queue.
+     Returns a plain Array snapshot; resets pending to a fresh
+     GrowableArray so publish: can resume O(1) appending."
     | result |
     mutex critical: [
-      result := sub at: 'pending'.
-      sub at: 'pending' put: (Array new: 0)
+      result := (sub at: 'pending') asArray.
+      sub at: 'pending' put: (GrowableArray new)
     ].
     ^result
   ]

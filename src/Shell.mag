@@ -14,6 +14,16 @@
    runChecked:timeout: — signals Error on timeout (exit 124 by convention)."
 
 Shell subclass: Object
+  classVars: captureSeq
+
+  classMethod: nextCaptureId [
+    "Monotonic counter appended to temp file names so two capture: calls
+     within the same epoch second never collide. Initialized lazily;
+     the class variable is nil until the first call."
+    captureSeq isNil ifTrue: [captureSeq := 0].
+    captureSeq := captureSeq + 1.
+    ^captureSeq printString
+  ]
 
   classMethod: run: cmd [
     "Fire-and-forget shell command. No output capture."
@@ -29,7 +39,7 @@ Shell subclass: Object
     "Run a shell command and return its stdout as a String.
      Uses a temp file to capture output reliably."
     | proc shellArgs tmpFile raw result |
-    tmpFile := '/tmp/pp-shell-capture-', DateTime now epochSeconds printString.
+    tmpFile := '/tmp/pp-shell-capture-', DateTime now epochSeconds printString, '-', self nextCaptureId.
     proc := ExternalProcess command: '/bin/sh'.
     shellArgs := #('-c').
     shellArgs := shellArgs copyWith: cmd, ' > "', tmpFile, '" 2>&1'.

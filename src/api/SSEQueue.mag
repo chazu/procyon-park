@@ -9,13 +9,18 @@
  invokes `conn send:event:` — so even if that call blocks on a slow
  client the tick loop is unaffected.
 
+ Implementation: pre-allocated ring buffer. Both enqueue: and dequeue
+ are O(1) with zero allocation on the hot path — the previous
+ copyWith:/copyFrom: implementation allocated a fresh N-element array
+ on every enqueue and every dequeue.
+
  This class is intentionally minimal: no internal signalling primitive
  (Maggie lacks Channel), so the drainer polls with a short sleep when
  the queue is empty. In practice the tick cadence (≈5s) dwarfs the
  poll interval (200ms) so latency is dominated by enqueue frequency."
 
 SSEQueue subclass: Object
-  instanceVars: items cap closed droppedCount
+  instanceVars: buf cap head tail count closed droppedCount
 
   classMethod: new [
     ^super new init
@@ -30,15 +35,18 @@ SSEQueue subclass: Object
   ]
 
   method: initCap: capacity [
-    items := Array new: 0.
     cap := capacity.
+    buf := Array new: cap.
+    head := 0.
+    tail := 0.
+    count := 0.
     closed := false.
     droppedCount := 0.
     ^self
   ]
 
   method: size [
-    ^items size
+    ^count
   ]
 
   method: capacity [
@@ -46,11 +54,11 @@ SSEQueue subclass: Object
   ]
 
   method: isEmpty [
-    ^items size = 0
+    ^count = 0
   ]
 
   method: isFull [
-    ^items size >= cap
+    ^count >= cap
   ]
 
   method: isClosed [
@@ -69,23 +77,29 @@ SSEQueue subclass: Object
   ]
 
   method: enqueue: event [
-    "Append event to the queue. Returns true on success, false if the
-     queue is closed or at capacity. On overflow we also track a dropped
-     count so DashboardSSE can log per-connection loss."
+    "Append event to the tail of the ring buffer. Returns true on
+     success, false if the queue is closed or at capacity. O(1), no
+     allocation."
     closed ifTrue: [^false].
-    self isFull ifTrue: [
+    count >= cap ifTrue: [
       droppedCount := droppedCount + 1.
       ^false
     ].
-    items := items copyWith: event.
+    buf at: tail put: event.
+    tail := (tail + 1) \\ cap.
+    count := count + 1.
     ^true
   ]
 
   method: dequeue [
-    "Pop the head of the queue, or nil if empty. Does not block."
-    | head |
-    items isEmpty ifTrue: [^nil].
-    head := items at: 0.
-    items := items copyFrom: 1 to: items size.
-    ^head
+    "Pop the head of the ring buffer, or nil if empty. O(1), no
+     allocation. Nils out the vacated slot to avoid retaining
+     references to delivered events."
+    | item |
+    count = 0 ifTrue: [^nil].
+    item := buf at: head.
+    buf at: head put: nil.
+    head := (head + 1) \\ cap.
+    count := count - 1.
+    ^item
   ]
