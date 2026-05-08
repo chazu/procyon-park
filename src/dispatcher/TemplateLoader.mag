@@ -97,9 +97,12 @@ TemplateLoader subclass: Object
       | path identity payload |
       path := workflowsDir, '/', fname.
       identity := fname copyFrom: 0 to: fname size - 4.
-      payload := self loadTemplateFile: path.
-      payload notNil ifTrue: [
-        bbs outPinned: 'template' scope: 'system' identity: identity payload: payload
+      [payload := self loadTemplateFile: path.
+       payload notNil ifTrue: [
+         bbs outPinned: 'template' scope: 'system' identity: identity payload: payload
+       ]
+      ] on: Exception do: [:e |
+        ('Warning: skipping system template ', identity, ': ', e messageText) println
       ]
     ].
     ('Loaded ', files size printString, ' system workflow template(s).') println
@@ -119,9 +122,12 @@ TemplateLoader subclass: Object
           | path identity payload |
           path := repoWorkflowsDir, '/', fname.
           identity := fname copyFrom: 0 to: fname size - 4.
-          payload := self loadTemplateFile: path.
-          payload notNil ifTrue: [
-            bbs outPinned: 'template' scope: repoName identity: identity payload: payload
+          [payload := self loadTemplateFile: path.
+           payload notNil ifTrue: [
+             bbs outPinned: 'template' scope: repoName identity: identity payload: payload
+           ]
+          ] on: Exception do: [:e |
+            ('Warning: skipping repo template ', identity, ' (', repoName, '): ', e messageText) println
           ]
         ].
         files size > 0 ifTrue: [
@@ -213,7 +219,10 @@ TemplateLoader subclass: Object
   ]
 
   method: loadTemplateFile: path [
-    "Load a single CUE file, return Dictionary payload or nil on error."
+    "Load a single CUE file, return Dictionary payload or nil on error.
+     Raises Error on failure so callers (seedAll:, reloadTemplate:) can
+     handle it — previously called System exit: 1 which killed the
+     entire process (including the test runner) on any malformed .cue."
     | cueResult payload |
     [
       cueResult := cueCtx loadFile: path.
@@ -222,9 +231,7 @@ TemplateLoader subclass: Object
     ] on: Exception do: [:e |
       ('ERROR: failed to load workflow template: ', path) println.
       ('  ', e messageText) println.
-      ('Fatal: malformed CUE template — cannot continue.') println.
-      System exit: 1.
-      ^nil
+      Error signal: 'Failed to load CUE template: ', path, ' — ', e messageText
     ]
   ]
 
