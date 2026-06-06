@@ -7,6 +7,21 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+- Migrated the entire codebase to Maggie's 1-based array/string indexing
+  (Smalltalk-80 convention), which the language adopted upstream. All
+  element access, `copyFrom:to:` slices (now closed intervals), manual
+  index loops, and `indexOf:` not-found checks (now `0` instead of `-1`)
+  were converted across `src/` and the test suite. Without this, building
+  against current Maggie produced silent off-by-one corruption and
+  `index 0 out of bounds` crashes throughout the server and CLI.
+
+### Fixed
+- Restored buildability against current Maggie: the bundled `alto` Go
+  interop shims (`wrap/tcell`, `wrap/terminal`) used the old
+  `PrimitiveFunc` signature (`interface{}` receiver) and no longer
+  compiled after the VM switched to a typed `*VM` receiver.
+
 ### Added
 - `pp gc` is now the single command for cleaning up everything stale.
   In addition to the prior behaviour (terminal workflows + their

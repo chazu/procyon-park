@@ -200,13 +200,13 @@ BBS subclass: Object
      first entry whose id matches. No-op if not present."
     | n i found |
     n := index size.
-    i := 0.
-    found := -1.
-    [(found < 0) and: [i < n]] whileTrue: [
+    i := 1.
+    found := 0.
+    [(found <= 0) and: [i <= n]] whileTrue: [
       ((index at: i) at: 'id') = tupleId ifTrue: [found := i].
       i := i + 1
     ].
-    found >= 0 ifTrue: [index removeAt: found]
+    found > 0 ifTrue: [index removeAt: found]
   ]
 
   method: removeFromIndicesByKey: category scope: scope identity: identity [
@@ -1019,7 +1019,7 @@ BBS subclass: Object
     limit := filters at: 'limit' ifAbsent: [nil].
     limit notNil ifTrue: [
       entries size > limit ifTrue: [
-        entries := entries copyFrom: (entries size - limit) to: entries size
+        entries := entries copyFrom: (entries size - limit) + 1 to: entries size
       ]
     ].
 

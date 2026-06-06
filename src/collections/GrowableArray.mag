@@ -1,6 +1,6 @@
 "GrowableArray — amortized O(1) append via doubling growth strategy.
  Wraps an Array with size tracking and capacity management.
- Uses 0-based indexing to match Maggie Array semantics."
+ Uses 1-based indexing to match Maggie Array semantics."
 
 GrowableArray subclass: Object
   instanceVars: storage count
@@ -21,7 +21,7 @@ GrowableArray subclass: Object
   method: add: anObject [
     "Append an element, growing if necessary."
     count >= storage size ifTrue: [self grow].
-    storage at: count put: anObject.
+    storage at: count + 1 put: anObject.
     count := count + 1
   ]
 
@@ -29,25 +29,25 @@ GrowableArray subclass: Object
     "Double the capacity."
     | newStorage |
     newStorage := Array new: storage size * 2.
-    0 to: count - 1 do: [:i | newStorage at: i put: (storage at: i)].
+    1 to: count do: [:i | newStorage at: i put: (storage at: i)].
     storage := newStorage
   ]
 
   method: size [ ^count ]
 
   method: at: index [
-    (index < 0 or: [index >= count]) ifTrue: [Error signal: 'Index out of bounds'].
+    (index < 1 or: [index > count]) ifTrue: [Error signal: 'Index out of bounds'].
     ^storage at: index
   ]
 
   method: do: aBlock [
-    0 to: count - 1 do: [:i | aBlock value: (storage at: i)]
+    1 to: count do: [:i | aBlock value: (storage at: i)]
   ]
 
   method: select: aBlock [
     | result |
     result := GrowableArray new.
-    0 to: count - 1 do: [:i |
+    1 to: count do: [:i |
       | elem |
       elem := storage at: i.
       (aBlock value: elem) ifTrue: [result add: elem]
@@ -58,7 +58,7 @@ GrowableArray subclass: Object
   method: collect: aBlock [
     | result |
     result := GrowableArray new.
-    0 to: count - 1 do: [:i |
+    1 to: count do: [:i |
       result add: (aBlock value: (storage at: i))
     ].
     ^result
@@ -67,7 +67,7 @@ GrowableArray subclass: Object
   method: reject: aBlock [
     | result |
     result := GrowableArray new.
-    0 to: count - 1 do: [:i |
+    1 to: count do: [:i |
       | elem |
       elem := storage at: i.
       (aBlock value: elem) ifFalse: [result add: elem]
@@ -76,7 +76,7 @@ GrowableArray subclass: Object
   ]
 
   method: detect: aBlock ifNone: noneBlock [
-    0 to: count - 1 do: [:i |
+    1 to: count do: [:i |
       | elem |
       elem := storage at: i.
       (aBlock value: elem) ifTrue: [^elem]
@@ -85,7 +85,7 @@ GrowableArray subclass: Object
   ]
 
   method: includes: anObject [
-    0 to: count - 1 do: [:i |
+    1 to: count do: [:i |
       (storage at: i) = anObject ifTrue: [^true]
     ].
     ^false
@@ -94,10 +94,10 @@ GrowableArray subclass: Object
   method: isEmpty [ ^count = 0 ]
 
   method: asArray [
-    "Return a plain 0-based Array containing only the live elements."
+    "Return a plain Array containing only the live elements."
     | result |
     result := Array new: count.
-    0 to: count - 1 do: [:i | result at: i put: (storage at: i)].
+    1 to: count do: [:i | result at: i put: (storage at: i)].
     ^result
   ]
 

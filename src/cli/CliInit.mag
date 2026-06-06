@@ -12,7 +12,7 @@ CliInit subclass: Object
   classMethod: run: args [
     | name rec ident home tomlPath tomlContents pubHex configDir user |
     name := ''.
-    args size > 0 ifTrue: [name := args at: 0].
+    args size > 0 ifTrue: [name := args at: 1].
     (name isNil or: [name isEmpty]) ifTrue: [
       user := System env: 'USER'.
       (user isNil or: [user isEmpty])

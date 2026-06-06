@@ -174,7 +174,7 @@ TestIVHarnessEmptyPrompt subclass: Object
     reason notNil ifTrue: [
       t assert: (reason startsWith: 'empty-task-description')
         message: 'IV5b: failureReason must be tagged empty-task-description'.
-      t assert: ((reason indexOf: 'pp workitem update') >= 0)
+      t assert: ((reason indexOf: 'pp workitem update') > 0)
         message: 'IV5c: failureReason must include the fix hint'
     ]
   ]

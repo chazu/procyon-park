@@ -94,13 +94,13 @@ TestNotificationHub subclass: Object
     t assertEqual: pendA size to: 3 message: 'NH1: subA got 3 tuples'.
     t assertEqual: pendB size to: 3 message: 'NH1: subB got 3 tuples'.
     t assertEqual: pendC size to: 0 message: 'NH1: subC got 0 tuples'.
-    t assertEqual: ((pendA at: 0) at: 'identity') to: 'a'
+    t assertEqual: ((pendA at: 1) at: 'identity') to: 'a'
       message: 'NH1: subA[0] = a (publish order)'.
-    t assertEqual: ((pendA at: 1) at: 'identity') to: 'b'
+    t assertEqual: ((pendA at: 2) at: 'identity') to: 'b'
       message: 'NH1: subA[1] = b'.
-    t assertEqual: ((pendA at: 2) at: 'identity') to: 'c'
+    t assertEqual: ((pendA at: 3) at: 'identity') to: 'c'
       message: 'NH1: subA[2] = c'.
-    t assertEqual: ((pendB at: 0) at: 'identity') to: 'a'
+    t assertEqual: ((pendB at: 1) at: 'identity') to: 'a'
       message: 'NH1: subB[0] = a (publish order)'
   ]
 
@@ -119,7 +119,7 @@ TestNotificationHub subclass: Object
       message: 'NH2: bad-filter subscriber got nothing (treated as no-match)'.
     t assertEqual: pendGood size to: 1
       message: 'NH2: good-filter subscriber still got the tuple'.
-    t assertEqual: ((pendGood at: 0) at: 'identity') to: 'survivor'
+    t assertEqual: ((pendGood at: 1) at: 'identity') to: 'survivor'
       message: 'NH2: good subscriber received correct tuple'
   ]
 
@@ -133,19 +133,19 @@ TestNotificationHub subclass: Object
     doomed := hub subscribe: [:t1 | true].
     live   := hub subscribe: [:t1 | true].
     doneFlag := Array new: 2.
-    doneFlag at: 0 put: false.
     doneFlag at: 1 put: false.
+    doneFlag at: 2 put: false.
     tup := self makeTuple: 'notification' ident: 'race'.
     [200 timesRepeat: [hub publish: tup].
-     doneFlag at: 0 put: true] fork.
+     doneFlag at: 1 put: true] fork.
     [Process sleep: 1.
      hub unsubscribe: doomed.
-     doneFlag at: 1 put: true] fork.
+     doneFlag at: 2 put: true] fork.
     iter := 0.
-    [((doneFlag at: 0) and: [doneFlag at: 1]) not and: [iter < 200]]
+    [((doneFlag at: 1) and: [doneFlag at: 2]) not and: [iter < 200]]
       whileTrue: [Process sleep: 10. iter := iter + 1].
-    t assert: (doneFlag at: 0) message: 'NH3: publisher fork finished'.
-    t assert: (doneFlag at: 1) message: 'NH3: unsubscriber fork finished'.
+    t assert: (doneFlag at: 1) message: 'NH3: publisher fork finished'.
+    t assert: (doneFlag at: 2) message: 'NH3: unsubscriber fork finished'.
     t assertEqual: hub subscriberCount to: 1
       message: 'NH3: only one subscriber remains (no zombie)'.
     "Post-race: drain both, then publish 'after' — only live should
@@ -158,7 +158,7 @@ TestNotificationHub subclass: Object
     hub publish: (self makeTuple: 'notification' ident: 'after').
     t assertEqual: (hub drain: doomed) size to: 0
       message: 'NH3: doomed subscriber got nothing post-unsubscribe'.
-    t assertEqual: (((hub drain: live) at: 0) at: 'identity')
+    t assertEqual: (((hub drain: live) at: 1) at: 'identity')
       to: 'after'
       message: 'NH3: live still receives after the race'
   ]

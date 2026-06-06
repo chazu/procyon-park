@@ -85,7 +85,7 @@ TestCliWorkerRegister subclass: Object
       message: 'WRC1: single value → 1 element'.
     t assertEqual: (CliWorkerRegister splitCsv: 'a,b,c') size to: 3
       message: 'WRC1: three values → 3 elements'.
-    t assertEqual: ((CliWorkerRegister splitCsv: ' a , b ') at: 0) to: 'a'
+    t assertEqual: ((CliWorkerRegister splitCsv: ' a , b ') at: 1) to: 'a'
       message: 'WRC1: entries are trimmed'
   ]
 
@@ -95,7 +95,7 @@ TestCliWorkerRegister subclass: Object
     repos := CliWorkerRegister parseRepos: 'pp:/tmp/pp:main,maggie:/tmp/maggie:dev'.
     t assertEqual: repos size to: 2
       message: 'WRC2: two repo entries parsed'.
-    r := repos at: 0.
+    r := repos at: 1.
     t assertEqual: (r at: 'name') to: 'pp'
       message: 'WRC2: first repo name'.
     t assertEqual: (r at: 'path') to: '/tmp/pp'

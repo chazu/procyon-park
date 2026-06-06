@@ -16,7 +16,7 @@ CliBBS subclass: CLIBase
       System exit: 1.
       ^self
     ].
-    sub := args at: 1.
+    sub := args at: 2.
     (sub = '--help' or: [sub = '-h' or: [sub = 'help']]) ifTrue: [^self printUsage].
     sub = 'list' ifTrue: [^self cmdList: args].
     sub = 'get'  ifTrue: [^self cmdGet: args].
@@ -40,7 +40,7 @@ CliBBS subclass: CLIBase
     catFlag := self flagValue: '--category' in: args.
     scopeFlag := self flagValue: '--scope' in: args.
     identFlag := self flagValue: '--identity' in: args.
-    jsonFlag := (args indexOf: '--json') >= 0.
+    jsonFlag := (args indexOf: '--json') > 0.
 
     catFlag notNil ifTrue: [
       (Categories isValid: catFlag) ifFalse: [
@@ -141,9 +141,9 @@ CliBBS subclass: CLIBase
       'Usage: pp bbs get <category> <scope> <identity>' println.
       System exit: 1. ^self
     ].
-    cat := args at: 2.
-    sc := args at: 3.
-    id := args at: 4.
+    cat := args at: 3.
+    sc := args at: 4.
+    id := args at: 5.
 
     (Categories isValid: cat) ifFalse: [
       self printInvalidCategory: cat.
@@ -196,7 +196,7 @@ CliBBS subclass: CLIBase
     "Collapse a payload to a single-line preview, cut to ~60 chars."
     | s |
     s := Json encode: payload.
-    s size > 60 ifTrue: [^(s copyFrom: 0 to: 60), '…'].
+    s size > 60 ifTrue: [^(s copyFrom: 1 to: 60), '…'].
     ^s
   ]
 
@@ -228,12 +228,12 @@ CliBBS subclass: CLIBase
       '  <payload> is inline JSON or @path/to/file.json' println.
       System exit: 1. ^self
     ].
-    cat := args at: 2.
-    sc := args at: 3.
-    id := args at: 4.
-    payloadArg := args at: 5.
+    cat := args at: 3.
+    sc := args at: 4.
+    id := args at: 5.
+    payloadArg := args at: 6.
 
-    pinnedFlag := (args indexOf: '--pinned') >= 0.
+    pinnedFlag := (args indexOf: '--pinned') > 0.
     ttlFlag := self flagValue: '--ttl' in: args.
     modalityFlag := self flagValue: '--modality' in: args.
 
@@ -299,7 +299,7 @@ CliBBS subclass: CLIBase
      printing a diagnostic on error."
     | path contents result |
     (arg startsWith: '@') ifTrue: [
-      path := arg copyFrom: 1 to: arg size.
+      path := arg copyFrom: 2 to: arg size.
       path isEmpty ifTrue: [
         'Error: @ must be followed by a file path' println.
         ^nil
@@ -337,9 +337,9 @@ CliBBS subclass: CLIBase
       'Usage: pp bbs rm <category> <scope> <identity>' println.
       System exit: 1. ^self
     ].
-    cat := args at: 2.
-    sc := args at: 3.
-    id := args at: 4.
+    cat := args at: 3.
+    sc := args at: 4.
+    id := args at: 5.
 
     (Categories isValid: cat) ifFalse: [
       self printInvalidCategory: cat.

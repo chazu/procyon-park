@@ -152,7 +152,7 @@ FakeWorkerClient subclass: Object
     ].
     scope := task at: 'scope'.
     outcome := Array new: 3.
-    outcome at: 0 put: 'unknown'.
+    outcome at: 1 put: 'unknown'.
     now := DateTime now epochSeconds.
     result := bbs update: 'task' scope: scope identity: taskId do: [:p |
       | cur curClaim curWorker |
@@ -169,35 +169,35 @@ FakeWorkerClient subclass: Object
           p at: 'claim_expires_at' put: expires.
           p at: 'renewed_at' put: now.
           p at: 'missed_renewals' put: 0.
-          outcome at: 0 put: 'claimed'.
-          outcome at: 1 put: expires.
-          outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+          outcome at: 1 put: 'claimed'.
+          outcome at: 2 put: expires.
+          outcome at: 3 put: (p at: 'retry_count' ifAbsent: [0])
         ]
         ifFalse: [
           (cur = 'claimed' and: [curClaim = claimId and: [curWorker = workerId]])
             ifTrue: [
-              outcome at: 0 put: 'replay'.
-              outcome at: 1 put: (p at: 'claim_expires_at' ifAbsent: [nil]).
-              outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+              outcome at: 1 put: 'replay'.
+              outcome at: 2 put: (p at: 'claim_expires_at' ifAbsent: [nil]).
+              outcome at: 3 put: (p at: 'retry_count' ifAbsent: [0])
             ]
             ifFalse: [
-              outcome at: 0 put: 'conflict'.
-              outcome at: 1 put: (p at: 'executed_by' ifAbsent: [curWorker]).
-              outcome at: 2 put: cur
+              outcome at: 1 put: 'conflict'.
+              outcome at: 2 put: (p at: 'executed_by' ifAbsent: [curWorker]).
+              outcome at: 3 put: cur
             ]
         ]
     ].
-    (outcome at: 0) = 'conflict' ifTrue: [
+    (outcome at: 1) = 'conflict' ifTrue: [
       d := Dictionary new.
       d at: 'error' put: 'task already claimed'.
-      d at: 'executed_by' put: (outcome at: 1).
-      d at: 'status' put: (outcome at: 2).
+      d at: 'executed_by' put: (outcome at: 2).
+      d at: 'status' put: (outcome at: 3).
       ^self errorBody: d status: 409
     ].
     d := Dictionary new.
     d at: 'status' put: 'ok'.
-    d at: 'claim_expires_at' put: (outcome at: 1).
-    d at: 'retry_count' put: (outcome at: 2).
+    d at: 'claim_expires_at' put: (outcome at: 2).
+    d at: 'retry_count' put: (outcome at: 3).
     ^self okBody: d
   ]
 
@@ -441,7 +441,7 @@ WCLHelper seedWorker: 'w1' roles: #('implementer') repos: #('pp-main') onBBS: bb
     t assertEqual: tasks size to: 1 message: 'WCL1: fetchAvailable returns 1 task'.
 
     "2. /api/tasks/claim → 200."
-    claimResult := agent attemptClaim: (tasks at: 0).
+    claimResult := agent attemptClaim: (tasks at: 1).
     t assertEqual: (claimResult at: 'status') to: 200
       message: 'WCL1: claim returns 200'.
     t assert: ((claimResult at: 'claim_id') size = 32)

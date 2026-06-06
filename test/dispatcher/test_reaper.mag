@@ -335,7 +335,7 @@ TestReaper subclass: Object
     events := RPHelper reapEventsFor: 'rp3' in: bbs.
     t assertEqual: events size to: 1
       message: 'RP3: one terminal reap event emitted'.
-    evPayload := (events at: 0) at: 'payload'.
+    evPayload := (events at: 1) at: 'payload'.
     t assertEqual: (evPayload at: 'terminal') to: true
       message: 'RP3: reap event payload.terminal=true'
   ]
@@ -353,7 +353,7 @@ TestReaper subclass: Object
     events := RPHelper reapEventsFor: 'rp4' in: bbs.
     t assertEqual: events size to: 1
       message: 'RP4: exactly one reap event emitted on action'.
-    evPayload := (events at: 0) at: 'payload'.
+    evPayload := (events at: 1) at: 'payload'.
     t assertEqual: (evPayload at: 'type') to: 'reap'
       message: 'RP4: event type=reap'.
     t assertEqual: (evPayload at: 'task_id') to: 'rp4'
@@ -585,7 +585,7 @@ TestReaper subclass: Object
     events := RPHelper reapEventsFor: 'rp10' in: bbs.
     t assertEqual: events size to: 1
       message: 'RP10: re-pend reap event emitted'.
-    t assertEqual: (((events at: 0) at: 'payload') at: 'terminal') to: false
+    t assertEqual: (((events at: 1) at: 'payload') at: 'terminal') to: false
       message: 'RP10: re-pend reap event terminal=false'.
 
     "Simulate a fresh claim cycle: scheduler re-claims, lease

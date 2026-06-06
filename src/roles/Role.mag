@@ -243,8 +243,8 @@ Violations will be detected and reverted.
     n <= 0 ifTrue: [^Array new: 0].
     size := tuples size.
     size <= n ifTrue: [^tuples].
-    start := size - n.
-    "copyFrom:to: upper bound is exclusive (Go-style): size yields size-1 inclusive."
+    start := size - n + 1.
+    "copyFrom:to: is 1-indexed closed [start, size] (both inclusive)."
     ^tuples copyFrom: start to: size
   ]
 

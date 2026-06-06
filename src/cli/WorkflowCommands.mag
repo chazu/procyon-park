@@ -9,15 +9,15 @@ WorkflowCommands subclass: CLIBase
 
   method: runWith: args [
     "Dispatch workflow subcommands. args[0] is 'workflow'."
-    (args size > 1 and: [(args at: 1) = 'status'])
+    (args size > 1 and: [(args at: 2) = 'status'])
       ifTrue: [^self cmdWorkflowStatus: args].
-    (args size > 1 and: [(args at: 1) = 'list'])
+    (args size > 1 and: [(args at: 2) = 'list'])
       ifTrue: [^self cmdWorkflowList: args].
-    (args size > 1 and: [(args at: 1) = 'cancel'])
+    (args size > 1 and: [(args at: 2) = 'cancel'])
       ifTrue: [^self cmdWorkflowCancel: args].
-    (args size > 1 and: [(args at: 1) = 'wait'])
+    (args size > 1 and: [(args at: 2) = 'wait'])
       ifTrue: [^self cmdWorkflowWait: args].
-    (args size > 1 and: [(args at: 1) = 'viz'])
+    (args size > 1 and: [(args at: 2) = 'viz'])
       ifTrue: [^self cmdWorkflowViz: args].
     ^self cmdWorkflow: args
   ]
@@ -30,23 +30,23 @@ WorkflowCommands subclass: CLIBase
       ^self
     ].
 
-    templateId := args at: 1.
+    templateId := args at: 2.
     wfScope := self flagValue: '--scope' in: args.
     scopeExplicit := wfScope notNil.
     wfScope isNil ifTrue: [wfScope := scope].
 
     "Parse --param key=value pairs"
     params := Dictionary new.
-    i := 0.
-    [i < args size] whileTrue: [
+    i := 1.
+    [i <= args size] whileTrue: [
       arg := args at: i.
       arg = '--param' ifTrue: [
-        i < (args size - 1) ifTrue: [
+        i < args size ifTrue: [
           i := i + 1.
           arg := args at: i.
           eqIdx := arg indexOf: '='.
-          eqIdx >= 0 ifTrue: [
-            key := arg copyFrom: 0 to: eqIdx.
+          eqIdx > 0 ifTrue: [
+            key := arg copyFrom: 1 to: eqIdx - 1.
             val := arg copyFrom: eqIdx + 1.
             params at: key put: val
           ]
@@ -84,9 +84,9 @@ WorkflowCommands subclass: CLIBase
 
     args size > 2 ifTrue: [
       | wfId |
-      wfId := args at: 2.
+      wfId := args at: 3.
       "Skip flag values that come after --scope"
-      (wfId copyFrom: 0 to: 2) = '--' ifTrue: [
+      (wfId copyFrom: 1 to: 2) = '--' ifTrue: [
         "No actual ID given, fall through to listing"
       ] ifFalse: [
         "Specific workflow — if --scope given, use it directly; otherwise search all scopes"
@@ -119,7 +119,7 @@ WorkflowCommands subclass: CLIBase
       params := wfPayload at: 'params' ifAbsent: [nil].
       desc := params notNil ifTrue: [params at: 'description' ifAbsent: ['']] ifFalse: [''].
       truncDesc := desc size > 60
-        ifTrue: [(desc copyFrom: 0 to: 57), '...']
+        ifTrue: [(desc copyFrom: 1 to: 57), '...']
         ifFalse: [desc].
       (wfId, '  [', wfStatus, ']  ', template, '  scope:', wfScopeLabel) println.
       truncDesc isEmpty ifFalse: [
@@ -209,7 +209,7 @@ WorkflowCommands subclass: CLIBase
       ].
       durStr := self formatDuration: duration.
       truncDesc := description size > 50
-        ifTrue: [(description copyFrom: 0 to: 47), '...']
+        ifTrue: [(description copyFrom: 1 to: 47), '...']
         ifFalse: [description].
       ((self padString: wfId toWidth: idW),
         (self padString: template toWidth: tmplW),
@@ -225,7 +225,7 @@ WorkflowCommands subclass: CLIBase
      at least one trailing space between columns."
     | truncated padLen result |
     truncated := s size >= w
-      ifTrue: [s copyFrom: 0 to: w - 1]
+      ifTrue: [s copyFrom: 1 to: w - 1]
       ifFalse: [s].
     padLen := w - truncated size.
     result := truncated.
@@ -257,7 +257,7 @@ WorkflowCommands subclass: CLIBase
       ^self
     ].
 
-    wfId := args at: 2.
+    wfId := args at: 3.
     theScope := self flagValue: '--scope' in: args.
     theScope isNil ifTrue: [theScope := scope].
 
@@ -286,7 +286,7 @@ WorkflowCommands subclass: CLIBase
       ^self
     ].
 
-    wfId := args at: 2.
+    wfId := args at: 3.
     theScope := self flagValue: '--scope' in: args.
     theScope isNil ifTrue: [theScope := scope].
     timeoutStr := self flagValue: '--timeout' in: args.
@@ -328,15 +328,15 @@ WorkflowCommands subclass: CLIBase
       ^self
     ].
 
-    wfId := args at: 2.
-    (wfId copyFrom: 0 to: 2) = '--' ifTrue: [
+    wfId := args at: 3.
+    (wfId copyFrom: 1 to: 2) = '--' ifTrue: [
       'Usage: pp workflow viz <workflow-id> [--scope <scope>] [--dot]' println.
       ^self
     ].
 
     wfScope := self flagValue: '--scope' in: args.
     scopeExplicit := wfScope notNil.
-    useDot := (args indexOf: '--dot') >= 0.
+    useDot := (args indexOf: '--dot') > 0.
 
     "Locate the workflow across scopes (same pattern as showWorkflowDetailSearching)"
     scopeExplicit ifFalse: [
@@ -737,7 +737,7 @@ WorkflowCommands subclass: CLIBase
       'Usage: pp watch <workflow_id>' println.
       ^self
     ].
-    wfId := args at: 1.
+    wfId := args at: 2.
     body := Dictionary new.
     body at: 'workflow_id' put: wfId.
     self post: '/api/workflow/watch' body: body
@@ -750,7 +750,7 @@ WorkflowCommands subclass: CLIBase
       'Usage: pp unwatch <workflow_id>' println.
       ^self
     ].
-    wfId := args at: 1.
+    wfId := args at: 2.
     body := Dictionary new.
     body at: 'workflow_id' put: wfId.
     self post: '/api/workflow/unwatch' body: body

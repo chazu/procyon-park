@@ -54,8 +54,8 @@ Shell subclass: Object
 
     "Strip trailing newlines"
     result := raw.
-    [result size > 0 and: [(result copyFrom: result size - 1) = ((Character lf) asString)]] whileTrue: [
-      result := result copyFrom: 0 to: result size - 1
+    [result size > 0 and: [(result copyFrom: result size) = ((Character lf) asString)]] whileTrue: [
+      result := result copyFrom: 1 to: result size - 1
     ].
     ^result
   ]

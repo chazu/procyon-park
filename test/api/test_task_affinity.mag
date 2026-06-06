@@ -148,7 +148,7 @@ TestTaskAffinity subclass: Object
   classMethod: testLauncherOnly: t [
     | pair bbs server aff idsA idsB claimA claimB |
     '--- AF1: launcher_only ---' println.
-    pair := self setup. bbs := pair at: 0. server := pair at: 1.
+    pair := self setup. bbs := pair at: 1. server := pair at: 2.
     aff := Dictionary new. aff at: 'launcher_only' put: true.
     "Task launched by user:alice — only alice's worker 'wa' may take it."
     AFHelper seedTask: 'lo-task' scope: 'demo'
@@ -169,7 +169,7 @@ TestTaskAffinity subclass: Object
   classMethod: testWorkers: t [
     | pair bbs server aff idsA idsB claimA claimB |
     '--- AF2: workers list ---' println.
-    pair := self setup. bbs := pair at: 0. server := pair at: 1.
+    pair := self setup. bbs := pair at: 1. server := pair at: 2.
     aff := Dictionary new.
     aff at: 'workers' put: #('worker:wa').
     AFHelper seedTask: 'w-task' scope: 'demo'
@@ -190,7 +190,7 @@ TestTaskAffinity subclass: Object
   classMethod: testModel: t [
     | pair bbs server aff idsA idsB claimA claimB |
     '--- AF3: model ---' println.
-    pair := self setup. bbs := pair at: 0. server := pair at: 1.
+    pair := self setup. bbs := pair at: 1. server := pair at: 2.
     aff := Dictionary new. aff at: 'model' put: 'sonnet'.
     AFHelper seedTask: 'm-task' scope: 'demo'
              role: 'implementer' repo: 'pp-main'
@@ -210,7 +210,7 @@ TestTaskAffinity subclass: Object
   classMethod: testRepo: t [
     | pair bbs server aff idsA idsB claimA claimB repos repoDict |
     '--- AF4: repo (name match, commit advisory) ---' println.
-    pair := self setup. bbs := pair at: 0. server := pair at: 1.
+    pair := self setup. bbs := pair at: 1. server := pair at: 2.
 
     "Switch both workers to dict-form repos so the match stresses the
      {name,path,head} branch in repoNameMatches:inRepos:."
@@ -277,7 +277,7 @@ TestTaskAffinity subclass: Object
   classMethod: testCombined: t [
     | pair bbs server aff idsA idsB claimB |
     '--- AF6: combined keys AND together ---' println.
-    pair := self setup. bbs := pair at: 0. server := pair at: 1.
+    pair := self setup. bbs := pair at: 1. server := pair at: 2.
     "launcher_only + model: alice worker has model sonnet, bob worker has
      model opus, so only wa matches both."
     aff := Dictionary new.

@@ -100,7 +100,7 @@ TestWorkerBudget subclass: Object
       message: 'WB1: canClaim=false once soft-drained'.
     t assertEqual: agent notifications size to: 1
       message: 'WB1: exactly one notification emitted on breach'.
-    notif := agent notifications at: 0.
+    notif := agent notifications at: 1.
     t assertEqual: (notif at: 'severity') to: 'urgent'
       message: 'WB1: severity=urgent'.
     t assertEqual: (notif at: 'reason') to: 'budget_hard_stop'
@@ -127,14 +127,14 @@ TestWorkerBudget subclass: Object
       message: 'WB2: canClaim stays true in soft mode past threshold'.
     t assertEqual: agent notifications size to: 1
       message: 'WB2: one warning on initial breach'.
-    t assertEqual: ((agent notifications at: 0) at: 'severity') to: 'warning'
+    t assertEqual: ((agent notifications at: 1) at: 'severity') to: 'warning'
       message: 'WB2: breach severity=warning'.
     "Each claim-past-threshold fires a warning."
     agent noteClaimPastThreshold.
     agent noteClaimPastThreshold.
     t assertEqual: agent notifications size to: 3
       message: 'WB2: warning emitted per claim-past-threshold'.
-    t assertEqual: ((agent notifications at: 2) at: 'severity') to: 'warning'
+    t assertEqual: ((agent notifications at: 3) at: 'severity') to: 'warning'
       message: 'WB2: per-claim severity=warning'
   ]
 

@@ -109,9 +109,9 @@ TestWorkflowAffinityFlags subclass: Object
       workers := d at: 'workers' ifAbsent: [#()].
       t assertEqual: workers size to: 2
         message: 'WAF5b: 2 workers parsed'.
-      t assertEqual: (workers at: 0) to: 'worker:w1'
+      t assertEqual: (workers at: 1) to: 'worker:w1'
         message: 'WAF5c: first worker auto-prefixed'.
-      t assertEqual: (workers at: 1) to: 'worker:w2'
+      t assertEqual: (workers at: 2) to: 'worker:w2'
         message: 'WAF5d: second worker auto-prefixed'
     ].
 
@@ -119,9 +119,9 @@ TestWorkflowAffinityFlags subclass: Object
     d := CliPP buildAffinityFromFlags: '' worker: 'worker:alice,worker:bob' model: '' repo: ''.
     d notNil ifTrue: [
       workers := d at: 'workers' ifAbsent: [#()].
-      t assertEqual: (workers at: 0) to: 'worker:alice'
+      t assertEqual: (workers at: 1) to: 'worker:alice'
         message: 'WAF6a: already-prefixed worker untouched'.
-      t assertEqual: (workers at: 1) to: 'worker:bob'
+      t assertEqual: (workers at: 2) to: 'worker:bob'
         message: 'WAF6b: second already-prefixed worker untouched'
     ].
 

@@ -206,7 +206,7 @@ MultiplayerTestMain subclass: Object
     '' println.
     '--- Pending multiplayer suites (skipped, tracked separately) ---' println.
     self pendingReasons do: [:pair |
-      ('  PENDING: ', (pair at: 0), ' — ', (pair at: 1)) println
+      ('  PENDING: ', (pair at: 1), ' — ', (pair at: 2)) println
     ].
 
     "--- Aggregate report ---"
@@ -234,44 +234,44 @@ MultiplayerTestMain subclass: Object
   classMethod: pendingReasons [
     | r p |
     r := Array new: 0.
-    p := Array new: 2. p at: 0 put: 'TestClaimIdMain'.
-    p at: 1 put: 'crashes: TestClaimId>>hash: — hash:/claimIdParts? helper missing on String; see observation procyon-park:src/util'.
+    p := Array new: 2. p at: 1 put: 'TestClaimIdMain'.
+    p at: 2 put: 'crashes: TestClaimId>>hash: — hash:/claimIdParts? helper missing on String; see observation procyon-park:src/util'.
     r := r copyWith: p.
 
-    p := Array new: 2. p at: 0 put: 'TestWorkerStoreMain'.
-    p at: 1 put: 'crashes: privHex accessor missing on test fixture; see observation procyon-park:src/worker'.
+    p := Array new: 2. p at: 1 put: 'TestWorkerStoreMain'.
+    p at: 2 put: 'crashes: privHex accessor missing on test fixture; see observation procyon-park:src/worker'.
     r := r copyWith: p.
 
-    p := Array new: 2. p at: 0 put: 'TWRMain (test_worker_register)'.
-    p at: 1 put: 'crashes: identityHash selector not implemented; see observation procyon-park:src/worker'.
+    p := Array new: 2. p at: 1 put: 'TWRMain (test_worker_register)'.
+    p at: 2 put: 'crashes: identityHash selector not implemented; see observation procyon-park:src/worker'.
     r := r copyWith: p.
 
-    p := Array new: 2. p at: 0 put: 'TWRCMain (test_worker_register_cli)'.
-    p at: 1 put: 'crashes: trimSeparators selector missing on String; see observation procyon-park:src/cli'.
+    p := Array new: 2. p at: 1 put: 'TWRCMain (test_worker_register_cli)'.
+    p at: 2 put: 'crashes: trimSeparators selector missing on String; see observation procyon-park:src/cli'.
     r := r copyWith: p.
 
-    p := Array new: 2. p at: 0 put: 'THBMain (test_worker_heartbeat)'.
-    p at: 1 put: 'crashes: identityHash selector not implemented; see observation procyon-park:src/worker'.
+    p := Array new: 2. p at: 1 put: 'THBMain (test_worker_heartbeat)'.
+    p at: 2 put: 'crashes: identityHash selector not implemented; see observation procyon-park:src/worker'.
     r := r copyWith: p.
 
-    p := Array new: 2. p at: 0 put: 'TWDMain (test_worker_drain)'.
-    p at: 1 put: 'crashes: identityHash selector not implemented; see observation procyon-park:src/worker'.
+    p := Array new: 2. p at: 1 put: 'TWDMain (test_worker_drain)'.
+    p at: 2 put: 'crashes: identityHash selector not implemented; see observation procyon-park:src/worker'.
     r := r copyWith: p.
 
-    p := Array new: 2. p at: 0 put: 'TWMRMain (test_worker_manifest_refresh)'.
-    p at: 1 put: 'crashes: identityHash selector not implemented; see observation procyon-park:src/worker'.
+    p := Array new: 2. p at: 1 put: 'TWMRMain (test_worker_manifest_refresh)'.
+    p at: 2 put: 'crashes: identityHash selector not implemented; see observation procyon-park:src/worker'.
     r := r copyWith: p.
 
-    p := Array new: 2. p at: 0 put: 'ObserveWitnessedByMain'.
-    p at: 1 put: 'crashes: String>>isString not implemented (known gap in ApiServer>>handleTaskClaim request validator); see observation procyon-park:src/api'.
+    p := Array new: 2. p at: 1 put: 'ObserveWitnessedByMain'.
+    p at: 2 put: 'crashes: String>>isString not implemented (known gap in ApiServer>>handleTaskClaim request validator); see observation procyon-park:src/api'.
     r := r copyWith: p.
 
-    p := Array new: 2. p at: 0 put: 'TaskCreateClaimFieldsMain'.
-    p at: 1 put: 'CF2 fails: task tuple not re-readable after BBS reload from disk; see observation procyon-park:src/bbs'.
+    p := Array new: 2. p at: 1 put: 'TaskCreateClaimFieldsMain'.
+    p at: 2 put: 'CF2 fails: task tuple not re-readable after BBS reload from disk; see observation procyon-park:src/bbs'.
     r := r copyWith: p.
 
-    p := Array new: 2. p at: 0 put: 'TestAuditCmdMain'.
-    p at: 1 put: 'crashes inside TestAuditCmd: nil>>ifTrue:ifFalse: — audit-cmd helper return shape drift; see observation procyon-park:src/cli'.
+    p := Array new: 2. p at: 1 put: 'TestAuditCmdMain'.
+    p at: 2 put: 'crashes inside TestAuditCmd: nil>>ifTrue:ifFalse: — audit-cmd helper return shape drift; see observation procyon-park:src/cli'.
     r := r copyWith: p.
 
     ^r

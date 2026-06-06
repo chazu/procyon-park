@@ -34,7 +34,7 @@ CliWorkerInit subclass: Object
         'Usage: pp worker init <name> [--force]' println.
         exitCode := 1
       ] ifFalse: [
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         force := cmd flagValue: 'force'.
         force isNil ifTrue: [force := false].
         (WorkerStore init: name force: force) ifFalse: [exitCode := 1]
@@ -92,9 +92,9 @@ CliWorkerRegister subclass: Object
       | parts rec |
       parts := entry split: ':'.
       rec := Dictionary new.
-      rec at: 'name' put: (parts size > 0 ifTrue: [parts at: 0] ifFalse: ['']).
-      rec at: 'path' put: (parts size > 1 ifTrue: [parts at: 1] ifFalse: ['']).
-      rec at: 'head' put: (parts size > 2 ifTrue: [parts at: 2] ifFalse: ['']).
+      rec at: 'name' put: (parts size > 0 ifTrue: [parts at: 1] ifFalse: ['']).
+      rec at: 'path' put: (parts size > 1 ifTrue: [parts at: 2] ifFalse: ['']).
+      rec at: 'head' put: (parts size > 2 ifTrue: [parts at: 3] ifFalse: ['']).
       repos := repos copyWith: rec
     ].
     ^repos
@@ -259,7 +259,7 @@ CliWorkerRegister subclass: Object
       ] ifFalse: [
         cfg := PPCliConfig new.
         cmd applyEnvBindings: cfg.
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         (self performRegister: name cmd: cmd cfg: cfg) ifFalse: [exitCode := 1]
       ].
       exitCode
@@ -510,7 +510,7 @@ CliWorkerHeartbeat subclass: Object
       ] ifFalse: [
         cfg := PPCliConfig new.
         cmd applyEnvBindings: cfg.
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         once := cmd flagValue: 'once'.
         once isNil ifTrue: [once := false].
         interval := cmd flagValue: 'interval'.
@@ -637,7 +637,7 @@ CliWorkerDrain subclass: Object
       ] ifFalse: [
         cfg := PPCliConfig new.
         cmd applyEnvBindings: cfg.
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         (self performDrain: name cmd: cmd cfg: cfg) ifFalse: [exitCode := 1]
       ].
       exitCode

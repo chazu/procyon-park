@@ -61,7 +61,7 @@ Scheduler subclass: Object
     count := pendingTasks size.
     count > self availableSlots ifTrue: [count := self availableSlots].
 
-    0 to: count - 1 do: [:i |
+    1 to: count do: [:i |
       self dispatchTask: (pendingTasks at: i)
     ]
   ]

@@ -43,7 +43,7 @@ CliUserAdd subclass: Object
       ] ifFalse: [
         cfg := PPCliConfig new.
         cmd applyEnvBindings: cfg.
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         pubkey := cmd flagValue: 'pubkey'.
         replace := cmd flagValue: 'replace'.
         replace isNil ifTrue: [replace := false].
@@ -90,7 +90,7 @@ CliUserRevoke subclass: Object
       ] ifFalse: [
         cfg := PPCliConfig new.
         cmd applyEnvBindings: cfg.
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         body := Dictionary new.
         body at: 'name' put: name.
         (CliUserHelper signedAdminPost: cfg path: '/api/user/revoke' body: body) ifFalse: [

@@ -72,10 +72,10 @@ CliPP subclass: Object
 
     "Strip -i <name> / --identity <name> from anywhere in args to find the real command."
     stripped := Array new: 0.
-    i := 0.
-    [i < args size] whileTrue: [
+    i := 1.
+    [i <= args size] whileTrue: [
       idArg := args at: i.
-      ((idArg = '-i' or: [idArg = '--identity']) and: [i + 1 < args size]) ifTrue: [
+      ((idArg = '-i' or: [idArg = '--identity']) and: [i + 1 <= args size]) ifTrue: [
         i := i + 2
       ] ifFalse: [
         stripped := stripped copyWith: idArg.
@@ -84,7 +84,7 @@ CliPP subclass: Object
     ].
     stripped isEmpty ifTrue: [^false].
 
-    head := stripped at: 0.
+    head := stripped at: 1.
     head = 'status'   ifTrue: [^true].
     head = 'log'      ifTrue: [^true].
     head = 'prime'    ifTrue: [^true].
@@ -123,10 +123,10 @@ CliPP subclass: Object
 
     "Strip -i <name> / --identity <name> from anywhere in args."
     stripped := Array new: 0.
-    i := 0.
-    [i < args size] whileTrue: [
+    i := 1.
+    [i <= args size] whileTrue: [
       idArg := args at: i.
-      ((idArg = '-i' or: [idArg = '--identity']) and: [i + 1 < args size]) ifTrue: [
+      ((idArg = '-i' or: [idArg = '--identity']) and: [i + 1 <= args size]) ifTrue: [
         i := i + 2
       ] ifFalse: [
         stripped := stripped copyWith: idArg.
@@ -136,7 +136,7 @@ CliPP subclass: Object
     args := stripped.
     args isEmpty ifTrue: [^0].
 
-    head := args at: 0.
+    head := args at: 1.
     head = 'status'   ifTrue: [^self runStatus: args].
     head = 'workflow' ifTrue: [^self runWorkflow: args].
     head = 'watch'    ifTrue: [^self runWatch: args].
@@ -164,7 +164,7 @@ CliPP subclass: Object
     head = 'plan'     ifTrue: [^self runPlan: args].
     head = 'identity' ifTrue: [^self runIdentity: args].
     head = 'whoami'   ifTrue: [^CliWhoami run: args].
-    head = 'init'     ifTrue: [^CliInit run: (args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0])].
+    head = 'init'     ifTrue: [^CliInit run: (args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0])].
     ^0
   ]
 
@@ -210,7 +210,7 @@ CliPP subclass: Object
 
     "args[0] is 'status' — strip it before handing control to cobra so
      the leaf command sees only its own options/positionals."
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     "Catch Cli::CliError (bad flags / unknown subcommand) the same way
      examples/cli/demo.mag does — cobra prints the error/usage to stderr
@@ -271,7 +271,7 @@ CliPP subclass: Object
     knownChildren := #('list' 'status' 'cancel' 'wait' 'help'
                        '--help' '-h' 'completion').
     args size <= 1 ifTrue: [^self runWorkflowTree: args].
-    head := args at: 1.
+    head := args at: 2.
     (knownChildren includes: head) ifTrue: [^self runWorkflowTree: args].
     "Leading `-` means a flag — let cobra report unknown-flag against
      the parent, which prints usage. Everything else is a template id."
@@ -319,10 +319,10 @@ CliPP subclass: Object
       default: ''
       doc: 'Preferred model (e.g. opus, sonnet) — F4.3 override').
 
-    argTail := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    argTail := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     repoParams := self extractParamFlags: argTail.
-    params := repoParams at: 0.
-    prunedRest := repoParams at: 1.
+    params := repoParams at: 1.
+    prunedRest := repoParams at: 2.
 
     cmd run: [:runArgs |
       | scopeArg repoArg theScope templateId body exitCode affinityArg workerArg modelArg affinityDict |
@@ -331,7 +331,7 @@ CliPP subclass: Object
         'Usage: pp workflow <template> [--scope <scope>] [--repo <name>] [--affinity launcher-only|team] [--worker w1,w2] [--model m] [--param key=value ...]' println.
         exitCode := 1
       ] ifFalse: [
-        templateId := runArgs at: 0.
+        templateId := runArgs at: 1.
         scopeArg := cmd flagValue: 'scope'.
         repoArg := cmd flagValue: 'repo'.
         affinityArg := cmd flagValue: 'affinity'.
@@ -474,7 +474,7 @@ CliPP subclass: Object
       | scopeFilter |
       scopeFilter := status flagValue: 'scope'.
       runArgs size >= 1
-        ifTrue: [self performWorkflowStatusDetail: cfg id: (runArgs at: 0) scope: scopeFilter]
+        ifTrue: [self performWorkflowStatusDetail: cfg id: (runArgs at: 1) scope: scopeFilter]
         ifFalse: [self performWorkflowStatusList: cfg scope: scopeFilter].
       0
     ].
@@ -509,7 +509,7 @@ CliPP subclass: Object
             ifTrue: [scopeArg]
             ifFalse: [cfg scope].
           body := Dictionary new.
-          body at: 'workflow_id' put: (runArgs at: 0).
+          body at: 'workflow_id' put: (runArgs at: 1).
           body at: 'scope' put: theScope.
           body at: 'reason' put: reasonStripped.
           self postAndPrint: cfg path: '/api/workflow/cancel' body: body
@@ -543,7 +543,7 @@ CliPP subclass: Object
           ifFalse: [cfg scope].
         maxWait := wait flagValue: 'timeout'.
         (maxWait isNil or: [maxWait <= 0]) ifTrue: [maxWait := 3600].
-        self performWorkflowWait: cfg id: (runArgs at: 0) scope: theScope timeout: maxWait
+        self performWorkflowWait: cfg id: (runArgs at: 1) scope: theScope timeout: maxWait
       ].
       exitCode
     ].
@@ -555,7 +555,7 @@ CliPP subclass: Object
 
     "args = #('workflow' ...). Strip the leading `workflow` so cobra
      dispatches directly to the named child."
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     root setArgs: rest.
     ^[root execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -568,26 +568,26 @@ CliPP subclass: Object
     | i params out arg next eqIdx key val result rest2 |
     params := Dictionary new.
     out := Array new: 0.
-    i := 0.
-    [i < argArr size] whileTrue: [
+    i := 1.
+    [i <= argArr size] whileTrue: [
       arg := argArr at: i.
       arg = '--param' ifTrue: [
-        i < (argArr size - 1) ifTrue: [
+        i < argArr size ifTrue: [
           i := i + 1.
           next := argArr at: i.
           eqIdx := next indexOf: '='.
-          eqIdx >= 0 ifTrue: [
-            key := next copyFrom: 0 to: eqIdx.
+          eqIdx > 0 ifTrue: [
+            key := next copyFrom: 1 to: eqIdx - 1.
             val := next copyFrom: eqIdx + 1.
             params at: key put: val
           ]
         ]
       ] ifFalse: [
         (arg startsWith: '--param=') ifTrue: [
-          rest2 := arg copyFrom: 8.
+          rest2 := arg copyFrom: 9.
           eqIdx := rest2 indexOf: '='.
-          eqIdx >= 0 ifTrue: [
-            key := rest2 copyFrom: 0 to: eqIdx.
+          eqIdx > 0 ifTrue: [
+            key := rest2 copyFrom: 1 to: eqIdx - 1.
             val := rest2 copyFrom: eqIdx + 1.
             params at: key put: val
           ]
@@ -598,8 +598,8 @@ CliPP subclass: Object
       i := i + 1
     ].
     result := Array new: 2.
-    result at: 0 put: params.
-    result at: 1 put: out.
+    result at: 1 put: params.
+    result at: 2 put: out.
     ^result
   ]
 
@@ -666,7 +666,7 @@ CliPP subclass: Object
       ].
       durStr := self formatDuration: duration.
       truncDesc := description size > 50
-        ifTrue: [(description copyFrom: 0 to: 47), '...']
+        ifTrue: [(description copyFrom: 1 to: 47), '...']
         ifFalse: [description].
 
       row := Dictionary new.
@@ -828,7 +828,7 @@ CliPP subclass: Object
       0
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -943,7 +943,7 @@ CliPP subclass: Object
       0
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -1103,7 +1103,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       0
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -1407,8 +1407,8 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         exitCode := 1
       ] ifFalse: [
         cmd applyEnvBindings: cfg.
-        identity := runArgs at: 0.
-        detail := runArgs at: 1.
+        identity := runArgs at: 1.
+        detail := runArgs at: 2.
         tagsStr := cmd flagValue: 'tags'.
         body := Dictionary new.
         body at: 'scope' put: cfg scope.
@@ -1425,7 +1425,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -1476,8 +1476,8 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         exitCode := 1
       ] ifFalse: [
         cmd applyEnvBindings: cfg.
-        identity := runArgs at: 0.
-        detail := runArgs at: 1.
+        identity := runArgs at: 1.
+        detail := runArgs at: 2.
         rationale := cmd flagValue: 'rationale'.
         body := Dictionary new.
         body at: 'scope' put: cfg scope.
@@ -1493,7 +1493,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -1543,7 +1543,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         exitCode := 1
       ] ifFalse: [
         cmd applyEnvBindings: cfg.
-        identity := runArgs at: 0.
+        identity := runArgs at: 1.
         eventType := cmd flagValue: 'type'.
         summary := cmd flagValue: 'summary'.
         body := Dictionary new.
@@ -1561,7 +1561,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -1609,7 +1609,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         exitCode := 1
       ] ifFalse: [
         cmd applyEnvBindings: cfg.
-        message := runArgs at: 0.
+        message := runArgs at: 1.
         severity := cmd flagValue: 'severity'.
         (severity isNil or: [severity isEmpty]) ifTrue: [severity := 'info'].
         allowed := #('info' 'warn' 'urgent').
@@ -1628,7 +1628,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -1670,9 +1670,9 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         exitCode := 1
       ] ifFalse: [
         cmd applyEnvBindings: cfg.
-        identity := runArgs at: 0.
-        key := runArgs at: 1.
-        value := runArgs at: 2.
+        identity := runArgs at: 1.
+        key := runArgs at: 2.
+        value := runArgs at: 3.
         payload := Dictionary new.
         payload at: key put: value.
         body := Dictionary new.
@@ -1684,7 +1684,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -1739,7 +1739,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -1754,7 +1754,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       'Usage: pp watch <workflow_id>' println.
       ^1
     ].
-    wfId := args at: 1.
+    wfId := args at: 2.
     cfg := self loadConfig.
     body := Dictionary new.
     body at: 'workflow_id' put: wfId.
@@ -1770,7 +1770,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       'Usage: pp unwatch <workflow_id>' println.
       ^1
     ].
-    wfId := args at: 1.
+    wfId := args at: 2.
     cfg := self loadConfig.
     body := Dictionary new.
     body at: 'workflow_id' put: wfId.
@@ -1820,7 +1820,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp verdict <pass|fix|exhausted> [--workflow <id>]' println.
         exitCode := 1
       ] ifFalse: [
-        decision := runArgs at: 0.
+        decision := runArgs at: 1.
         (decision = 'pass' or: [decision = 'fix' or: [decision = 'exhausted']]) ifFalse: [
           ('Invalid decision: ', decision, ' (expected pass|fix|exhausted)') println.
           exitCode := 1
@@ -1867,7 +1867,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -1897,7 +1897,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         ifTrue: [params at: 'description' ifAbsent: ['']]
         ifFalse: [''].
       truncDesc := description size > 60
-        ifTrue: [(description copyFrom: 0 to: 57), '...']
+        ifTrue: [(description copyFrom: 1 to: 57), '...']
         ifFalse: [description].
       row := Dictionary new.
       row at: 'id' put: wfId.
@@ -2119,9 +2119,9 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         exitCode := 1
       ] ifFalse: [
         cmd applyEnvBindings: cfg.
-        category := runArgs at: 0.
-        rdScope := runArgs size > 1 ifTrue: [runArgs at: 1] ifFalse: [cfg scope].
-        rdIdentity := runArgs size > 2 ifTrue: [runArgs at: 2] ifFalse: [nil].
+        category := runArgs at: 1.
+        rdScope := runArgs size > 1 ifTrue: [runArgs at: 2] ifFalse: [cfg scope].
+        rdIdentity := runArgs size > 2 ifTrue: [runArgs at: 3] ifFalse: [nil].
         rdIdentity notNil ifTrue: [
           body := Dictionary new.
           body at: 'category' put: category.
@@ -2138,7 +2138,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -2219,7 +2219,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       0
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -2344,7 +2344,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -2553,7 +2553,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     root registerSubcommand: review.
     root registerSubcommand: rewave.
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     root setArgs: rest.
     ^[root execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -2590,7 +2590,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp workitem create <identity> --title T --type epic|story [flags]' println.
         exitCode := 1
       ] ifFalse: [
-        identity := runArgs at: 0.
+        identity := runArgs at: 1.
         title := cmd flagValue: 'title'.
         type := cmd flagValue: 'type'.
         repoArg := cmd flagValue: 'repo'.
@@ -2666,7 +2666,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp workitem show <identity> [--repo R]' println.
         exitCode := 1
       ] ifFalse: [
-        identity := runArgs at: 0.
+        identity := runArgs at: 1.
         repoArg := cmd flagValue: 'repo'.
         theScope := self workitemScope: cfg repoFlag: repoArg.
         self performWorkitemShow: cfg scope: theScope identity: identity
@@ -2710,7 +2710,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp workitem children <identity> [--repo R]' println.
         exitCode := 1
       ] ifFalse: [
-        identity := runArgs at: 0.
+        identity := runArgs at: 1.
         repoArg := cmd flagValue: 'repo'.
         theScope := self workitemScope: cfg repoFlag: repoArg.
         self performWorkitemList: cfg
@@ -2742,7 +2742,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp workitem update <identity> [flags]' println.
         exitCode := 1
       ] ifFalse: [
-        identity := runArgs at: 0.
+        identity := runArgs at: 1.
         repoArg := cmd flagValue: 'repo'.
         theScope := self workitemScope: cfg repoFlag: repoArg.
 
@@ -2785,8 +2785,8 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp workitem comment <identity> "text" [--repo R]' println.
         exitCode := 1
       ] ifFalse: [
-        identity := runArgs at: 0.
-        text := runArgs at: 1.
+        identity := runArgs at: 1.
+        text := runArgs at: 2.
         repoArg := cmd flagValue: 'repo'.
         theScope := self workitemScope: cfg repoFlag: repoArg.
         body := Dictionary new.
@@ -2815,7 +2815,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         ('Usage: pp workitem ', cmdName, ' <identity> [--repo R]') println.
         exitCode := 1
       ] ifFalse: [
-        identity := runArgs at: 0.
+        identity := runArgs at: 1.
         repoArg := cmd flagValue: 'repo'.
         theScope := self workitemScope: cfg repoFlag: repoArg.
         fields := Dictionary new.
@@ -2844,7 +2844,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp workitem block <identity> --reason "..." [--repo R]' println.
         exitCode := 1
       ] ifFalse: [
-        identity := runArgs at: 0.
+        identity := runArgs at: 1.
         reason := cmd flagValue: 'reason'.
         reason isNil ifTrue: [reason := ''].
         repoArg := cmd flagValue: 'repo'.
@@ -2875,7 +2875,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp workitem run <identity> [--repo R]' println.
         exitCode := 1
       ] ifFalse: [
-        identity := runArgs at: 0.
+        identity := runArgs at: 1.
         repoArg := cmd flagValue: 'repo'.
         theScope := self workitemScope: cfg repoFlag: repoArg.
         body := Dictionary new.
@@ -2915,7 +2915,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         ('Usage: pp workitem ', cmdName, ' <identity> [--repo R]') println.
         exitCode := 1
       ] ifFalse: [
-        identity := runArgs at: 0.
+        identity := runArgs at: 1.
         repoArg := cmd flagValue: 'repo'.
         theScope := self workitemScope: cfg repoFlag: repoArg.
         wfParams := Dictionary new.
@@ -2949,12 +2949,12 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp workitem rewave <epic-id> [story1=2,story2=3] [--file path] [--repo R] [--dry-run]' println.
         exitCode := 1
       ] ifFalse: [
-        epicId := runArgs at: 0.
+        epicId := runArgs at: 1.
         repoArg := cmd flagValue: 'repo'.
         theScope := self workitemScope: cfg repoFlag: repoArg.
         fileArg := cmd flagValue: 'file'.
         dryRun := cmd flagValue: 'dry-run'.
-        inlineArg := runArgs size > 1 ifTrue: [runArgs at: 1] ifFalse: [nil].
+        inlineArg := runArgs size > 1 ifTrue: [runArgs at: 2] ifFalse: [nil].
 
         mapping := nil.
         (fileArg notNil and: [fileArg isEmpty not]) ifTrue: [
@@ -2996,8 +2996,8 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
       (pair isEmpty or: [pair size = 0]) ifFalse: [
         parts := pair split: '='.
         parts size = 2 ifTrue: [
-          key := parts at: 0.
-          waveStr := parts at: 1.
+          key := parts at: 1.
+          waveStr := parts at: 2.
           waveNum := waveStr asInteger.
           (key isEmpty not and: [waveNum > 0]) ifTrue: [
             result at: key put: waveNum
@@ -3272,10 +3272,10 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     | r last |
     r := aString.
     [r size > 0 and: [
-      last := r copyFrom: r size - 1.
+      last := r copyFrom: r size.
       (last = (Character lf asString)) or: [last = (Character cr asString)]
     ]] whileTrue: [
-      r := r copyFrom: 0 to: r size - 1
+      r := r copyFrom: 1 to: r size - 1
     ].
     ^r
   ]
@@ -3298,7 +3298,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp repo add <path> [--name <name>]' println.
         exitCode := 1
       ] ifFalse: [
-        rawPath := runArgs at: 0.
+        rawPath := runArgs at: 1.
         nameFlag := add flagValue: 'name'.
         self performRepoAdd: rawPath name: nameFlag
       ].
@@ -3319,7 +3319,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp repo remove <name>' println.
         exitCode := 1
       ] ifFalse: [
-        self performRepoRemove: (runArgs at: 0)
+        self performRepoRemove: (runArgs at: 1)
       ].
       exitCode
     ].
@@ -3332,7 +3332,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
         'Usage: pp repo info <name>' println.
         exitCode := 1
       ] ifFalse: [
-        self performRepoInfo: (runArgs at: 0)
+        self performRepoInfo: (runArgs at: 1)
       ].
       exitCode
     ].
@@ -3342,7 +3342,7 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     root registerSubcommand: remove.
     root registerSubcommand: info.
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     root setArgs: rest.
     ^[root execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -3401,7 +3401,7 @@ PPEOF'.
     ].
     rows := Array new: 0.
     (listing split: (Character lf asString)) do: [:fname |
-      (fname size > 5 and: [(fname copyFrom: fname size - 5) = '.json']) ifTrue: [
+      (fname size > 5 and: [(fname copyFrom: fname size - 4) = '.json']) ifTrue: [
         | configPath contents config row |
         configPath := self reposDir, '/', fname.
         [
@@ -3490,7 +3490,7 @@ PPEOF'.
     root registerSubcommand: list.
     root registerSubcommand: clean.
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     root setArgs: rest.
     ^[root execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -3634,7 +3634,7 @@ PPEOF'.
       0
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -3690,7 +3690,7 @@ PPEOF'.
           ('Skipping current branch: ', line) println
         ] ifFalse: [
           branch := line.
-          isMerged := (mergedLines indexOf: branch) >= 0.
+          isMerged := (mergedLines indexOf: branch) > 0.
           isMerged ifTrue: [
             dryRun
               ifTrue: [('Would delete (merged): ', branch) println]
@@ -3763,7 +3763,7 @@ PPEOF'.
         exitCode := 1
       ] ifFalse: [
         cmd applyEnvBindings: cfg.
-        identity := runArgs at: 0.
+        identity := runArgs at: 1.
         role := cmd flagValue: 'role'.
         desc := cmd flagValue: 'description'.
         workdir := cmd flagValue: 'workdir'.
@@ -3801,7 +3801,7 @@ PPEOF'.
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -3818,14 +3818,14 @@ PPEOF'.
       | callArgs sysCmd |
       callArgs := #('session').
       runArgs size >= 1 ifTrue: [
-        callArgs := callArgs copyWith: (runArgs at: 0)
+        callArgs := callArgs copyWith: (runArgs at: 1)
       ].
       sysCmd := SystemCommands new.
       sysCmd cmdSession: callArgs.
       0
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -3840,8 +3840,8 @@ PPEOF'.
     cmd run: [:runArgs |
       | callArgs sysCmd i |
       callArgs := #('usage').
-      i := 0.
-      [i < runArgs size] whileTrue: [
+      i := 1.
+      [i <= runArgs size] whileTrue: [
         callArgs := callArgs copyWith: (runArgs at: i).
         i := i + 1
       ].
@@ -3850,7 +3850,7 @@ PPEOF'.
       0
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -3888,7 +3888,7 @@ PPEOF'.
         exitCode := 1
       ] ifFalse: [
         cmd applyEnvBindings: cfg.
-        filePath := runArgs at: 0.
+        filePath := runArgs at: 1.
         (File exists: filePath) ifFalse: [
           ('File not found: ', filePath) println.
           exitCode := 1
@@ -3903,7 +3903,7 @@ PPEOF'.
       exitCode
     ].
 
-    rest := args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0].
+    rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
   ]
@@ -3919,8 +3919,8 @@ PPEOF'.
       self printIdentityUsage.
       ^1
     ].
-    sub := args at: 1.
-    rest := args size > 2 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
+    sub := args at: 2.
+    rest := args size > 2 ifTrue: [args copyFrom: 3] ifFalse: [Array new: 0].
     sub = 'init'    ifTrue: [^CliIdentityInit run: rest].
     sub = 'show'    ifTrue: [^CliIdentityShow run: rest].
     sub = 'rotate'  ifTrue: [^CliIdentityRotate run: rest].

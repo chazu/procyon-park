@@ -31,7 +31,7 @@ CliIdentityInit subclass: Object
         'Usage: pp identity init <name> [--force]' println.
         exitCode := 1
       ] ifFalse: [
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         force := cmd flagValue: 'force'.
         force isNil ifTrue: [force := false].
         (IdentityStore init: name force: force) ifFalse: [exitCode := 1]
@@ -59,7 +59,7 @@ CliIdentityShow subclass: Object
         'Usage: pp identity show <name>' println.
         exitCode := 1
       ] ifFalse: [
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         (IdentityStore show: name) ifFalse: [exitCode := 1]
       ].
       exitCode
@@ -93,7 +93,7 @@ CliIdentityRotate subclass: Object
       ] ifFalse: [
         cfg := PPCliConfig new.
         cmd applyEnvBindings: cfg.
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         (IdentityStore rotate: name baseUrl: cfg baseUrl) ifFalse: [exitCode := 1]
       ].
       exitCode

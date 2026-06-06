@@ -233,7 +233,7 @@ TestActionDispatch subclass: Object
     ].
     taskTokens size > 0
       ifTrue: [
-        t assertEqual: (((taskTokens at: 0) at: 'payload') at: 'status') to: 'waiting' message: 'WR4: role-bearing transition tokens must have status waiting'
+        t assertEqual: (((taskTokens at: 1) at: 'payload') at: 'status') to: 'waiting' message: 'WR4: role-bearing transition tokens must have status waiting'
       ]
       ifFalse: [
         t assert: false message: 'WR4: role-bearing transition tokens must have status waiting (no tokens found)'
@@ -344,10 +344,10 @@ TestStoryTemplate subclass: Object
     templatePayload := template at: 'payload'.
 
     "WR10: Spec says start_places includes 'request'"
-    t assertEqual: ((templatePayload at: 'start_places') at: 0) to: 'request' message: 'WR10: start_places must include request'.
+    t assertEqual: ((templatePayload at: 'start_places') at: 1) to: 'request' message: 'WR10: start_places must include request'.
 
     "WR11: Spec says terminal_places includes 'done'"
-    t assertEqual: ((templatePayload at: 'terminal_places') at: 0) to: 'done' message: 'WR11: terminal_places must include done'.
+    t assertEqual: ((templatePayload at: 'terminal_places') at: 1) to: 'done' message: 'WR11: terminal_places must include done'.
 
     "WR12: Spec says template must have at least 8 transitions (9 with re_review)"
     transitions := templatePayload at: 'transitions'.
@@ -359,8 +359,8 @@ TestStoryTemplate subclass: Object
     tr notNil ifTrue: [
       t assertEqual: (tr at: 'action' ifAbsent: [nil]) to: 'create-worktree' message: 'WR13b: T1 action must be create-worktree'.
       t assert: (tr at: 'role' ifAbsent: [nil]) isNil message: 'WR13c: T1 must not have a role'.
-      t assertEqual: ((tr at: 'in') at: 0) to: 'request' message: 'WR13d: T1 in must include request'.
-      t assertEqual: ((tr at: 'out') at: 0) to: 'ready' message: 'WR13e: T1 out must include ready'
+      t assertEqual: ((tr at: 'in') at: 1) to: 'request' message: 'WR13d: T1 in must include request'.
+      t assertEqual: ((tr at: 'out') at: 1) to: 'ready' message: 'WR13e: T1 out must include ready'
     ].
 
     "WR14: T2 (implement) — role=implementer, description={{description}}"
@@ -380,7 +380,7 @@ TestStoryTemplate subclass: Object
       trPreconditions := tr at: 'preconditions' ifAbsent: [#()].
       t assert: (trPreconditions size > 0) message: 'WR15c: T3 must have at least 1 precondition'.
       trPreconditions size > 0 ifTrue: [
-        pre := trPreconditions at: 0.
+        pre := trPreconditions at: 1.
         t assertEqual: (pre at: 'category') to: 'event' message: 'WR15d: T3 precondition category must be event'.
         t assertEqual: (pre at: 'identity') to: 'task-complete:{{instance}}:task:implement' message: 'WR15e: T3 precondition identity must reference implement task'
       ] ifFalse: [
@@ -393,11 +393,11 @@ TestStoryTemplate subclass: Object
     tr := self findTransition: 'pass' in: transitions.
     t assert: tr notNil message: 'WR16a: T4 pass must exist'.
     tr notNil ifTrue: [
-      t assertEqual: ((tr at: 'in') at: 0) to: 'reviewed' message: 'WR16b: T4 in must include reviewed'.
-      t assertEqual: ((tr at: 'out') at: 0) to: 'merging' message: 'WR16c: T4 out must include merging'.
+      t assertEqual: ((tr at: 'in') at: 1) to: 'reviewed' message: 'WR16b: T4 in must include reviewed'.
+      t assertEqual: ((tr at: 'out') at: 1) to: 'merging' message: 'WR16c: T4 out must include merging'.
       trPreconditions := tr at: 'preconditions' ifAbsent: [#()].
       trPreconditions size > 0 ifTrue: [
-        pre := trPreconditions at: 0.
+        pre := trPreconditions at: 1.
         t assertEqual: (pre at: 'category') to: 'signal' message: 'WR16d: T4 precondition must be signal category'.
         t assert: ((pre at: 'constraint') includes: 'pass') message: 'WR16e: T4 constraint must include pass'
       ] ifFalse: [
@@ -426,11 +426,11 @@ TestStoryTemplate subclass: Object
     tr := self findTransition: 'fail' in: transitions.
     t assert: tr notNil message: 'WR19a: T7 fail must exist'.
     tr notNil ifTrue: [
-      t assertEqual: ((tr at: 'in') at: 0) to: 'reviewed' message: 'WR19b: T7 in must include reviewed'.
-      t assertEqual: ((tr at: 'out') at: 0) to: 'fixing' message: 'WR19c: T7 out must include fixing'.
+      t assertEqual: ((tr at: 'in') at: 1) to: 'reviewed' message: 'WR19b: T7 in must include reviewed'.
+      t assertEqual: ((tr at: 'out') at: 1) to: 'fixing' message: 'WR19c: T7 out must include fixing'.
       trPreconditions := tr at: 'preconditions' ifAbsent: [#()].
       trPreconditions size > 0 ifTrue: [
-        pre := trPreconditions at: 0.
+        pre := trPreconditions at: 1.
         t assertEqual: (pre at: 'category') to: 'signal' message: 'WR19d: T7 precondition must be signal category'.
         t assert: ((pre at: 'constraint') includes: 'fix') message: 'WR19e: T7 constraint must include fix'
       ] ifFalse: [
@@ -444,8 +444,8 @@ TestStoryTemplate subclass: Object
     t assert: tr notNil message: 'WR20a: T8 fix must exist'.
     tr notNil ifTrue: [
       t assertEqual: (tr at: 'role') to: 'fixer' message: 'WR20b: T8 role must be fixer'.
-      t assertEqual: ((tr at: 'out') at: 0) to: 'implemented' message: 'WR20c: T8 out must include implemented for loop-back'.
-      t assertEqual: ((tr at: 'in') at: 0) to: 'fixing' message: 'WR20d: T8 in must include fixing'
+      t assertEqual: ((tr at: 'out') at: 1) to: 'implemented' message: 'WR20c: T8 out must include implemented for loop-back'.
+      t assertEqual: ((tr at: 'in') at: 1) to: 'fixing' message: 'WR20d: T8 in must include fixing'
     ].
 
     "WR21: Spec says description must be 'Single-task: implement in worktree, review, integrate'"
@@ -464,22 +464,22 @@ TestStoryTemplate subclass: Object
     "WR24: Places form connected graph from request to done"
     "Verify all intermediate places are both produced and consumed (using id-based lookup)"
     tr := self findTransition: 'setup' in: transitions.
-    t assertEqual: ((tr at: 'out') at: 0) to: 'ready' message: 'WR24a: setup produces ready'.
+    t assertEqual: ((tr at: 'out') at: 1) to: 'ready' message: 'WR24a: setup produces ready'.
     tr := self findTransition: 'implement' in: transitions.
-    t assertEqual: ((tr at: 'in') at: 0) to: 'ready' message: 'WR24b: implement consumes ready'.
-    t assertEqual: ((tr at: 'out') at: 0) to: 'implemented' message: 'WR24c: implement produces implemented'.
+    t assertEqual: ((tr at: 'in') at: 1) to: 'ready' message: 'WR24b: implement consumes ready'.
+    t assertEqual: ((tr at: 'out') at: 1) to: 'implemented' message: 'WR24c: implement produces implemented'.
     tr := self findTransition: 'review' in: transitions.
-    t assertEqual: ((tr at: 'in') at: 0) to: 'implemented' message: 'WR24d: review consumes implemented'.
-    t assertEqual: ((tr at: 'out') at: 0) to: 'reviewed' message: 'WR24e: review produces reviewed'.
+    t assertEqual: ((tr at: 'in') at: 1) to: 'implemented' message: 'WR24d: review consumes implemented'.
+    t assertEqual: ((tr at: 'out') at: 1) to: 'reviewed' message: 'WR24e: review produces reviewed'.
     tr := self findTransition: 'pass' in: transitions.
-    t assertEqual: ((tr at: 'in') at: 0) to: 'reviewed' message: 'WR24f: pass consumes reviewed'.
-    t assertEqual: ((tr at: 'out') at: 0) to: 'merging' message: 'WR24g: pass produces merging'.
+    t assertEqual: ((tr at: 'in') at: 1) to: 'reviewed' message: 'WR24f: pass consumes reviewed'.
+    t assertEqual: ((tr at: 'out') at: 1) to: 'merging' message: 'WR24g: pass produces merging'.
     tr := self findTransition: 'integrate' in: transitions.
-    t assertEqual: ((tr at: 'in') at: 0) to: 'merging' message: 'WR24h: integrate consumes merging'.
-    t assertEqual: ((tr at: 'out') at: 0) to: 'merged' message: 'WR24i: integrate produces merged'.
+    t assertEqual: ((tr at: 'in') at: 1) to: 'merging' message: 'WR24h: integrate consumes merging'.
+    t assertEqual: ((tr at: 'out') at: 1) to: 'merged' message: 'WR24i: integrate produces merged'.
     tr := self findTransition: 'notify' in: transitions.
-    t assertEqual: ((tr at: 'in') at: 0) to: 'merged' message: 'WR24j: notify consumes merged'.
-    t assertEqual: ((tr at: 'out') at: 0) to: 'done' message: 'WR24k: notify produces done'.
+    t assertEqual: ((tr at: 'in') at: 1) to: 'merged' message: 'WR24j: notify consumes merged'.
+    t assertEqual: ((tr at: 'out') at: 1) to: 'done' message: 'WR24k: notify produces done'.
 
     WRHelper removeTempDir: tempDir
   ]
@@ -527,7 +527,7 @@ TestWorkdirThreading subclass: Object
     tasks := bbs scanAll: 'task'.
     t assert: (tasks size > 0) message: 'WR25a: task must be created'.
     tasks size > 0 ifTrue: [
-      taskPayload := (tasks at: 0) at: 'payload'.
+      taskPayload := (tasks at: 1) at: 'payload'.
       t assertEqual: (taskPayload at: 'workdir' ifAbsent: [nil]) to: '/tmp/test-worktree/impl' message: 'WR25b: task payload must include workdir from worktree signal'.
       t assertEqual: (taskPayload at: 'repo' ifAbsent: [nil]) to: '/tmp/test-repo' message: 'WR25c: task payload must include repo from worktree signal'
     ] ifFalse: [
@@ -562,7 +562,7 @@ TestWorkdirThreading subclass: Object
 
     tasks := bbs scanAll: 'task'.
     tasks size > 0 ifTrue: [
-      taskPayload := (tasks at: 0) at: 'payload'.
+      taskPayload := (tasks at: 1) at: 'payload'.
       t assert: (taskPayload at: 'workdir' ifAbsent: [nil]) isNil message: 'WR26: without worktree signal, task must not have workdir'
     ] ifFalse: [
       t assert: false message: 'WR26: without worktree signal, task must not have workdir (no tasks)'
@@ -597,7 +597,7 @@ TestWorkdirThreading subclass: Object
 
     tasks := bbs scanAll: 'task'.
     tasks size > 0 ifTrue: [
-      taskPayload := (tasks at: 0) at: 'payload'.
+      taskPayload := (tasks at: 1) at: 'payload'.
       t assertEqual: (taskPayload at: 'repo' ifAbsent: [nil]) to: 'my-repo' message: 'WR27: repo from params must appear in task payload'
     ] ifFalse: [
       t assert: false message: 'WR27: repo from params (no tasks)'
@@ -632,7 +632,7 @@ TestWorkdirThreading subclass: Object
 
     tasks := bbs scanAll: 'task'.
     tasks size > 0 ifTrue: [
-      taskPayload := (tasks at: 0) at: 'payload'.
+      taskPayload := (tasks at: 1) at: 'payload'.
       t assertEqual: (taskPayload at: 'description') to: 'Implement: add login' message: 'WR28: description must be interpolated with params'
     ] ifFalse: [
       t assert: false message: 'WR28: description interpolation (no tasks)'
@@ -674,7 +674,7 @@ TestWorkdirThreading subclass: Object
 
     tasks := bbs scanAll: 'task'.
     tasks size > 0 ifTrue: [
-      taskPayload := (tasks at: 0) at: 'payload'.
+      taskPayload := (tasks at: 1) at: 'payload'.
       t assertEqual: (taskPayload at: 'workdir' ifAbsent: [nil]) to: '/tmp/override-worktree' message: 'WR29a: worktree signal workdir must override'.
       t assertEqual: (taskPayload at: 'repo' ifAbsent: [nil]) to: '/tmp/override-repo' message: 'WR29b: worktree signal repo must override params repo'
     ] ifFalse: [
@@ -732,7 +732,7 @@ TestStoryIntegration subclass: Object
     tokens := WRHelper findTokens: instanceId in: bbs.
     t assertEqual: tokens size to: 1 message: 'WR31a: instantiation must create exactly 1 token'.
     tokens size > 0 ifTrue: [
-      tokPlace := (tokens at: 0) at: 'payload'.
+      tokPlace := (tokens at: 1) at: 'payload'.
       t assertEqual: (tokPlace at: 'place') to: 'request' message: 'WR31b: initial token must be at place request'.
       t assertEqual: (tokPlace at: 'status') to: 'positive' message: 'WR31c: initial token status must be positive'
     ] ifFalse: [
@@ -767,7 +767,7 @@ TestStoryIntegration subclass: Object
         "WR34: Token at implemented should have status waiting"
         tokens := WRHelper findTokensAtPlace: 'implemented' instance: instanceId in: bbs.
         tokens size > 0 ifTrue: [
-          t assertEqual: (((tokens at: 0) at: 'payload') at: 'status') to: 'waiting' message: 'WR34: implemented token must have status waiting'
+          t assertEqual: (((tokens at: 1) at: 'payload') at: 'status') to: 'waiting' message: 'WR34: implemented token must have status waiting'
         ] ifFalse: [
           t assert: false message: 'WR34: implemented token status (no token at implemented)'
         ]
@@ -791,7 +791,7 @@ TestStoryIntegration subclass: Object
       ((tk at: 'payload') at: 'transition_id' ifAbsent: ['']) = 'implement'
     ].
     implTasks size > 0 ifTrue: [
-      t assertEqual: (((implTasks at: 0) at: 'payload') at: 'role') to: 'implementer' message: 'WR35: implement task role must be implementer'
+      t assertEqual: (((implTasks at: 1) at: 'payload') at: 'role') to: 'implementer' message: 'WR35: implement task role must be implementer'
     ] ifFalse: [
       t assert: false message: 'WR35: implement task role (no implement task found)'
     ].
@@ -820,7 +820,7 @@ TestStoryIntegration subclass: Object
     tokens := bbs scanAll: 'workflow'.
     tokens := tokens select: [:w | (w at: 'identity') = instanceId].
     tokens size > 0 ifTrue: [
-      t assertEqual: (((tokens at: 0) at: 'payload') at: 'status') to: 'running' message: 'WR38: workflow status must be running while in progress'
+      t assertEqual: (((tokens at: 1) at: 'payload') at: 'status') to: 'running' message: 'WR38: workflow status must be running while in progress'
     ] ifFalse: [
       t assert: false message: 'WR38: workflow status (not found)'
     ].
@@ -858,7 +858,7 @@ TestStoryIntegration subclass: Object
     tokens := bbs scanAll: 'workflow'.
     tokens := tokens select: [:w | (w at: 'identity') = instanceId].
     tokens size > 0 ifTrue: [
-      tokStatus := ((tokens at: 0) at: 'payload') at: 'status'.
+      tokStatus := ((tokens at: 1) at: 'payload') at: 'status'.
       t assertEqual: tokStatus to: 'completed' message: 'WR39: workflow status must be completed after all tokens reach done'
     ] ifFalse: [
       t assert: false message: 'WR39: workflow status completed (not found)'
@@ -866,7 +866,7 @@ TestStoryIntegration subclass: Object
 
     "WR40: Spec says workflow has completed_at timestamp"
     tokens size > 0 ifTrue: [
-      t assert: (((tokens at: 0) at: 'payload') at: 'completed_at' ifAbsent: [nil]) notNil message: 'WR40: completed workflow must have completed_at'
+      t assert: (((tokens at: 1) at: 'payload') at: 'completed_at' ifAbsent: [nil]) notNil message: 'WR40: completed workflow must have completed_at'
     ] ifFalse: [
       t assert: false message: 'WR40: completed_at (workflow not found)'
     ].
@@ -1023,7 +1023,7 @@ TestConventionCompliance subclass: Object
       "Inside a method, look for | ... | patterns"
       inMethod ifTrue: [
         ((trimmed size > 2) and:
-         [(trimmed at: 0) = pipeChar]) ifTrue: [
+         [(trimmed at: 1) = pipeChar]) ifTrue: [
           foundBar ifTrue: [
             foundCode ifTrue: [hasMidBlockVars := true]
           ].
@@ -1031,7 +1031,7 @@ TestConventionCompliance subclass: Object
           foundCode := false
         ] ifFalse: [
           trimmed isEmpty ifFalse: [
-            (trimmed at: 0) = quoteChar ifFalse: [
+            (trimmed at: 1) = quoteChar ifFalse: [
               foundCode := true
             ]
           ]
@@ -1101,7 +1101,7 @@ TestSpawnWorkflow subclass: Object
     t assert: (childWfs size > 0) message: 'WR57: spawn must create child workflow with template scout-mission'.
 
     "Capture child ID for later tests"
-    childWf := childWfs at: 0.
+    childWf := childWfs at: 1.
     childId := childWf at: 'identity'.
 
     "WR58: Spawn output tokens are waiting"

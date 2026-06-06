@@ -131,7 +131,7 @@ TestBBSIndex subclass: Object
     t assertEqual: scanResult size to: 1
       message: 'IX3: scanAll: shows exactly one decision tuple after upsert drain'.
     scanResult size = 1 ifTrue: [
-      t assertEqual: ((scanResult at: 0) at: 'id') to: id3
+      t assertEqual: ((scanResult at: 1) at: 'id') to: id3
         message: 'IX3: scanAll survivor is the latest upsert tuple'
     ].
 

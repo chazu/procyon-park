@@ -44,7 +44,7 @@ WorkItemCLI subclass: Object
       ifFalse: [
         '  Identity is present in these scopes:' println.
         hits do: [:s | ('    - ', s) println].
-        ('  Re-run with --repo <scope>, e.g.: pp workitem ', cmdName, ' ', identity, ' --repo ', (hits at: 0)) println
+        ('  Re-run with --repo <scope>, e.g.: pp workitem ', cmdName, ' ', identity, ' --repo ', (hits at: 1)) println
       ].
     ^false
   ]
@@ -78,7 +78,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    subcmd := args at: 1.
+    subcmd := args at: 3.
 
     subcmd = 'create'      ifTrue: [^self cmdCreate: args].
     subcmd = 'create-from' ifTrue: [^self cmdCreateFrom: args].
@@ -111,7 +111,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    identity := args at: 2.
+    identity := args at: 3.
     title := self flagValue: '--title' in: args.
     type := self flagValue: '--type' in: args.
     title isNil ifTrue: [title := identity].
@@ -194,7 +194,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    path := args at: 2.
+    path := args at: 3.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
     scope isNil ifTrue: [scope := 'default'].
@@ -354,7 +354,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    identity := args at: 2.
+    identity := args at: 3.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
     (self requireScopeForCmd: 'show' identity: identity) ifFalse: [^self].
@@ -542,7 +542,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    identity := args at: 2.
+    identity := args at: 3.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
     scope isNil ifTrue: [scope := 'default'].
@@ -563,7 +563,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    identity := args at: 2.
+    identity := args at: 3.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
     (self requireScopeForCmd: 'update' identity: identity) ifFalse: [^self].
@@ -616,8 +616,8 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    identity := args at: 2.
-    text := args at: 3.
+    identity := args at: 3.
+    text := args at: 4.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
     (self requireScopeForCmd: 'comment' identity: identity) ifFalse: [^self].
@@ -639,7 +639,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    identity := args at: 2.
+    identity := args at: 3.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
     scope isNil ifTrue: [scope := 'default'].
@@ -665,7 +665,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    identity := args at: 2.
+    identity := args at: 3.
     reason := self flagValue: '--reason' in: args.
     reason isNil ifTrue: [reason := ''].
     repo := self flagValue: '--repo' in: args.
@@ -693,7 +693,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    identity := args at: 2.
+    identity := args at: 3.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
     (self requireScopeForCmd: 'run' identity: identity) ifFalse: [^self].
@@ -713,7 +713,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    identity := args at: 2.
+    identity := args at: 3.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
     scope isNil ifTrue: [scope := 'default'].
@@ -736,7 +736,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    identity := args at: 2.
+    identity := args at: 3.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
     scope isNil ifTrue: [scope := 'default'].
@@ -763,18 +763,18 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    epicId := args at: 2.
+    epicId := args at: 3.
     repo := self flagValue: '--repo' in: args.
     repo notNil ifTrue: [scope := repo].
     scope isNil ifTrue: [scope := 'default'].
     file := self flagValue: '--file' in: args.
     dryRunFlag := args indexOf: '--dry-run'.
-    dryRun := dryRunFlag >= 0.
+    dryRun := dryRunFlag > 0.
 
     "Inline mapping: first positional arg after epic that isn't a flag."
     inline := nil.
-    (args size >= 4 and: [((args at: 3) startsWith: '--') not]) ifTrue: [
-      inline := args at: 3
+    (args size >= 4 and: [((args at: 4) startsWith: '--') not]) ifTrue: [
+      inline := args at: 4
     ].
 
     mapping := nil.
@@ -857,8 +857,8 @@ WorkItemCLI subclass: Object
       pair isEmpty ifFalse: [
         parts := pair split: '='.
         parts size = 2 ifTrue: [
-          key := parts at: 0.
-          waveStr := parts at: 1.
+          key := parts at: 1.
+          waveStr := parts at: 2.
           waveNum := waveStr asInteger.
           (key isEmpty not and: [waveNum > 0]) ifTrue: [
             result at: key put: waveNum
@@ -955,7 +955,7 @@ WorkItemCLI subclass: Object
   method: flagValue: flag in: args [
     | idx |
     idx := args indexOf: flag.
-    (idx >= 0 and: [idx < (args size - 1)])
+    (idx > 0 and: [idx < args size])
       ifTrue: [^args at: idx + 1]
       ifFalse: [^nil]
   ]

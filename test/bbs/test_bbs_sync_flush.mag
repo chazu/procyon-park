@@ -90,7 +90,7 @@ TestBBSSyncFlush subclass: Object
     t assertEqual: found size to: 1
       message: 'SF2: restart after outSync: sees the tuple'.
     found size > 0 ifTrue: [
-      payload2 := (found at: 0) at: 'payload'.
+      payload2 := (found at: 1) at: 'payload'.
       t assertEqual: (payload2 at: 'body') to: 'hello sync'
         message: 'SF2: tuple payload round-trips through disk'
     ].

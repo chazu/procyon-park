@@ -355,7 +355,7 @@ CLIBase subclass: Object
     "Extract the value after a --flag in args. Returns nil if not found."
     | idx |
     idx := args indexOf: flag.
-    (idx >= 0 and: [idx < (args size - 1)])
+    (idx > 0 and: [idx < args size])
       ifTrue: [^args at: idx + 1]
       ifFalse: [^nil]
   ]

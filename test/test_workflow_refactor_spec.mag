@@ -194,7 +194,7 @@ SpecActionDispatch subclass: Object
     endTokens := SRHelper findTokensAtPlace: 'end' instance: instanceId in: bbs.
     t assert: (endTokens size > 0) message: 'SA1a: action transition must produce output token at end place'.
     endTokens size > 0 ifTrue: [
-      endPayload := (endTokens at: 0) at: 'payload'.
+      endPayload := (endTokens at: 1) at: 'payload'.
       t assertEqual: (endPayload at: 'status') to: 'positive'
         message: 'SA1b: action transition output token must have status positive'
     ].
@@ -233,7 +233,7 @@ SpecActionDispatch subclass: Object
     tasks := bbs scanAll: 'task'.
     t assert: (tasks size > 0) message: 'SA4a: role-bearing transition must create a task tuple'.
     tasks size > 0 ifTrue: [
-      endPayload := (tasks at: 0) at: 'payload'.
+      endPayload := (tasks at: 1) at: 'payload'.
       t assertEqual: (endPayload at: 'role') to: 'implementer'
         message: 'SA4b: task must have correct role'
     ].
@@ -249,7 +249,7 @@ SpecActionDispatch subclass: Object
     endTokens := SRHelper findTokensAtPlace: 'end' instance: instanceId in: bbs.
     t assert: (endTokens size > 0) message: 'SA5a: role-bearing transition must produce output token'.
     endTokens size > 0 ifTrue: [
-      endPayload := (endTokens at: 0) at: 'payload'.
+      endPayload := (endTokens at: 1) at: 'payload'.
       t assertEqual: (endPayload at: 'status') to: 'waiting'
         message: 'SA5b: role-bearing transition output token must have status waiting'
     ].
@@ -328,14 +328,14 @@ SpecStoryTemplate subclass: Object
     startPlaces := templatePayload at: 'start_places'.
     t assertEqual: startPlaces size to: 1 message: 'ST2a: start_places must have 1 entry'.
     startPlaces size > 0 ifTrue: [
-      t assertEqual: (startPlaces at: 0) to: 'request' message: 'ST2b: start_places[0] must be request'
+      t assertEqual: (startPlaces at: 1) to: 'request' message: 'ST2b: start_places[0] must be request'
     ].
 
     "ST3: Spec says terminal_places must contain done"
     termPlaces := templatePayload at: 'terminal_places'.
     t assertEqual: termPlaces size to: 1 message: 'ST3a: terminal_places must have 1 entry'.
     termPlaces size > 0 ifTrue: [
-      t assertEqual: (termPlaces at: 0) to: 'done' message: 'ST3b: terminal_places[0] must be done'
+      t assertEqual: (termPlaces at: 1) to: 'done' message: 'ST3b: terminal_places[0] must be done'
     ].
 
     "ST4: Spec says there must be exactly 8 transitions"
@@ -343,85 +343,85 @@ SpecStoryTemplate subclass: Object
     transitions size < 8 ifTrue: [SRHelper removeTempDir: tempDir. ^self].
 
     "ST5: T1 setup — spec says action=create-worktree, no role, in=request, out=ready"
-    tr := transitions at: 0.
+    tr := transitions at: 1.
     t assertEqual: (tr at: 'id') to: 'setup' message: 'ST5a: T1 id must be setup'.
     t assertEqual: (tr at: 'action' ifAbsent: [nil]) to: 'create-worktree' message: 'ST5b: T1 action must be create-worktree'.
     t assert: (tr at: 'role' ifAbsent: [nil]) isNil message: 'ST5c: T1 must have no role'.
     inPlaces := tr at: 'in'.
-    t assertEqual: (inPlaces at: 0) to: 'request' message: 'ST5d: T1 in must be request'.
+    t assertEqual: (inPlaces at: 1) to: 'request' message: 'ST5d: T1 in must be request'.
     outPlaces := tr at: 'out'.
-    t assertEqual: (outPlaces at: 0) to: 'ready' message: 'ST5e: T1 out must be ready'.
+    t assertEqual: (outPlaces at: 1) to: 'ready' message: 'ST5e: T1 out must be ready'.
 
     "ST6: T2 implement — spec says role=implementer, description={{description}}"
-    tr := transitions at: 1.
+    tr := transitions at: 2.
     t assertEqual: (tr at: 'id') to: 'implement' message: 'ST6a: T2 id must be implement'.
     t assertEqual: (tr at: 'role') to: 'implementer' message: 'ST6b: T2 role must be implementer'.
     t assertEqual: (tr at: 'description') to: '{{description}}' message: 'ST6c: T2 desc must be {{description}}'.
     t assert: (tr at: 'action' ifAbsent: [nil]) isNil message: 'ST6d: T2 must have no action'.
 
     "ST7: T3 review — spec says role=reviewer, precondition on task-complete:implement"
-    tr := transitions at: 2.
+    tr := transitions at: 3.
     t assertEqual: (tr at: 'id') to: 'review' message: 'ST7a: T3 id must be review'.
     t assertEqual: (tr at: 'role') to: 'reviewer' message: 'ST7b: T3 role must be reviewer'.
     trPreconditions := tr at: 'preconditions' ifAbsent: [#()].
     t assert: (trPreconditions size > 0) message: 'ST7c: T3 must have preconditions'.
     trPreconditions size > 0 ifTrue: [
-      pre := trPreconditions at: 0.
+      pre := trPreconditions at: 1.
       t assertEqual: (pre at: 'category') to: 'event' message: 'ST7d: T3 precondition must be event category'.
       t assertEqual: (pre at: 'identity') to: 'task-complete:{{instance}}:task:implement'
         message: 'ST7e: T3 precondition identity must reference implement task'
     ].
 
     "ST8: T4 pass — spec says verdict gate for pass"
-    tr := transitions at: 3.
+    tr := transitions at: 4.
     t assertEqual: (tr at: 'id') to: 'pass' message: 'ST8a: T4 id must be pass'.
     inPlaces := tr at: 'in'.
-    t assertEqual: (inPlaces at: 0) to: 'reviewed' message: 'ST8b: T4 in must be reviewed'.
+    t assertEqual: (inPlaces at: 1) to: 'reviewed' message: 'ST8b: T4 in must be reviewed'.
     outPlaces := tr at: 'out'.
-    t assertEqual: (outPlaces at: 0) to: 'merging' message: 'ST8c: T4 out must be merging'.
+    t assertEqual: (outPlaces at: 1) to: 'merging' message: 'ST8c: T4 out must be merging'.
     trPreconditions := tr at: 'preconditions' ifAbsent: [#()].
     t assert: (trPreconditions size > 0) message: 'ST8d: T4 must have preconditions'.
     trPreconditions size > 0 ifTrue: [
-      pre := trPreconditions at: 0.
+      pre := trPreconditions at: 1.
       t assertEqual: (pre at: 'category') to: 'signal' message: 'ST8e: T4 precondition must be signal'.
       t assert: ((pre at: 'constraint') includes: 'pass') message: 'ST8f: T4 constraint must reference pass'
     ].
 
     "ST9: T5 integrate — spec says action=merge-worktree"
-    tr := transitions at: 4.
+    tr := transitions at: 5.
     t assertEqual: (tr at: 'id') to: 'integrate' message: 'ST9a: T5 id must be integrate'.
     t assertEqual: (tr at: 'action' ifAbsent: [nil]) to: 'merge-worktree' message: 'ST9b: T5 action must be merge-worktree'.
     t assert: (tr at: 'role' ifAbsent: [nil]) isNil message: 'ST9c: T5 must have no role'.
 
     "ST10: T6 notify — spec says action=notify-head"
-    tr := transitions at: 5.
+    tr := transitions at: 6.
     t assertEqual: (tr at: 'id') to: 'notify' message: 'ST10a: T6 id must be notify'.
     t assertEqual: (tr at: 'action' ifAbsent: [nil]) to: 'notify-head' message: 'ST10b: T6 action must be notify-head'.
     t assert: (tr at: 'role' ifAbsent: [nil]) isNil message: 'ST10c: T6 must have no role'.
 
     "ST11: T7 fail — spec says verdict gate for fix"
-    tr := transitions at: 6.
+    tr := transitions at: 7.
     t assertEqual: (tr at: 'id') to: 'fail' message: 'ST11a: T7 id must be fail'.
     inPlaces := tr at: 'in'.
-    t assertEqual: (inPlaces at: 0) to: 'reviewed' message: 'ST11b: T7 in must be reviewed'.
+    t assertEqual: (inPlaces at: 1) to: 'reviewed' message: 'ST11b: T7 in must be reviewed'.
     outPlaces := tr at: 'out'.
-    t assertEqual: (outPlaces at: 0) to: 'fixing' message: 'ST11c: T7 out must be fixing'.
+    t assertEqual: (outPlaces at: 1) to: 'fixing' message: 'ST11c: T7 out must be fixing'.
     trPreconditions := tr at: 'preconditions' ifAbsent: [#()].
     t assert: (trPreconditions size > 0) message: 'ST11d: T7 must have preconditions'.
     trPreconditions size > 0 ifTrue: [
-      pre := trPreconditions at: 0.
+      pre := trPreconditions at: 1.
       t assertEqual: (pre at: 'category') to: 'signal' message: 'ST11e: T7 precondition must be signal'.
       t assert: ((pre at: 'constraint') includes: 'fix') message: 'ST11f: T7 constraint must reference fix'
     ].
 
     "ST12: T8 fix — spec says role=fixer, loops back to implemented"
-    tr := transitions at: 7.
+    tr := transitions at: 8.
     t assertEqual: (tr at: 'id') to: 'fix' message: 'ST12a: T8 id must be fix'.
     t assertEqual: (tr at: 'role') to: 'fixer' message: 'ST12b: T8 role must be fixer'.
     inPlaces := tr at: 'in'.
-    t assertEqual: (inPlaces at: 0) to: 'fixing' message: 'ST12c: T8 in must be fixing'.
+    t assertEqual: (inPlaces at: 1) to: 'fixing' message: 'ST12c: T8 in must be fixing'.
     outPlaces := tr at: 'out'.
-    t assertEqual: (outPlaces at: 0) to: 'implemented' message: 'ST12d: T8 out must be implemented (loop-back)'.
+    t assertEqual: (outPlaces at: 1) to: 'implemented' message: 'ST12d: T8 out must be implemented (loop-back)'.
 
     "ST13: Spec says template description"
     t assertEqual: (templatePayload at: 'description')
@@ -429,36 +429,36 @@ SpecStoryTemplate subclass: Object
       message: 'ST13: template description must match spec'.
 
     "ST14: Action transitions must have no role"
-    t assert: ((transitions at: 0) at: 'role' ifAbsent: [nil]) isNil message: 'ST14a: T1 no role'.
-    t assert: ((transitions at: 4) at: 'role' ifAbsent: [nil]) isNil message: 'ST14b: T5 no role'.
-    t assert: ((transitions at: 5) at: 'role' ifAbsent: [nil]) isNil message: 'ST14c: T6 no role'.
+    t assert: ((transitions at: 1) at: 'role' ifAbsent: [nil]) isNil message: 'ST14a: T1 no role'.
+    t assert: ((transitions at: 5) at: 'role' ifAbsent: [nil]) isNil message: 'ST14b: T5 no role'.
+    t assert: ((transitions at: 6) at: 'role' ifAbsent: [nil]) isNil message: 'ST14c: T6 no role'.
 
     "ST15: Agentic transitions must have no action"
-    t assert: ((transitions at: 1) at: 'action' ifAbsent: [nil]) isNil message: 'ST15a: T2 no action'.
-    t assert: ((transitions at: 2) at: 'action' ifAbsent: [nil]) isNil message: 'ST15b: T3 no action'.
-    t assert: ((transitions at: 7) at: 'action' ifAbsent: [nil]) isNil message: 'ST15c: T8 no action'.
+    t assert: ((transitions at: 2) at: 'action' ifAbsent: [nil]) isNil message: 'ST15a: T2 no action'.
+    t assert: ((transitions at: 3) at: 'action' ifAbsent: [nil]) isNil message: 'ST15b: T3 no action'.
+    t assert: ((transitions at: 8) at: 'action' ifAbsent: [nil]) isNil message: 'ST15c: T8 no action'.
 
     "ST16: Places connectivity — each transition connects properly"
-    outPlaces := (transitions at: 0) at: 'out'.
-    t assertEqual: (outPlaces at: 0) to: 'ready' message: 'ST16a: setup → ready'.
-    inPlaces := (transitions at: 1) at: 'in'.
-    t assertEqual: (inPlaces at: 0) to: 'ready' message: 'ST16b: implement ← ready'.
     outPlaces := (transitions at: 1) at: 'out'.
-    t assertEqual: (outPlaces at: 0) to: 'implemented' message: 'ST16c: implement → implemented'.
+    t assertEqual: (outPlaces at: 1) to: 'ready' message: 'ST16a: setup → ready'.
     inPlaces := (transitions at: 2) at: 'in'.
-    t assertEqual: (inPlaces at: 0) to: 'implemented' message: 'ST16d: review ← implemented'.
+    t assertEqual: (inPlaces at: 1) to: 'ready' message: 'ST16b: implement ← ready'.
     outPlaces := (transitions at: 2) at: 'out'.
-    t assertEqual: (outPlaces at: 0) to: 'reviewed' message: 'ST16e: review → reviewed'.
+    t assertEqual: (outPlaces at: 1) to: 'implemented' message: 'ST16c: implement → implemented'.
+    inPlaces := (transitions at: 3) at: 'in'.
+    t assertEqual: (inPlaces at: 1) to: 'implemented' message: 'ST16d: review ← implemented'.
     outPlaces := (transitions at: 3) at: 'out'.
-    t assertEqual: (outPlaces at: 0) to: 'merging' message: 'ST16f: pass → merging'.
-    inPlaces := (transitions at: 4) at: 'in'.
-    t assertEqual: (inPlaces at: 0) to: 'merging' message: 'ST16g: integrate ← merging'.
+    t assertEqual: (outPlaces at: 1) to: 'reviewed' message: 'ST16e: review → reviewed'.
     outPlaces := (transitions at: 4) at: 'out'.
-    t assertEqual: (outPlaces at: 0) to: 'merged' message: 'ST16h: integrate → merged'.
+    t assertEqual: (outPlaces at: 1) to: 'merging' message: 'ST16f: pass → merging'.
     inPlaces := (transitions at: 5) at: 'in'.
-    t assertEqual: (inPlaces at: 0) to: 'merged' message: 'ST16i: notify ← merged'.
+    t assertEqual: (inPlaces at: 1) to: 'merging' message: 'ST16g: integrate ← merging'.
     outPlaces := (transitions at: 5) at: 'out'.
-    t assertEqual: (outPlaces at: 0) to: 'done' message: 'ST16j: notify → done'.
+    t assertEqual: (outPlaces at: 1) to: 'merged' message: 'ST16h: integrate → merged'.
+    inPlaces := (transitions at: 6) at: 'in'.
+    t assertEqual: (inPlaces at: 1) to: 'merged' message: 'ST16i: notify ← merged'.
+    outPlaces := (transitions at: 6) at: 'out'.
+    t assertEqual: (outPlaces at: 1) to: 'done' message: 'ST16j: notify → done'.
 
     SRHelper removeTempDir: tempDir
   ]
@@ -489,7 +489,7 @@ SpecWorkdirThreading subclass: Object
     tasks := bbs scanAll: 'task'.
     t assert: (tasks size > 0) message: 'SW1a: task must be created'.
     tasks size > 0 ifTrue: [
-      taskPayload := (tasks at: 0) at: 'payload'.
+      taskPayload := (tasks at: 1) at: 'payload'.
       t assertEqual: (taskPayload at: 'workdir' ifAbsent: [nil]) to: '/tmp/test-wt/impl'
         message: 'SW1b: task payload must include workdir from worktree signal'.
       t assertEqual: (taskPayload at: 'repo' ifAbsent: [nil]) to: '/tmp/test-repo'
@@ -507,7 +507,7 @@ SpecWorkdirThreading subclass: Object
 
     tasks := bbs scanAll: 'task'.
     tasks size > 0 ifTrue: [
-      taskPayload := (tasks at: 0) at: 'payload'.
+      taskPayload := (tasks at: 1) at: 'payload'.
       t assert: (taskPayload at: 'workdir' ifAbsent: [nil]) isNil
         message: 'SW2: without worktree signal, task must not have workdir'
     ].
@@ -525,7 +525,7 @@ SpecWorkdirThreading subclass: Object
 
     tasks := bbs scanAll: 'task'.
     tasks size > 0 ifTrue: [
-      taskPayload := (tasks at: 0) at: 'payload'.
+      taskPayload := (tasks at: 1) at: 'payload'.
       t assertEqual: (taskPayload at: 'repo' ifAbsent: [nil]) to: 'my-repo'
         message: 'SW3: repo param must be propagated into task payload'
     ].
@@ -549,7 +549,7 @@ SpecWorkdirThreading subclass: Object
 
     tasks := bbs scanAll: 'task'.
     tasks size > 0 ifTrue: [
-      taskPayload := (tasks at: 0) at: 'payload'.
+      taskPayload := (tasks at: 1) at: 'payload'.
       t assertEqual: (taskPayload at: 'repo' ifAbsent: [nil]) to: '/tmp/override-repo'
         message: 'SW4: worktree signal repo_path must override params repo'
     ].
@@ -582,7 +582,7 @@ SpecWorkdirThreading subclass: Object
 
     tasks := bbs scanAll: 'task'.
     tasks size > 0 ifTrue: [
-      taskPayload := (tasks at: 0) at: 'payload'.
+      taskPayload := (tasks at: 1) at: 'payload'.
       t assertEqual: (taskPayload at: 'description') to: 'Implement: add login'
         message: 'SW5: description must be interpolated with params'
     ].
@@ -632,7 +632,7 @@ SpecStoryIntegration subclass: Object
     tokens := SRHelper findTokens: instanceId in: bbs.
     t assertEqual: tokens size to: 1 message: 'SI1a: instantiation must create exactly 1 token'.
     tokens size > 0 ifTrue: [
-      tokPayload := (tokens at: 0) at: 'payload'.
+      tokPayload := (tokens at: 1) at: 'payload'.
       t assertEqual: (tokPayload at: 'place') to: 'request' message: 'SI1b: initial token must be at request'.
       t assertEqual: (tokPayload at: 'status') to: 'positive' message: 'SI1c: initial token must be positive'
     ].
@@ -652,7 +652,7 @@ SpecStoryIntegration subclass: Object
 
     "SI3: Implement task must have role=implementer"
     implTasks size > 0 ifTrue: [
-      tokPayload := (implTasks at: 0) at: 'payload'.
+      tokPayload := (implTasks at: 1) at: 'payload'.
       t assertEqual: (tokPayload at: 'role') to: 'implementer'
         message: 'SI3: implement task role must be implementer'
     ].
@@ -660,7 +660,7 @@ SpecStoryIntegration subclass: Object
     "SI4: Token at implemented should have status=waiting"
     tokens := SRHelper findTokensAtPlace: 'implemented' instance: instanceId in: bbs.
     tokens size > 0 ifTrue: [
-      tokPayload := (tokens at: 0) at: 'payload'.
+      tokPayload := (tokens at: 1) at: 'payload'.
       t assertEqual: (tokPayload at: 'status') to: 'waiting'
         message: 'SI4: implemented token must have status waiting'
     ].
@@ -687,7 +687,7 @@ SpecStoryIntegration subclass: Object
     workflows := bbs scanAll: 'workflow'.
     workflows := workflows select: [:w | (w at: 'identity') = instanceId].
     workflows size > 0 ifTrue: [
-      wfPayload := (workflows at: 0) at: 'payload'.
+      wfPayload := (workflows at: 1) at: 'payload'.
       t assertEqual: (wfPayload at: 'status') to: 'running'
         message: 'SI7: workflow must be running while in progress'
     ].
@@ -711,7 +711,7 @@ SpecStoryIntegration subclass: Object
     workflows := bbs scanAll: 'workflow'.
     workflows := workflows select: [:w | (w at: 'identity') = instanceId].
     workflows size > 0 ifTrue: [
-      wfPayload := (workflows at: 0) at: 'payload'.
+      wfPayload := (workflows at: 1) at: 'payload'.
       t assertEqual: (wfPayload at: 'status') to: 'completed'
         message: 'SI9: workflow must be completed after all tokens reach done'
     ].
@@ -781,7 +781,7 @@ SpecSignalKeyConsistency subclass: Object
 
     tasks := bbs scanAll: 'task'.
     tasks size > 0 ifTrue: [
-      wtPayload := (tasks at: 0) at: 'payload'.
+      wtPayload := (tasks at: 1) at: 'payload'.
       t assertEqual: (wtPayload at: 'workdir' ifAbsent: [nil]) to: '/tmp/sk3-dir'
         message: 'SK3a: workdir threading reads workdir key correctly'.
       t assertEqual: (wtPayload at: 'repo' ifAbsent: [nil]) to: '/tmp/sk3-repo'

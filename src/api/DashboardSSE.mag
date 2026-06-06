@@ -390,7 +390,7 @@ DashboardSSE subclass: Object
               (modelsStr isEmpty ifTrue: [''] ifFalse: [' <small>models=', modelsStr, '</small>']),
               (drain = true ifTrue: [' <span class="presence-badge-drain">drain</span>'] ifFalse: ['']),
               (digest isEmpty ifTrue: [''] ifFalse: [' <small class="presence-digest">',
-                 (digest size > 12 ifTrue: [digest copyFrom: 0 to: 12] ifFalse: [digest]), '</small>']).
+                 (digest size > 12 ifTrue: [digest copyFrom: 1 to: 12] ifFalse: [digest]), '</small>']).
         (budget notNil and: [budget isKindOf: Dictionary]) ifTrue: [
           | bState bRem bLimit |
           bState := budget at: 'state' ifAbsent: [budget at: 'status' ifAbsent: ['']].
@@ -469,7 +469,7 @@ DashboardSSE subclass: Object
           type := p at: 'type' ifAbsent: ['story'].
           repo := p at: 'repo' ifAbsent: [w at: 'scope' ifAbsent: ['']].
           wid := identity.
-          title size > 60 ifTrue: [title := (title copyFrom: 0 to: 60), '...'].
+          title size > 60 ifTrue: [title := (title copyFrom: 1 to: 60), '...'].
           s := s, '<div class="wi-card wi-', (self htmlEscape: type), '" data-repo="', (self htmlEscape: repo), '">',
                 '<div class="wi-title">', (self htmlEscape: title), '</div>',
                 '<div class="wi-meta"><span class="wi-type">', (self htmlEscape: type), '</span> ',
@@ -500,7 +500,7 @@ DashboardSSE subclass: Object
         template := p at: 'template' ifAbsent: ['?'].
         wfId := w at: 'identity' ifAbsent: ['?'].
         desc := (p at: 'params' ifAbsent: [Dictionary new]) at: 'description' ifAbsent: [''].
-        desc size > 100 ifTrue: [desc := (desc copyFrom: 0 to: 100), '...'].
+        desc size > 100 ifTrue: [desc := (desc copyFrom: 1 to: 100), '...'].
         label := desc isEmpty ifTrue: [wfId] ifFalse: [desc].
         places := self placesFor: wfId in: allTokens.
         launchedBy := w at: 'launched_by' ifAbsent: [p at: 'launched_by' ifAbsent: [nil]].
@@ -869,7 +869,7 @@ DashboardSSE subclass: Object
      Caller is responsible for any per-identity filtering."
     | s recent |
     recent := visible size > 30
-      ifTrue: [visible copyFrom: (visible size - 30) to: visible size]
+      ifTrue: [visible copyFrom: (visible size - 29) to: visible size]
       ifFalse: [visible].
     s := '<div id="dashboard-notifications"><h2>Recent Activity</h2>'.
     recent isEmpty ifTrue: [
@@ -877,10 +877,10 @@ DashboardSSE subclass: Object
     ] ifFalse: [
       s := s, '<ul>'.
       "Render newest-first: iterate the recent slice from tail to head.
-       Maggie arrays are 0-indexed half-open, so the valid range is
-       [0, size). Off-by-one regression here was producing a nil at the
+       Maggie arrays are 1-indexed closed, so the valid range is
+       [1, size]. Off-by-one regression here was producing a nil at the
        top of the list and silently dropping the freshest notification."
-      (recent size - 1) to: 0 by: -1 do: [:idx |
+      recent size to: 1 by: -1 do: [:idx |
         | n p message severity createdAt ts scope workflow line |
         line := [
           n := recent at: idx.

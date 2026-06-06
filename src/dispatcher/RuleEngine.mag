@@ -115,7 +115,7 @@ RuleEngine subclass: Object
     "Simple trailing-wildcard glob match. Supports 'foo:*' patterns."
     (pattern endsWith: '*') ifTrue: [
       | prefix |
-      prefix := pattern copyFrom: 0 to: pattern size - 2.
+      prefix := pattern copyFrom: 1 to: pattern size - 2.
       ^value startsWith: prefix
     ].
     ^pattern = value

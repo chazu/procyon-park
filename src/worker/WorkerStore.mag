@@ -102,7 +102,7 @@ WorkerStore subclass: Object
     (File listDirectory: self rootPath) do: [:entry |
       (entry endsWith: '.key') ifTrue: [
         (entry endsWith: '.key.bak') ifFalse: [
-          names := names copyWith: (entry copyFrom: 0 to: entry size - 4)
+          names := names copyWith: (entry copyFrom: 1 to: entry size - 4)
         ]
       ]
     ].

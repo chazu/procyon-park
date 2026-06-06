@@ -877,8 +877,8 @@ ApiServer subclass: Object
       wfInst := body at: 'workflow_instance'.
       (wfInst includes: ':task:') ifTrue: [
         parts := wfInst split: ':task:'.
-        instanceId := parts at: 0.
-        transId := parts at: 1.
+        instanceId := parts at: 1.
+        transId := parts at: 2.
         childSignalPayload := Dictionary new.
         childSignalPayload at: 'child_task_id' put: (body at: 'identity').
         childSignalPayload at: 'child_scope' put: (body at: 'scope').
@@ -962,10 +962,10 @@ ApiServer subclass: Object
       ^self jsonResponse: 403 body: d
     ].
 
-    "Capture outcome from inside the atomic block. outcome at: 0 = action,
-     at: 1/2 = action-specific payload (expires/executed_by, retry/status)."
+    "Capture outcome from inside the atomic block. outcome at: 1 = action,
+     at: 2/3 = action-specific payload (expires/executed_by, retry/status)."
     outcome := Array new: 3.
-    outcome at: 0 put: 'unknown'.
+    outcome at: 1 put: 'unknown'.
     now := DateTime now epochSeconds.
 
     result := bbs update: 'task' scope: scope identity: taskId do: [:p |
@@ -977,9 +977,9 @@ ApiServer subclass: Object
       (curStatus = 'claimed' and: [curClaim = claimId and: [curWorker = workerId]])
         ifTrue: [
           "D6.12: matching (task, claim, worker) → idempotent replay."
-          outcome at: 0 put: 'replay'.
-          outcome at: 1 put: (p at: 'claim_expires_at' ifAbsent: [nil]).
-          outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+          outcome at: 1 put: 'replay'.
+          outcome at: 2 put: (p at: 'claim_expires_at' ifAbsent: [nil]).
+          outcome at: 3 put: (p at: 'retry_count' ifAbsent: [0])
         ]
         ifFalse: [
           curStatus = 'pending'
@@ -997,15 +997,15 @@ ApiServer subclass: Object
               p at: 'claim_expires_at' put: expiresAt.
               p at: 'renewed_at' put: now.
               p at: 'missed_renewals' put: 0.
-              outcome at: 0 put: 'claimed'.
-              outcome at: 1 put: expiresAt.
-              outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+              outcome at: 1 put: 'claimed'.
+              outcome at: 2 put: expiresAt.
+              outcome at: 3 put: (p at: 'retry_count' ifAbsent: [0])
             ]
             ifFalse: [
               "D6.12: non-pending with non-matching identity → 409 conflict."
-              outcome at: 0 put: 'conflict'.
-              outcome at: 1 put: (p at: 'executed_by' ifAbsent: [nil]).
-              outcome at: 2 put: curStatus
+              outcome at: 1 put: 'conflict'.
+              outcome at: 2 put: (p at: 'executed_by' ifAbsent: [nil]).
+              outcome at: 3 put: curStatus
             ]
         ]
     ].
@@ -1014,15 +1014,15 @@ ApiServer subclass: Object
       ^self errorResponse: 404 message: 'task not found: ', taskId
     ].
 
-    (outcome at: 0) = 'conflict' ifTrue: [
+    (outcome at: 1) = 'conflict' ifTrue: [
       d := Dictionary new.
       d at: 'error' put: 'task already claimed'.
-      d at: 'executed_by' put: (outcome at: 1).
-      d at: 'status' put: (outcome at: 2).
+      d at: 'executed_by' put: (outcome at: 2).
+      d at: 'status' put: (outcome at: 3).
       ^self jsonResponse: 409 body: d
     ].
 
-    (outcome at: 0) = 'claimed' ifTrue: [
+    (outcome at: 1) = 'claimed' ifTrue: [
       bbs emitEvent: scope
           identity: 'claim:', taskId
           type: 'claim'
@@ -1032,8 +1032,8 @@ ApiServer subclass: Object
 
     d := Dictionary new.
     d at: 'status' put: 'ok'.
-    d at: 'claim_expires_at' put: (outcome at: 1).
-    d at: 'retry_count' put: (outcome at: 2).
+    d at: 'claim_expires_at' put: (outcome at: 2).
+    d at: 'retry_count' put: (outcome at: 3).
     ^self okResponse: d
   ]
 
@@ -1091,8 +1091,8 @@ ApiServer subclass: Object
     (affinity includesKey: 'repo') ifTrue: [
       repoSpec := affinity at: 'repo'.
       repoParts := repoSpec split: '@'.
-      repoName := repoParts at: 0.
-      repoCommit := repoParts size > 1 ifTrue: [repoParts at: 1] ifFalse: [nil].
+      repoName := repoParts at: 1.
+      repoCommit := repoParts size > 1 ifTrue: [repoParts at: 2] ifFalse: [nil].
       repos := mfst at: 'repos' ifAbsent: [#()].
       (self repoNameMatches: repoName inRepos: repos) ifFalse: [^false].
       "Advisory commit check (requirements §6.5 unresolved): log drift,
@@ -2430,7 +2430,7 @@ ApiServer subclass: Object
     tokens := bbs scanAll: 'token'.
     notifications := bbs scanAll: 'notification'.
     recent := notifications size > 20
-      ifTrue: [notifications copyFrom: (notifications size - 20)]
+      ifTrue: [notifications copyFrom: (notifications size - 19)]
       ifFalse: [notifications].
 
     pending := 0.

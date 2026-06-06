@@ -111,7 +111,7 @@ FakeClaimClient subclass: Object
     ].
     scope := task at: 'scope'.
     outcome := Array new: 3.
-    outcome at: 0 put: 'unknown'.
+    outcome at: 1 put: 'unknown'.
     now := DateTime now epochSeconds.
     result := bbs update: 'task' scope: scope identity: taskId do: [:p |
       | cur curClaim curWorker |
@@ -121,9 +121,9 @@ FakeClaimClient subclass: Object
       (cur = 'claimed' and: [curClaim = claimId and: [curWorker = workerId]])
         ifTrue: [
           "Idempotent replay — D6.12."
-          outcome at: 0 put: 'replay'.
-          outcome at: 1 put: (p at: 'claim_expires_at' ifAbsent: [nil]).
-          outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+          outcome at: 1 put: 'replay'.
+          outcome at: 2 put: (p at: 'claim_expires_at' ifAbsent: [nil]).
+          outcome at: 3 put: (p at: 'retry_count' ifAbsent: [0])
         ]
         ifFalse: [
           cur = 'pending'
@@ -136,28 +136,28 @@ FakeClaimClient subclass: Object
               p at: 'claim_expires_at' put: expires.
               p at: 'renewed_at' put: now.
               p at: 'missed_renewals' put: 0.
-              outcome at: 0 put: 'claimed'.
-              outcome at: 1 put: expires.
-              outcome at: 2 put: (p at: 'retry_count' ifAbsent: [0])
+              outcome at: 1 put: 'claimed'.
+              outcome at: 2 put: expires.
+              outcome at: 3 put: (p at: 'retry_count' ifAbsent: [0])
             ]
             ifFalse: [
-              outcome at: 0 put: 'conflict'.
-              outcome at: 1 put: (p at: 'executed_by' ifAbsent: [nil]).
-              outcome at: 2 put: cur
+              outcome at: 1 put: 'conflict'.
+              outcome at: 2 put: (p at: 'executed_by' ifAbsent: [nil]).
+              outcome at: 3 put: cur
             ]
         ]
     ].
     d := Dictionary new.
-    (outcome at: 0) = 'conflict' ifTrue: [
+    (outcome at: 1) = 'conflict' ifTrue: [
       d at: 'status' put: 409.
-      d at: 'executed_by' put: (outcome at: 1).
-      d at: 'task_status' put: (outcome at: 2).
+      d at: 'executed_by' put: (outcome at: 2).
+      d at: 'task_status' put: (outcome at: 3).
       ^d
     ].
     d at: 'status' put: 200.
-    d at: 'claim_expires_at' put: (outcome at: 1).
-    d at: 'retry_count' put: (outcome at: 2).
-    d at: 'outcome' put: (outcome at: 0).
+    d at: 'claim_expires_at' put: (outcome at: 2).
+    d at: 'retry_count' put: (outcome at: 3).
+    d at: 'outcome' put: (outcome at: 1).
     ^d
   ]
 
@@ -390,7 +390,7 @@ TestClaimLifecycle subclass: Object
     t assertEqual: events size to: 1
       message: 'MP3: exactly one reap event emitted'.
     events size = 1 ifTrue: [
-      evPayload := (events at: 0) at: 'payload'.
+      evPayload := (events at: 1) at: 'payload'.
       t assertEqual: (evPayload at: 'type') to: 'reap'
         message: 'MP3: reap event type=reap'.
       t assertEqual: (evPayload at: 'task_id') to: 'reap-1'
@@ -432,7 +432,7 @@ TestClaimLifecycle subclass: Object
     t assertEqual: events size to: 1
       message: 'MP4: terminal reap event emitted'.
     events size = 1 ifTrue: [
-      evPayload := (events at: 0) at: 'payload'.
+      evPayload := (events at: 1) at: 'payload'.
       t assertEqual: (evPayload at: 'terminal') to: true
         message: 'MP4: reap event terminal=true'
     ]

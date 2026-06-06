@@ -37,8 +37,8 @@ SSEQueue subclass: Object
   method: initCap: capacity [
     cap := capacity.
     buf := Array new: cap.
-    head := 0.
-    tail := 0.
+    head := 1.
+    tail := 1.
     count := 0.
     closed := false.
     droppedCount := 0.
@@ -86,7 +86,7 @@ SSEQueue subclass: Object
       ^false
     ].
     buf at: tail put: event.
-    tail := (tail + 1) \\ cap.
+    tail := (tail \\ cap) + 1.
     count := count + 1.
     ^true
   ]
@@ -99,7 +99,7 @@ SSEQueue subclass: Object
     count = 0 ifTrue: [^nil].
     item := buf at: head.
     buf at: head put: nil.
-    head := (head + 1) \\ cap.
+    head := (head \\ cap) + 1.
     count := count - 1.
     ^item
   ]

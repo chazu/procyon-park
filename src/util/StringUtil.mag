@@ -1,7 +1,7 @@
 "StringUtil — small helpers for String slicing operations.
 
- Maggie's String>>copyFrom:to: uses 0-indexed half-open [start, end)
- (Go-style) — the upper bound is EXCLUSIVE. This is a frequent
+ Maggie's String>>copyFrom:to: uses 1-indexed closed [start, end]
+ — both bounds are INCLUSIVE. This is a frequent
  off-by-one source when stripping a known prefix off a tagged identity
  such as 'task-complete:<taskId>' or '<user>:<wfId>'.
 
@@ -24,8 +24,8 @@ StringUtil subclass: Object
     prefix isNil ifTrue: [^s].
     prefix isEmpty ifTrue: [^s].
     (s startsWith: prefix) ifFalse: [^nil].
-    "copyFrom:to: is 0-indexed half-open [start, end) (Go-style). To
-     strip the prefix we start at index = prefix size, not prefix size
-     + 1, and end at s size."
-    ^s copyFrom: prefix size to: s size
+    "copyFrom:to: is 1-indexed closed [start, end] (both inclusive). To
+     strip the prefix we start at the first char after it, which is
+     1-based index prefix size + 1, and end at s size."
+    ^s copyFrom: prefix size + 1 to: s size
   ]

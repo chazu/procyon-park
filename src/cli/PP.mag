@@ -13,10 +13,10 @@ PP subclass: CLIBase
 
     "Strip -i <name> / --identity <name> from anywhere in args and apply to this CLI."
     stripped := Array new: 0.
-    i := 0.
-    [i < args size] whileTrue: [
+    i := 1.
+    [i <= args size] whileTrue: [
       idArg := args at: i.
-      ((idArg = '-i' or: [idArg = '--identity']) and: [i + 1 < args size]) ifTrue: [
+      ((idArg = '-i' or: [idArg = '--identity']) and: [i + 1 <= args size]) ifTrue: [
         self overrideIdentity: (args at: i + 1).
         i := i + 2
       ] ifFalse: [
@@ -27,7 +27,7 @@ PP subclass: CLIBase
     args := stripped.
     args isEmpty ifTrue: [self printUsage. ^self].
 
-    cmd := args at: 0.
+    cmd := args at: 1.
 
     cmd = 'observe'   ifTrue: [^self cmdObserve: args].
     cmd = 'decide'    ifTrue: [^self cmdDecide: args].
@@ -65,7 +65,7 @@ PP subclass: CLIBase
     cmd = 'worker'    ifTrue: [^self cmdWorker: args].
     cmd = 'user'      ifTrue: [^self cmdUser: args].
     cmd = 'whoami'    ifTrue: [^CliWhoami run: args identityOverride: identityOverride].
-    cmd = 'init'      ifTrue: [^CliInit run: (args size > 1 ifTrue: [args copyFrom: 1] ifFalse: [Array new: 0])].
+    cmd = 'init'      ifTrue: [^CliInit run: (args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0])].
     cmd = 'help'      ifTrue: [^self printUsage].
 
     ('Unknown command: ', cmd) println.
@@ -82,8 +82,8 @@ PP subclass: CLIBase
       ^self
     ].
 
-    identity := args at: 1.
-    detail := args at: 2.
+    identity := args at: 2.
+    detail := args at: 3.
     tags := self flagValue: '--tags' in: args.
 
     body := Dictionary new.
@@ -106,8 +106,8 @@ PP subclass: CLIBase
 
     body := Dictionary new.
     body at: 'scope' put: scope.
-    body at: 'identity' put: (args at: 1).
-    body at: 'detail' put: (args at: 2).
+    body at: 'identity' put: (args at: 2).
+    body at: 'detail' put: (args at: 3).
     taskId isEmpty ifFalse: [body at: 'task' put: taskId].
     rationale := self flagValue: '--rationale' in: args.
     rationale notNil ifTrue: [body at: 'rationale' put: rationale].
@@ -125,7 +125,7 @@ PP subclass: CLIBase
 
     body := Dictionary new.
     body at: 'scope' put: scope.
-    body at: 'identity' put: (args at: 1).
+    body at: 'identity' put: (args at: 2).
     eventType := self flagValue: '--type' in: args.
     body at: 'type' put: (eventType isNil ifTrue: ['generic'] ifFalse: [eventType]).
     summary := self flagValue: '--summary' in: args.
@@ -142,7 +142,7 @@ PP subclass: CLIBase
       ^self
     ].
 
-    filePath := args at: 1.
+    filePath := args at: 2.
     (File exists: filePath) ifFalse: [
       ('File not found: ', filePath) println.
       ^self
@@ -164,9 +164,9 @@ PP subclass: CLIBase
       ^self
     ].
 
-    category := args at: 1.
-    rdScope := args size > 2 ifTrue: [args at: 2] ifFalse: [scope].
-    rdIdentity := args size > 3 ifTrue: [args at: 3] ifFalse: [nil].
+    category := args at: 2.
+    rdScope := args size > 2 ifTrue: [args at: 3] ifFalse: [scope].
+    rdIdentity := args size > 3 ifTrue: [args at: 4] ifFalse: [nil].
 
     rdIdentity notNil ifTrue: [
       "Read a specific tuple — /api/rdp is intentionally unsigned."
@@ -193,7 +193,7 @@ PP subclass: CLIBase
     ].
 
     body := Dictionary new.
-    body at: 'message' put: (args at: 1).
+    body at: 'message' put: (args at: 2).
     body at: 'scope' put: scope.
     severity := self flagValue: '--severity' in: args.
     body at: 'severity' put: (severity isNil ifTrue: ['info'] ifFalse: [severity]).
@@ -226,9 +226,9 @@ PP subclass: CLIBase
       ^self
     ].
 
-    identity := args at: 1.
-    key := args at: 2.
-    value := args at: 3.
+    identity := args at: 2.
+    key := args at: 3.
+    value := args at: 4.
 
     payload := Dictionary new.
     payload at: key put: value.
@@ -252,7 +252,7 @@ PP subclass: CLIBase
       ^self
     ].
 
-    decision := args at: 1.
+    decision := args at: 2.
     (decision = 'pass' or: [decision = 'fix' or: [decision = 'exhausted']]) ifFalse: [
       ('Invalid decision: ', decision, ' (expected pass|fix|exhausted)') println.
       ^self
@@ -309,8 +309,8 @@ PP subclass: CLIBase
       'Usage: pp user <add|revoke> <name> [--pubkey <hex>]' println.
       ^self
     ].
-    sub := args at: 1.
-    rest := args size > 2 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
+    sub := args at: 2.
+    rest := args size > 2 ifTrue: [args copyFrom: 3] ifFalse: [Array new: 0].
     sub = 'add'    ifTrue: [^CliUserAdd run: rest].
     sub = 'revoke' ifTrue: [^CliUserRevoke run: rest].
     ('Unknown user subcommand: ', sub) println.
@@ -325,8 +325,8 @@ PP subclass: CLIBase
       'Usage: pp worker <init|register|heartbeat|drain> <name> [flags...]' println.
       ^self
     ].
-    sub := args at: 1.
-    rest := args size > 2 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
+    sub := args at: 2.
+    rest := args size > 2 ifTrue: [args copyFrom: 3] ifFalse: [Array new: 0].
     sub = 'init'      ifTrue: [^CliWorkerInit run: rest].
     sub = 'register'  ifTrue: [^CliWorkerRegister run: rest].
     sub = 'heartbeat' ifTrue: [^CliWorkerHeartbeat run: rest].
@@ -342,8 +342,8 @@ PP subclass: CLIBase
       'Usage: pp identity <init|show|rotate|list|use|invite|accept> [args...]' println.
       ^self
     ].
-    sub := args at: 1.
-    rest := args size > 2 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
+    sub := args at: 2.
+    rest := args size > 2 ifTrue: [args copyFrom: 3] ifFalse: [Array new: 0].
     sub = 'init'   ifTrue: [^CliIdentityInit run: rest].
     sub = 'show'   ifTrue: [^CliIdentityShow run: rest].
     sub = 'rotate' ifTrue: [^CliIdentityRotate run: rest].

@@ -16,7 +16,7 @@ CliIdentityUse subclass: Object
         'Usage: pp identity use <name>' println.
         exitCode := 1
       ] ifFalse: [
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         (IdentityStore load: name) isNil ifTrue: [
           exitCode := 1
         ] ifFalse: [
@@ -62,7 +62,7 @@ CliIdentityInvite subclass: Object
       ] ifFalse: [
         cfg := PPCliConfig new.
         cmd applyEnvBindings: cfg.
-        name := runArgs at: 0.
+        name := runArgs at: 1.
         ttl := cmd flagValue: 'ttl'.
         ttl isNil ifTrue: [ttl := 600].
         body := Dictionary new.
@@ -114,7 +114,7 @@ CliIdentityAccept subclass: Object
         'Usage: pp identity accept <url> --name <name> --token <token>' println.
         exitCode := 1
       ] ifFalse: [
-        url := runArgs at: 0.
+        url := runArgs at: 1.
         name := cmd flagValue: 'name'.
         token := cmd flagValue: 'token'.
         (name isNil or: [name isEmpty]) ifTrue: [

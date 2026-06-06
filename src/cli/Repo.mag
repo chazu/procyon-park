@@ -46,7 +46,7 @@ Repo subclass: Object
       ^self
     ].
 
-    subcmd := args at: 1.
+    subcmd := args at: 2.
 
     subcmd = 'add'    ifTrue: [^self cmdAdd: args].
     subcmd = 'list'   ifTrue: [^self cmdList: args].
@@ -60,7 +60,7 @@ Repo subclass: Object
 
     subcmd = 'worktree' ifTrue: [
       | wtCmd |
-      wtCmd := args size > 2 ifTrue: [args at: 2] ifFalse: [''].
+      wtCmd := args size > 2 ifTrue: [args at: 3] ifFalse: [''].
       wtCmd = 'list'  ifTrue: [^self cmdWorktreeList: args].
       wtCmd = 'ls'    ifTrue: [^self cmdWorktreeList: args].
       wtCmd = 'clean' ifTrue: [^self cmdWorktreeClean: args].
@@ -82,7 +82,7 @@ Repo subclass: Object
       ^self
     ].
 
-    rawPath := args at: 2.
+    rawPath := args at: 3.
     tmpFile := '/tmp/pp-repo-tmp-', DateTime now epochSeconds printString.
 
     "Resolve to absolute path"
@@ -155,7 +155,7 @@ PPEOF'.
     (fileList split: '
 ') do: [:fname |
       | configPath contents config name path valid |
-      (fname size > 5 and: [(fname copyFrom: fname size - 5) = '.json']) ifTrue: [
+      (fname size > 5 and: [(fname copyFrom: fname size - 4) = '.json']) ifTrue: [
         configPath := reposDir, '/', fname.
         [
           contents := File readFileContents: configPath.
@@ -185,7 +185,7 @@ PPEOF'.
       ^self
     ].
 
-    repoName := args at: 2.
+    repoName := args at: 3.
     configPath := reposDir, '/', repoName, '.json'.
 
     (File exists: configPath) ifFalse: [
@@ -206,7 +206,7 @@ PPEOF'.
       ^self
     ].
 
-    repoName := args at: 2.
+    repoName := args at: 3.
     configPath := reposDir, '/', repoName, '.json'.
 
     (File exists: configPath) ifFalse: [
@@ -275,7 +275,7 @@ PPEOF'.
 
     self ensureDirs.
     cleaned := 0.
-    dryRun := (args indexOf: '--dry-run') >= 0.
+    dryRun := (args indexOf: '--dry-run') > 0.
     tmpFile := '/tmp/pp-wt-clean-', DateTime now epochSeconds printString.
 
     "Read PP_URL for API calls"
@@ -366,8 +366,8 @@ PPEOF'.
     "pp repo clean-branches [--dry-run] [--all] [--repo <name>] — remove stale impl/feature branches."
     | tmpFile dryRun deleteAll repoName repoConfig repoPath branchOutput branchLines mergedOutput mergedLines branch trimmed isCurrent isMerged deletedMerged deletedForce totalDeleted line mlStr lineStr |
 
-    dryRun := (args indexOf: '--dry-run') >= 0.
-    deleteAll := (args indexOf: '--all') >= 0.
+    dryRun := (args indexOf: '--dry-run') > 0.
+    deleteAll := (args indexOf: '--all') > 0.
     repoName := self flagValue: '--repo' in: args.
     tmpFile := '/tmp/pp-repo-clean-', DateTime now epochSeconds printString.
     deletedMerged := 0.
@@ -428,7 +428,7 @@ PPEOF'.
           ('Skipping current branch: ', lineStr) println
         ] ifFalse: [
           branch := lineStr.
-          isMerged := (mergedLines indexOf: branch) >= 0.
+          isMerged := (mergedLines indexOf: branch) > 0.
           isMerged ifTrue: [
             dryRun ifTrue: [
               ('Would delete (merged): ', branch) println
@@ -504,7 +504,7 @@ PPEOF'.
     (fileList split: '
 ') do: [:fname |
       | configPath contents config name path |
-      (fname size > 5 and: [(fname copyFrom: fname size - 5) = '.json']) ifTrue: [
+      (fname size > 5 and: [(fname copyFrom: fname size - 4) = '.json']) ifTrue: [
         configPath := reposDir, '/', fname.
         [
           contents := File readFileContents: configPath.
@@ -574,9 +574,9 @@ PPEOF'.
     self shellRun: 'rm -f "', tmpFile, '"'.
     "Strip trailing newlines"
     result := raw.
-    [result size > 0 and: [(result copyFrom: result size - 1) = '
+    [result size > 0 and: [(result copyFrom: result size) = '
 ']] whileTrue: [
-      result := result copyFrom: 0 to: result size - 1
+      result := result copyFrom: 1 to: result size - 1
     ].
     ^result
   ]
@@ -584,7 +584,7 @@ PPEOF'.
   method: flagValue: flag in: args [
     | idx |
     idx := args indexOf: flag.
-    (idx >= 0 and: [idx < (args size - 1)])
+    (idx > 0 and: [idx < args size])
       ifTrue: [^args at: idx + 1]
       ifFalse: [^nil]
   ]

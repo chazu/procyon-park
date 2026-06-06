@@ -135,7 +135,7 @@ TestHistoryWriterSpec subclass: Object
     t assertEqual: lines size to: 1 message: 'HS2b: exactly 1 line after 1 out:'.
 
     "HS3: Spec says each entry must contain ts, op, id, category, scope, identity, modality"
-    entry := HistorySpecHelper tryDecode: (lines at: 0).
+    entry := HistorySpecHelper tryDecode: (lines at: 1).
     jsonOk := entry notNil.
     t assert: jsonOk message: 'HS3-pre: entry must be valid JSON'.
     jsonOk ifTrue: [
@@ -162,7 +162,7 @@ TestHistoryWriterSpec subclass: Object
     bbs outPinned: 'decision' scope: 'test' identity: 'd1' payload: p.
     lines := HistorySpecHelper readHistoryLines: historyPath.
     t assertEqual: lines size to: 2 message: 'HS4a: 2 lines after 2 ops'.
-    entry2 := HistorySpecHelper tryDecode: (lines at: 1).
+    entry2 := HistorySpecHelper tryDecode: (lines at: 2).
     entry2 notNil
       ifTrue: [t assertEqual: (entry2 at: 'op') to: 'out-pinned' message: 'HS4b: op must be out-pinned']
       ifFalse: [t assert: false message: 'HS4b: op must be out-pinned (invalid JSON)'].
@@ -170,7 +170,7 @@ TestHistoryWriterSpec subclass: Object
     "HS5: Spec says outAffine: must produce op = 'out-affine'"
     bbs outAffine: 'event' scope: 'test' identity: 'a1' payload: p ttl: 60.
     lines := HistorySpecHelper readHistoryLines: historyPath.
-    entry3 := HistorySpecHelper tryDecode: (lines at: 2).
+    entry3 := HistorySpecHelper tryDecode: (lines at: 3).
     entry3 notNil
       ifTrue: [t assertEqual: (entry3 at: 'op') to: 'out-affine' message: 'HS5: op must be out-affine']
       ifFalse: [t assert: false message: 'HS5: op must be out-affine (invalid JSON)'].
@@ -181,13 +181,13 @@ TestHistoryWriterSpec subclass: Object
     t assert: consumed notNil message: 'HS6a: inp: must return consumed tuple'.
     lines := HistorySpecHelper readHistoryLines: historyPath.
     "Should have: out(e1), out-pinned(d1), out-affine(a1), out(to-consume), consume(to-consume)"
-    entry4 := HistorySpecHelper tryDecode: (lines at: lines size - 1).
+    entry4 := HistorySpecHelper tryDecode: (lines at: lines size).
     entry4 notNil
       ifTrue: [t assertEqual: (entry4 at: 'op') to: 'consume' message: 'HS6b: consume op must appear']
       ifFalse: [t assert: false message: 'HS6b: consume op must appear (invalid JSON)'].
 
     "HS7: Spec says payload must NOT be in history (compact log)"
-    entry5 := HistorySpecHelper tryDecode: (lines at: 0).
+    entry5 := HistorySpecHelper tryDecode: (lines at: 1).
     entry5 notNil ifTrue: [
       t assert: ((entry5 at: 'payload' ifAbsent: [nil]) isNil) message: 'HS7: entry must not include payload'
     ] ifFalse: [
@@ -207,8 +207,8 @@ TestHistoryWriterSpec subclass: Object
 
     "HS9: Spec says entries must be in chronological order (ts non-decreasing)"
     lines size >= 2 ifTrue: [
-      first := HistorySpecHelper tryDecode: (lines at: 0).
-      second := HistorySpecHelper tryDecode: (lines at: 1).
+      first := HistorySpecHelper tryDecode: (lines at: 1).
+      second := HistorySpecHelper tryDecode: (lines at: 2).
       (first notNil and: [second notNil]) ifTrue: [
         firstTs := first at: 'ts'.
         secondTs := second at: 'ts'.
@@ -261,7 +261,7 @@ TestHistoryQuerySpec subclass: Object
     entries := bbs history: filters.
     t assertEqual: entries size to: 1 message: 'HS13a: category=event filter must return 1'.
     entries size > 0 ifTrue: [
-      t assertEqual: ((entries at: 0) at: 'category') to: 'event' message: 'HS13b: filtered entry must have category=event'
+      t assertEqual: ((entries at: 1) at: 'category') to: 'event' message: 'HS13b: filtered entry must have category=event'
     ] ifFalse: [
       t assert: false message: 'HS13b: filtered entry must have category=event (no entries)'
     ].
@@ -291,7 +291,7 @@ TestHistoryQuerySpec subclass: Object
     entries := bbs history: filters.
     t assertEqual: entries size to: 1 message: 'HS16: identity=s2 filter must return 1'.
     entries size > 0 ifTrue: [
-      t assertEqual: ((entries at: 0) at: 'identity') to: 's2' message: 'HS16b: must match identity s2'
+      t assertEqual: ((entries at: 1) at: 'identity') to: 's2' message: 'HS16b: must match identity s2'
     ] ifFalse: [
       t assert: false message: 'HS16b: must match identity s2 (no entries)'
     ].
@@ -328,9 +328,9 @@ TestHistoryQuerySpec subclass: Object
     t assertEqual: entries size to: 2 message: 'HS18a: limit=2 must return exactly 2'.
     entries size >= 2 ifTrue: [
       "Last entry should be the most recent one (lim5)"
-      t assertEqual: ((entries at: 1) at: 'identity') to: 'lim5' message: 'HS18b: last entry must be most recent (lim5)'.
+      t assertEqual: ((entries at: 2) at: 'identity') to: 'lim5' message: 'HS18b: last entry must be most recent (lim5)'.
       "First of the 2 should be lim4"
-      t assertEqual: ((entries at: 0) at: 'identity') to: 'lim4' message: 'HS18c: first entry in limit window must be lim4'
+      t assertEqual: ((entries at: 1) at: 'identity') to: 'lim4' message: 'HS18c: first entry in limit window must be lim4'
     ] ifFalse: [
       t assert: false message: 'HS18b: last entry must be most recent (not enough entries)'.
       t assert: false message: 'HS18c: first entry in limit window (not enough entries)'
@@ -362,7 +362,7 @@ TestHistoryQuerySpec subclass: Object
     entries := bbs history: filters.
     t assertEqual: entries size to: 2 message: 'HS20b: combined + limit=2 must return 2'.
     entries size >= 2 ifTrue: [
-      t assertEqual: ((entries at: 1) at: 'identity') to: 'c5' message: 'HS20c: last combined entry must be c5'
+      t assertEqual: ((entries at: 2) at: 'identity') to: 'c5' message: 'HS20c: last combined entry must be c5'
     ] ifFalse: [
       t assert: false message: 'HS20c: last combined entry (not enough entries)'
     ].
@@ -399,7 +399,7 @@ TestHistoryEdgeCases subclass: Object
     "Should be 2 entries: out + consume"
     t assertEqual: entries size to: 2 message: 'HS23a: out+consume must produce 2 entries'.
     entries size >= 2 ifTrue: [
-      t assertEqual: ((entries at: 1) at: 'identity') to: 'to-eat' message: 'HS23b: consume entry must have original identity'
+      t assertEqual: ((entries at: 2) at: 'identity') to: 'to-eat' message: 'HS23b: consume entry must have original identity'
     ] ifFalse: [
       t assert: false message: 'HS23b: consume entry identity (not enough entries)'
     ].
@@ -413,7 +413,7 @@ TestHistoryEdgeCases subclass: Object
     bbs out: 'event' scope: 'test-scope' identity: 'id-with-dash' payload: p.
     lines := HistorySpecHelper readHistoryLines: historyPath.
     t assertEqual: lines size to: 1 message: 'HS24a: entry with dashes must produce 1 line'.
-    specialEntry := HistorySpecHelper tryDecode: (lines at: 0).
+    specialEntry := HistorySpecHelper tryDecode: (lines at: 1).
     specialEntry notNil
       ifTrue: [
         t assertEqual: (specialEntry at: 'scope') to: 'test-scope' message: 'HS24b: scope with dash preserved'.
@@ -437,7 +437,7 @@ TestHistoryEdgeCases subclass: Object
     entries := bbs history: filters.
     t assertEqual: entries size to: 1 message: 'HS25a: limit=1 must return exactly 1'.
     entries size > 0 ifTrue: [
-      t assertEqual: ((entries at: 0) at: 'identity') to: 'third' message: 'HS25b: limit=1 must return the LAST entry'
+      t assertEqual: ((entries at: 1) at: 'identity') to: 'third' message: 'HS25b: limit=1 must return the LAST entry'
     ] ifFalse: [
       t assert: false message: 'HS25b: limit=1 entry (no entries)'
     ].

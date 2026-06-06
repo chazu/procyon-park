@@ -16,7 +16,7 @@
                                   mixer so any weakness in Random is
                                   absorbed before we truncate to 128 bits
    Proquint encodeHex64:      — 16-hex-char -> 4-quintuplet string
-   String copyFrom:to:        — Go-style exclusive upper bound
+   String copyFrom:to:        — 1-indexed closed [from, to] interval
 
  Shape:
    generate        -> { 'hex': <32-char hex>, 'proquint': <proquint> }
@@ -46,7 +46,7 @@ ClaimId subclass: Object
     seed := self freshSeed.
     digest := Sha256 hash: seed.
     "digest is 64 lowercase hex chars (32 bytes). Truncate to 128 bits."
-    hex := digest copyFrom: 0 to: 32.
+    hex := digest copyFrom: 1 to: 32.
     ^self buildDict: hex
   ]
 
@@ -110,18 +110,18 @@ ClaimId subclass: Object
     parts := Array new: 4.
     i := 0.
     [i < 4] whileTrue: [
-      chunk := hex copyFrom: i * 8 to: (i * 8) + 8.
-      parts at: i put: (Proquint encodeHex: chunk).
+      chunk := hex copyFrom: (i * 8) + 1 to: (i * 8) + 8.
+      parts at: i + 1 put: (Proquint encodeHex: chunk).
       i := i + 1
     ].
-    ^((parts at: 0), '-', (parts at: 1), '-', (parts at: 2), '-', (parts at: 3))
+    ^((parts at: 1), '-', (parts at: 2), '-', (parts at: 3), '-', (parts at: 4))
   ]
 
   classMethod: isLowerHex: s [
     | digits i c |
     digits := self hexDigits.
-    i := 0.
-    [i < s size] whileTrue: [
+    i := 1.
+    [i <= s size] whileTrue: [
       c := s at: i.
       (digits includes: c) ifFalse: [^false].
       i := i + 1
@@ -147,7 +147,7 @@ ClaimId subclass: Object
     hex := ''.
     i := 0.
     [i < 4] whileTrue: [
-      pair := (quints at: i * 2), '-', (quints at: (i * 2) + 1).
+      pair := (quints at: (i * 2) + 1), '-', (quints at: (i * 2) + 2).
       val := Proquint decode: pair.
       hex := hex, (self int32ToHex: val).
       i := i + 1
@@ -160,11 +160,11 @@ ClaimId subclass: Object
     | dash parts start i |
     dash := Character value: 45.
     parts := Array new: 0.
-    start := 0.
-    i := 0.
-    [i < pq size] whileTrue: [
+    start := 1.
+    i := 1.
+    [i <= pq size] whileTrue: [
       ((pq at: i) = dash) ifTrue: [
-        parts := parts copyWith: (pq copyFrom: start to: i).
+        parts := parts copyWith: (pq copyFrom: start to: i - 1).
         start := i + 1
       ].
       i := i + 1
@@ -183,7 +183,7 @@ ClaimId subclass: Object
     8 timesRepeat: [
       nibble := n bitAnd: 15.
       n := n bitShift: -4.
-      hex := (digits at: nibble) asString, hex
+      hex := (digits at: nibble + 1) asString, hex
     ].
     ^hex
   ]

@@ -110,8 +110,8 @@ TestWorkitemParentChild subclass: Object
     t assertEqual: kids size to: 2 message: 'PC1: child count'.
     ids := Array new: 0.
     kids do: [:k | ids := ids copyWith: (k at: 'identity')].
-    t assertEqual: (ids at: 0) to: 's-a' message: 'PC1: first child is wave 1 (s-a)'.
-    t assertEqual: (ids at: 1) to: 's-b' message: 'PC1: second child is wave 2 (s-b)'.
+    t assertEqual: (ids at: 1) to: 's-a' message: 'PC1: first child is wave 1 (s-a)'.
+    t assertEqual: (ids at: 2) to: 's-b' message: 'PC1: second child is wave 2 (s-b)'.
 
     "PC2 — both siblings are present even though we never wrote children[]."
     t assert: (ids includes: 's-a') message: 'PC2: s-a present'.

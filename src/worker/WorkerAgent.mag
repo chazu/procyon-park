@@ -416,20 +416,20 @@ WorkerAgent subclass: Object
     harness repoName: repoName.
     "Renewal timer. renewCtl is a two-slot Array used as a shared flag
      between the outer method and the forked timer:
-       slot 0 — running (true while outer method wants renewals to fire)
-       slot 1 — abandoned (set by the timer when the server returns 409
+       slot 1 — running (true while outer method wants renewals to fire)
+       slot 2 — abandoned (set by the timer when the server returns 409
                 for a renew, i.e. the task was reaped and re-dispatched)
      Float/Int math is avoided by keeping the sleep as Int milliseconds."
     renewCtl := Array new: 2.
-    renewCtl at: 0 put: true.
-    renewCtl at: 1 put: false.
+    renewCtl at: 1 put: true.
+    renewCtl at: 2 put: false.
     [self renewLoop: taskId scope: scope claimId: claimHex ctl: renewCtl] fork.
     failure := nil.
     [harness run] on: Exception do: [:e |
       failure := 'harness-exception: ', e messageText.
       ('WorkerAgent: harness raised: ', e messageText) println
     ].
-    renewCtl at: 0 put: false.
+    renewCtl at: 1 put: false.
     "Harness exposes failureReason (set e.g. on repo-not-available per
      D6.5). When the harness signalled an exception we keep that
      reason; otherwise we trust its self-reported reason."
@@ -444,7 +444,7 @@ WorkerAgent subclass: Object
      (now-stale) claim_id would at best return 409 and at worst race
      against the new owner's completion. Abandon silently — taskFinished
      still runs so in-flight bookkeeping is honest."
-    (renewCtl at: 1) ifTrue: [
+    (renewCtl at: 2) ifTrue: [
       ('WorkerAgent: abandoning complete for ', taskId,
        ' — renewal was 409ed (task reaped)') println.
       self taskFinished.
@@ -467,9 +467,9 @@ WorkerAgent subclass: Object
     tick := (lease // 3) * 1000.
     tick < 1000 ifTrue: [tick := 1000].
     abandoned := false.
-    [(renewCtl at: 0) and: [abandoned not]] whileTrue: [
+    [(renewCtl at: 1) and: [abandoned not]] whileTrue: [
       Process sleep: tick.
-      (renewCtl at: 0) ifTrue: [
+      (renewCtl at: 1) ifTrue: [
         body := Dictionary new.
         body at: 'task_id' put: taskId.
         body at: 'scope' put: scope.
@@ -487,7 +487,7 @@ WorkerAgent subclass: Object
             abandoned := true.
             "Surface abandonment to the runClaimed: caller so it skips
              the now-pointless /api/tasks/complete."
-            renewCtl at: 1 put: true
+            renewCtl at: 2 put: true
           ]
         ]
       ]
@@ -543,7 +543,7 @@ WorkerAgent subclass: Object
     buf := ''.
     32 timesRepeat: [
       nibble := Random nextInt: 16.
-      buf := buf, (digits at: nibble) asString
+      buf := buf, (digits at: nibble + 1) asString
     ].
     ^buf
   ]

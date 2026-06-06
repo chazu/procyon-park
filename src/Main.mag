@@ -21,10 +21,10 @@ Main subclass: Object
     ].
 
     "Find the real command by skipping any leading -i / --identity flags."
-    cmdIdx := 0.
-    [cmdIdx < args size] whileTrue: [
+    cmdIdx := 1.
+    [cmdIdx <= args size] whileTrue: [
       idArg := args at: cmdIdx.
-      ((idArg = '-i' or: [idArg = '--identity']) and: [cmdIdx + 1 < args size]) ifTrue: [
+      ((idArg = '-i' or: [idArg = '--identity']) and: [cmdIdx + 1 <= args size]) ifTrue: [
         cmdIdx := cmdIdx + 2
       ] ifFalse: [
         ^self dispatchWith: args cmdIdx: cmdIdx
@@ -35,7 +35,7 @@ Main subclass: Object
 
   classMethod: dispatchWith: args cmdIdx: idx [
     | cmd wtArgs |
-    idx >= args size ifTrue: [
+    idx > args size ifTrue: [
       self printUsage.
       ^self
     ].
@@ -51,7 +51,7 @@ Main subclass: Object
     ].
 
     "Server"
-    cmd = 'serve' ifTrue: [^self startServerGuarded: (args copyFrom: 1)].
+    cmd = 'serve' ifTrue: [^self startServerGuarded: (args copyFrom: 2)].
 
     "PoC: when PP_USE_CLI=1 is set, route the ported subcommands
      (status, workflow list, log, prime, gc) through the new Maggie
@@ -69,7 +69,7 @@ Main subclass: Object
     cmd = 'clean-branches' ifTrue: [
       wtArgs := #('repo' 'clean-branches').
       args size > 1 ifTrue: [
-        (args copyFrom: 1) do: [:a | wtArgs := wtArgs copyWith: a]
+        (args copyFrom: 2) do: [:a | wtArgs := wtArgs copyWith: a]
       ].
       ^Repo new runWith: wtArgs
     ].
@@ -282,7 +282,7 @@ Main subclass: Object
   classMethod: flagValue: flag in: args [
     | idx |
     idx := args indexOf: flag.
-    (idx >= 0 and: [idx < (args size - 1)])
+    (idx > 0 and: [idx < args size])
       ifTrue: [^args at: idx + 1]
       ifFalse: [^nil]
   ]

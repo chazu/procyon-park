@@ -182,7 +182,7 @@ Dashboard:     ', baseUrl, '/dashboard/
       ^self
     ].
 
-    identity := args at: 1.
+    identity := args at: 2.
     role := self flagValue: '--role' in: args.
     desc := self flagValue: '--description' in: args.
 
@@ -226,8 +226,8 @@ Dashboard:     ', baseUrl, '/dashboard/
     sinceOffset := 0.
 
     "Parse flags — follow is default; --no-follow disables, --follow is explicit"
-    (args indexOf: '--no-follow') >= 0 ifTrue: [follow := false].
-    (args indexOf: '--follow') >= 0 ifTrue: [follow := true].
+    (args indexOf: '--no-follow') > 0 ifTrue: [follow := false].
+    (args indexOf: '--follow') > 0 ifTrue: [follow := true].
     sinceStr := self flagValue: '--since' in: args.
     sinceStr notNil ifTrue: [sinceOffset := sinceStr asInteger].
 
@@ -373,9 +373,9 @@ Dashboard:     ', baseUrl, '/dashboard/
      `pp gc` is the single answer to 'why is .pp so big.'"
     | dryRun count sessionCount orphanCount backupCount keepBackupsStr keepBackups
       olderThanStr olderThanHours sessionsFlag worktreesFlag |
-    dryRun := (args indexOf: '--dry-run') >= 0.
-    sessionsFlag := (args indexOf: '--no-sessions') < 0.
-    worktreesFlag := (args indexOf: '--no-worktrees') < 0.
+    dryRun := (args indexOf: '--dry-run') > 0.
+    sessionsFlag := (args indexOf: '--no-sessions') <= 0.
+    worktreesFlag := (args indexOf: '--no-worktrees') <= 0.
     olderThanStr := self flagValue: '--older-than' in: args.
     olderThanHours := olderThanStr notNil
       ifTrue: [olderThanStr asInteger]
@@ -557,12 +557,12 @@ Dashboard:     ', baseUrl, '/dashboard/
             "Extract basename by stripping the known sessionsDir prefix + '/'"
             prefixLen := sessionsDir size + 1.
             fname := path size > prefixLen
-              ifTrue: [path copyFrom: prefixLen to: path size]
+              ifTrue: [path copyFrom: prefixLen + 1 to: path size]
               ifFalse: [path].
             "Extract workflow id: prefix before ':task:'"
             mIdx := fname indexOf: marker.
-            wfId := mIdx >= 0
-              ifTrue: [fname copyFrom: 0 to: mIdx]
+            wfId := mIdx > 0
+              ifTrue: [fname copyFrom: 1 to: mIdx - 1]
               ifFalse: [''].
             (wfId isEmpty not and: [(existingIds includes: wfId) not]) ifTrue: [
               ('  session: ', fname) println.
@@ -657,8 +657,8 @@ Dashboard:     ', baseUrl, '/dashboard/
     scope isEmpty ifTrue: [^false].
     parts := scope split: '-'.
     parts size < 3 ifTrue: [^false].
-    last := parts at: parts size - 1.
-    middle := parts at: parts size - 2.
+    last := parts at: parts size.
+    middle := parts at: parts size - 1.
     middle size < 10 ifTrue: [^false].
     last isEmpty ifTrue: [^false].
     "asInteger round-trip detects all-digits with no leading zeros — fine
@@ -697,8 +697,8 @@ Dashboard:     ', baseUrl, '/dashboard/
     files size <= keepN ifTrue: [^0].
     keep := keepN max: 0.
     removed := 0.
-    "Indices keep..files.size-1 are the older backups to delete."
-    keep to: files size - 1 do: [:i |
+    "Indices keep+1..files.size are the older backups to delete."
+    keep + 1 to: files size do: [:i |
       | f |
       f := files at: i.
       ('  bbs backup: ', f) println.
@@ -725,8 +725,8 @@ Dashboard:     ', baseUrl, '/dashboard/
     "Parse flags; first non-flag after 'session' becomes taskArg."
     mode := 'default'.
     taskArg := nil.
-    i := 1.
-    [i < args size] whileTrue: [
+    i := 2.
+    [i <= args size] whileTrue: [
       a := args at: i.
       a = '--full' ifTrue: [mode := 'full']
         ifFalse: [a = '--summary' ifTrue: [mode := 'summary']
@@ -750,7 +750,7 @@ Dashboard:     ', baseUrl, '/dashboard/
             | name |
             name := f.
             (name endsWith: '.jsonl') ifTrue: [
-              name := name copyFrom: 0 to: name size - 6
+              name := name copyFrom: 1 to: name size - 6
             ].
             ('  ', name) println
           ]
@@ -838,7 +838,7 @@ Dashboard:     ', baseUrl, '/dashboard/
       | shown |
       shown := (mode = 'full' or: [content size <= 120])
         ifTrue: [content]
-        ifFalse: [content copyFrom: 0 to: 120].
+        ifFalse: [content copyFrom: 1 to: 120].
       ('  [assistant] ', shown) println.
       ^self
     ].
@@ -854,7 +854,7 @@ Dashboard:     ', baseUrl, '/dashboard/
             text := block at: 'text' ifAbsent: [''].
             shown := (mode = 'full' or: [text size <= 120])
               ifTrue: [text]
-              ifFalse: [text copyFrom: 0 to: 120].
+              ifFalse: [text copyFrom: 1 to: 120].
             ('  [assistant] ', shown) println
           ].
           blockType = 'tool_use' ifTrue: [
@@ -866,7 +866,7 @@ Dashboard:     ', baseUrl, '/dashboard/
                 inputStr := Json encode: (block at: 'input' ifAbsent: [Dictionary new]).
                 shown := (mode = 'full' or: [inputStr size <= 80])
                   ifTrue: [inputStr]
-                  ifFalse: [inputStr copyFrom: 0 to: 80].
+                  ifFalse: [inputStr copyFrom: 1 to: 80].
                 ('  [tool_use] ', toolName, ' ', shown) println
               ]
           ]
@@ -882,7 +882,7 @@ Dashboard:     ', baseUrl, '/dashboard/
     (content isKindOf: String) ifTrue: [
       shown := (mode = 'full' or: [content size <= 80])
         ifTrue: [content]
-        ifFalse: [content copyFrom: 0 to: 80].
+        ifFalse: [content copyFrom: 1 to: 80].
       isError
         ifTrue: [('  [tool_result] ERROR: ', shown) println]
         ifFalse: [mode = 'full'
@@ -940,8 +940,8 @@ Dashboard:     ', baseUrl, '/dashboard/
     "Parse args: --json flag and optional positional taskId"
     jsonMode := false.
     taskArg := nil.
-    i := 1.
-    [i < args size] whileTrue: [
+    i := 2.
+    [i <= args size] whileTrue: [
       a := args at: i.
       a = '--json' ifTrue: [jsonMode := true]
         ifFalse: [taskArg isNil ifTrue: [taskArg := a]].

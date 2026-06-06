@@ -96,7 +96,7 @@ TemplateLoader subclass: Object
     files do: [:fname |
       | path identity payload |
       path := workflowsDir, '/', fname.
-      identity := fname copyFrom: 0 to: fname size - 4.
+      identity := fname copyFrom: 1 to: fname size - 4.
       [payload := self loadTemplateFile: path.
        payload notNil ifTrue: [
          bbs outPinned: 'template' scope: 'system' identity: identity payload: payload
@@ -121,7 +121,7 @@ TemplateLoader subclass: Object
         files do: [:fname |
           | path identity payload |
           path := repoWorkflowsDir, '/', fname.
-          identity := fname copyFrom: 0 to: fname size - 4.
+          identity := fname copyFrom: 1 to: fname size - 4.
           [payload := self loadTemplateFile: path.
            payload notNil ifTrue: [
              bbs outPinned: 'template' scope: repoName identity: identity payload: payload
