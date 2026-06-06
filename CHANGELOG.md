@@ -17,6 +17,11 @@ Semantic Versioning.
   `index 0 out of bounds` crashes throughout the server and CLI.
 
 ### Fixed
+- `pp worktree clean` no longer crashes the whole command when a single
+  worktree fails to process. The sweep now handles each task inside its own
+  rescue (logging and continuing on error) and skips malformed, non-string
+  directory-listing entries instead of crashing on string concatenation.
+  Reports a count of any skipped worktrees.
 - Restored buildability against current Maggie: the bundled `alto` Go
   interop shims (`wrap/tcell`, `wrap/terminal`) used the old
   `PrimitiveFunc` signature (`interface{}` receiver) and no longer

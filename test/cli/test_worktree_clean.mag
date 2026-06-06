@@ -1,0 +1,158 @@
+"Tests for `pp worktree clean` resilience (Repo>>cmdWorktreeClean:).
+
+ `pp worktree clean` routes through PP.mag -> Repo>>cmdWorktreeClean: (CliPP is
+ only used when PP_USE_CLI is set). Regression for the crash where a single
+ worktree whose per-task processing signaled an exception (e.g. a non-String
+ listing entry hitting string concatenation) aborted the ENTIRE sweep with an
+ uncaught VM panic. The sweep now processes each task inside its own rescue,
+ guards non-String listing entries, and answers {cleaned, failed}.
+
+ Invariants under test:
+   WC1  a task whose processing signals does NOT abort the sweep — the
+        remaining tasks are still cleaned.
+   WC2  cmdWorktreeClean: tallies the failed task instead of crashing.
+   WC3  the failing task's dir is left in place; the healthy ones are gone.
+   WC4  an empty worktrees dir reports nothing-to-do with zero counts."
+
+WCTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg,
+                            ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Worktree Clean Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== Test double ===
+ Subclasses Repo so the real cmdWorktreeClean: loop runs unchanged. Points
+ worktreesDir at a temp dir and forces a signal for one task name, delegating
+ every other task to the real implementation via super."
+RepoWtCleanDouble subclass: Repo
+  classVars: testBase
+
+  classMethod: testBase: aPath [ testBase := aPath ]
+
+  method: initialize [
+    super initialize.
+    "Redirect the worktrees root at the temp dir (cmdWorktreeClean: reads the
+     worktreesDir ivar directly)."
+    worktreesDir := testBase
+  ]
+
+  method: cleanWorktreeTask: taskName dryRun: dryRun ppUrl: ppUrl tmpFile: tmpFile [
+    taskName = 'boom-task' ifTrue: [^Error signal: 'simulated worktree failure'].
+    ^super cleanWorktreeTask: taskName dryRun: dryRun ppUrl: ppUrl tmpFile: tmpFile
+  ]
+
+"=== TestWorktreeClean ==="
+TestWorktreeClean subclass: Object
+
+  classMethod: dirExists: path [
+    "Use an if/fi compound so the redirect Shell capture appends binds to the
+     whole statement (a bare `&& echo yes || echo no` would let the `echo yes`
+     escape the captured redirect)."
+    ^(self strip:
+       (Shell capture: 'if test -d "', path, '"; then echo yes; else echo no; fi')) = 'yes'
+  ]
+
+  classMethod: strip: s [
+    | r |
+    r := s.
+    [r size > 0 and: [(r copyFrom: r size) = ((Character lf) asString)]] whileTrue: [
+      r := r copyFrom: 1 to: r size - 1
+    ].
+    ^r
+  ]
+
+  classMethod: run: t [
+    | base double result emptyResult |
+    '--- TestWorktreeClean ---' println.
+
+    "Fresh temp worktrees dir with three task dirs. Names are chosen so the
+     failing one ('boom-task') sorts FIRST under ls, proving the sweep
+     continues past an early failure rather than aborting on it."
+    base := '/tmp/pp-test-repowt-', DateTime now epochSeconds printString.
+    Shell run: 'rm -rf "', base, '"'.
+    Shell run: 'mkdir -p "', base, '/boom-task/impl" "', base,
+               '/good-task/impl" "', base, '/zzz-task/impl"'.
+
+    RepoWtCleanDouble testBase: base.
+    double := RepoWtCleanDouble new.
+
+    "No pp server on PP_URL -> status probe empty -> every task is a removal
+     candidate. boom-task signals; the other two must still go."
+    result := double cmdWorktreeClean: #('repo' 'worktree' 'clean').
+
+    t assertEqual: (result at: 'cleaned') to: 2
+      message: 'WC1: sweep continues past the failing task (2 cleaned)'.
+    t assertEqual: (result at: 'failed') to: 1
+      message: 'WC2: failing task is tallied, not crashed (1 failed)'.
+    t assert: (self dirExists: base, '/boom-task')
+      message: 'WC3a: failing task dir is left in place'.
+    t assert: ((self dirExists: base, '/good-task') not)
+      message: 'WC3b: healthy task good-task was removed'.
+    t assert: ((self dirExists: base, '/zzz-task') not)
+      message: 'WC3c: healthy task zzz-task was removed'.
+
+    "Empty dir -> nothing to do, zero counts, no crash."
+    Shell run: 'rm -rf "', base, '"'.
+    Shell run: 'mkdir -p "', base, '"'.
+    emptyResult := double cmdWorktreeClean: #('repo' 'worktree' 'clean').
+    t assertEqual: (emptyResult at: 'cleaned') to: 0
+      message: 'WC4a: empty worktrees dir cleans nothing'.
+    t assertEqual: (emptyResult at: 'failed') to: 0
+      message: 'WC4b: empty worktrees dir fails nothing'.
+
+    Shell run: 'rm -rf "', base, '"'
+  ]
+
+"=== Main ==="
+TestWorktreeCleanMain subclass: Object
+
+  classMethod: run [
+    | t |
+    t := WCTest new.
+    [TestWorktreeClean run: t] on: Exception do: [:e |
+      ('TestWorktreeClean CRASHED: ', e messageText) println.
+      ^1
+    ].
+    t report.
+    ^t failed
+  ]
