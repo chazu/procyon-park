@@ -22,10 +22,12 @@ Semantic Versioning.
   rescue (logging and continuing on error) and skips malformed, non-string
   directory-listing entries instead of crashing on string concatenation.
   Reports a count of any skipped worktrees.
-- Restored buildability against current Maggie: the bundled `alto` Go
+- Restored buildability against current Maggie. The bundled `alto` Go
   interop shims (`wrap/tcell`, `wrap/terminal`) used the old
   `PrimitiveFunc` signature (`interface{}` receiver) and no longer
-  compiled after the VM switched to a typed `*VM` receiver.
+  compiled after the VM switched to a typed `*VM` receiver. Since `alto`
+  was unused (no `src/` code referenced its symbols), the dependency was
+  dropped entirely rather than patched.
 
 ### Added
 - `pp gc` is now the single command for cleaning up everything stale.
@@ -48,6 +50,10 @@ Semantic Versioning.
       `--keep-backups N` (default 2) and removes the rest.
   Use `--dry-run` to preview, `--no-sessions` / `--no-worktrees` as
   escape hatches.
+
+### Removed
+- The unused `alto` dependency and its generated Go interop wrappers
+  (`wrap/tcell`, `wrap/terminal`).
 
 ### Fixed
 - Dashboard "Recent Activity" panel was silently dropping the newest

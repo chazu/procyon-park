@@ -3,9 +3,6 @@ name = "procyon-park"
 namespace = "ProcyonPark"
 version = "0.1.0"
 
-[dependencies]
-alto = { git = "https://github.com/chazu/alto", branch = "main" }
-
 [source]
 dirs = ["src"]
 entry = "Main.start"
