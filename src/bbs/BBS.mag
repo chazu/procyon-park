@@ -61,12 +61,13 @@ BBS subclass: Object
     "Ensure data directory exists"
     self ensureDataDir.
 
-    "PP_STORE=ganso: back the store with GansoStore (SQLite). When set, all
-     store ops delegate to gansoStore and the JSON index/flush path is bypassed.
-     Default (unset/json) keeps the legacy in-memory index + bbs.json flush."
-    ((System env: 'PP_STORE') = 'ganso')
-      ifTrue: [self initGansoStore]
-      ifFalse: [self loadFromDisk]
+    "Storage backend. DEFAULT is ganso/SQLite (GansoStore): all store ops
+     delegate to it, the JSON index/flush path is bypassed, and each write is
+     durable via WAL. Set PP_STORE=json to use the legacy in-memory index +
+     bbs.json flush (kept for rollback)."
+    ((System env: 'PP_STORE') = 'json')
+      ifTrue: [self loadFromDisk]
+      ifFalse: [self initGansoStore]
   ]
 
   method: usesGanso [ ^gansoStore notNil ]
@@ -1099,6 +1100,7 @@ BBS subclass: Object
   "--- Stats ---"
 
   method: size [
+    gansoStore notNil ifTrue: [^gansoStore countAll].
     ^mutex critical: [index size]
   ]
 

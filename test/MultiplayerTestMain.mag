@@ -178,7 +178,7 @@ MultiplayerTestMain subclass: Object
         failures := failures copyWith: ('TestInputValidationStrictMain CRASHED: ', e messageText).
         ('CRASH: TestInputValidationStrictMain: ', e messageText) println].
 
-    ((System env: 'PP_STORE') = 'ganso')
+    ((System env: 'PP_STORE') ~= 'json')
       ifTrue: ['  TestBBSCmd skipped under PP_STORE=ganso (asserts on the bbs.json file — JSON-backend specific)' println]
       ifFalse: [
         [totalFailed := totalFailed + TestBBSCmdMain run. ranSuites := ranSuites + 1]
@@ -211,7 +211,7 @@ MultiplayerTestMain subclass: Object
         failures := failures copyWith: ('TestWorktreeCleanMain CRASHED: ', e messageText).
         ('CRASH: TestWorktreeCleanMain: ', e messageText) println].
 
-    ((System env: 'PP_STORE') = 'ganso')
+    ((System env: 'PP_STORE') ~= 'json')
       ifTrue: ['  BBSIndex + BBSFlushAsync skipped under PP_STORE=ganso (test the JSON in-memory index + bbs.json flush — replaced by SQLite)' println]
       ifFalse: [
         [totalFailed := totalFailed + BBSIndexMain start. ranSuites := ranSuites + 1]

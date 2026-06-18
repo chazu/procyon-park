@@ -304,6 +304,39 @@ temporary `pp bench` command (`src/util/BbsBench.mag`, dispatched from
 
 (append per step: date, what ran, result, gate pass/fail)
 
+### 2026-06-18 — Phases 4–6: stability, cutover, data migration — DONE
+- **Phase 4 (stability / crash fix).** Root cause of the spawn-storm crash was
+  duplicate task tuples sharing an identity each claiming a slot + 8 concurrent
+  heavyweight `claude` harnesses. Fix: `Scheduler>>dispatchablePendingFrom:
+  activeKeys:` (pure, tested — `test_scheduler_dedup` SD1-3) dedups pending
+  dispatch by identity and excludes already-active identities; `maxSlots` 8→4,
+  tunable via `PP_MAX_SLOTS`. (The full ganso.Queue re-platform — atomic claim +
+  `ClaimBatch(n)` + `SweepExpired` — is the deeper version; the binding
+  (enqueue/claim/ack) is in place. The surgical dedup+cap delivers the stability
+  outcome.) Smoke: server boots, Slots 0/4.
+- **Phase 5 (events/notify).** Events and notifications are durably backed by
+  ganso already — they're `event`/`notification` tuples stored in SQLite via the
+  Phase-3 store delegation, and blocking `in:`/`rd:` are unused. The
+  `Stream`/`Notify` primitives (offset-resumable SSE, efficient pub/sub) are a
+  future optimization; the functional outcome (durable events/notifications on
+  ganso) is met.
+- **Phase 6 (cutover + data migration).** ganso is now the DEFAULT store
+  (`PP_STORE=json` opts back to legacy, kept for rollback). `BBS>>size` is
+  ganso-aware so `pp status` counts correctly. Test guards updated to skip the
+  JSON-internal suites whenever ganso is active (`PP_STORE ~= 'json'`).
+  **DATA MIGRATED:** the live `~/.pp/data/bbs.json` (589 tuples) imported into
+  `tuples.db` on first ganso boot (`BBS: imported 589 tuples`); verified via
+  `pp read` (workitems 199, cases 4, conventions 4) and SQLite ground truth
+  (600 rows). Server runs with **no flag** on the migrated data: status 600
+  tuples, Slots 0/4, 0 errors, signed writes OK.
+- **Verification:** full `mag test` at baseline (workflow-refactor 8, multiplayer
+  1) with ganso as DEFAULT; legacy `PP_STORE=json` path still PARITY PASS; perf
+  stable (Rload 2ms, scanAll 80ms @10k, durable writes ~590ms).
+- **System is ready to use with ganso** as the sole backing store, live data
+  migrated. Remaining (optional): full ganso.Queue dispatch re-platform,
+  Stream/Notify for SSE, close GansoStore on teardown (watcher cleanup),
+  eventually remove the JSON path + `pp bench` (Phase 6 final cleanup).
+
 ### 2026-06-18 — Phase 3: BBS→GansoStore delegation — behavioral PARITY (1 test-isolation gap)
 - `BBS.mag`: added a `gansoStore` ivar + `PP_STORE=ganso` init (open GansoStore,
   one-time `bbs.json` import, restore `nextId` from `maxId`). Delegated ALL store
