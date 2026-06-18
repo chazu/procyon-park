@@ -320,12 +320,13 @@ temporary `pp bench` command (`src/util/BbsBench.mag`, dispatched from
   baseline 8 (SAME — no new workflow regressions); the 3 JSON-backend-internal
   suites (BBSIndex / BBSFlushAsync / TestBBSCmd — they test the in-memory index,
   the flush mechanism, and the `bbs.json` file) are skipped under the flag since
-  that machinery is replaced by SQLite. ONE new failure: `test_invite_store`
-  `invite tuple stored` — a TEST-ISOLATION artifact, not a behavioral gap:
-  `BBS new` (default dir) instances are accidentally isolated under JSON
-  (in-memory, never flushed) but share the durable default `tuples.db` under
-  ganso. Production has a single BBS, so ganso's behavior is correct; the fix is
-  test-side (use isolated temp dirs / clear state for `BBS new` tests under ganso).
+  that machinery is replaced by SQLite. The one initial new failure
+  (`test_invite_store`) was a TEST-ISOLATION artifact (`BBS new` shares the
+  durable default `tuples.db` under ganso vs accidental in-memory isolation
+  under JSON) — FIXED test-side (isolated temp dir per BBS). **RESULT: under
+  `PP_STORE=ganso` the suite is IDENTICAL to the JSON baseline (workflow-refactor
+  8, multiplayer 1 — both pre-existing, failing under BOTH stores). FULL
+  BEHAVIORAL PARITY.** pp runs on ganso as the sole backing store.
 - KNOWN cleanups: (a) GansoStore isn't `close`d on BBS teardown, leaking ganso's
   update-watcher goroutine — harmless for the singleton server, noisy in tests
   (`watcher: file identity check failed` spam). (b) The `BBS new` test-isolation
