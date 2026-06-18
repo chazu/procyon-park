@@ -455,10 +455,16 @@ Dashboard:     ', baseUrl, '/dashboard/
   ]
 
   method: liveWorkflowInstances [
-    "Set of workflow_instance ids that have at least one live (pending/
-     dispatched/claimed/running) task. Used by gcWorkflows: so a running
-     workflow with in-flight work is never reaped as a zombie."
-    | tasks live |
+    "Set of workflow_instance ids that are live: at least one in-flight
+     (pending/dispatched/claimed/running) task OR at least one non-terminal
+     (waiting/positive) token. The token half is essential: a parent
+     workflow that spawned children (multi-scout, full-pipeline via
+     spawn-workflow) sits 'running' with a 'waiting' token and NO live task
+     of its own while the children run. Without counting tokens, `pp gc`
+     would delete such a healthy parent and its tuples past the TTL,
+     orphaning the running children (review-issue-2). Mirrors the Dispatcher
+     reaper liveness (Dispatcher>>isLiveTaskStatus:/isLiveTokenStatus:)."
+    | tasks tokens live |
     live := Set new.
     tasks := self safeScan: 'task' scope: nil.
     tasks do: [:t |
@@ -470,6 +476,16 @@ Dashboard:     ', baseUrl, '/dashboard/
           wfRef := p at: 'workflow_instance' ifAbsent: [nil].
           wfRef notNil ifTrue: [live add: wfRef]
         ]
+    ].
+    tokens := self safeScan: 'token' scope: nil.
+    tokens do: [:tok |
+      | p status wfRef |
+      p := tok at: 'payload' ifAbsent: [Dictionary new].
+      status := p at: 'status' ifAbsent: [''].
+      (status = 'waiting' or: [status = 'positive']) ifTrue: [
+        wfRef := p at: 'workflow_instance' ifAbsent: [nil].
+        wfRef notNil ifTrue: [live add: wfRef]
+      ]
     ].
     ^live
   ]
@@ -485,8 +501,11 @@ Dashboard:     ', baseUrl, '/dashboard/
     wfId isEmpty ifTrue: [^false].
     (liveWfInstances includes: wfId) ifTrue: [^false].
     startedAt := p at: 'started_at' ifAbsent: [nil].
-    (startedAt isKindOf: Integer) ifFalse: [startedAt := wf at: 'created_at' ifAbsent: [nil]].
-    (startedAt isKindOf: Integer) ifFalse: [^false].
+    "Number, not Integer: persisted tuples round-trip through Json decode,
+     yielding Float for whole epoch timestamps. Integer-only would never
+     reap a reloaded zombie via pp gc. Mirrors the Dispatcher reaper."
+    (startedAt isKindOf: Number) ifFalse: [startedAt := wf at: 'created_at' ifAbsent: [nil]].
+    (startedAt isKindOf: Number) ifFalse: [^false].
     ^(now - startedAt) > self staleWorkflowTtlSeconds
   ]
 

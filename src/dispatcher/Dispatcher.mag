@@ -481,7 +481,7 @@ Dispatcher subclass: Object
      the in-memory `workflows` snapshot below still carries the old status
      this tick (failed_at=now keeps it inside the age threshold anyway), so
      the cascade picks it up on a later tick, not this one."
-    [self reapStaleWorkflows: workflows tasks: tasks now: now]
+    [self reapStaleWorkflows: workflows tasks: tasks tokens: tokens now: now]
       on: Exception do: [:e |
         ('Dispatcher housekeep reapStaleWorkflows error: ', e messageText) println
       ].
@@ -571,7 +571,18 @@ Dispatcher subclass: Object
       or: [status = 'running']]]
   ]
 
-  method: reapStaleWorkflows: workflows tasks: tasks now: now [
+  method: isLiveTokenStatus: status [
+    "Token statuses that count as live orchestration for a parent workflow.
+     A 'waiting' token blocks the workflow on child-workflow / task
+     completion (multi-scout.cue, full-pipeline.cue via spawn-workflow); a
+     'positive' token is enabled and about to fire. Either means the
+     workflow is mid-flight even when it has NO live task of its own —
+     without this, a healthy parent waiting on running children is
+     false-positive reaped, orphaning the children (review-issue-1)."
+    ^status = 'waiting' or: [status = 'positive']
+  ]
+
+  method: reapStaleWorkflows: workflows tasks: tasks tokens: tokens now: now [
     "Transition workflows stuck in a non-terminal status with no live task
      and past the staleness TTL into 'failed'. This is the durable fix for
      the immortal-running workflow: the task reapers only ever touch task
@@ -579,12 +590,19 @@ Dispatcher subclass: Object
      workflow whose status never left 'running' (abandoned, or cancelled
      without the cancel propagating to the workflow tuple) is never reaped.
      Once failed it is eligible for the terminal cascade and pp gc, and the
-     dashboard moves it from Active to Recent Completions."
+     dashboard moves it from Active to Recent Completions.
+
+     Liveness is task OR token based: a parent workflow that spawned child
+     workflows sits 'running' with a non-terminal 'waiting' token and NO
+     live task of its own while the children run. Counting only tasks would
+     reap such a healthy parent past the 1h TTL, bricking orchestration
+     (waiting tokens never promote -> orphaned children). So a workflow with
+     any live token is treated as live too (review-issue-1)."
     | ttl liveWfInstances |
     ttl := self staleWorkflowTtlSeconds.
-    "Set of workflow instances with at least one live task. Defensive
-     per-tuple iteration: scanAll: returns shared references that may be
-     concurrently rewritten."
+    "Set of workflow instances with at least one live task OR live token.
+     Defensive per-tuple iteration: scanAll: returns shared references that
+     may be concurrently rewritten."
     liveWfInstances := Set new.
     tasks do: [:t |
       [
@@ -600,6 +618,22 @@ Dispatcher subclass: Object
       ] on: Exception do: [:e |
         ('Dispatcher reapStaleWorkflows live-task skip (',
           (t at: 'identity' ifAbsent: ['?']), '): ', e messageText) println
+      ]
+    ].
+    tokens do: [:tok |
+      [
+        | p status wfRef |
+        p := tok at: 'payload' ifAbsent: [nil].
+        p notNil ifTrue: [
+          status := p at: 'status' ifAbsent: [''].
+          (self isLiveTokenStatus: status) ifTrue: [
+            wfRef := p at: 'workflow_instance' ifAbsent: [nil].
+            wfRef notNil ifTrue: [liveWfInstances add: wfRef]
+          ]
+        ]
+      ] on: Exception do: [:e |
+        ('Dispatcher reapStaleWorkflows live-token skip (',
+          (tok at: 'identity' ifAbsent: ['?']), '): ', e messageText) println
       ]
     ].
 
@@ -625,8 +659,12 @@ Dispatcher subclass: Object
     wfId := wf at: 'identity'.
     (liveWfInstances includes: wfId) ifTrue: [^self].
     startedAt := payload at: 'started_at' ifAbsent: [nil].
-    (startedAt isKindOf: Integer) ifFalse: [startedAt := wf at: 'created_at' ifAbsent: [now]].
-    (startedAt isKindOf: Integer) ifFalse: [^self].
+    "Number, not Integer: persisted tuples round-trip through Json decode
+     (GansoStore / loadFromDisk); whole epoch timestamps may come back as
+     Float. Accept any Number so a reloaded started_at is still age-able and
+     the reaper is not silently no-op'd after a restart."
+    (startedAt isKindOf: Number) ifFalse: [startedAt := wf at: 'created_at' ifAbsent: [now]].
+    (startedAt isKindOf: Number) ifFalse: [^self].
     ((now - startedAt) > ttl) ifFalse: [^self].
 
     scope := wf at: 'scope' ifAbsent: ['default'].

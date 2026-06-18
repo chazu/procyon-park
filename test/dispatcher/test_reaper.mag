@@ -229,6 +229,62 @@ RPHelper subclass: Object
     ^(bbs scanAll: 'event') select: [:e | (e at: 'identity') = target]
   ]
 
+  classMethod: seedWorkflow: identity status: status startedAt: startedAt onBBS: bbs [
+    "Seed a workflow tuple in the given status with a started_at stamp."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'status' put: status.
+    payload at: 'template' put: 'story'.
+    payload at: 'started_at' put: startedAt.
+    bbs out: 'workflow' scope: 'demo-scope' identity: identity payload: payload
+        actor: 'user:alice' launchedBy: 'user:alice' executedBy: nil
+  ]
+
+  classMethod: seedTask: identity instance: instanceId status: status onBBS: bbs [
+    "Seed a task tuple bound to a workflow instance."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'role' put: 'implementer'.
+    payload at: 'status' put: status.
+    payload at: 'workflow_instance' put: instanceId.
+    payload at: 'description' put: 'wf task'.
+    bbs out: 'task' scope: 'demo-scope' identity: identity payload: payload
+        actor: 'user:alice' launchedBy: 'user:alice' executedBy: nil
+  ]
+
+  classMethod: seedToken: identity instance: instanceId status: status onBBS: bbs [
+    "Seed a token tuple bound to a workflow instance."
+    | payload |
+    payload := Dictionary new.
+    payload at: 'workflow_instance' put: instanceId.
+    payload at: 'place' put: 'review'.
+    payload at: 'status' put: status.
+    payload at: 'transition_id' put: 't1'.
+    payload at: 'modality' put: 'linear'.
+    bbs out: 'token' scope: 'demo-scope' identity: identity payload: payload
+        actor: 'user:alice' launchedBy: 'user:alice' executedBy: nil
+  ]
+
+  classMethod: workflowStatusOf: identity in: bbs [
+    | wf |
+    wf := (bbs scanAll: 'workflow') detect: [:w | (w at: 'identity') = identity] ifNone: [nil].
+    wf isNil ifTrue: [^nil].
+    ^(wf at: 'payload') at: 'status' ifAbsent: [nil]
+  ]
+
+  classMethod: reapStale: dispatcher onBBS: bbs [
+    "Drive the staleness reaper exactly as housekeep does."
+    dispatcher reapStaleWorkflows: (bbs scanAll: 'workflow')
+               tasks: (bbs scanAll: 'task')
+               tokens: (bbs scanAll: 'token')
+               now: DateTime now epochSeconds
+  ]
+
+  classMethod: oldStart [
+    "started_at well past the staleness TTL (1h)."
+    ^DateTime now epochSeconds - (7 * 3600)
+  ]
+
 "=== TestReaper ==="
 TestReaper subclass: Object
 
@@ -244,7 +300,100 @@ TestReaper subclass: Object
     self testCorruptExpiresAtNoPanic: t.
     self testPoisonTupleSkippedOthersReaped: t.
     self testRenewRaceWinsOverReap: t.
-    self testRetryCapBoundaryRependsThenFails: t
+    self testRetryCapBoundaryRependsThenFails: t.
+    self testStaleWorkflowReapedPastTtl: t.
+    self testWaitingTokenKeepsWorkflowAlive: t.
+    self testPositiveTokenKeepsWorkflowAlive: t.
+    self testLiveTaskKeepsWorkflowAlive: t.
+    self testRecentWorkflowNotReaped: t.
+    self testTerminalWorkflowUntouched: t
+  ]
+
+  classMethod: testStaleWorkflowReapedPastTtl: t [
+    | bbs dispatcher |
+    '--- WF1: stale running workflow, no live task, past TTL -> failed ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    RPHelper seedWorkflow: 'wf1' status: 'running' startedAt: RPHelper oldStart onBBS: bbs.
+    "A 'failed' task is NOT live work, so it must not keep the workflow alive."
+    RPHelper seedTask: 'wf1:task:a' instance: 'wf1' status: 'failed' onBBS: bbs.
+
+    RPHelper reapStale: dispatcher onBBS: bbs.
+
+    t assertEqual: (RPHelper workflowStatusOf: 'wf1' in: bbs) to: 'failed'
+      message: 'WF1: stale running workflow flipped to failed'
+  ]
+
+  classMethod: testWaitingTokenKeepsWorkflowAlive: t [
+    | bbs dispatcher |
+    '--- WF2: waiting token keeps parent alive past TTL (review-issue-1) ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    "Parent workflow that spawned children: running, no live task of its own,
+     past TTL, but a non-terminal 'waiting' token. MUST NOT be reaped."
+    RPHelper seedWorkflow: 'wf2' status: 'running' startedAt: RPHelper oldStart onBBS: bbs.
+    RPHelper seedToken: 'wf2:token:review' instance: 'wf2' status: 'waiting' onBBS: bbs.
+
+    RPHelper reapStale: dispatcher onBBS: bbs.
+
+    t assertEqual: (RPHelper workflowStatusOf: 'wf2' in: bbs) to: 'running'
+      message: 'WF2: parent with waiting token NOT reaped (no false-positive)'
+  ]
+
+  classMethod: testPositiveTokenKeepsWorkflowAlive: t [
+    | bbs dispatcher |
+    '--- WF3: positive (enabled) token keeps workflow alive past TTL ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    RPHelper seedWorkflow: 'wf3' status: 'running' startedAt: RPHelper oldStart onBBS: bbs.
+    RPHelper seedToken: 'wf3:token:review' instance: 'wf3' status: 'positive' onBBS: bbs.
+
+    RPHelper reapStale: dispatcher onBBS: bbs.
+
+    t assertEqual: (RPHelper workflowStatusOf: 'wf3' in: bbs) to: 'running'
+      message: 'WF3: workflow with positive token NOT reaped'
+  ]
+
+  classMethod: testLiveTaskKeepsWorkflowAlive: t [
+    | bbs dispatcher |
+    '--- WF4: live (running) task keeps workflow alive past TTL ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    RPHelper seedWorkflow: 'wf4' status: 'running' startedAt: RPHelper oldStart onBBS: bbs.
+    RPHelper seedTask: 'wf4:task:a' instance: 'wf4' status: 'running' onBBS: bbs.
+
+    RPHelper reapStale: dispatcher onBBS: bbs.
+
+    t assertEqual: (RPHelper workflowStatusOf: 'wf4' in: bbs) to: 'running'
+      message: 'WF4: workflow with live task NOT reaped'
+  ]
+
+  classMethod: testRecentWorkflowNotReaped: t [
+    | bbs dispatcher |
+    '--- WF5: recently-started running workflow within TTL NOT reaped ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    "No live task and no token, but started_at is recent (just now)."
+    RPHelper seedWorkflow: 'wf5' status: 'running'
+             startedAt: DateTime now epochSeconds onBBS: bbs.
+
+    RPHelper reapStale: dispatcher onBBS: bbs.
+
+    t assertEqual: (RPHelper workflowStatusOf: 'wf5' in: bbs) to: 'running'
+      message: 'WF5: fresh workflow within TTL NOT reaped (no race)'
+  ]
+
+  classMethod: testTerminalWorkflowUntouched: t [
+    | bbs dispatcher |
+    '--- WF6: already-terminal workflow untouched by stale reaper ---' println.
+    bbs := RPHelper makeBBS.
+    dispatcher := RPHelper makeDispatcher: bbs.
+    RPHelper seedWorkflow: 'wf6' status: 'completed' startedAt: RPHelper oldStart onBBS: bbs.
+
+    RPHelper reapStale: dispatcher onBBS: bbs.
+
+    t assertEqual: (RPHelper workflowStatusOf: 'wf6' in: bbs) to: 'completed'
+      message: 'WF6: completed workflow not re-failed'
   ]
 
   classMethod: testFirstSweepIncrementsOnly: t [

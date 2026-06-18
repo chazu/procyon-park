@@ -531,7 +531,10 @@ DashboardSSE subclass: Object
            sends > to nil -> 'Message not understood' on the ifTrue:. Coerce
            any non-Integer to 0 before the comparison."
           dispatchedAt := tp at: 'dispatched_at' ifAbsent: [0].
-          (dispatchedAt isKindOf: Integer) ifFalse: [dispatchedAt := 0].
+          "Number, not Integer: a reloaded dispatched_at is a Float after
+           Json decode; an Integer-only guard would zero it and mislabel a
+           live dispatched task as 'pending'. Still coerces nil/strings to 0."
+          (dispatchedAt isKindOf: Number) ifFalse: [dispatchedAt := 0].
           durStr := dispatchedAt > 0
             ifTrue: [self formatDuration: (now - dispatchedAt)]
             ifFalse: ['pending'].
@@ -575,17 +578,39 @@ DashboardSSE subclass: Object
 
   method: workflowActive: payload activeTask: activeTask now: now [
     "Liveness predicate for the Active Workflows panel. A workflow is shown
-     active iff it has a live/dispatched/claimed task OR it is still inside
-     the stale window (started_at recent). This replaces trusting the stored
-     status='running' absolutely: nothing ever flips a stuck-'running' tuple
-     to terminal until the Dispatcher staleness reaper runs, so without this
-     gate an abandoned workflow shows as active forever."
-    | startedAt |
-    activeTask notNil ifTrue: [^true].
+     active iff it has a LIVE task (pending/dispatched/claimed/running) OR it
+     is still inside the stale window (started_at recent). This replaces
+     trusting the stored status='running' absolutely: nothing ever flips a
+     stuck-'running' tuple to terminal until the Dispatcher staleness reaper
+     runs, so without this gate an abandoned workflow shows active forever.
+
+     The task must be LIVE, not merely non-terminal: activeTaskFor:in:
+     surfaces any non-completed/non-cancelled task INCLUDING 'failed', so a
+     workflow whose only task has failed would otherwise show Active until
+     the reaper transitions it. Mirror the reaper's isLiveTaskStatus:
+     (which excludes 'failed') so the two agree (review-issue-3)."
+    | startedAt tStatus |
+    activeTask notNil ifTrue: [
+      tStatus := (activeTask at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: [''].
+      (self isLiveTaskStatus: tStatus) ifTrue: [^true]
+    ].
     startedAt := payload at: 'started_at' ifAbsent: [nil].
-    "No usable started_at -> cannot age it; show it rather than hide silently."
-    (startedAt isKindOf: Integer) ifFalse: [^true].
+    "No usable started_at -> cannot age it; show it rather than hide silently.
+     Number, not Integer: persisted tuples round-trip through Json decode,
+     yielding Float for whole epoch timestamps — an Integer-only guard would
+     treat every reloaded workflow as un-ageable and show zombies forever."
+    (startedAt isKindOf: Number) ifFalse: [^true].
     ^(now - startedAt) < self staleWorkflowWindowSeconds
+  ]
+
+  method: isLiveTaskStatus: status [
+    "Task statuses that count as in-flight work for a workflow. Kept in sync
+     with Dispatcher>>isLiveTaskStatus: so the Active panel and the staleness
+     reaper agree on what 'live' means (notably: 'failed' is NOT live)."
+    ^status = 'pending'
+      or: [status = 'dispatched'
+      or: [status = 'claimed'
+      or: [status = 'running']]]
   ]
 
   method: tokenTotalsFor: wfId in: allTasks [
