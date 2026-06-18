@@ -146,6 +146,15 @@ GansoStore subclass: Object
     ^self decodeRows: rows
   ]
 
+  method: findByCategory: cat identity: identity [
+    "Latest tuple by (category, identity) across any scope."
+    | rows args |
+    args := Array new: 0. args := args copyWith: cat. args := args copyWith: identity.
+    rows := db primQuery: 'SELECT data FROM tuples WHERE category=? AND identity=? ORDER BY id DESC LIMIT 1' args: args.
+    rows isEmpty ifTrue: [^nil].
+    ^self decodeRow: (rows at: 1)
+  ]
+
   method: count: cat [
     | rows args |
     args := Array new: 0. args := args copyWith: cat.
@@ -193,6 +202,48 @@ GansoStore subclass: Object
     args := Array new: 0.
     args := args copyWith: cat. args := args copyWith: scope. args := args copyWith: identity.
     db primExec: 'DELETE FROM tuples WHERE category=? AND scope=? AND identity=?' args: args
+  ]
+
+  "--- BBS delegation API: store the verbatim tuple Dictionary BBS builds
+       (id and all). The id column carries BBS's assigned id; generated columns
+       extract the query keys from the JSON. Reads return the dict verbatim. ---"
+
+  method: putTuple: aDict [
+    "INSERT the full tuple dict. aDict already carries id/category/scope/
+     identity/payload/modality/created_at/actor (whatever BBS set)."
+    | json args id |
+    id := aDict at: 'id' ifAbsent: [nil].
+    json := Json encode: aDict.
+    args := Array new: 0.
+    id notNil ifTrue: [args := args copyWith: id].
+    args := args copyWith: json.
+    id notNil
+      ifTrue: [db primExec: 'INSERT INTO tuples(id, data) VALUES(?, ?)' args: args]
+      ifFalse: [db primExec: 'INSERT INTO tuples(data) VALUES(?)' args: args].
+    ^aDict
+  ]
+
+  "Upsert by key: pinned/signal categories keep exactly one tuple per
+   (category,scope,identity). Replace any existing rows with this one."
+  method: putPinnedTuple: aDict [
+    self removeKey: (aDict at: 'category') scope: (aDict at: 'scope') identity: (aDict at: 'identity').
+    ^self putTuple: aDict
+  ]
+
+  method: removeKey: cat scope: scope identity: identity [
+    | args |
+    args := Array new: 0.
+    args := args copyWith: cat. args := args copyWith: scope. args := args copyWith: identity.
+    db primExec: 'DELETE FROM tuples WHERE category=? AND scope=? AND identity=?' args: args
+  ]
+
+  method: maxId [
+    | rows m |
+    rows := db primQuery: 'SELECT MAX(id) AS m FROM tuples' args: (Array new: 0).
+    rows isEmpty ifTrue: [^0].
+    m := (rows at: 1) at: 'm' ifAbsent: [0].
+    m isNil ifTrue: [^0].
+    ^m
   ]
 
   method: close [ db primClose ]

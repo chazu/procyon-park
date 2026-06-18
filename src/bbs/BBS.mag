@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex upsertMutex startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener saveToDiskHook
+  instanceVars: space nextId mutex upsertMutex startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener saveToDiskHook gansoStore
 
   classMethod: new [
     ^super new initialize
@@ -61,8 +61,41 @@ BBS subclass: Object
     "Ensure data directory exists"
     self ensureDataDir.
 
-    "Load persisted state"
-    self loadFromDisk
+    "PP_STORE=ganso: back the store with GansoStore (SQLite). When set, all
+     store ops delegate to gansoStore and the JSON index/flush path is bypassed.
+     Default (unset/json) keeps the legacy in-memory index + bbs.json flush."
+    ((System env: 'PP_STORE') = 'ganso')
+      ifTrue: [self initGansoStore]
+      ifFalse: [self loadFromDisk]
+  ]
+
+  method: usesGanso [ ^gansoStore notNil ]
+
+  method: initGansoStore [
+    "Open the ganso/SQLite store; one-time import of an existing bbs.json;
+     restore nextId past the highest stored id."
+    | jsonPath |
+    gansoStore := GansoStore openAt: dataDir, '/tuples.db'.
+    "One-time import: if a legacy bbs.json exists and the store is empty, load it."
+    jsonPath := dataDir, '/bbs.json'.
+    ((File exists: jsonPath) and: [gansoStore countAll = 0]) ifTrue: [
+      self importJsonInto: gansoStore from: jsonPath
+    ].
+    nextId := gansoStore maxId
+  ]
+
+  method: importJsonInto: store from: jsonPath [
+    "Load tuples from a legacy bbs.json into the ganso store (verbatim)."
+    | contents tuples |
+    [
+      contents := File readFileContents: jsonPath.
+      (contents isNil or: [contents isEmpty]) ifTrue: [^self].
+      tuples := Json decode: contents.
+      tuples do: [:t | store putTuple: t].
+      ('BBS: imported ', tuples size printString, ' tuples from bbs.json into ganso store.') println
+    ] on: Exception do: [:e |
+      ('BBS: ganso import error: ', e messageText) println
+    ]
   ]
 
   method: startedAt [ ^startedAt ]
@@ -237,8 +270,9 @@ BBS subclass: Object
     | d |
     Categories validate: category.
     d := Tuple linear: category scope: scope identity: identity payload: payload id: self assignId actor: actor launchedBy: launchedBy executedBy: executedBy.
-    space out: d.
-    mutex critical: [self addToIndices: d].
+    gansoStore notNil
+      ifTrue: [gansoStore putTuple: d]
+      ifFalse: [space out: d. mutex critical: [self addToIndices: d]].
     self appendHistory: 'out' tuple: d.
     (self isDurableCategory: category) ifTrue: [self persistAfterChange].
     self emitNotificationListener: d.
@@ -257,8 +291,9 @@ BBS subclass: Object
     | d |
     Categories validate: category.
     d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor launchedBy: launchedBy executedBy: executedBy.
-    space outPersistent: d.
-    mutex critical: [self addToIndices: d].
+    gansoStore notNil
+      ifTrue: [gansoStore putTuple: d]
+      ifFalse: [space outPersistent: d. mutex critical: [self addToIndices: d]].
     self appendHistory: 'out-pinned' tuple: d.
     self persistAfterChange.
     self emitNotificationListener: d.
@@ -288,8 +323,9 @@ BBS subclass: Object
      the cap is defensive."
     self drainTuplesAt: category scope: scope identity: identity max: 1024.
     d := Tuple affine: category scope: scope identity: identity payload: payload id: self assignId ttl: ttlSeconds actor: actor launchedBy: launchedBy executedBy: executedBy.
-    space outAffine: d ttl: ttlSeconds.
-    mutex critical: [self addToIndices: d].
+    gansoStore notNil
+      ifTrue: [gansoStore putTuple: d]
+      ifFalse: [space outAffine: d ttl: ttlSeconds. mutex critical: [self addToIndices: d]].
     self appendHistory: 'out-affine' tuple: d.
     ^d at: 'id'
   ]
@@ -352,6 +388,11 @@ BBS subclass: Object
     "Non-blocking consume. Returns the matched Dictionary or nil.
      Also removes from the index."
     | tmpl result |
+    gansoStore notNil ifTrue: [
+      result := gansoStore inp: category scope: scope identity: identity.
+      result notNil ifTrue: [self appendHistory: 'consume' tuple: result].
+      ^result
+    ].
     tmpl := self templateFor: category scope: scope identity: identity.
     result := space tryIn: tmpl.
     result notNil ifTrue: [
@@ -376,13 +417,16 @@ BBS subclass: Object
   method: rdp: category scope: scope identity: identity [
     "Non-blocking read (no consume). Returns the matched Dictionary or nil."
     | tmpl |
+    gansoStore notNil ifTrue: [^gansoStore rdp: category scope: scope identity: identity].
     tmpl := self templateFor: category scope: scope identity: identity.
     ^space tryRead: tmpl
   ]
 
   method: rd: category scope: scope identity: identity [
-    "Blocking read (no consume)."
+    "Blocking read (no consume). (Blocking is unused in pp; under ganso this is
+     a non-blocking read for parity.)"
     | tmpl |
+    gansoStore notNil ifTrue: [^gansoStore rdp: category scope: scope identity: identity].
     tmpl := self templateFor: category scope: scope identity: identity.
     ^space read: tmpl
   ]
@@ -394,6 +438,7 @@ BBS subclass: Object
      callers can JSON-encode the result and so iteration is safe outside
      the mutex (the underlying ArrayList may be mutated concurrently by
      other writers)."
+    gansoStore notNil ifTrue: [^gansoStore scan: category scope: scope].
     ^mutex critical: [
       | result |
       result := ArrayList new.
@@ -408,6 +453,7 @@ BBS subclass: Object
   method: scanAll: category [
     "Return all tuples in a category (any scope). Returns a fresh Array
      for the same reasons as scan:scope:."
+    gansoStore notNil ifTrue: [^gansoStore scanAll: category].
     ^mutex critical: [
       | result |
       result := ArrayList new.
@@ -473,6 +519,7 @@ BBS subclass: Object
     "Look up a tuple from the index (not TupleSpace). Returns the tuple or nil.
      Use this when you need the latest version of a pinned/upserted tuple.
      O(1) hash lookup via byKey."
+    gansoStore notNil ifTrue: [^gansoStore rdp: category scope: scope identity: identity].
     ^mutex critical: [
       | k arr |
       k := self keyFor: category scope: scope identity: identity.
@@ -486,6 +533,7 @@ BBS subclass: Object
      Workflow / task identities are globally unique, so this returns
      the last matching tuple — the standard case has exactly one.
      O(1) hash lookup via byCatIdent."
+    gansoStore notNil ifTrue: [^gansoStore findByCategory: category identity: identity].
     ^mutex critical: [
       | ck arr |
       ck := self catIdentFor: category identity: identity.
@@ -501,6 +549,18 @@ BBS subclass: Object
      aBlock receives the payload Dictionary and may mutate it in place.
      Returns the new tuple id, or nil if no matching tuple was found."
     | tmpl result payload d |
+    gansoStore notNil ifTrue: [
+      | existing p2 d2 |
+      existing := gansoStore rdp: category scope: scope identity: identity.
+      existing isNil ifTrue: [^nil].
+      gansoStore removeKey: category scope: scope identity: identity.
+      p2 := (existing at: 'payload') copy.
+      aBlock value: p2.
+      d2 := Tuple linear: category scope: scope identity: identity payload: p2 id: self assignId.
+      gansoStore putTuple: d2.
+      self appendHistory: 'out' tuple: d2.
+      ^d2 at: 'id'
+    ].
     tmpl := self templateFor: category scope: scope identity: identity.
     result := space tryIn: tmpl.
     result isNil ifTrue: [^nil].
@@ -545,14 +605,17 @@ BBS subclass: Object
         ifFalse: [
           payload := (existing at: 'payload') copy.
           aBlock value: payload.
-          mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
           d := actor isNil
             ifTrue: [Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId]
             ifFalse: [Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor].
-          space outPersistent: d.
-          mutex critical: [self addToIndices: d].
+          gansoStore notNil
+            ifTrue: [gansoStore putPinnedTuple: d]
+            ifFalse: [
+              mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
+              space outPersistent: d.
+              mutex critical: [self addToIndices: d].
+              self persistAfterChange].
           self appendHistory: 'upsert-pinned' tuple: d.
-          self persistAfterChange.
           d at: 'id'
         ]
     ]
@@ -594,12 +657,15 @@ BBS subclass: Object
     Categories validate: category.
     ^upsertMutex critical: [
       | d |
-      mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
       d := Tuple pinned: category scope: scope identity: identity payload: payload id: self assignId actor: actor.
-      space outPersistent: d.
-      mutex critical: [self addToIndices: d].
+      gansoStore notNil
+        ifTrue: [gansoStore putPinnedTuple: d]
+        ifFalse: [
+          mutex critical: [self removeFromIndicesByKey: category scope: scope identity: identity].
+          space outPersistent: d.
+          mutex critical: [self addToIndices: d].
+          self persistAfterChange].
       self appendHistory: 'upsert-pinned' tuple: d.
-      self persistAfterChange.
       d at: 'id'
     ]
   ]
@@ -825,15 +891,18 @@ BBS subclass: Object
     "Mark state as dirty. Actual write happens on flushIfDirty / flushAsyncIfDirty.
      The dispatcher tick path uses flushAsyncIfDirty so a multi-MB JSON
      encode + rename never blocks the tick loop. CLI request paths that
-     ack durability still call the synchronous flushIfDirty."
+     ack durability still call the synchronous flushIfDirty.
+     No-op under ganso: each write is already durable via SQLite WAL."
+    gansoStore notNil ifTrue: [^self].
     flushMutex critical: [dirty := true]
   ]
 
   method: flushIfDirty [
     "Synchronous flush — caller blocks until state is on disk. Coordinates
      with any in-flight flushAsyncIfDirty via the flushInProgress fence so
-     two writers cannot race on the same .tmp/rename."
+     two writers cannot race on the same .tmp/rename. No-op under ganso."
     | needFlush savedException didError |
+    gansoStore notNil ifTrue: [^self].
     "Wait for any in-flight async flush to complete."
     [flushMutex critical: [flushInProgress]] whileTrue: [
       Process sleep: 10
@@ -866,6 +935,7 @@ BBS subclass: Object
      picks it up. Failure inside the background write re-marks dirty so
      the data isn't silently lost."
     | shouldRun |
+    gansoStore notNil ifTrue: [^self].
     shouldRun := false.
     flushMutex critical: [
       (dirty and: [flushInProgress not]) ifTrue: [

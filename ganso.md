@@ -304,7 +304,37 @@ temporary `pp bench` command (`src/util/BbsBench.mag`, dispatched from
 
 (append per step: date, what ran, result, gate pass/fail)
 
-### 2026-06-18 — Phase 3: GansoStore core + perf — PARTIAL (store proven; BBS cutover pending)
+### 2026-06-18 — Phase 3: BBS→GansoStore delegation — behavioral PARITY (1 test-isolation gap)
+- `BBS.mag`: added a `gansoStore` ivar + `PP_STORE=ganso` init (open GansoStore,
+  one-time `bbs.json` import, restore `nextId` from `maxId`). Delegated ALL store
+  methods to GansoStore behind a guard: `out:`/`outPinned:`/`outAffine:`,
+  `inp:`/`rdp:`/`rd:`, `scan:`/`scanAll:`/`findInIndex:`/`findByCategory:`,
+  `update:`/`updatePinned:`/`upsertPinned:` (`upsertSignal:` funnels through
+  inp:/out:). `persistAfterChange`/`flushIfDirty`/`flushAsyncIfDirty` are no-ops
+  under ganso (WAL is durable). The legacy JSON path is fully intact for rollback
+  (default when `PP_STORE` unset). KEY SIMPLIFIER: blocking `in:`/`rd:` are unused
+  in pp, so no blocking-wait layer was needed.
+- GansoStore gained `putTuple:`/`putPinnedTuple:`/`removeKey:`/`findByCategory:`/
+  `maxId` so BBS stores its verbatim tuple Dicts (id and all) and gets ids back.
+- **Parity (`PP_STORE=ganso mag test`):** workflow-refactor failures 8 = JSON
+  baseline 8 (SAME — no new workflow regressions); the 3 JSON-backend-internal
+  suites (BBSIndex / BBSFlushAsync / TestBBSCmd — they test the in-memory index,
+  the flush mechanism, and the `bbs.json` file) are skipped under the flag since
+  that machinery is replaced by SQLite. ONE new failure: `test_invite_store`
+  `invite tuple stored` — a TEST-ISOLATION artifact, not a behavioral gap:
+  `BBS new` (default dir) instances are accidentally isolated under JSON
+  (in-memory, never flushed) but share the durable default `tuples.db` under
+  ganso. Production has a single BBS, so ganso's behavior is correct; the fix is
+  test-side (use isolated temp dirs / clear state for `BBS new` tests under ganso).
+- KNOWN cleanups: (a) GansoStore isn't `close`d on BBS teardown, leaking ganso's
+  update-watcher goroutine — harmless for the singleton server, noisy in tests
+  (`watcher: file identity check failed` spam). (b) The `BBS new` test-isolation
+  fix above. Both bounded.
+- Net: pp can run with ganso as the SOLE backing store; the substantive behavior
+  is at parity. Remaining: the two cleanups, then Phases 4 (dispatch→Queue), 5
+  (events/notify→Stream/Notify), 6 (cutover + remove JSON path & `pp bench`).
+
+### 2026-06-18 — Phase 3: GansoStore core + perf — store proven
 - `src/bbs/GansoStore.mag`: the `tuples` schema (JSON `data` + STORED generated
   columns + indices) and the core BBS store ops (`out:`/`outPinned:`/`upsert`,
   `rdp:`/`scan:`/`scanAll:`/`scanChildrenOf:`/`count`, `inp:` atomic consume,
