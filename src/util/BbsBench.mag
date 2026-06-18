@@ -1,0 +1,109 @@
+"Migration-only bench/parity harness (see ganso.md). Invoked via `pp bench`.
+ Compares the JSON-backed BBS store vs the ganso/SQLite GansoStore and checks
+ store parity. REMOVE in Phase 6 (this class + the bench command wiring)."
+
+BbsBench subclass: Object
+
+  classMethod: run [
+    [self parity] on: Exception do: [:e | ('PARITY ERR: ', e messageText) println].
+    '=== JSON store (current) ===' println.
+    self jsonBenchN: 1000  dir: '/tmp/ppbench-json-1k'.
+    self jsonBenchN: 10000 dir: '/tmp/ppbench-json-10k'.
+    '=== Ganso/SQLite store ===' println.
+    self gansoBenchN: 1000  path: '/tmp/ppbench-ganso-1k.db'.
+    self gansoBenchN: 10000 path: '/tmp/ppbench-ganso-10k.db'
+  ]
+
+  classMethod: blob [
+    | s i chunk |
+    s := ''. chunk := '0123456789012345678901234567890123456789012345678901234'.
+    i := 1. [i <= 8] whileTrue: [s := s, chunk. i := i + 1]. ^s
+  ]
+
+  "--- JSON store (BBS) ---"
+  classMethod: jsonBenchN: n dir: dir [
+    | bbs cat scope blob i payload t0 t1 wmem tflush sscan rload fsize scanned |
+    cat := 'case'. scope := 'default'. blob := self blob.
+    bbs := BBS withDataDir: dir.
+    t0 := DateTime now epochMillis.
+    i := 1.
+    [i <= n] whileTrue: [
+      payload := Dictionary new. payload at: 'k' put: i. payload at: 'blob' put: blob.
+      bbs out: cat scope: scope identity: ('id-', i printString) payload: payload.
+      i := i + 1].
+    t1 := DateTime now epochMillis. wmem := t1 - t0.
+    t0 := DateTime now epochMillis. bbs flushIfDirty. t1 := DateTime now epochMillis. tflush := t1 - t0.
+    t0 := DateTime now epochMillis. scanned := bbs scanAll: cat. t1 := DateTime now epochMillis. sscan := t1 - t0.
+    fsize := self fileSize: (dir, '/bbs.json').
+    t0 := DateTime now epochMillis. BBS withDataDir: dir. t1 := DateTime now epochMillis. rload := t1 - t0.
+    ('  N=', n printString, '  Wmem=', wmem printString, 'ms  Tflush=', tflush printString,
+     'ms  Sscan=', sscan printString, 'ms (', scanned size printString, ')  Fsize=', fsize printString,
+     'B  Rload=', rload printString, 'ms') println
+  ]
+
+  "--- Ganso/SQLite store (GansoStore) ---"
+  classMethod: gansoBenchN: n path: path [
+    | store cat scope blob i payload t0 t1 wdur sscan rload fsize scanned |
+    cat := 'case'. scope := 'default'. blob := self blob.
+    self rmFile: path.
+    store := GansoStore openAt: path.
+    "Wdur: durable writes (each INSERT is a WAL commit — no separate flush)."
+    t0 := DateTime now epochMillis.
+    i := 1.
+    [i <= n] whileTrue: [
+      payload := Dictionary new. payload at: 'k' put: i. payload at: 'blob' put: blob.
+      store out: cat scope: scope identity: ('id-', i printString) payload: payload.
+      i := i + 1].
+    t1 := DateTime now epochMillis. wdur := t1 - t0.
+    t0 := DateTime now epochMillis. scanned := store scanAll: cat. t1 := DateTime now epochMillis. sscan := t1 - t0.
+    fsize := self fileSize: path.
+    store close.
+    "Rload: re-open the existing DB (O(1) — no decode)."
+    t0 := DateTime now epochMillis. (GansoStore openAt: path) close. t1 := DateTime now epochMillis. rload := t1 - t0.
+    ('  N=', n printString, '  Wdur=', wdur printString, 'ms (durable, no flush)  Sscan=',
+     sscan printString, 'ms (', scanned size printString, ')  Fsize=', fsize printString,
+     'B  Rload=', rload printString, 'ms') println
+  ]
+
+  "--- Parity: GansoStore round-trips the core ops ---"
+  classMethod: parity [
+    | store p t updated consumed ok |
+    ok := true.
+    self rmFile: '/tmp/ppbench-parity.db'.
+    store := GansoStore openAt: '/tmp/ppbench-parity.db'.
+    p := Dictionary new. p at: 'k' put: 42. p at: 's' put: 'hello'.
+    store out: 'case' scope: 'default' identity: 'p-1' payload: p.
+    store out: 'case' scope: 'default' identity: 'p-2' payload: (Dictionary new).
+    store out: 'task' scope: 'proj'    identity: 'p-3' payload: (Dictionary new).
+    t := store rdp: 'case' scope: 'default' identity: 'p-1'.
+    ok := ok and: [t notNil and: [((t at: 'payload') at: 'k' ifAbsent: [nil]) = 42]].
+    ok := ok and: [(store scanAll: 'case') size = 2].
+    ok := ok and: [(store scan: 'task' scope: 'proj') size = 1].
+    ok := ok and: [(store scan: 'case' scope: 'other') isEmpty].
+    store update: 'case' scope: 'default' identity: 'p-1' do: [:pl | pl at: 'k' put: 99].
+    updated := store rdp: 'case' scope: 'default' identity: 'p-1'.
+    ok := ok and: [((updated at: 'payload') at: 'k' ifAbsent: [nil]) = 99].
+    store upsert: 'case' scope: 'default' identity: 'p-1' payload: (Dictionary new) modality: 'persistent'.
+    ok := ok and: [(store scanAll: 'case') size = 2].
+    consumed := store inp: 'case' scope: 'default' identity: 'p-2'.
+    ok := ok and: [consumed notNil].
+    ok := ok and: [(store rdp: 'case' scope: 'default' identity: 'p-2') isNil].
+    ok := ok and: [(store scanAll: 'case') size = 1].
+    store close.
+    ('PARITY: ', (ok ifTrue: ['PASS'] ifFalse: ['FAIL'])) println
+  ]
+
+  classMethod: fileSize: path [
+    | contents |
+    (File exists: path) ifFalse: [^0].
+    contents := File readFileContents: path.
+    contents isNil ifTrue: [^0].
+    ^contents size
+  ]
+
+  classMethod: rmFile: path [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0. args := args copyWith: '-c'. args := args copyWith: ('rm -f "', path, '"*').
+    proc args: args. proc run
+  ]

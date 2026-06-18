@@ -1,0 +1,198 @@
+"GansoStore — a SQLite/ganso-backed tuple store implementing the core BBS
+ store operations over a single `tuples` table (JSON `data` + generated columns
+ + indices). Phase 3 of the ganso migration (see ganso.md).
+
+ Each tuple is a Maggie Dictionary (category/scope/identity/payload/created_at/
+ modality/...) stored as JSON in `data`; the hot query keys are SQLite STORED
+ generated columns indexed for O(log N) lookup. Writes are incremental and
+ durable via WAL — no full-file re-encode, no full-decode on open.
+
+ This is the store half of parity; blocking Linda ops (in:/rd:) and dispatch
+ (Queue) land in later phases. The class deliberately mirrors the BBS public
+ store API so BBS can delegate to it behind PP_STORE=ganso."
+
+GansoStore subclass: Object
+
+  instanceVars: db path
+
+  classMethod: openAt: aPath [
+    | s |
+    s := super new.
+    s initAt: aPath.
+    ^s
+  ]
+
+  method: initAt: aPath [
+    path := aPath.
+    db := GansoDatabase primOpen: aPath.
+    self ensureSchema
+  ]
+
+  method: ensureSchema [
+    | noArgs |
+    noArgs := Array new: 0.
+    db primExec: 'CREATE TABLE IF NOT EXISTS tuples (
+       id INTEGER PRIMARY KEY,
+       data TEXT NOT NULL,
+       category TEXT GENERATED ALWAYS AS (json_extract(data, ''$.category'')) STORED,
+       scope TEXT GENERATED ALWAYS AS (json_extract(data, ''$.scope'')) STORED,
+       identity TEXT GENERATED ALWAYS AS (json_extract(data, ''$.identity'')) STORED,
+       modality TEXT GENERATED ALWAYS AS (json_extract(data, ''$.modality'')) STORED,
+       created_at INTEGER GENERATED ALWAYS AS (json_extract(data, ''$.created_at'')) STORED,
+       expires_at INTEGER GENERATED ALWAYS AS (json_extract(data, ''$.expires_at'')) STORED,
+       parent TEXT GENERATED ALWAYS AS (json_extract(data, ''$.payload.parent'')) STORED,
+       wf_inst TEXT GENERATED ALWAYS AS (json_extract(data, ''$.payload.workflow_instance'')) STORED)' args: noArgs.
+    db primExec: 'CREATE INDEX IF NOT EXISTS ix_cat_scope_ident ON tuples(category,scope,identity)' args: noArgs.
+    db primExec: 'CREATE INDEX IF NOT EXISTS ix_cat_scope ON tuples(category,scope)' args: noArgs.
+    db primExec: 'CREATE INDEX IF NOT EXISTS ix_cat ON tuples(category)' args: noArgs.
+    db primExec: 'CREATE INDEX IF NOT EXISTS ix_wf ON tuples(wf_inst)' args: noArgs.
+    db primExec: 'CREATE INDEX IF NOT EXISTS ix_parent ON tuples(parent)' args: noArgs.
+    db primExec: 'CREATE INDEX IF NOT EXISTS ix_expires ON tuples(expires_at)' args: noArgs
+  ]
+
+  "--- Tuple <-> row helpers ---"
+
+  method: tupleCategory: cat scope: scope identity: identity payload: payload modality: modality [
+    | t |
+    t := Dictionary new.
+    t at: 'category' put: cat.
+    t at: 'scope' put: scope.
+    t at: 'identity' put: identity.
+    t at: 'payload' put: payload.
+    t at: 'modality' put: modality.
+    t at: 'created_at' put: DateTime now epochSeconds.
+    ^t
+  ]
+
+  method: decodeRow: row [
+    "A result row is a Dictionary with a 'data' JSON string. Decode to the tuple."
+    | data |
+    data := row at: 'data' ifAbsent: [nil].
+    data isNil ifTrue: [^nil].
+    ^Json decode: data
+  ]
+
+  method: decodeRows: rows [
+    "O(N): map each row to its decoded tuple. Avoid copyWith:-in-a-loop, which
+     is O(N^2) and made scanAll catastrophically slow."
+    ^rows collect: [:r | self decodeRow: r]
+  ]
+
+  "--- Writes ---"
+
+  method: out: cat scope: scope identity: identity payload: payload [
+    ^self out: cat scope: scope identity: identity payload: payload modality: 'linear'
+  ]
+
+  method: outPinned: cat scope: scope identity: identity payload: payload [
+    ^self out: cat scope: scope identity: identity payload: payload modality: 'persistent'
+  ]
+
+  method: out: cat scope: scope identity: identity payload: payload modality: modality [
+    | tuple json args |
+    tuple := self tupleCategory: cat scope: scope identity: identity payload: payload modality: modality.
+    json := Json encode: tuple.
+    args := Array new: 0. args := args copyWith: json.
+    db primExec: 'INSERT INTO tuples(data) VALUES(?)' args: args.
+    ^tuple
+  ]
+
+  "Upsert by (category,scope,identity) — for pinned/signal categories that keep
+   exactly one tuple per key."
+  method: upsert: cat scope: scope identity: identity payload: payload modality: modality [
+    | tuple json args |
+    tuple := self tupleCategory: cat scope: scope identity: identity payload: payload modality: modality.
+    json := Json encode: tuple.
+    "delete any existing key, then insert (a portable upsert that also works
+     when multiple legacy rows share the key)."
+    args := Array new: 0.
+    args := args copyWith: cat. args := args copyWith: scope. args := args copyWith: identity.
+    db primExec: 'DELETE FROM tuples WHERE category=? AND scope=? AND identity=?' args: args.
+    args := Array new: 0. args := args copyWith: json.
+    db primExec: 'INSERT INTO tuples(data) VALUES(?)' args: args.
+    ^tuple
+  ]
+
+  "--- Reads ---"
+
+  method: rdp: cat scope: scope identity: identity [
+    | rows args |
+    args := Array new: 0.
+    args := args copyWith: cat. args := args copyWith: scope. args := args copyWith: identity.
+    rows := db primQuery: 'SELECT data FROM tuples WHERE category=? AND scope=? AND identity=? ORDER BY id DESC LIMIT 1' args: args.
+    rows isEmpty ifTrue: [^nil].
+    ^self decodeRow: (rows at: 1)
+  ]
+
+  method: scan: cat scope: scope [
+    | rows args |
+    args := Array new: 0.
+    args := args copyWith: cat. args := args copyWith: scope.
+    rows := db primQuery: 'SELECT data FROM tuples WHERE category=? AND scope=? ORDER BY id' args: args.
+    ^self decodeRows: rows
+  ]
+
+  method: scanAll: cat [
+    | rows args |
+    args := Array new: 0. args := args copyWith: cat.
+    rows := db primQuery: 'SELECT data FROM tuples WHERE category=? ORDER BY id' args: args.
+    ^self decodeRows: rows
+  ]
+
+  method: scanChildrenOf: parentId scope: scope [
+    | rows args |
+    args := Array new: 0. args := args copyWith: parentId. args := args copyWith: scope.
+    rows := db primQuery: 'SELECT data FROM tuples WHERE parent=? AND scope=? ORDER BY id' args: args.
+    ^self decodeRows: rows
+  ]
+
+  method: count: cat [
+    | rows args |
+    args := Array new: 0. args := args copyWith: cat.
+    rows := db primQuery: 'SELECT COUNT(*) AS n FROM tuples WHERE category=?' args: args.
+    rows isEmpty ifTrue: [^0].
+    ^(rows at: 1) at: 'n' ifAbsent: [0]
+  ]
+
+  method: countAll [
+    | rows |
+    rows := db primQuery: 'SELECT COUNT(*) AS n FROM tuples' args: (Array new: 0).
+    rows isEmpty ifTrue: [^0].
+    ^(rows at: 1) at: 'n' ifAbsent: [0]
+  ]
+
+  "--- Consume / update ---"
+
+  method: inp: cat scope: scope identity: identity [
+    "Atomic match-and-remove: read the matching tuple, delete it, return it.
+     A single IMMEDIATE-tx DELETE keeps it atomic against concurrent claimers."
+    | tuple args |
+    tuple := self rdp: cat scope: scope identity: identity.
+    tuple isNil ifTrue: [^nil].
+    args := Array new: 0.
+    args := args copyWith: cat. args := args copyWith: scope. args := args copyWith: identity.
+    db primExec: 'DELETE FROM tuples WHERE category=? AND scope=? AND identity=?' args: args.
+    ^tuple
+  ]
+
+  method: update: cat scope: scope identity: identity do: aBlock [
+    "Read the current tuple, apply aBlock to its payload, re-write. Returns the
+     new tuple or nil if absent."
+    | tuple payload |
+    tuple := self rdp: cat scope: scope identity: identity.
+    tuple isNil ifTrue: [^nil].
+    payload := tuple at: 'payload' ifAbsent: [Dictionary new].
+    aBlock value: payload.
+    tuple at: 'payload' put: payload.
+    ^self upsert: cat scope: scope identity: identity payload: payload
+       modality: (tuple at: 'modality' ifAbsent: ['linear'])
+  ]
+
+  method: removeAll: cat scope: scope identity: identity [
+    | args |
+    args := Array new: 0.
+    args := args copyWith: cat. args := args copyWith: scope. args := args copyWith: identity.
+    db primExec: 'DELETE FROM tuples WHERE category=? AND scope=? AND identity=?' args: args
+  ]
+
+  method: close [ db primClose ]

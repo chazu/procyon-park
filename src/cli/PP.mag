@@ -29,6 +29,7 @@ PP subclass: CLIBase
 
     cmd := args at: 1.
 
+    cmd = 'bench'     ifTrue: [^BbsBench run].
     cmd = 'observe'   ifTrue: [^self cmdObserve: args].
     cmd = 'decide'    ifTrue: [^self cmdDecide: args].
     cmd = 'event'     ifTrue: [^self cmdEvent: args].

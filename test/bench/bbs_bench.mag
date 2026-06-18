@@ -1,0 +1,95 @@
+"BBS performance baseline harness. Run standalone (NOT part of mag test):
+   mag test/bench/bbs_bench.mag -m 'BbsBench.run'
+ Optionally set the data dir prefix via the BBS_BENCH_DIR env (default /tmp/ppbench).
+
+ Measures, per N:
+   Wmem   — wall-clock to out: N durable tuples (in-memory + dirty)
+   Tflush — wall-clock of ONE flushIfDirty at N tuples (the full re-encode; grows O(N))
+   Sscan  — wall-clock of scanAll: the category at N tuples
+   Fsize  — bbs.json bytes at N (Fsize/N ~= bytes per durable tuple)
+   Rload  — wall-clock to construct a fresh BBS from the same dir (loadFromDisk)
+
+ These are the axes the perf scout flagged (Q1 scan, Q2 write-amp, Q4 restart)."
+
+BbsBench subclass: Object
+
+  classMethod: run [
+    | prefix |
+    prefix := System env: 'BBS_BENCH_DIR'.
+    (prefix isNil or: [prefix isEmpty]) ifTrue: [prefix := '/tmp/ppbench'].
+    '=== BBS baseline (JSON store) ===' println.
+    self benchN: 1000  dir: (prefix, '-1k').
+    self benchN: 10000 dir: (prefix, '-10k')
+  ]
+
+  classMethod: blob [
+    "~440-char payload chunk to make tuples non-trivial (case-like)."
+    | s i chunk |
+    s := ''.
+    chunk := '0123456789012345678901234567890123456789012345678901234'.
+    i := 1.
+    [i <= 8] whileTrue: [s := s, chunk. i := i + 1].
+    ^s
+  ]
+
+  classMethod: benchN: n dir: dir [
+    | bbs cat scope blob i payload t0 t1 wmem tflush sscan rload fsize reloaded scanned |
+    cat := 'case'.            "a durable category (in isDurableCategory)"
+    scope := 'default'.
+    blob := self blob.
+
+    "Fresh store"
+    bbs := BBS withDataDir: dir.
+
+    "--- Wmem: write N durable tuples (marks dirty; no per-write flush) ---"
+    t0 := DateTime now epochMillis.
+    i := 1.
+    [i <= n] whileTrue: [
+      payload := Dictionary new.
+      payload at: 'k' put: i.
+      payload at: 'blob' put: blob.
+      bbs out: cat scope: scope identity: ('id-', i printString) payload: payload.
+      i := i + 1
+    ].
+    t1 := DateTime now epochMillis.
+    wmem := t1 - t0.
+
+    "--- Tflush: one full flush at N tuples (the re-encode cost) ---"
+    t0 := DateTime now epochMillis.
+    bbs flushIfDirty.
+    t1 := DateTime now epochMillis.
+    tflush := t1 - t0.
+
+    "--- Sscan: scanAll the category at N tuples ---"
+    t0 := DateTime now epochMillis.
+    scanned := bbs scanAll: cat.
+    t1 := DateTime now epochMillis.
+    sscan := t1 - t0.
+
+    "--- Fsize: bbs.json bytes ---"
+    fsize := self fileSize: (dir, '/bbs.json').
+
+    "--- Rload: construct a fresh BBS from the same dir (loadFromDisk) ---"
+    t0 := DateTime now epochMillis.
+    reloaded := BBS withDataDir: dir.
+    t1 := DateTime now epochMillis.
+    rload := t1 - t0.
+
+    ('N=', n printString,
+      '  Wmem=', wmem printString, 'ms',
+      '  Tflush=', tflush printString, 'ms',
+      '  Sscan=', sscan printString, 'ms (', scanned size printString, ' tuples)',
+      '  Fsize=', fsize printString, 'B (', (fsize // n) printString, 'B/tuple)',
+      '  Rload=', rload printString, 'ms') println
+  ]
+
+  classMethod: fileSize: path [
+    "Best-effort file size in bytes; 0 if unavailable."
+    | contents |
+    (File exists: path) ifFalse: [^0].
+    contents := File readFileContents: path.
+    contents isNil ifTrue: [^0].
+    ^contents size
+  ]
+
+BbsBench run
