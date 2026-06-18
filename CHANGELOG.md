@@ -7,6 +7,27 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+- Workflow staleness reaping. A workflow stuck in `running`/`dispatched`
+  with no live task and past a TTL (1h) is now transitioned to `failed`
+  (`last_failure_reason: workflow-stale`) by the Dispatcher housekeep pass,
+  so it can be cascade-cleaned and moves from Active Workflows to Recent
+  Completions. Previously such a workflow was immortal — shown active
+  forever, never reaped or gc'd, even with all agents dead.
+- `pp gc` now also sweeps stale-running workflows (non-terminal status, no
+  live task, past TTL), giving operators a manual escape hatch for zombie
+  workflows in addition to the automatic reaper.
+
+### Fixed
+- Dashboard "Active Workflows" panel now requires evidence of liveness (a
+  live task, or a recent `started_at`) before showing a `running` workflow,
+  instead of trusting the stored status absolutely. Abandoned/zombie
+  workflows no longer linger in the active list.
+- Guarded unguarded nil/non-Integer field reads in the workflows SSE render
+  (`dispatched_at`, plus non-string `launched_by`/`executed_by` coercion)
+  that intermittently produced `SSE render failed for workflows: Message
+  not understood: ifTrue:` and a per-tick panel flicker.
+
 ## [0.2.0] - 2026-06-18
 
 ### Added

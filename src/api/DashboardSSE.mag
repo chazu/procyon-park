@@ -496,18 +496,29 @@ DashboardSSE subclass: Object
       | p status template wfId desc label places activeTask taskLine tokenTotals tokenLine launchedBy launchedByLine executedByAttr |
       p := w at: 'payload' ifAbsent: [Dictionary new].
       status := p at: 'status' ifAbsent: ['?'].
-      status = 'running' ifTrue: [
+      "Active gate: a 'running' tuple is shown only if it has evidence of
+       liveness. wfId + activeTask are resolved first so the liveness
+       predicate can consult them; a stuck-'running' workflow with no live
+       task and past the stale window is a zombie and is hidden here (the
+       Dispatcher staleness reaper flips it to failed shortly after)."
+      wfId := w at: 'identity' ifAbsent: ['?'].
+      activeTask := status = 'running'
+        ifTrue: [self activeTaskFor: wfId in: allTasks]
+        ifFalse: [nil].
+      (status = 'running' and: [self workflowActive: p activeTask: activeTask now: now]) ifTrue: [
         template := p at: 'template' ifAbsent: ['?'].
-        wfId := w at: 'identity' ifAbsent: ['?'].
         desc := (p at: 'params' ifAbsent: [Dictionary new]) at: 'description' ifAbsent: [''].
         desc size > 100 ifTrue: [desc := (desc copyFrom: 1 to: 100), '...'].
         label := desc isEmpty ifTrue: [wfId] ifFalse: [desc].
         places := self placesFor: wfId in: allTokens.
         launchedBy := w at: 'launched_by' ifAbsent: [p at: 'launched_by' ifAbsent: [nil]].
+        "Guard non-string launched_by: a numeric/null value would make
+         isEmpty / htmlEscape misbehave and feed a non-Boolean to ifTrue:."
+        (launchedBy notNil and: [(launchedBy isKindOf: String) not])
+          ifTrue: [launchedBy := launchedBy asString].
         launchedByLine := (launchedBy isNil or: [launchedBy isEmpty])
           ifTrue: ['']
           ifFalse: ['<br><small>launched by <b>', (self htmlEscape: launchedBy), '</b></small>'].
-        activeTask := self activeTaskFor: wfId in: allTasks.
         taskLine := ''.
         executedByAttr := ''.
         activeTask notNil ifTrue: [
@@ -515,11 +526,18 @@ DashboardSSE subclass: Object
           tp := activeTask at: 'payload' ifAbsent: [Dictionary new].
           role := tp at: 'role' ifAbsent: ['?'].
           tStatus := tp at: 'status' ifAbsent: ['?'].
+          "Guard: at:ifAbsent: returns an explicit nil if the key is present
+           with a nil value (the absent-block does NOT run). nil > 0 then
+           sends > to nil -> 'Message not understood' on the ifTrue:. Coerce
+           any non-Integer to 0 before the comparison."
           dispatchedAt := tp at: 'dispatched_at' ifAbsent: [0].
+          (dispatchedAt isKindOf: Integer) ifFalse: [dispatchedAt := 0].
           durStr := dispatchedAt > 0
             ifTrue: [self formatDuration: (now - dispatchedAt)]
             ifFalse: ['pending'].
           executedBy := activeTask at: 'executed_by' ifAbsent: [tp at: 'executed_by' ifAbsent: [nil]].
+          (executedBy notNil and: [(executedBy isKindOf: String) not])
+            ifTrue: [executedBy := executedBy asString].
           execLine := ''.
           ((tStatus = 'claimed' or: [tStatus = 'dispatched' or: [tStatus = 'running']])
             and: [executedBy notNil and: [executedBy isEmpty not]]) ifTrue: [
@@ -544,6 +562,30 @@ DashboardSSE subclass: Object
     ].
     s := s, '</div>'.
     ^s
+  ]
+
+  method: staleWorkflowWindowSeconds [
+    "A 'running' workflow with NO live task that started more than this long
+     ago is treated as a zombie and hidden from the Active panel. Kept in
+     sync with Dispatcher>>staleWorkflowTtlSeconds (the reaper that actually
+     transitions such a tuple to failed). Generous enough never to hide a
+     freshly launched workflow whose first task has not dispatched yet."
+    ^3600
+  ]
+
+  method: workflowActive: payload activeTask: activeTask now: now [
+    "Liveness predicate for the Active Workflows panel. A workflow is shown
+     active iff it has a live/dispatched/claimed task OR it is still inside
+     the stale window (started_at recent). This replaces trusting the stored
+     status='running' absolutely: nothing ever flips a stuck-'running' tuple
+     to terminal until the Dispatcher staleness reaper runs, so without this
+     gate an abandoned workflow shows as active forever."
+    | startedAt |
+    activeTask notNil ifTrue: [^true].
+    startedAt := payload at: 'started_at' ifAbsent: [nil].
+    "No usable started_at -> cannot age it; show it rather than hide silently."
+    (startedAt isKindOf: Integer) ifFalse: [^true].
+    ^(now - startedAt) < self staleWorkflowWindowSeconds
   ]
 
   method: tokenTotalsFor: wfId in: allTasks [

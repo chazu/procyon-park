@@ -471,6 +471,21 @@ Dispatcher subclass: Object
     tasks     := bbs scanAll: 'task'.
     signals   := bbs scanAll: 'signal'.
 
+    "Workflow staleness reaper (runs before classification). A workflow
+     stuck in a non-terminal status with no live task and past its TTL is
+     immortal otherwise: classifyWorkflow: only ages-out ALREADY-terminal
+     workflows, so a 'running' tuple is permanently classified live and
+     never cascade-removed — shown active forever, never reaped, never
+     gc'd. Transition it to 'failed' so the existing terminal cascade /
+     pp gc can reclaim it and it moves to Recent Completions. Mutates BBS;
+     the in-memory `workflows` snapshot below still carries the old status
+     this tick (failed_at=now keeps it inside the age threshold anyway), so
+     the cascade picks it up on a later tick, not this one."
+    [self reapStaleWorkflows: workflows tasks: tasks now: now]
+      on: Exception do: [:e |
+        ('Dispatcher housekeep reapStaleWorkflows error: ', e messageText) println
+      ].
+
     liveWfIds     := Set new.
     terminalWfIds := Set new.
     wfScope       := Dictionary new.
@@ -537,6 +552,95 @@ Dispatcher subclass: Object
      while still preventing unbounded accumulation across a multi-day
      server uptime."
     ^24 * 3600
+  ]
+
+  method: staleWorkflowTtlSeconds [
+    "A workflow in a non-terminal status (running/dispatched) with NO live
+     task and started more than this long ago is presumed abandoned and is
+     transitioned to failed. Generous enough never to race a just-launched
+     workflow whose first task has not been dispatched yet. Kept in sync
+     with DashboardSSE>>staleWorkflowWindowSeconds (the cosmetic gate)."
+    ^3600
+  ]
+
+  method: isLiveTaskStatus: status [
+    "Task statuses that count as in-flight work for a workflow."
+    ^status = 'pending'
+      or: [status = 'dispatched'
+      or: [status = 'claimed'
+      or: [status = 'running']]]
+  ]
+
+  method: reapStaleWorkflows: workflows tasks: tasks now: now [
+    "Transition workflows stuck in a non-terminal status with no live task
+     and past the staleness TTL into 'failed'. This is the durable fix for
+     the immortal-running workflow: the task reapers only ever touch task
+     tuples (claims/dispatched), never the parent workflow tuple, so a
+     workflow whose status never left 'running' (abandoned, or cancelled
+     without the cancel propagating to the workflow tuple) is never reaped.
+     Once failed it is eligible for the terminal cascade and pp gc, and the
+     dashboard moves it from Active to Recent Completions."
+    | ttl liveWfInstances |
+    ttl := self staleWorkflowTtlSeconds.
+    "Set of workflow instances with at least one live task. Defensive
+     per-tuple iteration: scanAll: returns shared references that may be
+     concurrently rewritten."
+    liveWfInstances := Set new.
+    tasks do: [:t |
+      [
+        | p status wfRef |
+        p := t at: 'payload' ifAbsent: [nil].
+        p notNil ifTrue: [
+          status := p at: 'status' ifAbsent: [''].
+          (self isLiveTaskStatus: status) ifTrue: [
+            wfRef := p at: 'workflow_instance' ifAbsent: [nil].
+            wfRef notNil ifTrue: [liveWfInstances add: wfRef]
+          ]
+        ]
+      ] on: Exception do: [:e |
+        ('Dispatcher reapStaleWorkflows live-task skip (',
+          (t at: 'identity' ifAbsent: ['?']), '): ', e messageText) println
+      ]
+    ].
+
+    workflows do: [:wf |
+      [self maybeReapStaleWorkflow: wf now: now ttl: ttl live: liveWfInstances]
+        on: Exception do: [:e |
+          ('Dispatcher reapStaleWorkflows tuple skip (',
+            (wf at: 'identity' ifAbsent: ['?']), '): ', e messageText) println
+        ]
+    ]
+  ]
+
+  method: maybeReapStaleWorkflow: wf now: now ttl: ttl live: liveWfInstances [
+    "Fail a single stale workflow tuple if: status is running/dispatched,
+     it has no live task, and started_at (or created_at fallback) is older
+     than ttl. The mutation re-checks status inside the atomic BBS update so
+     an engine/worker advancing the tuple between snapshot and rewrite wins."
+    | wfId payload status startedAt scope |
+    payload := wf at: 'payload' ifAbsent: [nil].
+    payload isNil ifTrue: [^self].
+    status := payload at: 'status' ifAbsent: [''].
+    (status = 'running' or: [status = 'dispatched']) ifFalse: [^self].
+    wfId := wf at: 'identity'.
+    (liveWfInstances includes: wfId) ifTrue: [^self].
+    startedAt := payload at: 'started_at' ifAbsent: [nil].
+    (startedAt isKindOf: Integer) ifFalse: [startedAt := wf at: 'created_at' ifAbsent: [now]].
+    (startedAt isKindOf: Integer) ifFalse: [^self].
+    ((now - startedAt) > ttl) ifFalse: [^self].
+
+    scope := wf at: 'scope' ifAbsent: ['default'].
+    bbs update: 'workflow' scope: scope identity: wfId do: [:p |
+      | st |
+      st := p at: 'status' ifAbsent: [''].
+      (st = 'running' or: [st = 'dispatched']) ifTrue: [
+        p at: 'status' put: 'failed'.
+        p at: 'last_failure_reason' put: 'workflow-stale'.
+        p at: 'failed_at' put: now
+      ]
+    ].
+    bbs notify: ('Reaped stale workflow (no live task, past TTL): ', wfId)
+      scope: scope severity: 'warn'
   ]
 
   method: classifyWorkflow: wf now: now threshold: threshold

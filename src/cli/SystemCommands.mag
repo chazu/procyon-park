@@ -406,22 +406,32 @@ Dashboard:     ', baseUrl, '/dashboard/
   ]
 
   method: gcWorkflows: dryRun [
-    | body response result workflows count |
+    | body response result workflows count now liveWfInstances |
     body := Dictionary new.
     body at: 'category' put: 'workflow'.
     count := 0.
+    now := DateTime now epochSeconds.
+    "Workflow instances with at least one live (in-flight) task. A
+     stuck-'running' workflow with no live task and past TTL is reaped too,
+     mirroring the Dispatcher staleness reaper — gives operators a manual
+     escape hatch for zombie workflows that never transitioned to terminal."
+    liveWfInstances := self liveWorkflowInstances.
     [
       response := client post: baseUrl, '/api/scan' body: (Json encode: body) contentType: 'application/json'.
       result := Json decode: response.
       workflows := result at: 'tuples' ifAbsent: [#()].
       workflows do: [:wf |
-        | p status wfId wfScope |
+        | p status wfId wfScope isTerminal isStale label |
         p := wf at: 'payload' ifAbsent: [Dictionary new].
         status := p at: 'status' ifAbsent: [''].
         wfId := wf at: 'identity' ifAbsent: [''].
         wfScope := wf at: 'scope' ifAbsent: ['default'].
-        (status = 'completed' or: [status = 'cancelled' or: [status = 'failed']]) ifTrue: [
-          ('  ', wfId, ' [', status, ']') println.
+        isTerminal := (status = 'completed' or: [status = 'cancelled' or: [status = 'failed']]).
+        isStale := isTerminal not
+          and: [self workflowStaleRunning: wf live: liveWfInstances now: now].
+        (isTerminal or: [isStale]) ifTrue: [
+          label := isStale ifTrue: ['stale-running'] ifFalse: [status].
+          ('  ', wfId, ' [', label, ']') println.
           "Remove all tokens/tasks/events/signals associated with this workflow
            before removing the workflow tuple itself."
           self gcWorkflowTuples: wfId dryRun: dryRun.
@@ -435,6 +445,49 @@ Dashboard:     ', baseUrl, '/dashboard/
       ('Error: ', e messageText) println
     ].
     ^count
+  ]
+
+  method: staleWorkflowTtlSeconds [
+    "A workflow stuck in a non-terminal status (running/dispatched) with no
+     live task and started more than this long ago is considered abandoned
+     and is swept by pp gc. Kept in sync with the Dispatcher reaper TTL."
+    ^3600
+  ]
+
+  method: liveWorkflowInstances [
+    "Set of workflow_instance ids that have at least one live (pending/
+     dispatched/claimed/running) task. Used by gcWorkflows: so a running
+     workflow with in-flight work is never reaped as a zombie."
+    | tasks live |
+    live := Set new.
+    tasks := self safeScan: 'task' scope: nil.
+    tasks do: [:t |
+      | p status wfRef |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      status := p at: 'status' ifAbsent: [''].
+      (status = 'pending' or: [status = 'dispatched'
+        or: [status = 'claimed' or: [status = 'running']]]) ifTrue: [
+          wfRef := p at: 'workflow_instance' ifAbsent: [nil].
+          wfRef notNil ifTrue: [live add: wfRef]
+        ]
+    ].
+    ^live
+  ]
+
+  method: workflowStaleRunning: wf live: liveWfInstances now: now [
+    "True iff wf is stuck in a non-terminal status, has no live task, and
+     started more than staleWorkflowTtlSeconds ago."
+    | p status wfId startedAt |
+    p := wf at: 'payload' ifAbsent: [Dictionary new].
+    status := p at: 'status' ifAbsent: [''].
+    (status = 'running' or: [status = 'dispatched']) ifFalse: [^false].
+    wfId := wf at: 'identity' ifAbsent: [''].
+    wfId isEmpty ifTrue: [^false].
+    (liveWfInstances includes: wfId) ifTrue: [^false].
+    startedAt := p at: 'started_at' ifAbsent: [nil].
+    (startedAt isKindOf: Integer) ifFalse: [startedAt := wf at: 'created_at' ifAbsent: [nil]].
+    (startedAt isKindOf: Integer) ifFalse: [^false].
+    ^(now - startedAt) > self staleWorkflowTtlSeconds
   ]
 
   method: gcWorkflowTuples: wfId dryRun: dryRun [
