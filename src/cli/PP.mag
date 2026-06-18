@@ -166,7 +166,7 @@ PP subclass: CLIBase
      cross-scope scan by OMITTING the 'scope' key so the server runs
      scanAll:. When a scoped scan finds nothing, a second non-consuming
      scanAll surfaces a discoverability hint if other scopes have matches."
-    | category rdScope rdIdentity body allScopes positional scopedHits otherCount |
+    | category rdScope rdIdentity body allScopes positional scopedHits otherCount scanResponse |
     allScopes := (args includes: '--all') or: [args includes: '-A'].
 
     "Strip --all/-A so positional indexing (scope, identity) stays correct."
@@ -201,19 +201,39 @@ PP subclass: CLIBase
      --all, OMIT 'scope' so the server scans every scope (per-tuple scope
      is included in the rendered JSON for legibility)."
     body := self buildScanBody: category scope: rdScope all: allScopes.
-    self unauthedPost: '/api/scan' body: body.
 
-    "Discoverability hint: a scoped scan that found nothing may still have
-     matches elsewhere. Issue a second NON-CONSUMING scanAll and, on a
-     positive count, point the user at --all. Never consumes."
-    allScopes ifFalse: [
-      scopedHits := self safeScan: category scope: rdScope.
-      scopedHits isEmpty ifTrue: [
-        otherCount := (self safeScan: category scope: nil) size.
-        otherCount > 0 ifTrue: [
-          self warnStderr: otherCount printString, ' ', category,
-            ' tuple(s) exist in other scopes — pass --all or a scope'
-        ]
+    allScopes ifTrue: [
+      "Cross-scope read: render every scope. No hint — --all already
+       surfaces everything, so no second round-trip is warranted."
+      self unauthedPost: '/api/scan' body: body.
+      ^self
+    ].
+
+    "Scoped read: scan ONCE, capture the raw response, render it, then
+     reuse the SAME result to decide the discoverability hint. Avoids the
+     redundant second scoped scan (review-issue-2: was render-scan via
+     unauthedPost: PLUS an identical safeScan:). Still NON-CONSUMING —
+     /api/scan only reads the index."
+    scanResponse := nil.
+    [scanResponse := client post: baseUrl, '/api/scan'
+                       body: (Json encode: body)
+                       contentType: 'application/json']
+      on: Exception do: [:e | ('Error: ', e messageText) println. ^self].
+    self handleResponse: scanResponse path: '/api/scan'.
+
+    "Discoverability hint: decode the response we ALREADY have; only when
+     the scoped scan found nothing do we issue a single NON-CONSUMING
+     scanAll (omit 'scope') and, on a positive count, point at --all."
+    scopedHits := #().
+    (scanResponse notNil and: [scanResponse isKindOf: String]) ifTrue: [
+      [scopedHits := (Json decode: scanResponse) at: 'tuples' ifAbsent: [#()]]
+        on: Exception do: [:e | scopedHits := #()]
+    ].
+    scopedHits isEmpty ifTrue: [
+      otherCount := (self safeScan: category scope: nil) size.
+      otherCount > 0 ifTrue: [
+        self warnStderr: otherCount printString, ' ', category,
+          ' tuple(s) exist in other scopes — pass --all or a scope'
       ]
     ]
   ]
