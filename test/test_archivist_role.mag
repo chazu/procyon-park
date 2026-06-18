@@ -1,0 +1,145 @@
+"Tests for the Archivist role.
+
+ Invariants under test:
+   AR1  Archivist is instantiable (Archivist new returns a Role instance).
+   AR2  Its role key (name) is 'archivist'.
+   AR3  The assembled system prompt / header mentions after-action, case, lessons.
+   AR4  hardCategories includes 'case' and 'observation'.
+   AR5  HarnessFactory resolves 'archivist' to an Archivist instance.
+
+ Standalone runner at bottom (ArchivistRoleMain run)."
+
+ArchivistRoleRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Archivist Role Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== TestArchivistRole ==="
+TestArchivistRole subclass: Object
+
+  classMethod: containsCI: haystack sub: needle [
+    "Case-insensitive substring test via a sliding window. Avoids relying on a
+     String substring builtin; copyFrom:to: is 1-based closed interval."
+    | h n hlen nlen i last |
+    h := haystack asLowercase.
+    n := needle asLowercase.
+    nlen := n size.
+    nlen = 0 ifTrue: [^true].
+    hlen := h size.
+    nlen > hlen ifTrue: [^false].
+    last := hlen - nlen + 1.
+    i := 1.
+    [i <= last] whileTrue: [
+      (h copyFrom: i to: i + nlen - 1) = n ifTrue: [^true].
+      i := i + 1
+    ].
+    ^false
+  ]
+
+  classMethod: run: t [
+    | role prompt hard factory resolved |
+    '--- TestArchivistRole ---' println.
+
+    "AR1: instantiable."
+    role := Archivist new.
+    t assert: role notNil
+      message: 'AR1: Archivist new returns a non-nil instance'.
+    t assert: (role isKindOf: Role)
+      message: 'AR1: Archivist instance is a kind of Role'.
+
+    "AR2: role key (name) is archivist."
+    t assertEqual: role name to: 'archivist'
+      message: 'AR2: role name is archivist'.
+    t assertEqual: Archivist roleName to: 'archivist'
+      message: 'AR2: class-side roleName is archivist'.
+
+    "AR3: assembled system prompt / header mentions after-action, case, lessons."
+    prompt := role primeFor: 'Synthesize the AAR for workflow_instance abc123.'
+      context: (Array new: 0)
+      workDir: '/tmp/wd'
+      repoName: 'procyon-park'.
+    t assert: (self containsCI: prompt sub: 'after-action')
+      message: 'AR3: assembled prompt mentions after-action'.
+    t assert: (self containsCI: prompt sub: 'case')
+      message: 'AR3: assembled prompt mentions case'.
+    t assert: (self containsCI: prompt sub: 'lessons')
+      message: 'AR3: assembled prompt mentions lessons'.
+    "header alone (description) also carries the AAR framing."
+    t assert: (self containsCI: role systemPromptHeader sub: 'after-action')
+      message: 'AR3: systemPromptHeader mentions after-action'.
+
+    "AR4: hardCategories includes case and observation."
+    hard := Archivist hardCategories.
+    t assert: (hard includes: 'case')
+      message: 'AR4: hardCategories includes case'.
+    t assert: (hard includes: 'observation')
+      message: 'AR4: hardCategories includes observation'.
+    t assert: (hard includes: 'decision')
+      message: 'AR4: hardCategories includes decision'.
+
+    "AR5: HarnessFactory resolves archivist to an Archivist instance."
+    factory := HarnessFactory new.
+    resolved := factory roleFor: 'archivist'.
+    t assert: resolved notNil
+      message: 'AR5: factory roleFor: archivist returns non-nil'.
+    t assert: (resolved isKindOf: Archivist)
+      message: 'AR5: factory resolves archivist to an Archivist instance'.
+    t assertEqual: resolved name to: 'archivist'
+      message: 'AR5: resolved role name is archivist'
+  ]
+
+"=== Main ==="
+ArchivistRoleMain subclass: Object
+  classMethod: run [
+    | t |
+    t := ArchivistRoleRunner new.
+    [TestArchivistRole run: t] on: Exception do: [:e |
+      ('TestArchivistRole CRASHED: ', e messageText) println.
+      t assert: false message: 'TestArchivistRole crashed'
+    ].
+    t report.
+    ^t failed
+  ]
+
+ArchivistRoleMain run

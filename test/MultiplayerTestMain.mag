@@ -309,10 +309,11 @@ MultiplayerTestMain subclass: Object
 CombinedTestMain subclass: Object
 
   classMethod: run [
-    | wfFailed mpFailed ccFailed |
+    | wfFailed mpFailed ccFailed arFailed |
     wfFailed := 0.
     mpFailed := 0.
     ccFailed := 0.
+    arFailed := 0.
 
     '============================================================' println.
     '=== Running TestWorkflowRefactorMain ===' println.
@@ -335,6 +336,12 @@ CombinedTestMain subclass: Object
         ccFailed := 1].
     ccFailed isNil ifTrue: [ccFailed := 0].
 
+    [arFailed := ArchivistRoleMain run]
+      on: Exception do: [:e |
+        ('ArchivistRoleMain CRASHED: ', e messageText) println.
+        arFailed := 1].
+    arFailed isNil ifTrue: [arFailed := 0].
+
     '' println.
     '============================================================' println.
     '=== Combined Test Summary ===' println.
@@ -343,7 +350,8 @@ CombinedTestMain subclass: Object
      ' (note: WR15c/d/e are pre-existing rot, out of scope for this story)') println.
     ('Multiplayer failures:       ', mpFailed printString) println.
     ('Case-category failures:     ', ccFailed printString) println.
-    (wfFailed + mpFailed + ccFailed) = 0
+    ('Archivist-role failures:    ', arFailed printString) println.
+    (wfFailed + mpFailed + ccFailed + arFailed) = 0
       ifTrue:  ['COMBINED: ALL TESTS PASSED' println]
       ifFalse: ['COMBINED: SOME TESTS FAILED' println]
   ]
