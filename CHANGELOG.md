@@ -7,6 +7,22 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+- `pp gc` now sweeps cold `case` tuples (per-category retention window). Cases
+  are written once per terminal workflow and were previously never garbage-
+  collected — an unbounded, monotonic grower. `pp gc` keeps the N most-recent
+  cases (`--keep-cases <N>`, default 2000) and sweeps the rest; `--no-cases`
+  skips the sweep and `--cases-older-than <hours>` adds an age guard so a burst
+  of recent workflows is never pruned. Cases stay retrievable by id while live
+  (enricher/archivist read O(1), never by scan).
+
+### Changed
+- BBS in-memory `scan:`/`scanAll:` are now O(matches) instead of O(total durable
+  tuples): a per-category bucket index (`byCategory`) is maintained alongside the
+  existing hash indices. Unbounded growth in one category (e.g. `case`) no longer
+  taxes every scan of every other category. (JSON-store path; the SQLite/ganso
+  backend already indexes by category.)
+
 ## [0.2.0] - 2026-06-18
 
 ### Added

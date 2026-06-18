@@ -362,8 +362,18 @@ Dashboard:     ', baseUrl, '/dashboard/
        --dry-run             preview without modifying state
        --no-sessions         skip the session-jsonl sweep
        --no-worktrees        skip the worktree sweep (~/.pp/worktrees can be GB-scale)
+       --no-cases            skip the cold-case retention sweep
        --older-than <hours>  session-file age threshold (default: 24)
+       --keep-cases <N>      most-recent 'case' tuples to retain (default: 2000)
+       --cases-older-than <hours>  only sweep cases older than H hours (extra guard)
        --keep-backups <N>    bbs.json.bak-* files to retain (default: 2)
+
+     Case retention (2026-06-18): 'case' tuples are written once per terminal
+     workflow (~1 KB each) and were NEVER garbage-collected — a monotonic,
+     unbounded grower that taxes every scan, flush, and restart. gcCases:
+     keeps the N most-recent cases and sweeps the rest; cases stay O(1)
+     retrievable by id while live and vanish from scans once swept.
+     See docs/scout-perf-pinned-tuples-2026-06-18.md R1.
 
      Default-on for sessions and worktrees as of 2026-05-05: pp serve was
      drifting to 30 GB+ committed pages with hundreds of orphan signal
@@ -371,15 +381,25 @@ Dashboard:     ', baseUrl, '/dashboard/
      unreachable from the legacy workflow-walk). The orphan sweep is the
      fix; rolling everything else into one command is a usability call so
      `pp gc` is the single answer to 'why is .pp so big.'"
-    | dryRun count sessionCount orphanCount backupCount keepBackupsStr keepBackups
-      olderThanStr olderThanHours sessionsFlag worktreesFlag |
+    | dryRun count sessionCount orphanCount backupCount caseCount keepBackupsStr keepBackups
+      olderThanStr olderThanHours sessionsFlag worktreesFlag casesFlag
+      keepCasesStr keepCases casesOlderThanStr casesOlderThanHours |
     dryRun := (args indexOf: '--dry-run') > 0.
     sessionsFlag := (args indexOf: '--no-sessions') <= 0.
     worktreesFlag := (args indexOf: '--no-worktrees') <= 0.
+    casesFlag := (args indexOf: '--no-cases') <= 0.
     olderThanStr := self flagValue: '--older-than' in: args.
     olderThanHours := olderThanStr notNil
       ifTrue: [olderThanStr asInteger]
       ifFalse: [24].
+    keepCasesStr := self flagValue: '--keep-cases' in: args.
+    keepCases := keepCasesStr notNil
+      ifTrue: [keepCasesStr asInteger]
+      ifFalse: [2000].
+    casesOlderThanStr := self flagValue: '--cases-older-than' in: args.
+    casesOlderThanHours := casesOlderThanStr notNil
+      ifTrue: [casesOlderThanStr asInteger]
+      ifFalse: [0].
     keepBackupsStr := self flagValue: '--keep-backups' in: args.
     keepBackups := keepBackupsStr notNil
       ifTrue: [keepBackupsStr asInteger]
@@ -390,6 +410,9 @@ Dashboard:     ', baseUrl, '/dashboard/
 
     count := self gcWorkflows: dryRun.
     orphanCount := self gcOrphanTuples: dryRun.
+    caseCount := casesFlag
+      ifTrue: [self gcCases: dryRun keep: keepCases olderThanHours: casesOlderThanHours]
+      ifFalse: [0].
     self gcBranches: dryRun.
     sessionCount := sessionsFlag
       ifTrue: [self gcSessionsOlderThanHours: olderThanHours dryRun: dryRun]
@@ -400,9 +423,91 @@ Dashboard:     ', baseUrl, '/dashboard/
     '' println.
     ('Done. workflows=', count printString,
       ' orphan-tuples=', orphanCount printString,
+      ' cases=', caseCount printString,
       ' sessions=', sessionCount printString,
       ' bbs-backups=', backupCount printString,
       (dryRun ifTrue: [' (dry-run)'] ifFalse: [''])) println
+  ]
+
+  method: gcCases: dryRun keep: keepCases olderThanHours: olderThanHours [
+    "Retention sweep for the 'case' category — the one durable category that
+     grows with throughput (one ~1 KB tuple per terminal workflow) and was
+     never reclaimed. Keep the `keepCases` most-recent cases (ranked by
+     payload.created_at, newest first); sweep the rest. When olderThanHours
+     > 0 a case is swept only if it ALSO predates the age threshold, so a
+     burst of recent workflows is never pruned regardless of keepCases.
+
+     Cases are read only by id (CaseEnricher / Archivist, both O(1) rdp:) —
+     there is no scan: 'case' anywhere — so a swept case costs nothing while
+     gone and stays retrievable from the cold history.jsonl audit log.
+     Returns the number of cases removed (or that would be in dry-run)."
+    | cases nowEpoch victims removedCount |
+    cases := self safeScan: 'case' scope: nil.
+    cases isEmpty ifTrue: [^0].
+    nowEpoch := DateTime now epochSeconds.
+    victims := self casesToSweep: cases keep: keepCases olderThanHours: olderThanHours now: nowEpoch.
+    victims isEmpty ifTrue: [
+      ('Cases: ', cases size printString, ' present, none beyond retention (keep ',
+        keepCases printString, ') — nothing to sweep') println.
+      ^0
+    ].
+    ('Sweeping cold cases (keeping ', keepCases printString, ' most recent',
+      (olderThanHours > 0 ifTrue: [', older than ', olderThanHours printString, 'h'] ifFalse: ['']),
+      ')...') println.
+    removedCount := 0.
+    victims do: [:t |
+      | cScope cIdentity |
+      cScope := t at: 'scope' ifAbsent: ['default'].
+      cIdentity := t at: 'identity' ifAbsent: [''].
+      ('  [case] ', cScope, '/', cIdentity) println.
+      dryRun ifFalse: [
+        self silentInp: 'case' scope: cScope identity: cIdentity
+      ].
+      removedCount := removedCount + 1
+    ].
+    removedCount > 0 ifTrue: [
+      ('  -> ', removedCount printString, ' case(s) ',
+        (dryRun ifTrue: ['would be removed'] ifFalse: ['removed'])) println
+    ].
+    ^removedCount
+  ]
+
+  method: casesToSweep: cases keep: keepCases olderThanHours: olderThanHours now: nowEpoch [
+    "Pure retention policy (no I/O — unit-testable). Given a list of 'case'
+     tuples, return the subset to sweep: rank newest-first by
+     payload.created_at (missing → 0, treated as oldest), keep the
+     `keepCases` most recent, and from the remainder drop only those older
+     than `olderThanHours` (when > 0; otherwise drop all of the remainder)."
+    | keep cutoffEpoch sorted victims idx |
+    keep := keepCases.
+    keep < 0 ifTrue: [keep := 0].
+    cutoffEpoch := olderThanHours > 0
+      ifTrue: [nowEpoch - (olderThanHours * 3600)]
+      ifFalse: [nil].
+    "Copy into a fresh ArrayList so we never mutate the caller's collection,
+     then sort in place. (Array>>asArray is not available across collection
+     backends, so build the copy explicitly.)"
+    sorted := ArrayList new.
+    cases do: [:t | sorted add: t].
+    sorted sort: [:a :b |
+      | ca cb |
+      ca := (a at: 'payload' ifAbsent: [Dictionary new]) at: 'created_at' ifAbsent: [0].
+      cb := (b at: 'payload' ifAbsent: [Dictionary new]) at: 'created_at' ifAbsent: [0].
+      ca > cb ifTrue: [-1] ifFalse: [ca < cb ifTrue: [1] ifFalse: [0]]
+    ].
+    victims := Array new: 0.
+    idx := 0.
+    sorted do: [:t |
+      idx := idx + 1.
+      idx > keep ifTrue: [
+        | created |
+        created := (t at: 'payload' ifAbsent: [Dictionary new]) at: 'created_at' ifAbsent: [0].
+        (cutoffEpoch isNil or: [created < cutoffEpoch]) ifTrue: [
+          victims := victims copyWith: t
+        ]
+      ]
+    ].
+    ^victims
   ]
 
   method: gcWorkflows: dryRun [
