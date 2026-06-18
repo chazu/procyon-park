@@ -157,31 +157,72 @@ PP subclass: CLIBase
   ]
 
   method: cmdRead: args [
-    "pp read <category> [scope] [identity]"
-    | category rdScope rdIdentity body |
+    "pp read <category> [scope] [identity] [--all]
+
+     Reads are NON-CONSUMING: /api/scan (scan:/scanAll:) and /api/rdp
+     (rdp:) only read the index — they never remove tuples. The default
+     stays scoped to the current scope; --all (alias -A) opts in to a
+     cross-scope scan by OMITTING the 'scope' key so the server runs
+     scanAll:. When a scoped scan finds nothing, a second non-consuming
+     scanAll surfaces a discoverability hint if other scopes have matches."
+    | category rdScope rdIdentity body allScopes positional scopedHits otherCount |
     args size < 2 ifTrue: [
-      'Usage: pp read <category> [scope] [identity]' println.
+      'Usage: pp read <category> [scope] [identity] [--all]' println.
       ^self
     ].
 
-    category := args at: 2.
-    rdScope := args size > 2 ifTrue: [args at: 3] ifFalse: [scope].
-    rdIdentity := args size > 3 ifTrue: [args at: 4] ifFalse: [nil].
+    allScopes := (args includes: '--all') or: [args includes: '-A'].
+
+    "Strip --all/-A so positional indexing (scope, identity) stays correct."
+    positional := Array new: 0.
+    args do: [:a |
+      ((a = '--all') or: [a = '-A']) ifFalse: [positional := positional copyWith: a]
+    ].
+
+    category := positional at: 2.
+    rdScope := positional size > 2 ifTrue: [positional at: 3] ifFalse: [scope].
+    rdIdentity := positional size > 3 ifTrue: [positional at: 4] ifFalse: [nil].
 
     rdIdentity notNil ifTrue: [
-      "Read a specific tuple — /api/rdp is intentionally unsigned."
+      "Read a specific tuple — /api/rdp is intentionally unsigned, non-consuming."
       body := Dictionary new.
       body at: 'category' put: category.
       body at: 'scope' put: rdScope.
       body at: 'identity' put: rdIdentity.
-      self unauthedPost: '/api/rdp' body: body
-    ] ifFalse: [
-      "Scan all in category+scope — /api/scan is intentionally unsigned."
-      body := Dictionary new.
-      body at: 'category' put: category.
-      body at: 'scope' put: rdScope.
-      self unauthedPost: '/api/scan' body: body
+      self unauthedPost: '/api/rdp' body: body.
+      ^self
+    ].
+
+    "Scan in category — /api/scan is unsigned and non-consuming. With
+     --all, OMIT 'scope' so the server scans every scope (per-tuple scope
+     is included in the rendered JSON for legibility)."
+    body := self buildScanBody: category scope: rdScope all: allScopes.
+    self unauthedPost: '/api/scan' body: body.
+
+    "Discoverability hint: a scoped scan that found nothing may still have
+     matches elsewhere. Issue a second NON-CONSUMING scanAll and, on a
+     positive count, point the user at --all. Never consumes."
+    allScopes ifFalse: [
+      scopedHits := self safeScan: category scope: rdScope.
+      scopedHits isEmpty ifTrue: [
+        otherCount := (self safeScan: category scope: nil) size.
+        otherCount > 0 ifTrue: [
+          (otherCount printString, ' ', category,
+            ' tuple(s) exist in other scopes — pass --all or a scope') println
+        ]
+      ]
     ]
+  ]
+
+  method: buildScanBody: category scope: rdScope all: allScopes [
+    "Build the /api/scan request body. Only set 'scope' when NOT --all —
+     omitting the key tells the server to scanAll: across every scope.
+     Pure helper (no I/O) so the scope-vs-all contract is unit-testable."
+    | body |
+    body := Dictionary new.
+    body at: 'category' put: category.
+    allScopes ifFalse: [body at: 'scope' put: rdScope].
+    ^body
   ]
 
   method: cmdNotify: args [
@@ -364,7 +405,7 @@ PP subclass: CLIBase
     '  decide   <identity> <detail> [--rationale ...]   Record a decision' println.
     '  event    <identity> [--type T] [--summary S]     Emit an event' println.
     '  plan     <file.json>                             Submit a structured plan' println.
-    '  read     <category> [scope] [identity]           Read tuples' println.
+    '  read     <category> [scope] [identity] [--all]   Read tuples (--all scans every scope)' println.
     '  notify   <message> [--severity info|warn|urgent] Notify the user' println.
     '  dismiss                                          Signal task completion' println.
     '  verdict  <pass|fix|exhausted> [--workflow <id>]   Write review verdict (uses PP_WORKFLOW)' println.

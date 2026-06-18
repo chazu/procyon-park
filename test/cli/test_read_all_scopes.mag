@@ -1,0 +1,180 @@
+"Tests for `pp read` scope handling: default-scoped vs --all cross-scope,
+ the empty-scope discoverability hint, and the NON-CONSUMING guarantee.
+
+ Decided via design/dialectics/pp-read-scope-default.ndjson: keep the
+ default scoped, add an explicit --all opt-in, and fix discoverability
+ with a hint — do NOT make cross-scope the default.
+
+ Invariants under test:
+   RS1  Default scoped read returns ONLY the current scope's tuples
+        (bbs scan: category scope: rdScope).
+   RS2  --all returns EVERY scope's tuples (server scanAll: when the
+        scan body omits 'scope').
+   RS3  Cross-scope output is legible: scanAll tuples carry per-tuple scope.
+   RS4  An empty scoped read still has matches elsewhere — the second,
+        NON-CONSUMING scanAll count drives the hint (count > 0).
+   RS5  The hint message matches the agreed wording exactly.
+   RS6  NON-CONSUMING: every read path (scan:, scanAll:) leaves all
+        seeded tuples in place — reads never remove tuples.
+   RS7  CLI contract: PP>>buildScanBody:scope:all: OMITS 'scope' under
+        --all and INCLUDES it otherwise.
+
+ Standalone runner at bottom (TestReadAllScopesMain run)."
+
+TRASTest subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg,
+                           ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== pp read --all / hint Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue:  ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TRASHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | base |
+    base := '/tmp/pp-test-read-all-scopes-run'.
+    Shell run: 'rm -rf "', base, '"'.
+    Shell run: 'mkdir -p "', base, '"'.
+    ^base
+  ]
+
+  classMethod: payloadWith: detail [
+    | p |
+    p := Dictionary new.
+    p at: 'detail' put: detail.
+    p at: 'actor' put: 'user:tester'.
+    ^p
+  ]
+
+  classMethod: scopeOf: tuples named: aScope [
+    "Count tuples in the array whose scope = aScope."
+    | n |
+    n := 0.
+    tuples do: [:t |
+      (t at: 'scope' ifAbsent: [nil]) = aScope ifTrue: [n := n + 1]
+    ].
+    ^n
+  ]
+
+"=== TestReadAllScopes ==="
+TestReadAllScopes subclass: Object
+
+  classMethod: run: t [
+    | bbs tempDir scopedA scopedEmpty allTuples otherCount hintMsg expectedMsg
+      cli bodyAll bodyScoped reAfter reAllAfter |
+    '--- TestReadAllScopes ---' println.
+    tempDir := TRASHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    "Seed ONE durable category ('fact') across TWO scopes."
+    bbs out: 'fact' scope: 'scope-a' identity: 'f-a' payload: (TRASHelper payloadWith: 'in a').
+    bbs out: 'fact' scope: 'scope-b' identity: 'f-b' payload: (TRASHelper payloadWith: 'in b').
+
+    "RS1: default scoped read (scan:scope:) returns ONLY the current scope."
+    scopedA := bbs scan: 'fact' scope: 'scope-a'.
+    t assertEqual: scopedA size to: 1
+      message: 'RS1: scoped read returns only the current scope (scope-a)'.
+    t assertEqual: (TRASHelper scopeOf: scopedA named: 'scope-b') to: 0
+      message: 'RS1: scoped read does not leak other scopes (no scope-b)'.
+
+    "RS2: --all (scanAll:) returns EVERY scope."
+    allTuples := bbs scanAll: 'fact'.
+    t assertEqual: allTuples size to: 2
+      message: 'RS2: --all (scanAll) returns both scopes'.
+
+    "RS3: cross-scope output is legible — per-tuple scope present."
+    t assertEqual: (TRASHelper scopeOf: allTuples named: 'scope-a') to: 1
+      message: 'RS3: scanAll tuples carry scope=scope-a'.
+    t assertEqual: (TRASHelper scopeOf: allTuples named: 'scope-b') to: 1
+      message: 'RS3: scanAll tuples carry scope=scope-b'.
+
+    "RS4: empty scoped read surfaces the cross-scope hint — the second,
+     NON-CONSUMING scanAll count is what drives it."
+    scopedEmpty := bbs scan: 'fact' scope: 'scope-none'.
+    t assertEqual: scopedEmpty size to: 0
+      message: 'RS4: scoped read of an unused scope returns nothing'.
+    otherCount := (bbs scanAll: 'fact') size.
+    t assert: (scopedEmpty isEmpty and: [otherCount > 0])
+      message: 'RS4: empty scoped read + positive scanAll count fires the hint'.
+
+    "RS5: hint wording matches the agreed message exactly."
+    hintMsg := otherCount printString, ' ', 'fact',
+      ' tuple(s) exist in other scopes — pass --all or a scope'.
+    expectedMsg := '2 fact tuple(s) exist in other scopes — pass --all or a scope'.
+    t assertEqual: hintMsg to: expectedMsg
+      message: 'RS5: hint message matches the agreed wording'.
+
+    "RS6: NON-CONSUMING — re-read after every scan; nothing was removed."
+    reAfter := bbs scan: 'fact' scope: 'scope-a'.
+    reAllAfter := bbs scanAll: 'fact'.
+    t assertEqual: reAfter size to: 1
+      message: 'RS6: scoped tuple still present after repeated reads (no consume)'.
+    t assertEqual: reAllAfter size to: 2
+      message: 'RS6: all tuples still present after repeated reads (no consume)'.
+
+    "RS7: CLI contract — buildScanBody:scope:all: omit/include 'scope'."
+    cli := PP new.
+    bodyAll := cli buildScanBody: 'fact' scope: 'scope-a' all: true.
+    bodyScoped := cli buildScanBody: 'fact' scope: 'scope-a' all: false.
+    t assert: (bodyAll includesKey: 'scope') not
+      message: 'RS7: --all OMITS the scope key (server scanAll)'.
+    t assertEqual: (bodyAll at: 'category') to: 'fact'
+      message: 'RS7: --all body still carries the category'.
+    t assert: (bodyScoped includesKey: 'scope')
+      message: 'RS7: default body INCLUDES the scope key'.
+    t assertEqual: (bodyScoped at: 'scope') to: 'scope-a'
+      message: 'RS7: default body scope value is the requested scope'
+  ]
+
+"=== Main ==="
+TestReadAllScopesMain subclass: Object
+
+  classMethod: run [
+    | t |
+    t := TRASTest new.
+    [TestReadAllScopes run: t] on: Exception do: [:e |
+      ('TestReadAllScopes CRASHED: ', e messageText) println.
+      t assert: false message: 'TestReadAllScopes crashed'
+    ].
+    t report.
+    ^t failed
+  ]

@@ -8,6 +8,12 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `pp read <category>` now accepts `--all` (alias `-A`) to scan every scope
+  at once (a non-consuming cross-scope read), instead of only the current
+  scope. The default stays scoped — scope isolation is preserved. When a
+  scoped read finds nothing but matches exist in other scopes, `pp read`
+  prints a discoverability hint pointing at `--all` (the hint count comes
+  from a second non-consuming scan and never removes tuples).
 - After-Action Review enrichment loop is now closed. When an Archivist task
   completes, the dispatcher reads its structured enrichment (an `observation`
   tuple, identity `case-enrichment`, linked to the workflow instance and

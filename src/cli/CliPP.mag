@@ -2093,11 +2093,24 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
                                 pp read <category>
                                 pp read <category> <scope>
                                 pp read <category> <scope> <identity>
+                              The --all bool flag opts in to a cross-scope
+                              scan (omits 'scope' so the server scanAlls).
        * Cli::EnvBinding    — PP_URL / PP_SCOPE
        * JSON output        — matches the legacy pretty-printed shape.
+
+     Reads are NON-CONSUMING: /api/scan and /api/rdp only read the index.
+     The default stays scoped; --all opts in to every scope. When a scoped
+     scan finds nothing, a second non-consuming scanAll surfaces a hint if
+     other scopes hold matches.
      "
     | cmd cfg rest |
-    cmd := Cli::Command named: 'read' doc: 'Read tuples from the tuplespace'.
+    cmd := Cli::Command named: 'read'
+      doc: 'Read tuples from the tuplespace (pp read <category> [scope] [identity] [--all])'.
+    cmd flag: (Cli::Flag
+      name: 'all'
+      type: #bool
+      default: false
+      doc: 'Scan every scope (cross-scope, non-consuming)').
     cmd envBinding: (Cli::EnvBinding
       envName: 'PP_URL'
       setter: #baseUrl:
@@ -2112,13 +2125,14 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     cfg := PPCliConfig new.
 
     cmd run: [:runArgs |
-      | category rdScope rdIdentity body exitCode |
+      | category rdScope rdIdentity body exitCode allScopes scopedHits otherCount |
       exitCode := 0.
       runArgs size < 1 ifTrue: [
-        'Usage: pp read <category> [scope] [identity]' println.
+        'Usage: pp read <category> [scope] [identity] [--all]' println.
         exitCode := 1
       ] ifFalse: [
         cmd applyEnvBindings: cfg.
+        allScopes := cmd flagValue: 'all'.
         category := runArgs at: 1.
         rdScope := runArgs size > 1 ifTrue: [runArgs at: 2] ifFalse: [cfg scope].
         rdIdentity := runArgs size > 2 ifTrue: [runArgs at: 3] ifFalse: [nil].
@@ -2129,10 +2143,22 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
           body at: 'identity' put: rdIdentity.
           self unauthedPostAndPrint: cfg path: '/api/rdp' body: body
         ] ifFalse: [
+          "Only set 'scope' when NOT --all — omitting it makes the server scanAll."
           body := Dictionary new.
           body at: 'category' put: category.
-          body at: 'scope' put: rdScope.
-          self unauthedPostAndPrint: cfg path: '/api/scan' body: body
+          allScopes ifFalse: [body at: 'scope' put: rdScope].
+          self unauthedPostAndPrint: cfg path: '/api/scan' body: body.
+          "Non-consuming discoverability hint when a scoped scan is empty."
+          allScopes ifFalse: [
+            scopedHits := self safeScan: category cfg: cfg scope: rdScope.
+            scopedHits isEmpty ifTrue: [
+              otherCount := (self safeScan: category cfg: cfg scope: nil) size.
+              otherCount > 0 ifTrue: [
+                (otherCount printString, ' ', category,
+                  ' tuple(s) exist in other scopes — pass --all or a scope') println
+              ]
+            ]
+          ]
         ]
       ].
       exitCode
