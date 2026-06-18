@@ -1,0 +1,322 @@
+"Tests for CaseEnricher — additive merge of an archivist's enrichment
+ output into an existing 'case' tuple.
+
+ Two layers under test:
+   * mergeTags:with: — a PURE order-stable de-duping union (no BBS).
+   * applyEnrichment:toCaseWithInstance:scope:bbs: — a guarded BBS update
+     that ADDS aar/lessons/confidence/enriched_at and UNIONs tags WITHOUT
+     touching the deterministic skeleton fields CaseBuilder produced.
+
+ A real BBS (BBS withDataDir:) drives the integration cases so the
+ rdp + update path executes end-to-end against genuine tuple storage.
+
+ Invariants under test:
+   CE1  mergeTags dedups, is order-stable, and unions new tags after
+        existing ones.
+   CE2  mergeTags handles empty / nil inputs without crashing.
+   CE3  applyEnrichment on an existing case ADDS aar/lessons/confidence/
+        enriched_at and UNIONs tags; returns true.
+   CE4  Every deterministic skeleton field is byte-identical afterwards.
+   CE5  Re-applying enrichment introduces NO duplicate tags (idempotent
+        union).
+   CE6  applyEnrichment against a MISSING case returns false and writes
+        nothing — no crash."
+
+"=== Runner ==="
+CERunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== CaseEnricher Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== Helpers ==="
+CEHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: skeletonPayload: instanceId [
+    "A deterministic case skeleton carrying EXACTLY the 11 fields that
+     enrichment must preserve untouched."
+    | p actions a0 tags |
+    p := Dictionary new.
+    p at: 'workflow_instance' put: instanceId.
+    p at: 'terminal_state' put: 'completed'.
+    p at: 'duration_minutes' put: 10.
+    p at: 'retries' put: 1.
+    p at: 'review_cycles' put: 1.
+    p at: 'human_interventions' put: 2.
+    p at: 'files_changed' put: 7.
+    a0 := Dictionary new.
+    a0 at: 'role' put: 'implementer'.
+    a0 at: 'description' put: 'do the thing'.
+    a0 at: 'status' put: 'completed'.
+    actions := Array new: 0.
+    actions := actions copyWith: a0.
+    p at: 'actions' put: actions.
+    p at: 'repo' put: 'acme/widgets'.
+    p at: 'mission_type' put: 'full-pipeline'.
+    p at: 'created_at' put: 1600.
+    tags := Array new: 0.
+    tags := tags copyWith: 'acme/widgets'.
+    tags := tags copyWith: 'full-pipeline'.
+    tags := tags copyWith: 'completed'.
+    p at: 'tags' put: tags.
+    ^p
+  ]
+
+  classMethod: enrichment [
+    "A synthetic archivist enrichment payload. Its tags overlap the
+     skeleton ('acme/widgets' already present) plus two fresh ones."
+    | e lessons tags |
+    e := Dictionary new.
+    e at: 'aar' put: 'The mission succeeded after one retry.'.
+    lessons := Array new: 0.
+    lessons := lessons copyWith: 'cache the manifest'.
+    lessons := lessons copyWith: 'retry is cheap'.
+    e at: 'lessons' put: lessons.
+    e at: 'confidence' put: 0.9.
+    tags := Array new: 0.
+    tags := tags copyWith: 'acme/widgets'.
+    tags := tags copyWith: 'enriched'.
+    tags := tags copyWith: 'high-confidence'.
+    e at: 'tags' put: tags.
+    ^e
+  ]
+
+"=== Tests ==="
+TestCaseEnricher subclass: Object
+
+  classMethod: run: t [
+    self testMergeTagsDedupOrder: t.
+    self testMergeTagsEmptyAndNil: t.
+    self testApplyAddsEnrichment: t.
+    self testApplyPreservesDeterministic: t.
+    self testReapplyNoDuplicateTags: t.
+    self testMissingCaseReturnsFalse: t
+  ]
+
+  classMethod: testMergeTagsDedupOrder: t [
+    | existing incoming merged |
+    '--- CE1: mergeTags dedup + order-stable ---' println.
+    existing := Array new: 0.
+    existing := existing copyWith: 'a'.
+    existing := existing copyWith: 'b'.
+    existing := existing copyWith: 'c'.
+    incoming := Array new: 0.
+    incoming := incoming copyWith: 'b'.
+    incoming := incoming copyWith: 'd'.
+    incoming := incoming copyWith: 'a'.
+    incoming := incoming copyWith: 'e'.
+    merged := CaseEnricher mergeTags: existing with: incoming.
+
+    t assertEqual: merged size to: 5
+      message: 'CE1: union has 5 distinct tags'.
+    t assertEqual: (merged at: 1) to: 'a' message: 'CE1: existing order kept (a)'.
+    t assertEqual: (merged at: 2) to: 'b' message: 'CE1: existing order kept (b)'.
+    t assertEqual: (merged at: 3) to: 'c' message: 'CE1: existing order kept (c)'.
+    t assertEqual: (merged at: 4) to: 'd' message: 'CE1: new tags appended (d)'.
+    t assertEqual: (merged at: 5) to: 'e' message: 'CE1: new tags appended (e)'.
+    "duplicate 'b' and 'a' from incoming were dropped"
+    t assert: (merged size = 5)
+      message: 'CE1: duplicates from incoming dropped'
+  ]
+
+  classMethod: testMergeTagsEmptyAndNil: t [
+    | only |
+    '--- CE2: mergeTags empty / nil handling ---' println.
+    "empty existing -> just the new tags"
+    only := CaseEnricher mergeTags: (Array new: 0) with: (Array new: 0).
+    t assertEqual: only size to: 0
+      message: 'CE2: empty + empty => empty'.
+
+    only := Array new: 0.
+    only := only copyWith: 'x'.
+    only := only copyWith: 'x'.
+    "duplicate within the new list is also collapsed"
+    t assertEqual: (CaseEnricher mergeTags: (Array new: 0) with: only) size to: 1
+      message: 'CE2: duplicate within new list collapsed'.
+
+    "nil inputs treated as empty"
+    t assertEqual: (CaseEnricher mergeTags: nil with: nil) size to: 0
+      message: 'CE2: nil + nil => empty array'.
+    t assertEqual: (CaseEnricher mergeTags: nil with: only) size to: 1
+      message: 'CE2: nil existing tolerated'
+  ]
+
+  classMethod: testApplyAddsEnrichment: t [
+    | tempDir bbs result tuple p tags |
+    '--- CE3: applyEnrichment adds enrichment fields ---' println.
+    tempDir := CEHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    bbs out: 'case' scope: 'default' identity: 'ce-3'
+      payload: (CEHelper skeletonPayload: 'ce-3').
+
+    result := CaseEnricher applyEnrichment: CEHelper enrichment
+      toCaseWithInstance: 'ce-3' scope: 'default' bbs: bbs.
+    t assert: result message: 'CE3: applyEnrichment returns true'.
+
+    tuple := bbs rdp: 'case' scope: 'default' identity: 'ce-3'.
+    t assert: (tuple notNil) message: 'CE3: case still present after enrichment'.
+    p := tuple at: 'payload'.
+    t assertEqual: (p at: 'aar' ifAbsent: [nil])
+      to: 'The mission succeeded after one retry.'
+      message: 'CE3: aar added'.
+    t assertEqual: (p at: 'lessons' ifAbsent: [nil]) size to: 2
+      message: 'CE3: lessons added (2)'.
+    t assertEqual: (p at: 'confidence' ifAbsent: [nil]) to: 0.9
+      message: 'CE3: confidence added'.
+    t assert: ((p at: 'enriched_at' ifAbsent: [nil]) notNil)
+      message: 'CE3: enriched_at stamped'.
+
+    tags := p at: 'tags'.
+    t assert: (tags includes: 'acme/widgets')
+      message: 'CE3: original tag retained'.
+    t assert: (tags includes: 'completed')
+      message: 'CE3: original tag retained (completed)'.
+    t assert: (tags includes: 'enriched')
+      message: 'CE3: new tag unioned (enriched)'.
+    t assert: (tags includes: 'high-confidence')
+      message: 'CE3: new tag unioned (high-confidence)'.
+    "3 skeleton tags + 2 genuinely-new (acme/widgets overlapped) = 5"
+    t assertEqual: tags size to: 5
+      message: 'CE3: tags unioned without duplicating overlap'
+  ]
+
+  classMethod: testApplyPreservesDeterministic: t [
+    | tempDir bbs tuple p actions a0 |
+    '--- CE4: deterministic fields preserved byte-identical ---' println.
+    tempDir := CEHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    bbs out: 'case' scope: 'default' identity: 'ce-4'
+      payload: (CEHelper skeletonPayload: 'ce-4').
+
+    CaseEnricher applyEnrichment: CEHelper enrichment
+      toCaseWithInstance: 'ce-4' scope: 'default' bbs: bbs.
+
+    tuple := bbs rdp: 'case' scope: 'default' identity: 'ce-4'.
+    p := tuple at: 'payload'.
+    t assertEqual: (p at: 'workflow_instance') to: 'ce-4'
+      message: 'CE4: workflow_instance preserved'.
+    t assertEqual: (p at: 'terminal_state') to: 'completed'
+      message: 'CE4: terminal_state preserved'.
+    t assertEqual: (p at: 'duration_minutes') to: 10
+      message: 'CE4: duration_minutes preserved'.
+    t assertEqual: (p at: 'retries') to: 1
+      message: 'CE4: retries preserved'.
+    t assertEqual: (p at: 'review_cycles') to: 1
+      message: 'CE4: review_cycles preserved'.
+    t assertEqual: (p at: 'human_interventions') to: 2
+      message: 'CE4: human_interventions preserved'.
+    t assertEqual: (p at: 'files_changed') to: 7
+      message: 'CE4: files_changed preserved'.
+    t assertEqual: (p at: 'repo') to: 'acme/widgets'
+      message: 'CE4: repo preserved'.
+    t assertEqual: (p at: 'mission_type') to: 'full-pipeline'
+      message: 'CE4: mission_type preserved'.
+    t assertEqual: (p at: 'created_at') to: 1600
+      message: 'CE4: created_at preserved'.
+    actions := p at: 'actions'.
+    t assertEqual: actions size to: 1
+      message: 'CE4: actions array preserved (size)'.
+    a0 := actions at: 1.
+    t assertEqual: (a0 at: 'role') to: 'implementer'
+      message: 'CE4: action role preserved'.
+    t assertEqual: (a0 at: 'description') to: 'do the thing'
+      message: 'CE4: action description preserved'.
+    t assertEqual: (a0 at: 'status') to: 'completed'
+      message: 'CE4: action status preserved'
+  ]
+
+  classMethod: testReapplyNoDuplicateTags: t [
+    | tempDir bbs tuple p tags |
+    '--- CE5: re-apply introduces no duplicate tags ---' println.
+    tempDir := CEHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    bbs out: 'case' scope: 'default' identity: 'ce-5'
+      payload: (CEHelper skeletonPayload: 'ce-5').
+
+    CaseEnricher applyEnrichment: CEHelper enrichment
+      toCaseWithInstance: 'ce-5' scope: 'default' bbs: bbs.
+    "apply a second time — union must stay stable"
+    CaseEnricher applyEnrichment: CEHelper enrichment
+      toCaseWithInstance: 'ce-5' scope: 'default' bbs: bbs.
+
+    tuple := bbs rdp: 'case' scope: 'default' identity: 'ce-5'.
+    p := tuple at: 'payload'.
+    tags := p at: 'tags'.
+    t assertEqual: tags size to: 5
+      message: 'CE5: re-apply still 5 tags (no duplicates)'
+  ]
+
+  classMethod: testMissingCaseReturnsFalse: t [
+    | tempDir bbs result tuple |
+    '--- CE6: missing case returns false, no crash ---' println.
+    tempDir := CEHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "no case seeded for nope-1"
+    result := CaseEnricher applyEnrichment: CEHelper enrichment
+      toCaseWithInstance: 'nope-1' scope: 'default' bbs: bbs.
+    t assert: (result = false)
+      message: 'CE6: applyEnrichment returns false for missing case'.
+    tuple := bbs rdp: 'case' scope: 'default' identity: 'nope-1'.
+    t assert: (tuple isNil)
+      message: 'CE6: no case tuple written for missing instance'
+  ]
+
+"=== Main ==="
+CaseEnricherMain subclass: Object
+  classMethod: start [
+    | t |
+    t := CERunner new.
+    TestCaseEnricher run: t.
+    t report.
+    ^t failed
+  ]

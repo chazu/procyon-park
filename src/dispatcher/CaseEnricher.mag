@@ -1,0 +1,63 @@
+"CaseEnricher — merge an archivist's enrichment output into an existing
+ 'case' tuple WITHOUT clobbering the deterministic skeleton fields that
+ CaseBuilder produced.
+
+ The deterministic skeleton (written earlier by CaseBuilder + the engine
+ wiring) carries these fields and they MUST survive enrichment untouched:
+   workflow_instance, terminal_state, duration_minutes, retries,
+   review_cycles, human_interventions, files_changed, actions, repo,
+   mission_type, created_at.
+
+ Enrichment is purely ADDITIVE. applyEnrichment: only ever sets four new
+ keys (aar, lessons, confidence, enriched_at) and UNIONs the supplied
+ tags into the case's existing tags. No deterministic key is read,
+ rewritten, or removed.
+
+ ENRICHMENT PAYLOAD (a Maggie Dictionary the archivist produces):
+   'aar'        -> String narrative (default '').
+   'lessons'    -> Array of String (default empty Array).
+   'confidence' -> Number (default 0).
+   'tags'       -> Array of String UNIONed with the case's existing
+                   deterministic tags (default empty Array).
+
+ mergeTags:with: is a PURE helper (no BBS, no clock): order-stable
+ union with de-duplication, unit-testable in isolation."
+
+CaseEnricher subclass: Object
+
+  classMethod: applyEnrichment: enrichment toCaseWithInstance: instanceId scope: scope bbs: bbs [
+    "Guarded, additive merge of enrichment into the case tuple for
+     instanceId. Returns false (no-op) if no such case exists; otherwise
+     mutates the case payload in place and returns true."
+    | existing |
+    existing := bbs rdp: 'case' scope: scope identity: instanceId.
+    existing isNil ifTrue: [^false].
+
+    bbs update: 'case' scope: scope identity: instanceId do: [:p |
+      p at: 'aar' put: (enrichment at: 'aar' ifAbsent: ['']).
+      p at: 'lessons' put: (enrichment at: 'lessons' ifAbsent: [Array new: 0]).
+      p at: 'confidence' put: (enrichment at: 'confidence' ifAbsent: [0]).
+      p at: 'enriched_at' put: (DateTime now epochSeconds).
+      p at: 'tags' put: (CaseEnricher
+        mergeTags: (p at: 'tags' ifAbsent: [Array new: 0])
+        with: (enrichment at: 'tags' ifAbsent: [Array new: 0]))
+    ].
+    ^true
+  ]
+
+  classMethod: mergeTags: existingTags with: newTags [
+    "PURE order-stable union with de-duplication. Existing tags keep their
+     order and precedence; new tags are appended only when not already
+     present. nil inputs are treated as empty. No BBS, no clock."
+    | merged ex nw |
+    ex := existingTags isNil ifTrue: [Array new: 0] ifFalse: [existingTags].
+    nw := newTags isNil ifTrue: [Array new: 0] ifFalse: [newTags].
+    merged := Array new: 0.
+    ex do: [:tag |
+      (merged includes: tag) ifFalse: [merged := merged copyWith: tag]
+    ].
+    nw do: [:tag |
+      (merged includes: tag) ifFalse: [merged := merged copyWith: tag]
+    ].
+    ^merged
+  ]
