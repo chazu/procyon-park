@@ -8,6 +8,12 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `PP_NO_SSE` environment kill-switch for `pp serve`. When set, the dashboard
+  SSE route and per-tick broadcast are not registered, so no dashboard client
+  can attach. This is an operational mitigation for a per-tick memory leak that
+  only runs while a dashboard is connected (RSS grows ~1 GB/min until the OS
+  OOM-kills the process); with `PP_NO_SSE=1` the server stays flat. Remove the
+  workaround once the leak is fixed.
 - Workflow staleness reaping. A workflow stuck in `running`/`dispatched`
   with no live task and past a TTL (1h) is now transitioned to `failed`
   (`last_failure_reason: workflow-stale`) by the Dispatcher housekeep pass,

@@ -152,14 +152,23 @@ ApiServer subclass: Object
   method: bbs [ ^bbs ]
 
   method: start [
-    | staticDir |
+    | staticDir sseDisabled |
     ('Procyon Park API starting on port ', port printString) println.
     "Register SSE and static routes here (outside registerRoutes chain to avoid bytecode limits)"
     staticDir := (System env: 'HOME'), '/.pp/static'.
     httpServer serveStatic: '/dashboard/' from: staticDir.
-    httpServer sseRoute: '/api/sse/dashboard' handler: [:conn :req |
-      self handleSSEDashboard: conn request: req
-    ].
+    "PP_NO_SSE operational kill-switch: when set, skip SSE route + tick so no
+     dashboard subscriber can attach. Mitigation for the per-tick memory leak
+     (story:fix-sse-tick-memory-leak) — keeps the server stable while the leak
+     is unfixed. Connections to /api/sse/dashboard fast-fail (no handler)."
+    sseDisabled := (System env: 'PP_NO_SSE') notNil.
+    sseDisabled
+      ifTrue: [ 'SSE dashboard DISABLED (PP_NO_SSE set)' println ]
+      ifFalse: [
+        httpServer sseRoute: '/api/sse/dashboard' handler: [:conn :req |
+          self handleSSEDashboard: conn request: req
+        ]
+      ].
     "Root redirect: / → /dashboard/ so bookmarks and bare-host URLs land
      on the web UI instead of a 404."
     self get: '/' do: [:req |
@@ -168,7 +177,7 @@ ApiServer subclass: Object
       resp header: 'Location' value: '/dashboard/'.
       resp
     ].
-    self startSSETick.
+    sseDisabled ifFalse: [self startSSETick].
     httpServer start
   ]
 
