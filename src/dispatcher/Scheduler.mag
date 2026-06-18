@@ -39,23 +39,18 @@ Scheduler subclass: Object
      down from Dispatcher>>onTick. Sharing the snapshot is safe because
      bbs update: re-checks status='pending' atomically inside the
      update block — a stale read just means the claim attempt no-ops."
-    | allTasks pendingTasks count pending |
+    | allTasks pendingTasks count activeKeys |
     self availableSlots <= 0 ifTrue: [^self].
 
     allTasks := maybeTasks isNil
       ifTrue: [bbs scanAll: 'task']
       ifFalse: [maybeTasks].
 
-    "Filter to pending"
-    pending := GrowableArray new.
-    allTasks do: [:t |
-      | status |
-      status := (t at: 'payload') at: 'status' ifAbsent: [''].
-      status = 'pending' ifTrue: [pending add: t]
-    ].
+    "Filter to pending AND dedup by identity (see dispatchablePendingFrom:)."
+    activeKeys := mutex critical: [activeSlots keys].
+    pendingTasks := self dispatchablePendingFrom: allTasks activeKeys: activeKeys.
 
-    pending size = 0 ifTrue: [^self].
-    pendingTasks := pending asArray.
+    pendingTasks size = 0 ifTrue: [^self].
 
     "Dispatch as many as we have slots for"
     count := pendingTasks size.
@@ -64,6 +59,28 @@ Scheduler subclass: Object
     1 to: count do: [:i |
       self dispatchTask: (pendingTasks at: i)
     ]
+  ]
+
+  method: dispatchablePendingFrom: allTasks activeKeys: activeKeys [
+    "Pure: the dispatchable tasks from a snapshot — status='pending', deduped by
+     identity (at most one per identity), excluding identities already active.
+     Prevents the harness spawn storm from duplicate task tuples sharing an
+     identity (a review/fix cycle re-creating `…:task:review`). Extracted from
+     dispatchTasks: for testability (no harness spawn)."
+    | pending seen |
+    pending := GrowableArray new.
+    seen := Dictionary new.
+    allTasks do: [:t |
+      | status ident |
+      status := (t at: 'payload') at: 'status' ifAbsent: [''].
+      ident := t at: 'identity'.
+      (status = 'pending' and: [
+        (activeKeys includes: ident) not and: [
+        (seen includesKey: ident) not]]) ifTrue: [
+          pending add: t.
+          seen at: ident put: true]
+    ].
+    ^pending asArray
   ]
 
   method: dispatchTask: task [

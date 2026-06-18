@@ -154,7 +154,7 @@ Main subclass: Object
   ]
 
   classMethod: startServer: args [
-    | bbs api dispatcher harnessFactory port portStr |
+    | bbs api dispatcher harnessFactory port portStr slotsEnv maxSlots |
 
     'Procyon Park v0.1.0' println.
     '===================' println.
@@ -183,8 +183,15 @@ Main subclass: Object
     "Initialize harness factory"
     harnessFactory := HarnessFactory new.
 
-    "Initialize dispatcher (8 slots to accommodate foreman + parallel implementers)"
-    dispatcher := Dispatcher on: bbs harnessFactory: harnessFactory maxSlots: 8.
+    "Initialize dispatcher. Each slot is a heavyweight `claude` harness process;
+     8 concurrent overwhelmed the host (spawn-storm crash). Default 4, tunable
+     via PP_MAX_SLOTS."
+    slotsEnv := System env: 'PP_MAX_SLOTS'.
+    maxSlots := (slotsEnv isNil or: [slotsEnv isEmpty])
+      ifTrue: [4]
+      ifFalse: [slotsEnv asInteger].
+    (maxSlots isNil or: [maxSlots < 1]) ifTrue: [maxSlots := 4].
+    dispatcher := Dispatcher on: bbs harnessFactory: harnessFactory maxSlots: maxSlots.
 
     "Initialize HTTP API (with dispatcher reference for workflow endpoints)"
     api := ApiServer on: port bbs: bbs dispatcher: dispatcher.

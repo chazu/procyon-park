@@ -1,0 +1,87 @@
+"Tests for Scheduler>>dispatchablePendingFrom:activeKeys: — the dispatch dedup
+ that prevents the harness spawn storm (duplicate task tuples sharing an
+ identity, and identities already in flight). See ganso.md Phase 4.
+
+ SD1  pending tasks deduped by identity (one per identity); non-pending excluded.
+ SD2  identities already active (in activeSlots) are excluded.
+ SD3  empty input yields empty output (no crash)."
+
+SDRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+  method: init [ passed := 0. failed := 0. failures := Array new: 0 ]
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+      ifFalse: [
+        failed := failed + 1. failures := failures copyWith: msg.
+        ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println]
+  ]
+  method: report [
+    '=== Scheduler dedup Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed = 0 ifTrue: ['ALL TESTS PASSED' println] ifFalse: ['SOME TESTS FAILED' println]
+  ]
+  method: failed [ ^failed ]
+
+TestSchedulerDedup subclass: Object
+
+  classMethod: run: t [
+    self testDedupAndPending: t.
+    self testExcludesActive: t.
+    self testEmpty: t
+  ]
+
+  classMethod: task: ident status: status [
+    | tup p |
+    p := Dictionary new. p at: 'status' put: status. p at: 'role' put: 'reviewer'.
+    tup := Dictionary new. tup at: 'identity' put: ident. tup at: 'payload' put: p.
+    ^tup
+  ]
+
+  classMethod: scheduler [
+    "bbs + factory unused by the pure helper; activeSlots/mutex are set in init."
+    ^Scheduler on: nil maxSlots: 4 harnessFactory: nil
+  ]
+
+  classMethod: testDedupAndPending: t [
+    | sched tasks result |
+    sched := self scheduler.
+    tasks := Array new: 0.
+    tasks := tasks copyWith: (self task: 'wf:task:review' status: 'pending').
+    tasks := tasks copyWith: (self task: 'wf:task:review' status: 'pending').  "duplicate identity"
+    tasks := tasks copyWith: (self task: 'wf:task:fix'    status: 'pending').
+    tasks := tasks copyWith: (self task: 'wf:task:impl'   status: 'dispatched'). "not pending"
+    result := sched dispatchablePendingFrom: tasks activeKeys: (Array new: 0).
+    t assertEqual: result size to: 2 message: 'SD1: dups collapsed to one, non-pending excluded'
+  ]
+
+  classMethod: testExcludesActive: t [
+    | sched tasks active result |
+    sched := self scheduler.
+    tasks := Array new: 0.
+    tasks := tasks copyWith: (self task: 'wf:task:review' status: 'pending').
+    tasks := tasks copyWith: (self task: 'wf:task:fix'    status: 'pending').
+    active := Array new: 0. active := active copyWith: 'wf:task:review'.
+    result := sched dispatchablePendingFrom: tasks activeKeys: active.
+    t assertEqual: result size to: 1 message: 'SD2: already-active identity excluded'.
+    t assertEqual: ((result at: 1) at: 'identity') to: 'wf:task:fix' message: 'SD2: remaining is the fix task'
+  ]
+
+  classMethod: testEmpty: t [
+    | sched result |
+    sched := self scheduler.
+    result := sched dispatchablePendingFrom: (Array new: 0) activeKeys: (Array new: 0).
+    t assertEqual: result size to: 0 message: 'SD3: empty input yields empty output'
+  ]
+
+"=== Main ==="
+TestSchedulerDedupMain subclass: Object
+  classMethod: start [
+    | t |
+    t := SDRunner new.
+    TestSchedulerDedup run: t.
+    t report.
+    ^t failed
+  ]
