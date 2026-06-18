@@ -255,7 +255,15 @@ PP subclass: CLIBase
      Maggie's System exposes no stderr stream, so route through /bin/sh's
      1>&2 redirect. NON-mutating — used only for the read hint."
     | safe |
-    safe := msg replaceAll: '"' with: '\"'.
+    "Escape every char sh treats special inside double quotes: backslash
+     FIRST (so we don't double-escape the escapes we add), then $, backtick,
+     and double-quote. Categories are a fixed vocabulary so this is
+     defence-in-depth, not a live exploit (review-issue: warnStderr: only
+     escaped double-quotes, leaving $/backtick/backslash interpreted)."
+    safe := msg replaceAll: '\' with: '\\'.
+    safe := safe replaceAll: '$' with: '\$'.
+    safe := safe replaceAll: '`' with: '\`'.
+    safe := safe replaceAll: '"' with: '\"'.
     Shell run: 'printf ''%s\n'' "', safe, '" 1>&2'
   ]
 
