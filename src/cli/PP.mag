@@ -166,17 +166,20 @@ PP subclass: CLIBase
      scanAll:. When a scoped scan finds nothing, a second non-consuming
      scanAll surfaces a discoverability hint if other scopes have matches."
     | category rdScope rdIdentity body allScopes positional scopedHits otherCount |
-    args size < 2 ifTrue: [
-      'Usage: pp read <category> [scope] [identity] [--all]' println.
-      ^self
-    ].
-
     allScopes := (args includes: '--all') or: [args includes: '-A'].
 
     "Strip --all/-A so positional indexing (scope, identity) stays correct."
     positional := Array new: 0.
     args do: [:a |
       ((a = '--all') or: [a = '-A']) ifFalse: [positional := positional copyWith: a]
+    ].
+
+    "Validate AFTER stripping flags: a bare '--all'/'-A' inflates raw args
+     size, so guard on positional (command + category = size >= 2) to keep
+     'pp read --all' (no category) from indexing out of range."
+    positional size < 2 ifTrue: [
+      'Usage: pp read <category> [scope] [identity] [--all]' println.
+      ^self
     ].
 
     category := positional at: 2.
@@ -207,8 +210,8 @@ PP subclass: CLIBase
       scopedHits isEmpty ifTrue: [
         otherCount := (self safeScan: category scope: nil) size.
         otherCount > 0 ifTrue: [
-          (otherCount printString, ' ', category,
-            ' tuple(s) exist in other scopes — pass --all or a scope') println
+          self warnStderr: otherCount printString, ' ', category,
+            ' tuple(s) exist in other scopes — pass --all or a scope'
         ]
       ]
     ]
@@ -223,6 +226,16 @@ PP subclass: CLIBase
     body at: 'category' put: category.
     allScopes ifFalse: [body at: 'scope' put: rdScope].
     ^body
+  ]
+
+  method: warnStderr: msg [
+    "Emit a single line to stderr so the discoverability hint never
+     pollutes the JSON on stdout (a `pp read | jq` pipeline stays valid).
+     Maggie's System exposes no stderr stream, so route through /bin/sh's
+     1>&2 redirect. NON-mutating — used only for the read hint."
+    | safe |
+    safe := msg replaceAll: '"' with: '\"'.
+    Shell run: 'printf ''%s\n'' "', safe, '" 1>&2'
   ]
 
   method: cmdNotify: args [

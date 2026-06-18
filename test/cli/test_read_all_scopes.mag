@@ -162,7 +162,16 @@ TestReadAllScopes subclass: Object
     t assert: (bodyScoped includesKey: 'scope')
       message: 'RS7: default body INCLUDES the scope key'.
     t assertEqual: (bodyScoped at: 'scope') to: 'scope-a'
-      message: 'RS7: default body scope value is the requested scope'
+      message: 'RS7: default body scope value is the requested scope'.
+
+    "RS8: 'pp read --all' with NO category must hit the usage guard, not
+     panic. The flag inflates raw args size, so the guard runs AFTER
+     stripping --all/-A; positional = #('read') (size 1) -> usage, no I/O,
+     no 'positional at: 2' out-of-range. Returns self (the cli) cleanly."
+    t assert: ((cli cmdRead: #('read' '--all')) == cli)
+      message: 'RS8: bare --all (no category) hits usage guard without panic'.
+    t assert: ((cli cmdRead: #('read' '-A')) == cli)
+      message: 'RS8: bare -A (no category) hits usage guard without panic'
   ]
 
 "=== Main ==="

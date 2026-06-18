@@ -965,7 +965,7 @@ Communicate with it using the `pp` command-line tool.
   pp decide <identity> <detail> [--rationale ..]     Record a decision
   pp event <identity> [--type T] [--summary S]       Emit an event
   pp plan <file.json>                                Submit a structured plan
-  pp read <category> [scope] [identity]              Read tuples
+  pp read <category> [scope] [identity] [--all]      Read tuples (--all scans every scope)
   pp notify <message> [--severity info|warn|urgent]  Notify the user
   pp dismiss                                         Signal task completion
   pp status                                          Show system status
@@ -2154,8 +2154,8 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
             scopedHits isEmpty ifTrue: [
               otherCount := (self safeScan: category cfg: cfg scope: nil) size.
               otherCount > 0 ifTrue: [
-                (otherCount printString, ' ', category,
-                  ' tuple(s) exist in other scopes — pass --all or a scope') println
+                self warnStderr: otherCount printString, ' ', category,
+                  ' tuple(s) exist in other scopes — pass --all or a scope'
               ]
             ]
           ]
@@ -2167,6 +2167,15 @@ Dashboard:     ', cfg baseUrl, '/dashboard/
     rest := args size > 1 ifTrue: [args copyFrom: 2] ifFalse: [Array new: 0].
     cmd setArgs: rest.
     ^[cmd execute] on: Cli::CliError do: [:e | 1]
+  ]
+
+  classMethod: warnStderr: msg [
+    "Emit a single line to stderr so the read discoverability hint never
+     pollutes the JSON on stdout. Maggie's System exposes no stderr stream,
+     so route through /bin/sh's 1>&2 redirect. NON-mutating."
+    | safe |
+    safe := msg replaceAll: '"' with: '\"'.
+    Shell run: 'printf ''%s\n'' "', safe, '" 1>&2'
   ]
 
   "--- Subcommand: history -------------------------------------------------"

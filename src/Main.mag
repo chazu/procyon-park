@@ -109,7 +109,7 @@ Main subclass: Object
     '  decide   <identity> <detail> [--rationale ..]  Record a decision' println.
     '  event    <identity> [--type T] [--summary S]   Emit an event' println.
     '  plan     <file.json>                           Submit a structured plan' println.
-    '  read     <category> [scope] [identity]         Read tuples' println.
+    '  read     <category> [scope] [identity] [--all] Read tuples (--all scans every scope)' println.
     '  notify   <message> [--severity info|warn|urgent] Notify the user' println.
     '  dismiss                                        Signal task completion' println.
     '  status                                         Show system status' println.
