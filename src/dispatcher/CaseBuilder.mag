@@ -1,0 +1,166 @@
+"CaseBuilder — PURE transform from an in-memory WorkflowRecord into a
+ case-payload Dictionary.
+
+ PURITY CONTRACT: this class performs NO BBS access, NO `DateTime now`,
+ and NO I/O. Everything it needs is supplied in the WorkflowRecord the
+ caller passes in (the engine-wiring story is responsible for gathering
+ the record and stamping wall-clock time). That makes CaseBuilder
+ trivially unit-testable with synthetic plain-Dictionary records.
+
+ WorkflowRecord shape (a Maggie Dictionary):
+   'workflow'     -> workflow tuple Dictionary.
+                     Keys: 'identity'(String), 'created_at'(Integer epoch),
+                     'payload'(Dictionary). payload keys: 'status',
+                     one of 'completed_at'/'failed_at'/'cancelled_at'
+                     (Integer epoch), and 'params'(Dictionary with
+                     'repo','template','workitem').
+   'tasks'        -> Array of task tuple Dictionaries (ascending by
+                     created_at). Each has 'payload' with 'role',
+                     'description','status','retry_count'.
+   'observations' -> Array of observation tuple Dictionaries (each
+                     'payload' may carry 'files_changed').
+   'events'       -> Array of event tuple Dictionaries.
+
+ Every key access uses at:ifAbsent: — no key is ever assumed present."
+
+CaseBuilder subclass: Object
+
+  classMethod: buildCase: aRecord terminalState: stateString [
+    "Transform a WorkflowRecord into a case-payload Dictionary with
+     EXACTLY the keys documented inline below. Pure: no I/O, no clock."
+    | case workflow wfPayload params tasks observations
+      repo missionType start end duration retries reviewCycles
+      humanInterventions filesChanged foundFiles actions tags seenRoles |
+
+    workflow := aRecord at: 'workflow' ifAbsent: [Dictionary new].
+    wfPayload := workflow at: 'payload' ifAbsent: [Dictionary new].
+    params := wfPayload at: 'params' ifAbsent: [Dictionary new].
+    tasks := aRecord at: 'tasks' ifAbsent: [Array new: 0].
+    observations := aRecord at: 'observations' ifAbsent: [Array new: 0].
+
+    "--- repo / mission_type ---"
+    repo := params at: 'repo' ifAbsent: [''].
+    missionType := params at: 'template'
+      ifAbsent: [ wfPayload at: 'template' ifAbsent: ['unknown'] ].
+
+    "--- duration_minutes: floor((end-start)/60), never negative; 0 if
+     either bound is missing. end is the first present of the three
+     terminal timestamps. ---"
+    start := workflow at: 'created_at' ifAbsent: [nil].
+    end := nil.
+    (wfPayload at: 'completed_at' ifAbsent: [nil]) notNil
+      ifTrue: [end := wfPayload at: 'completed_at'].
+    (end isNil and: [(wfPayload at: 'failed_at' ifAbsent: [nil]) notNil])
+      ifTrue: [end := wfPayload at: 'failed_at'].
+    (end isNil and: [(wfPayload at: 'cancelled_at' ifAbsent: [nil]) notNil])
+      ifTrue: [end := wfPayload at: 'cancelled_at'].
+    duration := 0.
+    (start notNil and: [end notNil]) ifTrue: [
+      duration := ((end - start) // 60) max: 0
+    ].
+
+    "--- retries: sum of each task's retry_count (default 0) ---"
+    retries := 0.
+    tasks do: [:tk |
+      retries := retries + (self retryCountOf: tk)
+    ].
+
+    "--- review_cycles: tasks whose role = 'reviewer' ---"
+    reviewCycles := 0.
+    tasks do: [:tk |
+      ((self payloadOf: tk) at: 'role' ifAbsent: ['']) = 'reviewer'
+        ifTrue: [reviewCycles := reviewCycles + 1]
+    ].
+
+    "--- human_interventions: documented proxy = retries + review_cycles ---"
+    humanInterventions := retries + reviewCycles.
+
+    "--- files_changed: from the FIRST observation whose payload carries
+     'files_changed'; else 0. ---"
+    filesChanged := 0.
+    foundFiles := false.
+    observations do: [:ob |
+      (foundFiles not and:
+        [((self payloadOf: ob) at: 'files_changed' ifAbsent: [nil]) notNil])
+        ifTrue: [
+          filesChanged := (self payloadOf: ob) at: 'files_changed'.
+          foundFiles := true
+        ]
+    ].
+
+    "--- actions: one Dictionary per task ---"
+    actions := tasks collect: [:tk | self actionFor: tk].
+
+    "--- tags: skip empties ---"
+    tags := Array new: 0.
+    (self isBlank: repo) ifFalse: [tags := tags copyWith: repo].
+    (self isBlank: missionType) ifFalse: [tags := tags copyWith: missionType].
+    (self isBlank: stateString) ifFalse: [tags := tags copyWith: stateString].
+    tags := tags copyWith: ('success:', (stateString = 'completed') printString).
+    "one 'role:<r>' per DISTINCT task role"
+    seenRoles := Array new: 0.
+    tasks do: [:tk |
+      (seenRoles includes: ((self payloadOf: tk) at: 'role' ifAbsent: ['']))
+        ifFalse: [
+          seenRoles := seenRoles copyWith: ((self payloadOf: tk) at: 'role' ifAbsent: [''])
+        ]
+    ].
+    seenRoles do: [:r |
+      (self isBlank: r) ifFalse: [tags := tags copyWith: ('role:', r)]
+    ].
+
+    "--- assemble the case payload ---"
+    case := Dictionary new.
+    case at: 'workflow_instance' put: (workflow at: 'identity' ifAbsent: ['']).
+    case at: 'repo' put: repo.
+    case at: 'mission_type' put: missionType.
+    case at: 'terminal_state' put: stateString.
+    case at: 'duration_minutes' put: duration.
+    case at: 'retries' put: retries.
+    case at: 'review_cycles' put: reviewCycles.
+    case at: 'human_interventions' put: humanInterventions.
+    case at: 'files_changed' put: filesChanged.
+    case at: 'actions' put: actions.
+    case at: 'tags' put: tags.
+    ^case
+  ]
+
+  classMethod: payloadOf: aTuple [
+    "Tuple-payload accessor that never assumes the key exists."
+    ^aTuple at: 'payload' ifAbsent: [Dictionary new]
+  ]
+
+  classMethod: retryCountOf: aTask [
+    "retry_count as a number; nil / absent => 0. (Coerces a String via
+     asInteger when the underlying tuple was deserialized loosely.)"
+    | rc |
+    rc := (self payloadOf: aTask) at: 'retry_count' ifAbsent: [0].
+    rc isNil ifTrue: [^0].
+    (rc isKindOf: Integer) ifTrue: [^rc].
+    (rc isKindOf: String) ifTrue: [^rc asInteger].
+    ^rc
+  ]
+
+  classMethod: actionFor: aTask [
+    "Per-task action Dictionary: role, description(first 120 chars,
+     guard shorter), status."
+    | a tp |
+    tp := self payloadOf: aTask.
+    a := Dictionary new.
+    a at: 'role' put: (tp at: 'role' ifAbsent: ['']).
+    a at: 'description'
+      put: (self truncate: (tp at: 'description' ifAbsent: ['']) to: 120).
+    a at: 'status' put: (tp at: 'status' ifAbsent: ['']).
+    ^a
+  ]
+
+  classMethod: truncate: aString to: n [
+    "First n characters, guarding strings shorter than n."
+    aString isNil ifTrue: [^''].
+    aString size > n ifTrue: [^aString copyFrom: 1 to: n].
+    ^aString
+  ]
+
+  classMethod: isBlank: aString [
+    ^aString isNil or: [aString isEmpty]
+  ]

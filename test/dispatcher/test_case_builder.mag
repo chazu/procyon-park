@@ -1,0 +1,312 @@
+"Tests for CaseBuilder>>buildCase:terminalState: — a PURE transform from
+ an in-memory WorkflowRecord into a case-payload Dictionary.
+
+ No BBS, no clock, no I/O: every record below is a plain synthetic
+ Dictionary built with Dictionary new + at:put:.
+
+ Invariants under test:
+   CB1  Happy path (completed): 2 tasks (implementer + reviewer) with
+        retry_count 1+0 => retries=1, review_cycles=1,
+        human_interventions=2; created 1000 -> completed 1600 yields
+        duration_minutes=10; tags carry 'success:true', the repo, the
+        mission_type, the terminal_state and one role:<r> per distinct
+        role; actions mirror the tasks.
+   CB2  Failed terminal_state: tags carry 'success:false',
+        terminal_state='failed', and duration is computed off failed_at.
+   CB3  Missing end timestamp => duration_minutes=0 and no crash.
+   CB4  Empty tasks => retries=0, review_cycles=0, human_interventions=0,
+        actions is an empty Array.
+   CB5  files_changed is taken from the FIRST observation whose payload
+        carries files_changed.
+   CB6  Description longer than 120 chars is truncated to 120; negative
+        duration math is floored at 0."
+
+CBRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== CaseBuilder Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== CBHelper — synthetic-record builders (no BBS) ==="
+CBHelper subclass: Object
+
+  classMethod: task: role status: status retry: rc desc: desc [
+    "Build a synthetic task tuple Dictionary."
+    | t p |
+    p := Dictionary new.
+    p at: 'role' put: role.
+    p at: 'status' put: status.
+    p at: 'retry_count' put: rc.
+    p at: 'description' put: desc.
+    t := Dictionary new.
+    t at: 'payload' put: p.
+    ^t
+  ]
+
+  classMethod: observationWithFiles: n [
+    | o p |
+    p := Dictionary new.
+    p at: 'files_changed' put: n.
+    o := Dictionary new.
+    o at: 'payload' put: p.
+    ^o
+  ]
+
+  classMethod: observationPlain [
+    | o p |
+    p := Dictionary new.
+    p at: 'note' put: 'no files key here'.
+    o := Dictionary new.
+    o at: 'payload' put: p.
+    ^o
+  ]
+
+  classMethod: record: identity created: createdAt endKey: endKey endAt: endAt
+              repo: repo template: template tasks: tasks observations: observations [
+    "Assemble a full WorkflowRecord. endKey is one of
+     'completed_at'/'failed_at'/'cancelled_at', or nil for no end stamp."
+    | rec workflow wfPayload params |
+    params := Dictionary new.
+    params at: 'repo' put: repo.
+    params at: 'template' put: template.
+    params at: 'workitem' put: 'wi-1'.
+    wfPayload := Dictionary new.
+    wfPayload at: 'status' put: 'done'.
+    wfPayload at: 'params' put: params.
+    endKey notNil ifTrue: [wfPayload at: endKey put: endAt].
+    workflow := Dictionary new.
+    workflow at: 'identity' put: identity.
+    workflow at: 'created_at' put: createdAt.
+    workflow at: 'payload' put: wfPayload.
+    rec := Dictionary new.
+    rec at: 'workflow' put: workflow.
+    rec at: 'tasks' put: tasks.
+    rec at: 'observations' put: observations.
+    rec at: 'events' put: (Array new: 0).
+    ^rec
+  ]
+
+"=== TestCaseBuilder ==="
+TestCaseBuilder subclass: Object
+
+  classMethod: run: t [
+    self testHappyPathCompleted: t.
+    self testFailedTerminalState: t.
+    self testMissingEndTime: t.
+    self testEmptyTasks: t.
+    self testFilesChangedFromObservation: t.
+    self testTruncateAndNegativeDurationFloor: t
+  ]
+
+  classMethod: twoTasks [
+    | tasks |
+    tasks := Array new: 0.
+    tasks := tasks copyWith:
+      (CBHelper task: 'implementer' status: 'completed' retry: 1 desc: 'do the thing').
+    tasks := tasks copyWith:
+      (CBHelper task: 'reviewer' status: 'completed' retry: 0 desc: 'review the thing').
+    ^tasks
+  ]
+
+  classMethod: testHappyPathCompleted: t [
+    | rec case tags actions a0 |
+    '--- CB1: happy path completed ---' println.
+    rec := CBHelper record: 'wf-happy' created: 1000
+      endKey: 'completed_at' endAt: 1600
+      repo: 'acme/widgets' template: 'full-pipeline'
+      tasks: self twoTasks observations: (Array new: 0).
+
+    case := CaseBuilder buildCase: rec terminalState: 'completed'.
+
+    t assertEqual: (case at: 'workflow_instance') to: 'wf-happy'
+      message: 'CB1: workflow_instance'.
+    t assertEqual: (case at: 'repo') to: 'acme/widgets'
+      message: 'CB1: repo'.
+    t assertEqual: (case at: 'mission_type') to: 'full-pipeline'
+      message: 'CB1: mission_type from params template'.
+    t assertEqual: (case at: 'terminal_state') to: 'completed'
+      message: 'CB1: terminal_state'.
+    t assertEqual: (case at: 'duration_minutes') to: 10
+      message: 'CB1: duration (1600-1000)/60 = 10'.
+    t assertEqual: (case at: 'retries') to: 1
+      message: 'CB1: retries = 1+0'.
+    t assertEqual: (case at: 'review_cycles') to: 1
+      message: 'CB1: review_cycles = 1 reviewer'.
+    t assertEqual: (case at: 'human_interventions') to: 2
+      message: 'CB1: human_interventions = retries + review_cycles'.
+    t assertEqual: (case at: 'files_changed') to: 0
+      message: 'CB1: no observations => files_changed 0'.
+
+    actions := case at: 'actions'.
+    t assertEqual: actions size to: 2
+      message: 'CB1: actions has one entry per task'.
+    a0 := actions at: 1.
+    t assertEqual: (a0 at: 'role') to: 'implementer'
+      message: 'CB1: action[0] role'.
+    t assertEqual: (a0 at: 'description') to: 'do the thing'
+      message: 'CB1: action[0] description'.
+    t assertEqual: (a0 at: 'status') to: 'completed'
+      message: 'CB1: action[0] status'.
+
+    tags := case at: 'tags'.
+    t assert: (tags includes: 'success:true')
+      message: 'CB1: tags include success:true'.
+    t assert: (tags includes: 'acme/widgets')
+      message: 'CB1: tags include repo'.
+    t assert: (tags includes: 'full-pipeline')
+      message: 'CB1: tags include mission_type'.
+    t assert: (tags includes: 'completed')
+      message: 'CB1: tags include terminal_state'.
+    t assert: (tags includes: 'role:implementer')
+      message: 'CB1: tags include role:implementer'.
+    t assert: (tags includes: 'role:reviewer')
+      message: 'CB1: tags include role:reviewer'
+  ]
+
+  classMethod: testFailedTerminalState: t [
+    | rec case tags |
+    '--- CB2: failed terminal state ---' println.
+    rec := CBHelper record: 'wf-fail' created: 2000
+      endKey: 'failed_at' endAt: 2300
+      repo: 'acme/widgets' template: 'scout-mission'
+      tasks: self twoTasks observations: (Array new: 0).
+
+    case := CaseBuilder buildCase: rec terminalState: 'failed'.
+
+    t assertEqual: (case at: 'terminal_state') to: 'failed'
+      message: 'CB2: terminal_state failed'.
+    t assertEqual: (case at: 'duration_minutes') to: 5
+      message: 'CB2: duration from failed_at (2300-2000)/60 = 5'.
+    tags := case at: 'tags'.
+    t assert: (tags includes: 'success:false')
+      message: 'CB2: tags include success:false'.
+    t assert: ((tags includes: 'success:true') not)
+      message: 'CB2: tags do NOT include success:true'
+  ]
+
+  classMethod: testMissingEndTime: t [
+    | rec case |
+    '--- CB3: missing end timestamp => duration 0 ---' println.
+    rec := CBHelper record: 'wf-noend' created: 1000
+      endKey: nil endAt: nil
+      repo: 'acme/widgets' template: 'scout-mission'
+      tasks: self twoTasks observations: (Array new: 0).
+
+    case := CaseBuilder buildCase: rec terminalState: 'cancelled'.
+
+    t assertEqual: (case at: 'duration_minutes') to: 0
+      message: 'CB3: no end timestamp => duration 0'.
+    t assertEqual: (case at: 'terminal_state') to: 'cancelled'
+      message: 'CB3: terminal_state cancelled'
+  ]
+
+  classMethod: testEmptyTasks: t [
+    | rec case actions |
+    '--- CB4: empty tasks ---' println.
+    rec := CBHelper record: 'wf-empty' created: 1000
+      endKey: 'completed_at' endAt: 1060
+      repo: 'acme/widgets' template: 'scout-mission'
+      tasks: (Array new: 0) observations: (Array new: 0).
+
+    case := CaseBuilder buildCase: rec terminalState: 'completed'.
+
+    t assertEqual: (case at: 'retries') to: 0
+      message: 'CB4: empty tasks => retries 0'.
+    t assertEqual: (case at: 'review_cycles') to: 0
+      message: 'CB4: empty tasks => review_cycles 0'.
+    t assertEqual: (case at: 'human_interventions') to: 0
+      message: 'CB4: empty tasks => human_interventions 0'.
+    actions := case at: 'actions'.
+    t assertEqual: actions size to: 0
+      message: 'CB4: empty tasks => actions empty array'
+  ]
+
+  classMethod: testFilesChangedFromObservation: t [
+    | rec case obs |
+    '--- CB5: files_changed from first observation ---' println.
+    obs := Array new: 0.
+    obs := obs copyWith: CBHelper observationPlain.
+    obs := obs copyWith: (CBHelper observationWithFiles: 7).
+    obs := obs copyWith: (CBHelper observationWithFiles: 99).
+    rec := CBHelper record: 'wf-files' created: 1000
+      endKey: 'completed_at' endAt: 1600
+      repo: 'acme/widgets' template: 'full-pipeline'
+      tasks: self twoTasks observations: obs.
+
+    case := CaseBuilder buildCase: rec terminalState: 'completed'.
+
+    t assertEqual: (case at: 'files_changed') to: 7
+      message: 'CB5: files_changed taken from FIRST observation that has it'
+  ]
+
+  classMethod: testTruncateAndNegativeDurationFloor: t [
+    | rec case longDesc tasks a0 |
+    '--- CB6: description truncation + negative duration floor ---' println.
+    longDesc := 'x'.
+    [longDesc size < 200] whileTrue: [longDesc := longDesc, 'x'].
+    tasks := Array new: 0.
+    tasks := tasks copyWith:
+      (CBHelper task: 'implementer' status: 'completed' retry: 0 desc: longDesc).
+    "created AFTER completed => negative raw duration, must floor to 0"
+    rec := CBHelper record: 'wf-neg' created: 5000
+      endKey: 'completed_at' endAt: 1000
+      repo: 'acme/widgets' template: 'full-pipeline'
+      tasks: tasks observations: (Array new: 0).
+
+    case := CaseBuilder buildCase: rec terminalState: 'completed'.
+
+    t assertEqual: (case at: 'duration_minutes') to: 0
+      message: 'CB6: negative duration floored to 0'.
+    a0 := (case at: 'actions') at: 1.
+    t assertEqual: (a0 at: 'description') size to: 120
+      message: 'CB6: long description truncated to 120 chars'
+  ]
+
+"=== Main ==="
+CaseBuilderMain subclass: Object
+  classMethod: start [
+    | t |
+    t := CBRunner new.
+    TestCaseBuilder run: t.
+    t report.
+    ^t failed
+  ]
