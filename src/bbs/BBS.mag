@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex upsertMutex startedAt index byId byKey byCatIdent dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener saveToDiskHook gansoStore
+  instanceVars: space nextId mutex upsertMutex startedAt index byId byKey byCatIdent byCategory dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener saveToDiskHook gansoStore
 
   classMethod: new [
     ^super new initialize
@@ -42,6 +42,12 @@ BBS subclass: Object
     byId := Dictionary new.
     byKey := Dictionary new.
     byCatIdent := Dictionary new.
+    "byCategory — category (String) → ArrayList of tuples. Lets scanAll:/scan:
+     return a single category's tuples in O(matches) instead of walking the
+     whole flat index O(total). Without it, a `scanAll: 'task'` pays for every
+     `case`/`decision`/`fact` it filters out — so unbounded `case` growth taxes
+     every scan of every OTHER category. See docs/scout-perf-pinned-tuples-2026-06-18.md R4."
+    byCategory := Dictionary new.
 
     "Set data directory"
     aPath notNil
@@ -110,6 +116,7 @@ BBS subclass: Object
   method: byKeyMap [ ^byKey ]
   method: byIdMap [ ^byId ]
   method: byCatIdentMap [ ^byCatIdent ]
+  method: byCategoryMap [ ^byCategory ]
   method: byKeyHasCategory: category scope: scope identity: identity [
     ^mutex critical: [byKey includesKey: (self keyFor: category scope: scope identity: identity)]
   ]
@@ -182,12 +189,19 @@ BBS subclass: Object
 
   method: addToIndices: tuple [
     "Caller MUST hold mutex. Adds tuple to flat index and all hash indices."
-    | tupleId k ck arr arr2 |
+    | tupleId k ck arr arr2 cat bucket |
     tupleId := tuple at: 'id'.
     "ArrayList add: is O(1) amortized — was O(N) when index was an Array
      and we copyWith:'d on every write."
     index add: tuple.
     byId at: tupleId put: tuple.
+    "Per-category bucket (byCategory): ArrayList per category, O(1) add.
+     scanAll:/scan: read straight from this bucket so their cost is
+     O(matches) not O(total durable tuples)."
+    cat := tuple at: 'category'.
+    bucket := byCategory at: cat ifAbsent: [nil].
+    bucket isNil ifTrue: [bucket := ArrayList new. byCategory at: cat put: bucket].
+    bucket add: tuple.
     k := self keyFor: (tuple at: 'category') scope: (tuple at: 'scope') identity: (tuple at: 'identity').
     arr := byKey at: k ifAbsent: [nil].
     arr isNil
@@ -226,7 +240,26 @@ BBS subclass: Object
     "Linear scan + removeAt: on the ArrayList — O(N) worst case but no
      fresh array allocation. Stops at first match: tuple ids are unique."
     self removeFromFlatIndexById: tupleId.
+    self removeFromCategoryBucketById: tupleId category: (tuple at: 'category').
     ^tuple
+  ]
+
+  method: removeFromCategoryBucketById: tupleId category: cat [
+    "Caller MUST hold mutex. Drop the tuple with matching id from its
+     per-category bucket. Drops the bucket key entirely once empty so an
+     emptied category leaves no stale entry. No-op if absent."
+    | bucket n i found |
+    bucket := byCategory at: cat ifAbsent: [nil].
+    bucket isNil ifTrue: [^self].
+    n := bucket size.
+    i := 1.
+    found := 0.
+    [(found <= 0) and: [i <= n]] whileTrue: [
+      ((bucket at: i) at: 'id') = tupleId ifTrue: [found := i].
+      i := i + 1
+    ].
+    found > 0 ifTrue: [bucket removeAt: found].
+    bucket isEmpty ifTrue: [byCategory removeKey: cat ifAbsent: [nil]]
   ]
 
   method: removeFromFlatIndexById: tupleId [
@@ -441,11 +474,16 @@ BBS subclass: Object
      other writers)."
     gansoStore notNil ifTrue: [^gansoStore scan: category scope: scope].
     ^mutex critical: [
-      | result |
+      | result bucket |
       result := ArrayList new.
-      index do: [:t |
-        ((t at: 'category') = category and: [(t at: 'scope') = scope])
-          ifTrue: [result add: t]
+      "Walk only this category's bucket (O(matches)) instead of the whole
+       flat index. Unbounded growth in OTHER categories (e.g. `case`) no
+       longer taxes this scan."
+      bucket := byCategory at: category ifAbsent: [nil].
+      bucket notNil ifTrue: [
+        bucket do: [:t |
+          (t at: 'scope') = scope ifTrue: [result add: t]
+        ]
       ].
       result asArray
     ]
@@ -456,11 +494,12 @@ BBS subclass: Object
      for the same reasons as scan:scope:."
     gansoStore notNil ifTrue: [^gansoStore scanAll: category].
     ^mutex critical: [
-      | result |
+      | result bucket |
       result := ArrayList new.
-      index do: [:t |
-        (t at: 'category') = category ifTrue: [result add: t]
-      ].
+      "O(matches): copy the category bucket rather than walking the whole
+       flat index and discarding every other category."
+      bucket := byCategory at: category ifAbsent: [nil].
+      bucket notNil ifTrue: [bucket do: [:t | result add: t]].
       result asArray
     ]
   ]

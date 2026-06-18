@@ -193,6 +193,12 @@ MultiplayerTestMain subclass: Object
         failures := failures copyWith: ('TestReadAllScopesMain CRASHED: ', e messageText).
         ('CRASH: TestReadAllScopesMain: ', e messageText) println].
 
+    [totalFailed := totalFailed + TestGcCasesMain run. ranSuites := ranSuites + 1]
+      on: Exception do: [:e |
+        failedSuites := failedSuites + 1.
+        failures := failures copyWith: ('TestGcCasesMain CRASHED: ', e messageText).
+        ('CRASH: TestGcCasesMain: ', e messageText) println].
+
     [totalFailed := totalFailed + TestSchedulerDedupMain start. ranSuites := ranSuites + 1]
       on: Exception do: [:e |
         failedSuites := failedSuites + 1.

@@ -1,0 +1,137 @@
+"Tests for `pp gc` cold-case retention sweep (SystemCommands>>casesToSweep:).
+
+ 'case' tuples are written once per terminal workflow and were never GC'd —
+ an unbounded grower. casesToSweep: is the pure retention policy used by
+ gcCases:: rank cases newest-first by payload.created_at, keep the N most
+ recent, and from the remainder drop only those older than the age guard.
+
+ Invariants under test:
+   GC1  size <= keep → sweep nothing.
+   GC2  keep N most recent (highest created_at), sweep the rest.
+   GC3  the swept set is exactly the oldest (size-keep) cases.
+   GC4  --cases-older-than guard spares old-but-within-keep AND
+        recent-but-beyond-keep cases (must be BOTH beyond keep AND older).
+   GC5  missing created_at sorts as oldest (swept first).
+   GC6  keep 0 sweeps everything (subject to the age guard).
+
+ Standalone runner at bottom (TestGcCasesMain run)."
+
+GCRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== GC Cases Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+TestGcCases subclass: Object
+
+  classMethod: caseId: ident createdAt: created [
+    | t p |
+    p := Dictionary new.
+    created notNil ifTrue: [p at: 'created_at' put: created].
+    t := Dictionary new.
+    t at: 'category' put: 'case'.
+    t at: 'scope' put: 's'.
+    t at: 'identity' put: ident.
+    t at: 'payload' put: p.
+    ^t
+  ]
+
+  classMethod: identsOf: tuples [
+    ^tuples collect: [:t | t at: 'identity']
+  ]
+
+  classMethod: run: t [
+    | sc cases victims now |
+    '--- TestGcCases ---' println.
+    sc := SystemCommands new.
+    now := 1000000000.
+
+    "Five cases, created_at 10..50 (c5 newest)."
+    cases := Array new: 0.
+    cases := cases copyWith: (self caseId: 'c1' createdAt: now - 50000).
+    cases := cases copyWith: (self caseId: 'c2' createdAt: now - 40000).
+    cases := cases copyWith: (self caseId: 'c3' createdAt: now - 30000).
+    cases := cases copyWith: (self caseId: 'c4' createdAt: now - 20000).
+    cases := cases copyWith: (self caseId: 'c5' createdAt: now - 10000).
+
+    "=== GC1: size <= keep → nothing swept ==="
+    victims := sc casesToSweep: cases keep: 5 olderThanHours: 0 now: now.
+    t assertEqual: victims size to: 0 message: 'GC1: keep>=size sweeps nothing'.
+    victims := sc casesToSweep: cases keep: 10 olderThanHours: 0 now: now.
+    t assertEqual: victims size to: 0 message: 'GC1: keep>size sweeps nothing'.
+
+    "=== GC2/GC3: keep 2 most recent (c5,c4) → sweep c1,c2,c3 ==="
+    victims := sc casesToSweep: cases keep: 2 olderThanHours: 0 now: now.
+    t assertEqual: victims size to: 3 message: 'GC2: keep 2 sweeps the other 3'.
+    t assert: ((self identsOf: victims) includes: 'c1') message: 'GC3: oldest c1 swept'.
+    t assert: ((self identsOf: victims) includes: 'c2') message: 'GC3: c2 swept'.
+    t assert: ((self identsOf: victims) includes: 'c3') message: 'GC3: c3 swept'.
+    t assert: ((self identsOf: victims) includes: 'c4') not message: 'GC3: c4 kept (recent)'.
+    t assert: ((self identsOf: victims) includes: 'c5') not message: 'GC3: c5 kept (newest)'.
+
+    "=== GC4: age guard. keep 2 leaves c1,c2,c3 as candidates; with a
+     ~8.3h cutoff (30000s) only created_at < now-30000 qualify — that is
+     c1 (50000) and c2 (40000); c3 (exactly 30000) is NOT < cutoff. ==="
+    victims := sc casesToSweep: cases keep: 2 olderThanHours: 8 now: now.
+    "8h = 28800s cutoff = now-28800. c1(50000),c2(40000),c3(30000) all older."
+    t assertEqual: victims size to: 3 message: 'GC4: 8h guard still sweeps all 3 candidates'.
+    victims := sc casesToSweep: cases keep: 2 olderThanHours: 11 now: now.
+    "11h = 39600s cutoff. older-than means created_at < now-39600.
+     c1(50000)<39600? created=now-50000 → now-created=50000 > 39600 → older → sweep.
+     c2: 40000 > 39600 → older → sweep. c3: 30000 < 39600 → NOT older → spared."
+    t assertEqual: victims size to: 2 message: 'GC4: 11h guard spares c3 (within age)'.
+    t assert: ((self identsOf: victims) includes: 'c3') not message: 'GC4: c3 spared by age guard'.
+
+    "=== GC5: missing created_at sorts oldest → swept first ==="
+    cases := cases copyWith: (self caseId: 'cNull' createdAt: nil).
+    victims := sc casesToSweep: cases keep: 5 olderThanHours: 0 now: now.
+    "6 cases, keep 5 → exactly 1 swept, and it must be the null-timestamp one."
+    t assertEqual: victims size to: 1 message: 'GC5: keep 5 of 6 sweeps 1'.
+    t assert: ((self identsOf: victims) includes: 'cNull') message: 'GC5: null created_at swept first (oldest)'.
+
+    "=== GC6: keep 0 sweeps everything (no age guard) ==="
+    victims := sc casesToSweep: cases keep: 0 olderThanHours: 0 now: now.
+    t assertEqual: victims size to: 6 message: 'GC6: keep 0 sweeps all'.
+  ]
+
+"=== Main ==="
+TestGcCasesMain subclass: Object
+  classMethod: run [
+    | t |
+    t := GCRunner new.
+    TestGcCases run: t.
+    t report.
+    ^t failed
+  ]
