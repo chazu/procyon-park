@@ -161,7 +161,9 @@ ApiServer subclass: Object
      dashboard subscriber can attach. Mitigation for the per-tick memory leak
      (story:fix-sse-tick-memory-leak) — keeps the server stable while the leak
      is unfixed. Connections to /api/sse/dashboard fast-fail (no handler)."
-    sseDisabled := (System env: 'PP_NO_SSE') notNil.
+    "System env: returns '' (not nil) for an unset var, so test for a
+     non-empty value — not notNil — or SSE would always be disabled."
+    sseDisabled := (System env: 'PP_NO_SSE') isEmpty not.
     sseDisabled
       ifTrue: [ 'SSE dashboard DISABLED (PP_NO_SSE set)' println ]
       ifFalse: [
