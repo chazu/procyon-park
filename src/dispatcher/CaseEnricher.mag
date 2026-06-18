@@ -33,6 +33,10 @@ CaseEnricher subclass: Object
     existing := bbs rdp: 'case' scope: scope identity: instanceId.
     existing isNil ifTrue: [^false].
 
+    "update: (linear) — the case is a durable LINEAR tuple (see
+     WorkflowEngine>>writeCaseSkeleton and BBS>>isDurableCategory). update:
+     consumes + re-writes it and, because 'case' is durable, re-flushes so
+     the enrichment survives a restart."
     bbs update: 'case' scope: scope identity: instanceId do: [:p |
       p at: 'aar' put: (enrichment at: 'aar' ifAbsent: ['']).
       p at: 'lessons' put: (enrichment at: 'lessons' ifAbsent: [Array new: 0]).

@@ -726,6 +726,11 @@ WorkflowEngine subclass: Object
       record := WorkflowRecordGatherer gather: instanceId scope: scope bbs: bbs.
       payload := CaseBuilder buildCase: record terminalState: state.
       payload at: 'created_at' put: DateTime now epochSeconds.
+      "out: (linear) — case reads/updates go through rdp:/update: (the
+       linear tuplespace path). Durability across restart comes from 'case'
+       being in BBS>>isDurableCategory, which flushes it to disk and reloads
+       it; a pinned tuple would be invisible to the rdp:-based existence
+       checks here and in CaseEnricher."
       bbs out: 'case' scope: scope identity: instanceId payload: payload
     ] on: Exception do: [:e |
       bbs logEngine: 'warn' component: 'aar' scope: scope message: ('case skeleton failed (non-fatal): ', e messageText)

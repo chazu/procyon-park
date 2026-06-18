@@ -142,7 +142,8 @@ TestCaseSkeletonWire subclass: Object
     self testCompleteWritesOneCase: t.
     self testIdempotentSecondCall: t.
     self testFailWritesFailedCase: t.
-    self testExceptionIsSwallowed: t
+    self testExceptionIsSwallowed: t.
+    self testCaseSurvivesReload: t
   ]
 
   classMethod: testCompleteWritesOneCase: t [
@@ -223,6 +224,33 @@ TestCaseSkeletonWire subclass: Object
       message: 'CSW4: writeCaseSkeleton never propagates a gatherer exception'.
     t assert: (stub outCalled not)
       message: 'CSW4: no case tuple written when gather throws'
+  ]
+
+  classMethod: testCaseSurvivesReload: t [
+    "Durability: a written case must survive a server restart. Simulate the
+     restart by flushing to disk and loading a brand-new BBS from the same
+     data dir — exactly what `pp serve` does on boot. Guards the regression
+     where 'case' was in Categories.pinned but NOT BBS>>isDurableCategory, so
+     cases were never flushed and vanished on restart."
+    | tempDir bbs engine wf reloaded caseTuple |
+    '--- CSW5: case is durable — survives a fresh BBS load from disk ---' println.
+    tempDir := CSWHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    CSWHelper seedWorkflow: bbs id: 'dur-1' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    wf := bbs rdp: 'workflow' scope: 'default' identity: 'dur-1'.
+    engine completeWorkflow: wf.
+    bbs flushIfDirty.
+
+    reloaded := BBS withDataDir: tempDir.
+    caseTuple := reloaded rdp: 'case' scope: 'default' identity: 'dur-1'.
+    t assert: (caseTuple notNil)
+      message: 'CSW5: case tuple reloaded from disk after a simulated restart'.
+    caseTuple notNil ifTrue: [
+      t assertEqual: ((caseTuple at: 'payload') at: 'terminal_state' ifAbsent: [nil]) to: 'completed'
+        message: 'CSW5: reloaded case retains terminal_state=completed'
+    ]
   ]
 
 "=== Main ==="

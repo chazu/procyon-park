@@ -818,7 +818,7 @@ BBS subclass: Object
      pinned-only (registered users / rotated keys) and must survive a
      restart — without it, every admin re-registration of a user is lost
      the moment the server bounces."
-    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem' 'identity') includes: category
+    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem' 'identity' 'case') includes: category
   ]
 
   method: persistAfterChange [

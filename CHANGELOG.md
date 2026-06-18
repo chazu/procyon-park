@@ -27,6 +27,15 @@ Semantic Versioning.
   `index 0 out of bounds` crashes throughout the server and CLI.
 
 ### Fixed
+- AAR `case` tuples now survive a server restart (they are institutional
+  memory). The wire story added `case` to `Categories.pinned` but NOT to
+  `BBS>>isDurableCategory` — the *separate* list that actually gates the
+  disk flush + reload — so cases were written linear, never flushed, and
+  vanished on the next `pp serve` boot. Added `case` to `isDurableCategory`
+  (kept linear, since case reads/updates use the `rdp:`/`update:` path; a
+  pinned tuple would be invisible to those existence checks). New CSW5 test
+  writes a case, flushes, and loads a fresh BBS from the same dir to prove
+  it reloads.
 - AAR enrichment now actually populates the case. The live Archivist agent
   emits its enrichment as a JSON object in the observation's `detail` field,
   but the handler expected flat `aar`/`lessons`/`confidence` keys on the
