@@ -7,6 +7,16 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+- After-Action Review enrichment loop is now closed. When an Archivist task
+  completes, the dispatcher reads its structured enrichment (an `observation`
+  tuple, identity `case-enrichment`, linked to the workflow instance and
+  carrying `aar`/`lessons`/`confidence`/`tags`) and merges it into the case
+  via `CaseEnricher`. The handler is strictly off-critical-path: malformed,
+  empty, or absent archivist output is a no-op (never a crash), and a
+  workflow that completed successfully stays `completed` regardless of the
+  archivist outcome.
+
 ### Changed
 - Migrated the entire codebase to Maggie's 1-based array/string indexing
   (Smalltalk-80 convention), which the language adopted upstream. All

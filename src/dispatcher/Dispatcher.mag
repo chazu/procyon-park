@@ -81,6 +81,13 @@ Dispatcher subclass: Object
     [ruleEngine evaluate] on: Exception do: [:e |
       ('Dispatcher tick step error (ruleEngine evaluate): ', e messageText) println
     ].
+    "AAR: close the enrichment loop. For any completed archivist task whose
+     case is not yet enriched, merge its enrichment into the case. Strictly
+     off-critical-path — wrapped here AND internally so it can never gate or
+     flip workflow status."
+    [workflowEngine applyCompletedArchivistEnrichments] on: Exception do: [:e |
+      ('Dispatcher tick step error (applyCompletedArchivistEnrichments): ', e messageText) println
+    ].
     taskSnapshot := nil.
     [taskSnapshot := bbs scanAll: 'task'] on: Exception do: [:e |
       ('Dispatcher tick step error (task snapshot): ', e messageText) println

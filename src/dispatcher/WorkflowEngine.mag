@@ -788,6 +788,131 @@ WorkflowEngine subclass: Object
     ]
   ]
 
+  "--- AAR Archivist Enrichment Consumption (loop closer) ---"
+
+  "CHANNEL CONTRACT (decided + documented here):
+   The archivist writes its structured enrichment as an OBSERVATION tuple.
+   Rationale: the Archivist role (src/roles/Archivist.mag) is read-only /
+   write-only-to-the-knowledge-base and already emits via
+   `pp observe case-enrichment \"<...>\"` — 'observation' is in its
+   hardCategories, 'decision' is not its channel. So we consume an
+   observation, NOT a decision.
+
+   The enrichment observation MUST:
+     - have identity 'case-enrichment'
+     - link to the workflow via payload 'workflow_instance' = <instanceId>
+       (or payload 'task' = '<instanceId>:task:archivist', the off-band
+        archivist task id dispatchArchivist: writes)
+     - carry the structured enrichment keys CaseEnricher reads:
+         aar        -> String narrative      (default '')
+         lessons    -> Array of String       (default [])
+         confidence -> Number                (default 0)
+         tags       -> Array of String       (UNIONed; default [])
+   Extra payload keys (detail, agent_identity, scope, task...) are ignored
+   by CaseEnricher — only the four above + tags union are merged."
+
+  method: findArchivistEnrichment: instanceId scope: scope [
+    "Locate the archivist's 'case-enrichment' observation for this workflow
+     instance. Returns the OBSERVATION TUPLE (not its payload) or nil when
+     none is present. Matching is by enrichment identity AND instance linkage
+     so an unrelated observation can never be mistaken for the enrichment."
+    | archivistTaskId |
+    archivistTaskId := instanceId, ':task:archivist'.
+    ^(bbs scanAll: 'observation') detect: [:o |
+      | p ident |
+      ident := o at: 'identity' ifAbsent: [''].
+      p := o at: 'payload' ifAbsent: [nil].
+      (ident = 'case-enrichment')
+        and: [p notNil
+        and: [((p at: 'workflow_instance' ifAbsent: ['']) = instanceId)
+          or: [(p at: 'task' ifAbsent: ['']) = archivistTaskId]]]
+    ] ifNone: [nil]
+  ]
+
+  method: applyArchivistEnrichment: instanceId scope: scope [
+    "Enrichment-loop closer. Read the archivist's structured enrichment
+     observation for instanceId and merge it into the case via
+     CaseEnricher applyEnrichment:toCaseWithInstance:scope:bbs:.
+
+     OFF-CRITICAL-PATH GUARANTEES (the whole point of this story):
+       1. NON-FATAL — the entire body is wrapped in on:Exception. A
+          malformed tuple, a BBS hiccup, anything at all — logs a warn and
+          returns false. It NEVER throws into the caller (terminal/tick path),
+          so the archivist outcome can never flip or gate workflow status.
+       2. NO-OP ON ABSENT/EMPTY/MALFORMED — if no enrichment observation is
+          found, or its payload is missing, return false WITHOUT touching the
+          case skeleton. CaseEnricher itself is additive-only and tolerates
+          missing keys, so a partial/empty payload only ever sets defaults.
+
+     Returns true iff CaseEnricher actually applied an enrichment to an
+     existing case; false otherwise."
+    [
+      | enrich payload |
+      enrich := self findArchivistEnrichment: instanceId scope: scope.
+      enrich isNil ifTrue: [^false].
+      payload := enrich at: 'payload' ifAbsent: [nil].
+      payload isNil ifTrue: [^false].
+      (payload isKindOf: Dictionary) ifFalse: [^false].
+      "Empty/malformed enrichment is a NO-OP: an observation that links to the
+       instance but carries none of aar/lessons/confidence/tags must NOT stamp
+       defaults onto the deterministic skeleton."
+      (self enrichmentHasContent: payload) ifFalse: [^false].
+      ^CaseEnricher applyEnrichment: payload toCaseWithInstance: instanceId scope: scope bbs: bbs
+    ] on: Exception do: [:e |
+      bbs logEngine: 'warn' component: 'aar' scope: scope message: ('archivist enrichment apply failed (non-fatal): ', e messageText).
+      ^false
+    ]
+  ]
+
+  method: enrichmentHasContent: payload [
+    "True iff the payload carries at least one enrichment key worth applying.
+     Guards the empty-output no-op invariant: a linked-but-contentless
+     enrichment observation is treated as EMPTY so the caller bails before
+     CaseEnricher would otherwise write default aar=''/lessons=[]/confidence=0."
+    ^((payload at: 'aar' ifAbsent: [nil]) notNil)
+      or: [((payload at: 'lessons' ifAbsent: [nil]) notNil)
+      or: [((payload at: 'confidence' ifAbsent: [nil]) notNil)
+      or: [(payload at: 'tags' ifAbsent: [nil]) notNil]]]
+  ]
+
+  method: applyCompletedArchivistEnrichments [
+    "Off-critical-path sweep (driven from the Dispatcher tick): for every
+     COMPLETED archivist task whose workflow case has not yet been enriched,
+     apply its enrichment. Idempotent — a case already carrying enriched_at
+     is skipped, so re-running every tick is a safe no-op. Each task is
+     wrapped in its own on:Exception so one bad tuple can neither abort the
+     sweep nor escape into the tick loop."
+    (bbs scanAll: 'task') do: [:t |
+      [
+        | p role status instanceId scope completeEvt caseTuple |
+        p := t at: 'payload' ifAbsent: [nil].
+        (p notNil and: [(p at: 'role' ifAbsent: ['']) = 'archivist']) ifTrue: [
+          status := p at: 'status' ifAbsent: [''].
+          status = 'completed' ifTrue: [
+            instanceId := p at: 'workflow_instance' ifAbsent: [nil].
+            scope := t at: 'scope'.
+            instanceId notNil ifTrue: [
+              "Gate on the task-complete event so we only fire after the
+               archivist actually finished (local scheduler + multiplayer
+               both emit 'task-complete:<taskId>')."
+              completeEvt := bbs rdp: 'event' scope: scope identity: 'task-complete:', (t at: 'identity').
+              completeEvt notNil ifTrue: [
+                "Idempotency: skip if the case is gone or already enriched."
+                caseTuple := bbs rdp: 'case' scope: scope identity: instanceId.
+                (caseTuple notNil
+                  and: [((caseTuple at: 'payload') at: 'enriched_at' ifAbsent: [nil]) isNil]) ifTrue: [
+                    self applyArchivistEnrichment: instanceId scope: scope
+                ]
+              ]
+            ]
+          ]
+        ]
+      ] on: Exception do: [:e |
+        bbs logEngine: 'warn' component: 'aar' scope: 'system' message: ('archivist enrichment sweep skip: ', e messageText)
+      ]
+    ]
+  ]
+
   "--- Workflow Completion ---"
 
   "wf-accepting variants — preferred when the caller already has the

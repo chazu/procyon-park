@@ -1,0 +1,441 @@
+"AAR learning-loop integration + fault-injection tests.
+
+ Closes the loop story: an archivist's structured enrichment (channel =
+ an OBSERVATION tuple, identity 'case-enrichment', linked to the workflow
+ instance, carrying aar/lessons/confidence/tags) is consumed at archivist
+ task completion and merged into the case via CaseEnricher.
+
+ Units under test (WorkflowEngine):
+   * applyArchivistEnrichment: instanceId scope:        — the handler.
+   * applyCompletedArchivistEnrichments                 — the tick sweep.
+
+ A real BBS (BBS withDataDir:) drives every case so the full scan + rdp +
+ update path executes end-to-end against genuine tuple storage.
+
+ Invariants under test:
+   AL1  HAPPY PATH — skeleton case + a linked enrichment observation, run
+        the handler => case gains aar/lessons/confidence/enriched_at and
+        UNIONed tags; returns true.
+   AL2  Deterministic skeleton fields survive enrichment byte-identical.
+   AL3  FAULT (absent)    — no enrichment observation => handler returns
+        false; case skeleton untouched (no aar / no enriched_at); no crash.
+   AL4  FAULT (empty)     — a linked observation carrying NONE of the
+        enrichment keys => no-op (returns false); skeleton untouched.
+   AL5  FAULT (wrong inst) — an enrichment observation for a DIFFERENT
+        instance is never mistaken for this one; skeleton untouched.
+   AL6  SWEEP — applyCompletedArchivistEnrichments enriches the case of a
+        completed archivist task that has a task-complete event.
+   AL7  INVARIANT — a workflow that completed successfully stays
+        'completed' regardless of archivist outcome (good enrichment).
+   AL8  INVARIANT (fault) — same, but with archivist output absent: the
+        workflow STILL reads 'completed', the case stays un-enriched, and
+        nothing crashes. Off-critical-path proven.
+   AL9  IDEMPOTENT — running the sweep twice does not double-apply (tags
+        not duplicated; enriched_at gate holds)."
+
+"=== Runner ==="
+ALRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== AAR learning-integration Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== Helpers ==="
+ALHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: skeletonPayload: instanceId [
+    "Deterministic case skeleton — the 11 fields enrichment must preserve."
+    | p actions a0 tags |
+    p := Dictionary new.
+    p at: 'workflow_instance' put: instanceId.
+    p at: 'terminal_state' put: 'completed'.
+    p at: 'duration_minutes' put: 12.
+    p at: 'retries' put: 1.
+    p at: 'review_cycles' put: 2.
+    p at: 'human_interventions' put: 0.
+    p at: 'files_changed' put: 4.
+    a0 := Dictionary new.
+    a0 at: 'role' put: 'implementer'.
+    a0 at: 'description' put: 'wire the thing'.
+    a0 at: 'status' put: 'completed'.
+    actions := Array new: 0.
+    actions := actions copyWith: a0.
+    p at: 'actions' put: actions.
+    p at: 'repo' put: 'procyon-park'.
+    p at: 'mission_type' put: 'full-pipeline'.
+    p at: 'created_at' put: 1700.
+    tags := Array new: 0.
+    tags := tags copyWith: 'procyon-park'.
+    tags := tags copyWith: 'full-pipeline'.
+    tags := tags copyWith: 'completed'.
+    p at: 'tags' put: tags.
+    ^p
+  ]
+
+  classMethod: seedCase: bbs id: instanceId scope: scope [
+    bbs out: 'case' scope: scope identity: instanceId
+      payload: (ALHelper skeletonPayload: instanceId)
+  ]
+
+  classMethod: enrichmentPayload: instanceId [
+    "A structured archivist enrichment as it arrives on the observation
+     channel: linkage (workflow_instance + task) PLUS the four enrichment
+     keys CaseEnricher reads."
+    | e lessons tags |
+    e := Dictionary new.
+    e at: 'workflow_instance' put: instanceId.
+    e at: 'task' put: instanceId, ':task:archivist'.
+    e at: 'detail' put: 'AAR: situation / worked / failed / unexpected'.
+    e at: 'aar' put: 'Mission landed after a single review cycle.'.
+    lessons := Array new: 0.
+    lessons := lessons copyWith: 'pin the manifest sha'.
+    lessons := lessons copyWith: 'reviewers catch the off-by-one early'.
+    e at: 'lessons' put: lessons.
+    e at: 'confidence' put: 0.8.
+    tags := Array new: 0.
+    tags := tags copyWith: 'procyon-park'.
+    tags := tags copyWith: 'enriched'.
+    tags := tags copyWith: 'aar-reviewed'.
+    e at: 'tags' put: tags.
+    ^e
+  ]
+
+  classMethod: seedEnrichment: bbs id: instanceId scope: scope [
+    "Write the simulated archivist enrichment observation."
+    bbs out: 'observation' scope: scope identity: 'case-enrichment'
+      payload: (ALHelper enrichmentPayload: instanceId)
+  ]
+
+  classMethod: seedCompletedWorkflow: bbs id: instanceId scope: scope [
+    | params wfPayload |
+    params := Dictionary new.
+    params at: 'repo' put: 'procyon-park'.
+    wfPayload := Dictionary new.
+    wfPayload at: 'status' put: 'completed'.
+    wfPayload at: 'template' put: 'demo-tmpl'.
+    wfPayload at: 'params' put: params.
+    wfPayload at: 'started_at' put: 100.
+    wfPayload at: 'completed_at' put: 200.
+    bbs out: 'workflow' scope: scope identity: instanceId payload: wfPayload
+  ]
+
+  classMethod: seedCompletedArchivistTask: bbs id: instanceId scope: scope [
+    "A completed archivist task tuple + its task-complete event so the sweep
+     gate is satisfied."
+    | tp taskId |
+    taskId := instanceId, ':task:archivist'.
+    tp := Dictionary new.
+    tp at: 'role' put: 'archivist'.
+    tp at: 'status' put: 'completed'.
+    tp at: 'workflow_instance' put: instanceId.
+    bbs out: 'task' scope: scope identity: taskId payload: tp.
+    bbs emitEvent: scope
+        identity: 'task-complete:', taskId
+        type: 'task-complete'
+        summary: 'archivist done'
+  ]
+
+  classMethod: statusOf: bbs id: instanceId scope: scope [
+    | wf |
+    wf := bbs rdp: 'workflow' scope: scope identity: instanceId.
+    ^wf isNil ifTrue: ['missing'] ifFalse: [(wf at: 'payload') at: 'status' ifAbsent: ['unknown']]
+  ]
+
+  classMethod: casePayload: bbs id: instanceId scope: scope [
+    | c |
+    c := bbs rdp: 'case' scope: scope identity: instanceId.
+    ^c isNil ifTrue: [nil] ifFalse: [c at: 'payload']
+  ]
+
+"=== Tests ==="
+TestAarLearningIntegration subclass: Object
+
+  classMethod: run: t [
+    self testHappyPath: t.
+    self testDeterministicPreserved: t.
+    self testFaultAbsent: t.
+    self testFaultEmpty: t.
+    self testFaultWrongInstance: t.
+    self testSweepEnriches: t.
+    self testInvariantStaysCompleted: t.
+    self testInvariantFaultStaysCompleted: t.
+    self testSweepIdempotent: t
+  ]
+
+  classMethod: testHappyPath: t [
+    | tempDir bbs engine result p tags |
+    '--- AL1: happy path — handler enriches the case ---' println.
+    tempDir := ALHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ALHelper seedCase: bbs id: 'al-1' scope: 'default'.
+    ALHelper seedEnrichment: bbs id: 'al-1' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    result := engine applyArchivistEnrichment: 'al-1' scope: 'default'.
+    t assert: result message: 'AL1: handler returns true on a real enrichment'.
+
+    p := ALHelper casePayload: bbs id: 'al-1' scope: 'default'.
+    t assert: (p notNil) message: 'AL1: case still present'.
+    t assertEqual: (p at: 'aar' ifAbsent: [nil])
+      to: 'Mission landed after a single review cycle.'
+      message: 'AL1: aar merged'.
+    t assertEqual: (p at: 'lessons' ifAbsent: [nil]) size to: 2
+      message: 'AL1: lessons merged (2)'.
+    t assertEqual: (p at: 'confidence' ifAbsent: [nil]) to: 0.8
+      message: 'AL1: confidence merged'.
+    t assert: ((p at: 'enriched_at' ifAbsent: [nil]) notNil)
+      message: 'AL1: enriched_at stamped'.
+    tags := p at: 'tags'.
+    t assert: (tags includes: 'enriched')
+      message: 'AL1: new tag unioned (enriched)'.
+    t assert: (tags includes: 'completed')
+      message: 'AL1: skeleton tag retained (completed)'.
+    "3 skeleton tags + 2 new (procyon-park overlapped) = 5"
+    t assertEqual: tags size to: 5
+      message: 'AL1: tags unioned without duplicating overlap'
+  ]
+
+  classMethod: testDeterministicPreserved: t [
+    | tempDir bbs engine p actions a0 |
+    '--- AL2: deterministic skeleton survives enrichment ---' println.
+    tempDir := ALHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ALHelper seedCase: bbs id: 'al-2' scope: 'default'.
+    ALHelper seedEnrichment: bbs id: 'al-2' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    engine applyArchivistEnrichment: 'al-2' scope: 'default'.
+
+    p := ALHelper casePayload: bbs id: 'al-2' scope: 'default'.
+    t assertEqual: (p at: 'workflow_instance') to: 'al-2'
+      message: 'AL2: workflow_instance preserved'.
+    t assertEqual: (p at: 'terminal_state') to: 'completed'
+      message: 'AL2: terminal_state preserved'.
+    t assertEqual: (p at: 'duration_minutes') to: 12
+      message: 'AL2: duration_minutes preserved'.
+    t assertEqual: (p at: 'retries') to: 1
+      message: 'AL2: retries preserved'.
+    t assertEqual: (p at: 'review_cycles') to: 2
+      message: 'AL2: review_cycles preserved'.
+    t assertEqual: (p at: 'human_interventions') to: 0
+      message: 'AL2: human_interventions preserved'.
+    t assertEqual: (p at: 'files_changed') to: 4
+      message: 'AL2: files_changed preserved'.
+    t assertEqual: (p at: 'repo') to: 'procyon-park'
+      message: 'AL2: repo preserved'.
+    t assertEqual: (p at: 'mission_type') to: 'full-pipeline'
+      message: 'AL2: mission_type preserved'.
+    t assertEqual: (p at: 'created_at') to: 1700
+      message: 'AL2: created_at preserved'.
+    actions := p at: 'actions'.
+    t assertEqual: actions size to: 1
+      message: 'AL2: actions preserved (size)'.
+    a0 := actions at: 1.
+    t assertEqual: (a0 at: 'role') to: 'implementer'
+      message: 'AL2: action role preserved'
+  ]
+
+  classMethod: testFaultAbsent: t [
+    | tempDir bbs engine result p |
+    '--- AL3: fault (absent) — no enrichment => no-op, no crash ---' println.
+    tempDir := ALHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ALHelper seedCase: bbs id: 'al-3' scope: 'default'.
+    "NO enrichment observation seeded."
+    engine := WorkflowEngine on: bbs.
+
+    result := engine applyArchivistEnrichment: 'al-3' scope: 'default'.
+    t assert: (result = false)
+      message: 'AL3: handler returns false when enrichment absent'.
+
+    p := ALHelper casePayload: bbs id: 'al-3' scope: 'default'.
+    t assert: ((p at: 'aar' ifAbsent: [nil]) isNil)
+      message: 'AL3: no aar written (skeleton untouched)'.
+    t assert: ((p at: 'enriched_at' ifAbsent: [nil]) isNil)
+      message: 'AL3: no enriched_at written'.
+    t assertEqual: (p at: 'tags') size to: 3
+      message: 'AL3: tags unchanged (3 skeleton tags)'
+  ]
+
+  classMethod: testFaultEmpty: t [
+    | tempDir bbs engine result emptyPayload p |
+    '--- AL4: fault (empty) — linked but contentless => no-op ---' println.
+    tempDir := ALHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ALHelper seedCase: bbs id: 'al-4' scope: 'default'.
+    "Linked enrichment observation carrying NONE of aar/lessons/confidence/tags."
+    emptyPayload := Dictionary new.
+    emptyPayload at: 'workflow_instance' put: 'al-4'.
+    emptyPayload at: 'detail' put: ''.
+    bbs out: 'observation' scope: 'default' identity: 'case-enrichment'
+      payload: emptyPayload.
+    engine := WorkflowEngine on: bbs.
+
+    result := engine applyArchivistEnrichment: 'al-4' scope: 'default'.
+    t assert: (result = false)
+      message: 'AL4: empty enrichment is a no-op (returns false)'.
+
+    p := ALHelper casePayload: bbs id: 'al-4' scope: 'default'.
+    t assert: ((p at: 'aar' ifAbsent: [nil]) isNil)
+      message: 'AL4: no aar default stamped onto skeleton'.
+    t assert: ((p at: 'enriched_at' ifAbsent: [nil]) isNil)
+      message: 'AL4: no enriched_at stamped'.
+    t assertEqual: (p at: 'tags') size to: 3
+      message: 'AL4: tags unchanged'
+  ]
+
+  classMethod: testFaultWrongInstance: t [
+    | tempDir bbs engine result p |
+    '--- AL5: fault (wrong instance) — never mis-applied ---' println.
+    tempDir := ALHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ALHelper seedCase: bbs id: 'al-5' scope: 'default'.
+    "Enrichment for a DIFFERENT instance only."
+    ALHelper seedEnrichment: bbs id: 'other-99' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    result := engine applyArchivistEnrichment: 'al-5' scope: 'default'.
+    t assert: (result = false)
+      message: 'AL5: foreign enrichment not applied to this case'.
+
+    p := ALHelper casePayload: bbs id: 'al-5' scope: 'default'.
+    t assert: ((p at: 'aar' ifAbsent: [nil]) isNil)
+      message: 'AL5: skeleton untouched by foreign enrichment'
+  ]
+
+  classMethod: testSweepEnriches: t [
+    | tempDir bbs engine p |
+    '--- AL6: sweep enriches a completed archivist task case ---' println.
+    tempDir := ALHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ALHelper seedCompletedWorkflow: bbs id: 'al-6' scope: 'default'.
+    ALHelper seedCase: bbs id: 'al-6' scope: 'default'.
+    ALHelper seedCompletedArchivistTask: bbs id: 'al-6' scope: 'default'.
+    ALHelper seedEnrichment: bbs id: 'al-6' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    engine applyCompletedArchivistEnrichments.
+
+    p := ALHelper casePayload: bbs id: 'al-6' scope: 'default'.
+    t assertEqual: (p at: 'aar' ifAbsent: [nil])
+      to: 'Mission landed after a single review cycle.'
+      message: 'AL6: sweep merged aar'.
+    t assert: ((p at: 'enriched_at' ifAbsent: [nil]) notNil)
+      message: 'AL6: sweep stamped enriched_at'
+  ]
+
+  classMethod: testInvariantStaysCompleted: t [
+    | tempDir bbs engine |
+    '--- AL7: invariant — completed stays completed (good enrichment) ---' println.
+    tempDir := ALHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ALHelper seedCompletedWorkflow: bbs id: 'al-7' scope: 'default'.
+    ALHelper seedCase: bbs id: 'al-7' scope: 'default'.
+    ALHelper seedCompletedArchivistTask: bbs id: 'al-7' scope: 'default'.
+    ALHelper seedEnrichment: bbs id: 'al-7' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    engine applyCompletedArchivistEnrichments.
+
+    t assertEqual: (ALHelper statusOf: bbs id: 'al-7' scope: 'default') to: 'completed'
+      message: 'AL7: workflow status stays completed after enrichment'
+  ]
+
+  classMethod: testInvariantFaultStaysCompleted: t [
+    | tempDir bbs engine p |
+    '--- AL8: invariant (fault) — completed stays completed, no crash ---' println.
+    tempDir := ALHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ALHelper seedCompletedWorkflow: bbs id: 'al-8' scope: 'default'.
+    ALHelper seedCase: bbs id: 'al-8' scope: 'default'.
+    ALHelper seedCompletedArchivistTask: bbs id: 'al-8' scope: 'default'.
+    "NO enrichment observation — archivist output absent."
+    engine := WorkflowEngine on: bbs.
+
+    engine applyCompletedArchivistEnrichments.
+
+    t assertEqual: (ALHelper statusOf: bbs id: 'al-8' scope: 'default') to: 'completed'
+      message: 'AL8: workflow stays completed despite absent archivist output'.
+    p := ALHelper casePayload: bbs id: 'al-8' scope: 'default'.
+    t assert: ((p at: 'aar' ifAbsent: [nil]) isNil)
+      message: 'AL8: case skeleton stays un-enriched on absent output'
+  ]
+
+  classMethod: testSweepIdempotent: t [
+    | tempDir bbs engine p |
+    '--- AL9: sweep is idempotent — no double-apply ---' println.
+    tempDir := ALHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ALHelper seedCompletedWorkflow: bbs id: 'al-9' scope: 'default'.
+    ALHelper seedCase: bbs id: 'al-9' scope: 'default'.
+    ALHelper seedCompletedArchivistTask: bbs id: 'al-9' scope: 'default'.
+    ALHelper seedEnrichment: bbs id: 'al-9' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    engine applyCompletedArchivistEnrichments.
+    engine applyCompletedArchivistEnrichments.
+
+    p := ALHelper casePayload: bbs id: 'al-9' scope: 'default'.
+    t assertEqual: (p at: 'tags') size to: 5
+      message: 'AL9: tags not duplicated across two sweeps'
+  ]
+
+"=== Main ==="
+AarLearningIntegrationMain subclass: Object
+  classMethod: start [
+    | t |
+    t := ALRunner new.
+    TestAarLearningIntegration run: t.
+    t report.
+    ^t failed
+  ]
