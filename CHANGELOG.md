@@ -14,6 +14,19 @@ Semantic Versioning.
   only runs while a dashboard is connected (RSS grows ~1 GB/min until the OS
   OOM-kills the process); with `PP_NO_SSE=1` the server stays flat. Remove the
   workaround once the leak is fixed.
+- Board work-item detail modal. Clicking a card on the dashboard Board
+  (Kanban) opens a dialog with the item's full detail — title, id, type,
+  status, description, wave, labels, parent/children relationships,
+  `depends_on`, repo/scope, and human-readable timestamps — fetched from a
+  new unsigned `GET /api/workitem/detail?scope=&identity=` read endpoint
+  (404 when not found). The modal is focus-trapped and closes on Esc or
+  scrim click. A "Cancel item" button logically cancels the item (status →
+  `cancelled`) via a new `POST /api/workitem/cancel`; after a confirm step
+  the card drops off the active board on the next SSE tick. The cancel route
+  is the first browser-initiated mutation: it is unsigned but loopback-gated
+  (localhost/127.x/[::1] only; non-loopback callers get 403) for the
+  single-operator local dashboard. Cancel is a logical delete only — the
+  tuple, history, and relationships are preserved (no hard delete/cascade).
 - Workflow staleness reaping. A workflow stuck in `running`/`dispatched`
   with no live task and past a TTL (1h) is now transitioned to `failed`
   (`last_failure_reason: workflow-stale`) by the Dispatcher housekeep pass,

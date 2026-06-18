@@ -462,15 +462,22 @@ DashboardSSE subclass: Object
         s := s, '<div class="empty-state">—</div>'
       ] ifFalse: [
         items do: [:w |
-          | p title wid type identity repo |
+          | p title wid type identity repo wiScope |
           p := w at: 'payload' ifAbsent: [Dictionary new].
           identity := w at: 'identity' ifAbsent: ['?'].
+          wiScope := w at: 'scope' ifAbsent: ['default'].
           title := p at: 'title' ifAbsent: [identity].
           type := p at: 'type' ifAbsent: ['story'].
           repo := p at: 'repo' ifAbsent: [w at: 'scope' ifAbsent: ['']].
           wid := identity.
           title size > 60 ifTrue: [title := (title copyFrom: 1 to: 60), '...'].
-          s := s, '<div class="wi-card wi-', (self htmlEscape: type), '" data-repo="', (self htmlEscape: repo), '">',
+          "data-wi-id / data-wi-type / data-scope let the Board detail modal
+           resolve the item's identity + scope to fetch /api/workitem/detail."
+          s := s, '<div class="wi-card wi-', (self htmlEscape: type),
+                '" data-wi-id="', (self htmlEscape: identity),
+                '" data-wi-type="', (self htmlEscape: type),
+                '" data-scope="', (self htmlEscape: wiScope),
+                '" data-repo="', (self htmlEscape: repo), '">',
                 '<div class="wi-title">', (self htmlEscape: title), '</div>',
                 '<div class="wi-meta"><span class="wi-type">', (self htmlEscape: type), '</span> ',
                 '<small>', (self htmlEscape: wid), '</small>',

@@ -530,6 +530,99 @@
     .wi-epic  .wi-type{ background: var(--terra); color: var(--cream-hi); }
     .wi-story .wi-type{ background: var(--cobalt); color: var(--cream-hi); }
     .wi-task  .wi-type{ background: var(--moss); color: var(--bg); }
+    .wi-card{ cursor: pointer; }
+
+    /* ══════════════ WORK-ITEM DETAIL MODAL ══════════════
+       Board card click -> /api/workitem/detail -> this dialog. Riso tokens
+       only; no new hex. Scrim + index-card panel, focus-trapped. */
+    .wi-modal-scrim{
+      position: fixed; inset: 0; z-index: 1000;
+      display: none;
+      align-items: flex-start; justify-content: center;
+      padding: 6vh 16px;
+      background: rgba(10,8,6,.72);
+      overflow-y: auto;
+    }
+    .wi-modal-scrim.is-open{ display: flex; }
+    .wi-modal{
+      position: relative;
+      width: 100%; max-width: 560px;
+      background: var(--surface);
+      border: 1px solid var(--rule-hi);
+      border-left: 5px solid var(--cobalt);
+      box-shadow: 6px 6px 0 rgba(0,0,0,.6);
+      padding: 16px 18px 18px;
+    }
+    .wi-modal.wi-epic { border-left-color: var(--terra); }
+    .wi-modal.wi-story{ border-left-color: var(--cobalt); }
+    .wi-modal.wi-task { border-left-color: var(--moss); }
+    .wi-modal-close{
+      position: absolute; top: 8px; right: 10px;
+      background: transparent; border: none; cursor: pointer;
+      color: var(--cream-dim); font-family: var(--f-mono);
+      font-size: 18px; line-height: 1; padding: 2px 6px;
+    }
+    .wi-modal-close:hover{ color: var(--terra); }
+    .wi-modal h3{
+      font-family: var(--f-serif);
+      font-size: 17px; font-weight: 600; line-height: 1.25;
+      color: var(--cream-hi);
+      margin: 0 28px 10px 0;
+    }
+    .wi-modal-tags{ display:flex; gap:6px; flex-wrap:wrap; margin-bottom: 12px; }
+    .wi-modal-tag{
+      font-family: var(--f-slab); font-weight: 800;
+      font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
+      padding: 1px 7px; background: var(--cream); color: var(--bg);
+    }
+    .wi-modal-tag.is-status{ background: var(--sun); color: var(--bg); }
+    .wi-modal-tag.is-type{ background: var(--cobalt); color: var(--cream-hi); }
+    .wi-modal-desc{
+      font-family: var(--f-mono); font-size: 12px; color: var(--cream);
+      white-space: pre-wrap; word-break: break-word;
+      border-left: 2px solid var(--rule); padding-left: 10px;
+      margin-bottom: 14px;
+    }
+    .wi-modal-grid{
+      display: grid; grid-template-columns: auto 1fr; gap: 4px 12px;
+      font-family: var(--f-mono); font-size: 11.5px;
+      margin-bottom: 12px;
+    }
+    .wi-modal-grid dt{ color: var(--fog); text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; align-self: baseline; }
+    .wi-modal-grid dd{ color: var(--cream); word-break: break-word; }
+    .wi-modal-grid dd a, .wi-modal-rel a{ color: var(--cobalt); text-decoration: none; cursor: pointer; }
+    .wi-modal-grid dd a:hover, .wi-modal-rel a:hover{ text-decoration: underline; }
+    .wi-modal-rel{ margin-bottom: 12px; }
+    .wi-modal-rel h4{
+      font-family: var(--f-slab); font-weight: 800; font-size: 10px;
+      letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--cream-dim); margin: 0 0 4px;
+    }
+    .wi-modal-rel ul{ list-style: none; margin: 0; padding: 0; }
+    .wi-modal-rel li{
+      font-family: var(--f-mono); font-size: 11px; color: var(--cream-dim);
+      padding: 2px 0; border-bottom: 1px dashed rgba(176,165,140,.16);
+    }
+    .wi-modal-rel li:last-child{ border-bottom: none; }
+    .wi-modal-actions{
+      display:flex; justify-content: flex-end; gap: 8px;
+      border-top: 1px dashed var(--rule); padding-top: 12px; margin-top: 4px;
+    }
+    .wi-modal-cancel{
+      background: transparent; color: var(--rose);
+      border: 1px solid var(--rose);
+      padding: 5px 12px; cursor: pointer;
+      font-family: var(--f-slab); font-weight: 800;
+      font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+      transition: background .1s ease, color .1s ease, transform .1s ease, box-shadow .1s ease;
+    }
+    .wi-modal-cancel:hover{
+      background: var(--rose); color: var(--cream-hi);
+      transform: translate(-1px,-1px); box-shadow: 2px 2px 0 rgba(0,0,0,.5);
+    }
+    .wi-modal-cancel[disabled]{ opacity: .5; cursor: default; transform:none; box-shadow:none; }
+    .wi-modal-err{ color: var(--rose); font-size: 11px; font-family: var(--f-mono); margin-right: auto; align-self: center; }
+    .wi-modal-loading{ font-family: var(--f-mono); color: var(--cream-dim); font-size: 12px; padding: 8px 0; }
 
     /* ══════════════ ACTIVITY FEED ══════════════ */
     .col-feed .panel{ display:flex; flex-direction: column; max-height: calc(100vh - 220px); }
@@ -1021,6 +1114,14 @@
 
   </div>
 
+  <!-- Work-item detail modal (Board card click). Hidden until opened. -->
+  <div class="wi-modal-scrim" id="wi-modal-scrim">
+    <div class="wi-modal" id="wi-modal" role="dialog" aria-modal="true" aria-labelledby="wi-modal-title">
+      <button type="button" class="wi-modal-close" id="wi-modal-close" aria-label="Close">×</button>
+      <div id="wi-modal-body"></div>
+    </div>
+  </div>
+
   <script>
     // --- Card scope toggle (mine | team) — §4.7, D6.7 default team ---
     // Persisted to localStorage under pp.cardScope. In "mine" mode we inject
@@ -1419,6 +1520,209 @@
     }
     refreshQueueBadge();
     setInterval(refreshQueueBadge, 5000);
+
+    // --- Work-item detail modal (Board) -----------------------------------
+    // Delegated click on the Board panel opens a dialog with the item's full
+    // detail (fetched from /api/workitem/detail) and a loopback-gated
+    // "Cancel item" (logical delete) button.
+    (function initWorkitemModal(){
+      const scrim   = document.getElementById('wi-modal-scrim');
+      const modal   = document.getElementById('wi-modal');
+      const closeEl = document.getElementById('wi-modal-close');
+      const bodyEl  = document.getElementById('wi-modal-body');
+      const board   = document.getElementById('dashboard-workitems');
+      if (!scrim || !modal || !bodyEl || !board) return;
+
+      let lastFocus = null;
+
+      function esc(s){
+        return String(s == null ? '' : s)
+          .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+          .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+      }
+      function fmtTime(v){
+        if (v == null || v === '') return null;
+        let n = Number(v);
+        if (!isFinite(n) || n <= 0) return null;
+        if (n < 1e12) n = n * 1000;   // epoch seconds -> ms
+        try { return new Date(n).toLocaleString(); } catch (_) { return String(v); }
+      }
+      function row(label, valueHtml){
+        if (valueHtml == null || valueHtml === '') return '';
+        return '<dt>' + esc(label) + '</dt><dd>' + valueHtml + '</dd>';
+      }
+      function itemLink(scope, id, text){
+        return '<a href="#" data-wi-link="1" data-scope="' + esc(scope) +
+               '" data-id="' + esc(id) + '">' + esc(text || id) + '</a>';
+      }
+
+      function openModal(scope, identity){
+        lastFocus = document.activeElement;
+        modal.className = 'wi-modal';
+        bodyEl.innerHTML = '<div class="wi-modal-loading">Loading…</div>';
+        scrim.classList.add('is-open');
+        closeEl.focus();
+        const url = '/api/workitem/detail?scope=' + encodeURIComponent(scope) +
+                    '&identity=' + encodeURIComponent(identity);
+        fetch(url, { credentials: 'same-origin' })
+          .then(r => {
+            if (r.status === 404) throw new Error('Work item not found');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          })
+          .then(data => renderDetail(data))
+          .catch(err => {
+            bodyEl.innerHTML = '<div class="wi-modal-loading">Error: ' + esc(err.message) + '</div>';
+          });
+      }
+
+      function renderDetail(data){
+        const p        = (data && data.payload) || {};
+        const scope    = (data && data.scope) || 'default';
+        const identity = (data && data.identity) || '';
+        const type     = p.type || 'story';
+        const status   = p.status || 'backlog';
+        modal.className = 'wi-modal wi-' + esc(type);
+
+        const title = p.title || identity;
+        let h = '';
+        h += '<h3 id="wi-modal-title">' + esc(title) + '</h3>';
+        h += '<div class="wi-modal-tags">';
+        h += '<span class="wi-modal-tag is-type">' + esc(type) + '</span>';
+        h += '<span class="wi-modal-tag is-status">' + esc(status) + '</span>';
+        h += '</div>';
+
+        if (p.description) {
+          h += '<div class="wi-modal-desc">' + esc(p.description) + '</div>';
+        }
+
+        // Labels: accept array or comma string.
+        let labelsHtml = '';
+        if (Array.isArray(p.labels) && p.labels.length) {
+          labelsHtml = p.labels.map(l => esc(l)).join(', ');
+        } else if (typeof p.labels === 'string' && p.labels.trim()) {
+          labelsHtml = esc(p.labels);
+        }
+        // depends_on: array or string.
+        let depHtml = '';
+        if (Array.isArray(p.depends_on) && p.depends_on.length) {
+          depHtml = p.depends_on.map(d => itemLink(scope, d, d)).join(', ');
+        } else if (typeof p.depends_on === 'string' && p.depends_on.trim()) {
+          depHtml = itemLink(scope, p.depends_on, p.depends_on);
+        }
+
+        h += '<dl class="wi-modal-grid">';
+        h += row('ID', esc(identity));
+        h += row('Type', esc(type));
+        h += row('Status', esc(status));
+        h += row('Wave', p.wave != null ? esc(p.wave) : '');
+        h += row('Estimate', p.estimate ? esc(p.estimate) : '');
+        h += row('Labels', labelsHtml);
+        h += row('Repo', p.repo ? esc(p.repo) : '');
+        h += row('Scope', esc(scope));
+        if (p.parent) h += row('Parent', itemLink(scope, p.parent, p.parent));
+        h += row('Depends on', depHtml);
+        h += row('Created', fmtTime(p.created_at) ? esc(fmtTime(p.created_at)) : '');
+        h += row('Updated', fmtTime(p.updated_at) ? esc(fmtTime(p.updated_at)) : '');
+        const doneT = fmtTime(p.completed_at) || fmtTime(p.done_at) || fmtTime(p.finished_at);
+        if (doneT) h += row('Completed', esc(doneT));
+        const cancelT = fmtTime(p.cancelled_at);
+        if (cancelT) h += row('Cancelled', esc(cancelT));
+        h += '</dl>';
+
+        // Children (relationships) — derived server-side.
+        const kids = (data && data.children) || [];
+        if (kids.length) {
+          h += '<div class="wi-modal-rel"><h4>Children (' + kids.length + ')</h4><ul>';
+          kids.forEach(c => {
+            h += '<li>' + itemLink(scope, c.identity, c.title || c.identity) +
+                 ' <small>· ' + esc(c.type || 'story') + ' · ' + esc(c.status || '') + '</small></li>';
+          });
+          h += '</ul></div>';
+        }
+
+        // Actions: logical-cancel (skip if already cancelled).
+        h += '<div class="wi-modal-actions">';
+        h += '<span class="wi-modal-err" id="wi-modal-err"></span>';
+        if (status !== 'cancelled') {
+          h += '<button type="button" class="wi-modal-cancel" id="wi-modal-cancel"' +
+               ' data-scope="' + esc(scope) + '" data-id="' + esc(identity) + '">Cancel item</button>';
+        }
+        h += '</div>';
+
+        bodyEl.innerHTML = h;
+
+        const cancelBtn = document.getElementById('wi-modal-cancel');
+        if (cancelBtn) cancelBtn.addEventListener('click', onCancelClick);
+        bodyEl.querySelectorAll('[data-wi-link]').forEach(a => {
+          a.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            openModal(a.getAttribute('data-scope'), a.getAttribute('data-id'));
+          });
+        });
+      }
+
+      function onCancelClick(ev){
+        const btn = ev.currentTarget;
+        const scope = btn.getAttribute('data-scope');
+        const id    = btn.getAttribute('data-id');
+        if (!confirm('Cancel work item "' + id + '"?\nIt will be removed from the active board (status set to cancelled). History is preserved.')) return;
+        const errEl = document.getElementById('wi-modal-err');
+        btn.disabled = true;
+        if (errEl) errEl.textContent = '';
+        const url = '/api/workitem/cancel?scope=' + encodeURIComponent(scope) +
+                    '&identity=' + encodeURIComponent(id);
+        fetch(url, { method: 'POST', credentials: 'same-origin' })
+          .then(r => {
+            if (!r.ok) return r.json().catch(() => ({})).then(j => { throw new Error(j.error || ('HTTP ' + r.status)); });
+            return r.json().catch(() => ({}));
+          })
+          .then(() => { closeModal(); })   // SSE re-render drops the cancelled card
+          .catch(err => {
+            btn.disabled = false;
+            if (errEl) errEl.textContent = err.message;
+          });
+      }
+
+      function closeModal(){
+        scrim.classList.remove('is-open');
+        bodyEl.innerHTML = '';
+        if (lastFocus && typeof lastFocus.focus === 'function') {
+          try { lastFocus.focus(); } catch (_) {}
+        }
+        lastFocus = null;
+      }
+
+      // Open on card click (ignore clicks on existing interactive children).
+      board.addEventListener('click', (ev) => {
+        if (ev.target.closest('a, button, input, select, textarea, label')) return;
+        const card = ev.target.closest('.wi-card');
+        if (!card) return;
+        const id = card.getAttribute('data-wi-id');
+        if (!id) return;
+        const scope = card.getAttribute('data-scope') || 'default';
+        openModal(scope, id);
+      });
+
+      closeEl.addEventListener('click', closeModal);
+      scrim.addEventListener('click', (ev) => { if (ev.target === scrim) closeModal(); });
+
+      document.addEventListener('keydown', (ev) => {
+        if (!scrim.classList.contains('is-open')) return;
+        if (ev.key === 'Escape') { ev.preventDefault(); closeModal(); return; }
+        if (ev.key === 'Tab') {
+          // Focus trap: keep Tab within the dialog.
+          const focusables = modal.querySelectorAll(
+            'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])');
+          if (!focusables.length) return;
+          const first = focusables[0];
+          const last  = focusables[focusables.length - 1];
+          if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+          else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+          else if (!modal.contains(document.activeElement)) { ev.preventDefault(); first.focus(); }
+        }
+      });
+    })();
   </script>
 </body>
 </html>

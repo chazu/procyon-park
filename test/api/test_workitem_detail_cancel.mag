@@ -1,0 +1,229 @@
+"Tests for the Board detail modal server routes:
+   GET  /api/workitem/detail  (handleWorkitemDetailScope:identity:)
+   POST /api/workitem/cancel   (handleWorkitemCancelScope:identity:actor:
+                                 + isLoopbackHost: gate)
+
+ Invariants:
+   WD1  detail returns the full payload + derived children for an existing item.
+   WD2  detail returns 404 for a missing item.
+   WC1  cancel flips status to 'cancelled' (logical delete; tuple preserved).
+   WC2  cancel returns 404 for a missing item.
+   WL1  isLoopbackHost: accepts loopback Host headers (localhost/127.x/[::1]).
+   WL2  isLoopbackHost: rejects non-loopback hosts -> route would 403."
+
+WDCRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg,
+                            ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Workitem Detail/Cancel Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+WDCHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: newServer: bbs [
+    | dispatcher server |
+    dispatcher := Dispatcher on: bbs harnessFactory: nil.
+    server := ApiServer on: 0 bbs: bbs dispatcher: dispatcher.
+    ^server
+  ]
+
+  classMethod: seedItem: identity scope: scope type: type status: status title: title parent: parent in: bbs [
+    | payload |
+    payload := Dictionary new.
+    payload at: 'type' put: type.
+    payload at: 'status' put: status.
+    payload at: 'title' put: title.
+    payload at: 'description' put: 'desc for ', identity.
+    payload at: 'repo' put: 'demo/repo'.
+    payload at: 'created_at' put: 1000.
+    payload at: 'updated_at' put: 1001.
+    parent notNil ifTrue: [payload at: 'parent' put: parent].
+    bbs outPinned: 'workitem' scope: scope identity: identity payload: payload actor: nil
+  ]
+
+"=== WD1: detail returns payload + children ==="
+TestDetailOk subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server resp body payload children |
+    '--- WD1: detail returns payload + children ---' println.
+    tempDir := WDCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WDCHelper newServer: bbs.
+    WDCHelper seedItem: 'epic-1' scope: 'demo' type: 'epic' status: 'in-progress'
+              title: 'Parent Epic' parent: nil in: bbs.
+    WDCHelper seedItem: 'story-1' scope: 'demo' type: 'story' status: 'ready'
+              title: 'Child Story' parent: 'epic-1' in: bbs.
+
+    resp := server handleWorkitemDetailScope: 'demo' identity: 'epic-1'.
+    t assertEqual: resp status to: 200 message: 'WD1: detail → 200'.
+
+    body := Json decode: resp body.
+    t assertEqual: (body at: 'identity') to: 'epic-1' message: 'WD1: identity echoed'.
+    t assertEqual: (body at: 'scope') to: 'demo' message: 'WD1: scope echoed'.
+    payload := body at: 'payload'.
+    t assertEqual: (payload at: 'title') to: 'Parent Epic' message: 'WD1: title in payload'.
+    t assertEqual: (payload at: 'status') to: 'in-progress' message: 'WD1: status in payload'.
+
+    children := body at: 'children'.
+    t assertEqual: children size to: 1 message: 'WD1: one derived child'.
+    children size = 1 ifTrue: [
+      t assertEqual: ((children at: 1) at: 'identity') to: 'story-1'
+        message: 'WD1: child identity'.
+      t assertEqual: ((children at: 1) at: 'status') to: 'ready'
+        message: 'WD1: child status'
+    ]
+  ]
+
+"=== WD2: detail 404 for missing item ==="
+TestDetailMissing subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server resp |
+    '--- WD2: detail 404 ---' println.
+    tempDir := WDCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WDCHelper newServer: bbs.
+
+    resp := server handleWorkitemDetailScope: 'demo' identity: 'nope'.
+    t assertEqual: resp status to: 404 message: 'WD2: missing item → 404'
+  ]
+
+"=== WC1: cancel flips status to cancelled ==="
+TestCancelFlips subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server resp item |
+    '--- WC1: cancel → cancelled ---' println.
+    tempDir := WDCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WDCHelper newServer: bbs.
+    WDCHelper seedItem: 'story-2' scope: 'demo' type: 'story' status: 'ready'
+              title: 'Cancel Me' parent: nil in: bbs.
+
+    resp := server handleWorkitemCancelScope: 'demo' identity: 'story-2' actor: nil.
+    t assertEqual: resp status to: 200 message: 'WC1: cancel → 200'.
+
+    item := bbs findInIndex: 'workitem' scope: 'demo' identity: 'story-2'.
+    t assert: item notNil message: 'WC1: tuple preserved (not hard-deleted)'.
+    item notNil ifTrue: [
+      t assertEqual: ((item at: 'payload') at: 'status') to: 'cancelled'
+        message: 'WC1: status flipped to cancelled'.
+      t assert: (((item at: 'payload') at: 'cancelled_at' ifAbsent: [nil]) notNil)
+        message: 'WC1: cancelled_at stamped'
+    ]
+  ]
+
+"=== WC2: cancel 404 for missing item ==="
+TestCancelMissing subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server resp |
+    '--- WC2: cancel 404 ---' println.
+    tempDir := WDCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WDCHelper newServer: bbs.
+
+    resp := server handleWorkitemCancelScope: 'demo' identity: 'ghost' actor: nil.
+    t assertEqual: resp status to: 404 message: 'WC2: missing item → 404'
+  ]
+
+"=== WL1/WL2: loopback gate ==="
+TestLoopbackGate subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server |
+    '--- WL: isLoopbackHost: ---' println.
+    tempDir := WDCHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := WDCHelper newServer: bbs.
+
+    "WL1: loopback hosts accepted"
+    t assert: (server isLoopbackHost: 'localhost') message: 'WL1: localhost'.
+    t assert: (server isLoopbackHost: 'localhost:7777') message: 'WL1: localhost:port'.
+    t assert: (server isLoopbackHost: '127.0.0.1') message: 'WL1: 127.0.0.1'.
+    t assert: (server isLoopbackHost: '127.0.0.1:7777') message: 'WL1: 127.0.0.1:port'.
+    t assert: (server isLoopbackHost: '[::1]:7777') message: 'WL1: [::1]:port'.
+
+    "WL2: non-loopback hosts rejected → route would 403"
+    t assert: (server isLoopbackHost: '192.168.1.5:7777') not message: 'WL2: LAN IP rejected'.
+    t assert: (server isLoopbackHost: 'pp.internal:7777') not message: 'WL2: hostname rejected'.
+    t assert: (server isLoopbackHost: nil) not message: 'WL2: nil rejected'.
+    t assert: (server isLoopbackHost: '') not message: 'WL2: empty rejected'.
+    t assert: (server isLoopbackHost: '10.0.0.9') not message: 'WL2: 10.x rejected'
+  ]
+
+"=== Main ==="
+TestWorkitemDetailCancelMain subclass: Object
+  classMethod: start [
+    | t |
+    t := WDCRunner new.
+    [TestDetailOk run: t] on: Exception do: [:e |
+      ('TestDetailOk CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDetailOk crashed'
+    ].
+    [TestDetailMissing run: t] on: Exception do: [:e |
+      ('TestDetailMissing CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDetailMissing crashed'
+    ].
+    [TestCancelFlips run: t] on: Exception do: [:e |
+      ('TestCancelFlips CRASHED: ', e messageText) println.
+      t assert: false message: 'TestCancelFlips crashed'
+    ].
+    [TestCancelMissing run: t] on: Exception do: [:e |
+      ('TestCancelMissing CRASHED: ', e messageText) println.
+      t assert: false message: 'TestCancelMissing crashed'
+    ].
+    [TestLoopbackGate run: t] on: Exception do: [:e |
+      ('TestLoopbackGate CRASHED: ', e messageText) println.
+      t assert: false message: 'TestLoopbackGate crashed'
+    ].
+    t report.
+    ^t failed
+  ]
