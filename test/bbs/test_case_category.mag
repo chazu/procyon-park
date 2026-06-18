@@ -1,0 +1,92 @@
+"Tests for the 'case' tuple category (AAR skeleton writer institutional memory).
+
+ Invariants under test:
+   CC1  Categories>>valid includes 'case' (Categories isValid: 'case' = true).
+   CC2  Categories>>pinned includes 'case' (Categories isPinned: 'case' = true).
+        Cases are institutional memory — pinned, never consumed/GC'd.
+   CC3  Categories>>validate: 'case' does NOT raise.
+   CC4  Sanity: Categories isValid: 'bogus-xyz' = false.
+
+ Standalone runner at bottom (CaseCategoryMain run)."
+
+CaseCatRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: report [
+    '=== Case Category Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== TestCaseCategory ==="
+TestCaseCategory subclass: Object
+
+  classMethod: run: t [
+    | raised |
+    '--- TestCaseCategory ---' println.
+
+    "CC1: 'case' is a valid category."
+    t assert: (Categories isValid: 'case')
+      message: 'CC1: Categories isValid: case is true'.
+    t assert: (Categories valid includes: 'case')
+      message: 'CC1: Categories valid includes case'.
+
+    "CC2: 'case' is pinned (institutional memory, never consumed)."
+    t assert: (Categories isPinned: 'case')
+      message: 'CC2: Categories isPinned: case is true'.
+    t assert: (Categories pinned includes: 'case')
+      message: 'CC2: Categories pinned includes case'.
+
+    "CC3: validate: 'case' does NOT raise."
+    raised := false.
+    [Categories validate: 'case']
+      on: Exception do: [:e | raised := true].
+    t assert: raised not
+      message: 'CC3: Categories validate: case does not raise'.
+
+    "CC4: sanity — a bogus category is not valid."
+    t assert: (Categories isValid: 'bogus-xyz') not
+      message: 'CC4: Categories isValid: bogus-xyz is false'
+  ]
+
+"=== Main ==="
+CaseCategoryMain subclass: Object
+  classMethod: run [
+    | t |
+    t := CaseCatRunner new.
+    [TestCaseCategory run: t] on: Exception do: [:e |
+      ('TestCaseCategory CRASHED: ', e messageText) println.
+      t assert: false message: 'TestCaseCategory crashed'
+    ].
+    t report.
+    ^t failed
+  ]
+
+CaseCategoryMain run
