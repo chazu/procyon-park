@@ -12,6 +12,17 @@ TestInviteStore subclass: Object
     ^self
   ]
 
+  method: freshBbs [
+    "Isolated BBS per call. `BBS new` defaults to the shared data dir, which is
+     fine under the in-memory JSON store (writes never flush between instances)
+     but pollutes across instances under PP_STORE=ganso (durable shared
+     tuples.db). A unique temp dir keeps each test isolated under both stores."
+    | dir |
+    dir := '/tmp/ppinv-test-', (DateTime now epochMillis) printString, '-',
+           passed printString, '-', failed printString.
+    ^BBS withDataDir: dir
+  ]
+
   method: assert: c message: m [
     c ifTrue: [passed := passed + 1]
       ifFalse: [failed := failed + 1. failures := failures copyWith: m.
@@ -29,7 +40,7 @@ TestInviteStore subclass: Object
 
   method: testCreateGeneratesToken [
     | bbs store inv |
-    bbs := BBS new.
+    bbs := self freshBbs.
     store := InviteStore new bbs: bbs.
     inv := store create: 'bob' ttl: 60 createdBy: 'alice'.
     self assert: (inv at: 'token') size >= 32 message: 'token long enough'.
@@ -39,7 +50,7 @@ TestInviteStore subclass: Object
 
   method: testClaimConsumesInvite [
     | bbs store inv result |
-    bbs := BBS new.
+    bbs := self freshBbs.
     store := InviteStore new bbs: bbs.
     inv := store create: 'bob' ttl: 60 createdBy: 'alice'.
     result := store claim: 'bob' token: (inv at: 'token') pubkey: 'deadbeef'.
@@ -50,7 +61,7 @@ TestInviteStore subclass: Object
 
   method: testDoubleClaimFails [
     | bbs store inv first second |
-    bbs := BBS new.
+    bbs := self freshBbs.
     store := InviteStore new bbs: bbs.
     inv := store create: 'bob' ttl: 60 createdBy: 'alice'.
     first := store claim: 'bob' token: (inv at: 'token') pubkey: 'aa'.
@@ -61,7 +72,7 @@ TestInviteStore subclass: Object
 
   method: testExpiredClaimFails [
     | bbs store inv result |
-    bbs := BBS new.
+    bbs := self freshBbs.
     store := InviteStore new bbs: bbs.
     inv := store create: 'bob' ttl: 0 createdBy: 'alice'.
     "Sleep 1s so now > expires_at."
@@ -72,7 +83,7 @@ TestInviteStore subclass: Object
 
   method: testWrongTokenFails [
     | bbs store inv result |
-    bbs := BBS new.
+    bbs := self freshBbs.
     store := InviteStore new bbs: bbs.
     inv := store create: 'bob' ttl: 60 createdBy: 'alice'.
     result := store claim: 'bob' token: 'wrong' pubkey: 'dd'.
