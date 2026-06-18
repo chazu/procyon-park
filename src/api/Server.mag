@@ -358,6 +358,13 @@ ApiServer subclass: Object
   method: registerDashboardRoutes2 [
     "More work item routes + dashboard."
     self signedRouteOnly: '/api/workitem/run' do: [:req :actorCtx | self handleWorkitemRun: req actor: actorCtx].
+    "Unsigned read: the dashboard is read-only over unsigned GETs already.
+     Detail powers the Board detail modal (scope+identity from card attrs)."
+    self get: '/api/workitem/detail' do: [:req | self handleWorkitemDetail: req].
+    "Logical-cancel (status -> cancelled). Unsigned but loopback-gated: the
+     FIRST browser-initiated mutation, restricted to the single-operator
+     local dashboard. See handleWorkitemCancelRoute:."
+    httpServer route: '/api/workitem/cancel' method: 'POST' handler: [:req | self handleWorkitemCancelRoute: req].
     self get: '/api/dashboard' do: [:req | self handleDashboard: req].
     self get: '/api/history' do: [:req | self handleHistory: req].
     self registerUserRoutes
@@ -2239,7 +2246,7 @@ ApiServer subclass: Object
   method: handleWorkitemUpdate: req actor: actorCtx [
     "POST /api/workitem/update — update fields on a work item.
      Body: {identity, scope, fields: {status, title, ...}, cascade?}"
-    | body scope identity fields cascade item newPayload actor |
+    | body scope identity fields cascade actor |
     actor := self actorOf: actorCtx.
     body := self parseBody: req.
     body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
@@ -2250,6 +2257,16 @@ ApiServer subclass: Object
     fields := body at: 'fields' ifAbsent: [Dictionary new].
     cascade := body at: 'cascade' ifAbsent: [false].
 
+    ^self applyWorkitemFields: fields scope: scope identity: identity cascade: cascade actor: actor
+  ]
+
+  method: applyWorkitemFields: fields scope: scope identity: identity cascade: cascade actor: actor [
+    "Core work-item field merge shared by /api/workitem/update and the
+     loopback-gated /api/workitem/cancel. Validates existence (404), strips
+     immutable/derived keys, merges via updatePinned, cascades status to
+     children when requested, and auto-promotes a parent epic on done.
+     Returns an HttpResponse."
+    | item newPayload |
     "Read existing item"
     item := bbs findInIndex: 'workitem' scope: scope identity: identity.
     item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
@@ -2390,6 +2407,104 @@ ApiServer subclass: Object
       p at: 'status' put: newStatus.
       p at: 'updated_at' put: DateTime now epochSeconds
     ]
+  ]
+
+  method: handleWorkitemDetail: req [
+    "GET /api/workitem/detail?scope=&identity= — return the full work item
+     payload for the Board detail modal. Unsigned read (the dashboard is
+     read-only over unsigned GETs already). 404 when not found.
+     Children are derived from child.parent (never stored) and attached as a
+     lightweight summary so the modal can render relationships."
+    | scope identity |
+    scope := req queryParam: 'scope'.
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default'].
+    identity := req queryParam: 'identity'.
+    (identity isNil or: [identity isEmpty]) ifTrue: [^self errorResponse: 400 message: 'identity required'].
+    ^self handleWorkitemDetailScope: scope identity: identity
+  ]
+
+  method: handleWorkitemDetailScope: scope identity: identity [
+    "Testable core of /api/workitem/detail. Returns an HttpResponse."
+    | item children childList d |
+    item := bbs findInIndex: 'workitem' scope: scope identity: identity.
+    item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
+
+    children := bbs scanChildrenOf: identity scope: scope.
+    childList := Array new: 0.
+    children do: [:c |
+      | cp cd |
+      cp := c at: 'payload' ifAbsent: [Dictionary new].
+      cd := Dictionary new.
+      cd at: 'identity' put: (c at: 'identity' ifAbsent: ['?']).
+      cd at: 'title' put: (cp at: 'title' ifAbsent: [c at: 'identity' ifAbsent: ['?']]).
+      cd at: 'type' put: (cp at: 'type' ifAbsent: ['story']).
+      cd at: 'status' put: (cp at: 'status' ifAbsent: ['backlog']).
+      childList := childList copyWith: cd
+    ].
+
+    d := Dictionary new.
+    d at: 'identity' put: (item at: 'identity' ifAbsent: [identity]).
+    d at: 'scope' put: (item at: 'scope' ifAbsent: [scope]).
+    d at: 'payload' put: (item at: 'payload' ifAbsent: [Dictionary new]).
+    d at: 'children' put: childList.
+    ^self okResponse: d
+  ]
+
+  method: handleWorkitemCancelRoute: req [
+    "POST /api/workitem/cancel?scope=&identity= — logically cancel (status ->
+     'cancelled') a work item. UNSIGNED but LOOPBACK-GATED: this is the first
+     browser-initiated mutation and is restricted to the single-operator
+     local dashboard. Non-loopback callers get 403. The tuple is NOT
+     hard-deleted (history/relationships preserved); the cancelled card just
+     drops off the active Kanban board on the next SSE tick."
+    | host scope identity |
+    host := req header: 'Host'.
+    (self isLoopbackHost: host) ifFalse: [
+      ^self errorResponse: 403 message: 'work item cancel is restricted to the local dashboard (loopback only)'
+    ].
+    scope := req queryParam: 'scope'.
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default'].
+    identity := req queryParam: 'identity'.
+    (identity isNil or: [identity isEmpty]) ifTrue: [^self errorResponse: 400 message: 'identity required'].
+    ^self handleWorkitemCancelScope: scope identity: identity actor: nil
+  ]
+
+  method: handleWorkitemCancelScope: scope identity: identity actor: actor [
+    "Set status='cancelled' via the same updatePinned merge path as
+     /api/workitem/update (applyWorkitemFields:), so validation and the
+     parent-promotion / children-cascade rules are reused, not duplicated."
+    | fields now |
+    now := DateTime now epochSeconds.
+    fields := Dictionary new.
+    fields at: 'status' put: 'cancelled'.
+    fields at: 'cancelled_at' put: now.
+    fields at: 'updated_at' put: now.
+    ^self applyWorkitemFields: fields scope: scope identity: identity cascade: false actor: actor
+  ]
+
+  method: isLoopbackHost: hostHeader [
+    "Loopback gate for the browser-initiated cancel mutation. The Maggie
+     HttpRequest primitive does not expose the peer socket address, so the
+     only request-derived signal available is the Host header. A genuine
+     local-dashboard request carries Host: localhost[:port], 127.x[:port],
+     or [::1][:port]. Returns true for those, false otherwise.
+
+     NOTE: Host is client-supplied and therefore spoofable; this is a
+     best-effort guard for the single-operator local dashboard, not a
+     hardened security boundary. Follow-up (multiplayer:identity): add a
+     remoteAddr primitive to Maggie for a true peer-address check, and/or
+     browser request signing."
+    | host |
+    hostHeader isNil ifTrue: [^false].
+    host := hostHeader asLowercase trimBoth.
+    host isEmpty ifTrue: [^false].
+    (host = 'localhost') ifTrue: [^true].
+    (host startsWith: 'localhost:') ifTrue: [^true].
+    (host startsWith: '127.') ifTrue: [^true].
+    (host = '::1') ifTrue: [^true].
+    (host startsWith: '::1:') ifTrue: [^true].
+    (host startsWith: '[::1]') ifTrue: [^true].
+    ^false
   ]
 
   "--- History ---"
