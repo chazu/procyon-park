@@ -7,7 +7,20 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-18
+
 ### Added
+- **Ganso/SQLite backing store (now the default).** The tuplespace is backed by
+  a single SQLite database (`~/.pp/data/tuples.db`, JSON `data` + indexed
+  generated columns) via the embedded `ganso` coordination toolkit, replacing
+  the in-memory index + whole-file `bbs.json` re-encode. Writes are durable
+  per-statement (WAL); restart is O(1) (≈60× faster); memory moves to disk.
+  `BBS` delegates all store ops behind the backend; set `PP_STORE=json` to use
+  the legacy store (rollback). Existing `bbs.json` data is imported on first
+  boot. See `ganso.md`.
+- After-Action Review (AAR): every terminal workflow writes a durable `case`
+  (deterministic skeleton), an Archivist agent enriches it (narrative + lessons
+  + confidence), strictly off the critical path.
 - `pp read <category>` now accepts `--all` (alias `-A`) to scan every scope
   at once (a non-consuming cross-scope read), instead of only the current
   scope. The default stays scoped — scope isolation is preserved. When a
