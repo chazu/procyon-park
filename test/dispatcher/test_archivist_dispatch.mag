@@ -1,0 +1,201 @@
+"Integration tests for WorkflowEngine>>dispatchArchivist:scope: and its
+ wiring into the terminal workflow paths (complete / fail).
+
+ Invariants under test:
+   AD1  completeWorkflow: enqueues EXACTLY ONE 'archivist' task tuple for the
+        instance, with role='archivist' and workflow_instance set.
+   AD2  Driving the terminal path again (idempotent) creates NO second
+        archivist task — still exactly one.
+   AD3  The workflow status remains 'completed' after dispatch (the archivist
+        task never gates completion or flips terminal status).
+   AD4  failWorkflow:scope:reason: ALSO enqueues exactly one archivist task.
+
+ Real BBS (BBS withDataDir:) is used so the full scan + out: path executes
+ end-to-end against an in-memory tuplespace."
+
+"--- Runner ---"
+ADRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== WorkflowEngine archivist-dispatch Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+ADHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedWorkflow: bbs id: instanceId scope: scope [
+    "Seed a running workflow tuple (with a repo param) plus a done task."
+    | wfPayload params tp1 |
+    params := Dictionary new.
+    params at: 'repo' put: 'procyon-park'.
+    wfPayload := Dictionary new.
+    wfPayload at: 'status' put: 'running'.
+    wfPayload at: 'template' put: 'demo-tmpl'.
+    wfPayload at: 'params' put: params.
+    wfPayload at: 'started_at' put: 100.
+    bbs out: 'workflow' scope: scope identity: instanceId payload: wfPayload.
+
+    tp1 := Dictionary new.
+    tp1 at: 'workflow_instance' put: instanceId.
+    tp1 at: 'role' put: 'implementer'.
+    tp1 at: 'status' put: 'done'.
+    bbs out: 'task' scope: 'agents' identity: instanceId, ':task:impl' payload: tp1
+  ]
+
+  classMethod: archivistTasksFor: bbs id: instanceId [
+    "All 'task' tuples with role='archivist' and workflow_instance=instanceId."
+    ^(bbs scanAll: 'task') select: [:t |
+      | p |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      ((p at: 'role' ifAbsent: ['']) = 'archivist')
+        and: [(p at: 'workflow_instance' ifAbsent: ['']) = instanceId]
+    ]
+  ]
+
+  classMethod: statusOf: bbs id: instanceId scope: scope [
+    | wf |
+    wf := bbs rdp: 'workflow' scope: scope identity: instanceId.
+    ^wf isNil ifTrue: ['missing'] ifFalse: [(wf at: 'payload') at: 'status' ifAbsent: ['unknown']]
+  ]
+
+"=== Tests ==="
+TestArchivistDispatch subclass: Object
+
+  classMethod: run: t [
+    self testCompleteEnqueuesOne: t.
+    self testIdempotentNoSecond: t.
+    self testStatusRemainsCompleted: t.
+    self testFailEnqueuesOne: t
+  ]
+
+  classMethod: testCompleteEnqueuesOne: t [
+    | tempDir bbs engine wf tasks task |
+    '--- AD1: completeWorkflow enqueues exactly one archivist task ---' println.
+    tempDir := ADHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ADHelper seedWorkflow: bbs id: 'aw-1' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    wf := bbs rdp: 'workflow' scope: 'default' identity: 'aw-1'.
+    engine completeWorkflow: wf.
+
+    tasks := ADHelper archivistTasksFor: bbs id: 'aw-1'.
+    t assertEqual: tasks size to: 1
+      message: 'AD1: exactly one archivist task for aw-1'.
+    tasks size = 1 ifTrue: [
+      task := tasks at: 1.
+      t assertEqual: ((task at: 'payload') at: 'role' ifAbsent: [nil]) to: 'archivist'
+        message: 'AD1: task role=archivist'.
+      t assertEqual: ((task at: 'payload') at: 'workflow_instance' ifAbsent: [nil]) to: 'aw-1'
+        message: 'AD1: task workflow_instance=aw-1'
+    ]
+  ]
+
+  classMethod: testIdempotentNoSecond: t [
+    | tempDir bbs engine wf tasks |
+    '--- AD2: repeated dispatch is idempotent (no second task) ---' println.
+    tempDir := ADHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ADHelper seedWorkflow: bbs id: 'aw-2' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    wf := bbs rdp: 'workflow' scope: 'default' identity: 'aw-2'.
+    engine completeWorkflow: wf.
+    "Drive dispatch again directly — must NOT create a duplicate."
+    engine dispatchArchivist: 'aw-2' scope: 'default'.
+    engine dispatchArchivist: 'aw-2' scope: 'default'.
+
+    tasks := ADHelper archivistTasksFor: bbs id: 'aw-2'.
+    t assertEqual: tasks size to: 1
+      message: 'AD2: still exactly one archivist task after repeated dispatch'
+  ]
+
+  classMethod: testStatusRemainsCompleted: t [
+    | tempDir bbs engine wf |
+    '--- AD3: workflow status remains completed after dispatch ---' println.
+    tempDir := ADHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ADHelper seedWorkflow: bbs id: 'aw-3' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    wf := bbs rdp: 'workflow' scope: 'default' identity: 'aw-3'.
+    engine completeWorkflow: wf.
+
+    t assertEqual: (ADHelper statusOf: bbs id: 'aw-3' scope: 'default') to: 'completed'
+      message: 'AD3: workflow aw-3 status=completed'
+  ]
+
+  classMethod: testFailEnqueuesOne: t [
+    | tempDir bbs engine tasks |
+    '--- AD4: failWorkflow enqueues exactly one archivist task ---' println.
+    tempDir := ADHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ADHelper seedWorkflow: bbs id: 'af-1' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    engine failWorkflow: 'af-1' scope: 'default' reason: 'boom'.
+
+    tasks := ADHelper archivistTasksFor: bbs id: 'af-1'.
+    t assertEqual: tasks size to: 1
+      message: 'AD4: exactly one archivist task for af-1'
+  ]
+
+"=== Main ==="
+ArchivistDispatchMain subclass: Object
+  classMethod: start [
+    | t |
+    t := ADRunner new.
+    TestArchivistDispatch run: t.
+    t report.
+    ^t failed
+  ]

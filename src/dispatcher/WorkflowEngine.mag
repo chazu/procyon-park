@@ -732,6 +732,62 @@ WorkflowEngine subclass: Object
     ]
   ]
 
+  "--- AAR Archivist Dispatch ---"
+
+  method: dispatchArchivist: instanceId scope: scope [
+    "Best-effort: enqueue EXACTLY ONE 'archivist' task pointed at this terminal
+     workflow instance so an Archivist agent can AAR-review it and emit the
+     enrichment payload. Called from the terminal paths AFTER the case
+     skeleton has been written (the archivist reads that case tuple).
+
+     Two hard guarantees:
+       1. IDEMPOTENT — if an archivist task already exists for this instance
+          we bail before creating a second one.
+       2. BEST-EFFORT / NON-FATAL — the whole body is wrapped in
+          on:Exception so a scan/BBS failure can NEVER propagate into the
+          terminal path. This task NEVER gates completion or flips status.
+
+     SCOPE: this method ONLY enqueues the task. Consuming the archivist's
+     output and calling CaseEnricher is the integration story."
+    [
+      | existing wf wfPayload params repo launchedBy taskPayload |
+      "Idempotency guard: skip if an archivist task already exists for this
+       instance (role='archivist' AND payload workflow_instance=instanceId)."
+      existing := (bbs scanAll: 'task') detect: [:t |
+        | p |
+        p := t at: 'payload' ifAbsent: [Dictionary new].
+        ((p at: 'role' ifAbsent: ['']) = 'archivist')
+          and: [(p at: 'workflow_instance' ifAbsent: ['']) = instanceId]
+      ] ifNone: [nil].
+      existing notNil ifTrue: [^self].
+
+      "Recover repo from the workflow params + launched_by for attribution."
+      wf := bbs rdp: 'workflow' scope: scope identity: instanceId.
+      wfPayload := wf notNil
+        ifTrue: [wf at: 'payload' ifAbsent: [Dictionary new]]
+        ifFalse: [Dictionary new].
+      params := wfPayload at: 'params' ifAbsent: [Dictionary new].
+      repo := params at: 'repo' ifAbsent: [nil].
+      launchedBy := wf notNil ifTrue: [wf at: 'launched_by' ifAbsent: [nil]] ifFalse: [nil].
+
+      "Build the task tuple via the same mechanism role-bearing transitions use."
+      taskPayload := Dictionary new.
+      taskPayload at: 'role' put: 'archivist'.
+      taskPayload at: 'status' put: 'pending'.
+      taskPayload at: 'workflow_instance' put: instanceId.
+      taskPayload at: 'affinity' put: (self buildAffinity: nil wfAffinity: nil overrideAffinity: nil).
+      taskPayload at: 'description' put:
+        ('AAR-review workflow instance ', instanceId, ' and emit the enrichment payload. ',
+         'Read the case tuple and workflow record for this workflow_instance, then write ',
+         'the archivist enrichment for it.').
+      repo notNil ifTrue: [taskPayload at: 'repo' put: repo].
+
+      bbs out: 'task' scope: scope identity: instanceId, ':task:archivist' payload: taskPayload actor: nil launchedBy: launchedBy executedBy: nil
+    ] on: Exception do: [:e |
+      bbs logEngine: 'warn' component: 'aar' scope: scope message: ('archivist dispatch failed (non-fatal): ', e messageText)
+    ]
+  ]
+
   "--- Workflow Completion ---"
 
   "wf-accepting variants — preferred when the caller already has the
@@ -804,6 +860,10 @@ WorkflowEngine subclass: Object
     "AAR: persist one idempotent 'case' tuple now that failed_at is stamped.
      Best-effort — never throws into the failure path."
     self writeCaseSkeleton: instanceId scope: scope terminalState: 'failed'.
+
+    "AAR: enqueue a best-effort Archivist task pointed at this instance now
+     that the case skeleton exists. Self-guarded — never gates failure."
+    self dispatchArchivist: instanceId scope: scope.
 
     "Emit failure event"
     bbs emitEvent: scope identity: (Identity workflowFailed: instanceId) type: 'workflow-failed' summary: reason.
@@ -883,6 +943,10 @@ WorkflowEngine subclass: Object
     "AAR: persist one idempotent 'case' tuple now that completed_at is
      stamped (so the gatherer sees the end time). Best-effort — never throws."
     self writeCaseSkeleton: instanceId scope: scope terminalState: 'completed'.
+
+    "AAR: enqueue a best-effort Archivist task pointed at this instance now
+     that the case skeleton exists. Self-guarded — never gates completion."
+    self dispatchArchivist: instanceId scope: scope.
 
     "Promote originating work item to done (cascades to parent epic)."
     payload := wf at: 'payload' ifAbsent: [Dictionary new].
