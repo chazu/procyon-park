@@ -87,9 +87,9 @@ SignatureVerifier subclass: Object
     body isNil ifTrue: [body := ''].
     method := req method.
     path := req path.
-    canonical := method, (String with: Character lf),
-                 path, (String with: Character lf),
-                 tsHeader, (String with: Character lf),
+    canonical := method, (String lf),
+                 path, (String lf),
+                 tsHeader, (String lf),
                  (Sha256 hash: body).
 
     isAdmin := false.
@@ -185,8 +185,8 @@ SignatureVerifier subclass: Object
     delta < 0 ifTrue: [delta := delta negated].
     delta > skew ifTrue: [^nil].
 
-    canonical := 'sse', (String with: Character lf),
-                 actorParam, (String with: Character lf),
+    canonical := 'sse', (String lf),
+                 actorParam, (String lf),
                  tsParam.
 
     isAdmin := false.

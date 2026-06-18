@@ -242,12 +242,12 @@ Main subclass: Object
       stamp := now printString.
       className := 'Exception'.
       [className := e class name] on: Exception do: [:_ | className := 'Exception'].
-      body := '=== pp serve crash at epoch=', stamp, ' ===', (String with: Character lf),
-              'exception: ', className, (String with: Character lf),
-              'message: ', e messageText, (String with: Character lf),
-              '(Maggie VM does not expose a full stack trace object; attach controlling', (String with: Character lf),
-              ' terminal output or run under scripts/pp-supervisor.sh for per-run logs.)', (String with: Character lf),
-              (String with: Character lf).
+      body := '=== pp serve crash at epoch=', stamp, ' ===', (String lf),
+              'exception: ', className, (String lf),
+              'message: ', e messageText, (String lf),
+              '(Maggie VM does not expose a full stack trace object; attach controlling', (String lf),
+              ' terminal output or run under scripts/pp-supervisor.sh for per-run logs.)', (String lf),
+              (String lf).
       crashPath := logsDir, '/crash-', stamp, '.log'.
       rollingPath := logsDir, '/pp-serve.log'.
       File writeFileContents: crashPath contents: body mode: 8r644.

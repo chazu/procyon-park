@@ -38,6 +38,15 @@ Semantic Versioning.
   (`primConcat: argument must be a string`) on current Maggie. Switched to
   `String lf` (the `primLf` primitive), which yields identical bytes so
   existing server-side signature verification stays compatible.
+- Restored the **server** build against current Maggie. The remaining 17
+  `String with: Character lf` sites (`Main.mag`, `api/Server.mag`,
+  `api/SignatureVerifier.mag`) panicked the same way at runtime, so a
+  server rebuilt on current Maggie could not verify signed writes (its
+  `SignatureVerifier` canonical) — the prior running server worked only
+  because it predated the VM change. All 17 migrated to `String lf`
+  (byte-identical `\n`), so a freshly built `pp serve` verifies signed
+  writes again. This unblocks live deployment of the AAR case/enrichment
+  feature.
 - `pp worktree clean` no longer crashes the whole command when a single
   worktree fails to process. The sweep now handles each task inside its own
   rescue (logging and continuing on error) and skips malformed, non-string

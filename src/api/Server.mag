@@ -117,12 +117,12 @@ ApiServer subclass: Object
     configDir := home, '/.config/pp'.
     Shell run: 'mkdir -p "', configDir, '"'.
     tomlPath := configDir, '/server.toml'.
-    tomlContents := '[admin]', (String with: Character lf),
-                    'admins = ["', pubHex, '"]', (String with: Character lf),
-                    '', (String with: Character lf),
-                    '[security]', (String with: Character lf),
-                    'enforce_signatures = true', (String with: Character lf),
-                    'skew_seconds = 120', (String with: Character lf).
+    tomlContents := '[admin]', (String lf),
+                    'admins = ["', pubHex, '"]', (String lf),
+                    '', (String lf),
+                    '[security]', (String lf),
+                    'enforce_signatures = true', (String lf),
+                    'skew_seconds = 120', (String lf).
     File writeFileContents: tomlPath contents: tomlContents mode: 8r644.
     "Seed pinned identity tuple matching handleUserAdd's shape
      (category=identity, scope=/, identity=user:<name>)."
