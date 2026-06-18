@@ -1,0 +1,80 @@
+"WorkflowRecordGatherer — collects every BBS tuple belonging to one
+ workflow instance and returns them as a flat WorkflowRecord Dictionary
+ for CaseBuilder to consume.
+
+ This is the only BBS-touching half of the skeleton: it is deliberately
+ dumb. It collects, filters, and sorts — it does NOT transform, score,
+ or interpret. All scoring/shaping lives downstream in CaseBuilder.
+
+ Returned Dictionary shape:
+   'workflow'     -> the workflow tuple Dictionary (empty Dictionary if absent)
+   'tasks'        -> Array of task tuples for this instance, sorted ascending
+                     by top-level 'created_at'
+   'observations' -> Array of observation tuples scoped to this instance
+   'events'       -> Array of event tuples scoped to this instance
+
+ A task belongs to the instance when its payload.workflow_instance equals
+ the instance id. An observation/event belongs when EITHER the tuple's
+ top-level scope equals the instance id OR its payload.workflow_instance
+ does. Missing data never throws — collections default to empty Arrays.
+
+ Maggie idioms: temp vars at method top; at:ifAbsent: for every read;
+ isNil/notNil ifTrue: (no ifNil:); sort: with a -1/0/1 comparator like
+ BBS>>childrenOfParent:."
+
+WorkflowRecordGatherer subclass: Object
+
+  classMethod: gather: instanceId scope: scope bbs: bbs [
+    "Assemble the WorkflowRecord Dictionary for the given workflow instance."
+    | record wf tasks observations events |
+    record := Dictionary new.
+
+    "--- workflow: rdp first, then identity scan, else empty Dictionary ---"
+    wf := bbs rdp: 'workflow' scope: scope identity: instanceId.
+    wf isNil ifTrue: [
+      wf := (bbs scanAll: 'workflow') detect: [:t |
+        (t at: 'identity' ifAbsent: ['']) = instanceId
+      ] ifNone: [nil]
+    ].
+    wf isNil ifTrue: [wf := Dictionary new].
+    record at: 'workflow' put: wf.
+
+    "--- tasks: payload.workflow_instance match, sorted by created_at asc ---"
+    tasks := (bbs scanAll: 'task') select: [:t |
+      ((t at: 'payload' ifAbsent: [Dictionary new])
+        at: 'workflow_instance' ifAbsent: ['']) = instanceId
+    ].
+    tasks sort: [:a :b |
+      | ca cb |
+      ca := a at: 'created_at' ifAbsent: [0].
+      cb := b at: 'created_at' ifAbsent: [0].
+      ca < cb ifTrue: [-1] ifFalse: [
+        ca > cb ifTrue: [1] ifFalse: [0]
+      ]
+    ].
+    record at: 'tasks' put: tasks.
+
+    "--- observations: scope OR payload.workflow_instance match ---"
+    observations := (bbs scanAll: 'observation') select: [:t |
+      self tuple: t belongsTo: instanceId
+    ].
+    record at: 'observations' put: observations.
+
+    "--- events: same scope-or-workflow_instance rule ---"
+    events := (bbs scanAll: 'event') select: [:t |
+      self tuple: t belongsTo: instanceId
+    ].
+    record at: 'events' put: events.
+
+    ^record
+  ]
+
+  classMethod: tuple: t belongsTo: instanceId [
+    "True when the tuple's top-level scope equals instanceId OR its
+     payload.workflow_instance equals instanceId. Nil-safe throughout."
+    | wi |
+    (t at: 'scope' ifAbsent: ['']) = instanceId ifTrue: [^true].
+    wi := (t at: 'payload' ifAbsent: [Dictionary new])
+            at: 'workflow_instance' ifAbsent: [''].
+    ^wi = instanceId
+  ]

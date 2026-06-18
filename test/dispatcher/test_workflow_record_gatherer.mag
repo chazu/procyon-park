@@ -1,0 +1,283 @@
+"Tests for WorkflowRecordGatherer>>gather:scope:bbs: — the dumb BBS
+ collector that assembles a WorkflowRecord for one workflow instance.
+
+ Invariants under test:
+   WRG1 tasks returned are ONLY the target instance's, filtered by
+        payload.workflow_instance, and sorted ascending by created_at.
+   WRG2 observations match by EITHER tuple scope=instanceId OR
+        payload.workflow_instance=instanceId — and exclude other
+        instances' tuples.
+   WRG3 events follow the same scope-or-workflow_instance rule.
+   WRG4 workflow tuple is resolved via rdp: when present.
+   WRG5 when rdp: misses (scope mismatch) the workflow is still found by
+        a category-wide identity scan fallback.
+   WRG6 nil-safe: a completely-absent instance yields an empty workflow
+        Dictionary and empty Arrays (never throws).
+
+ Uses an in-memory stub BBS exposing only the two selectors the gatherer
+ touches: rdp:scope:identity: and scanAll:."
+
+"=== Stub BBS ==="
+WRGStubBBS subclass: Object
+  instanceVars: tuples
+
+  classMethod: new [ ^super new initWRG ]
+
+  method: initWRG [ tuples := Array new: 0 ]
+
+  method: addCategory: cat scope: scope identity: identity created: ca payload: payload [
+    | t |
+    t := Dictionary new.
+    t at: 'category' put: cat.
+    t at: 'scope' put: scope.
+    t at: 'identity' put: identity.
+    t at: 'created_at' put: ca.
+    t at: 'payload' put: payload.
+    tuples := tuples copyWith: t
+  ]
+
+  method: scanAll: category [
+    ^tuples select: [:t | (t at: 'category' ifAbsent: ['']) = category]
+  ]
+
+  method: rdp: category scope: scope identity: identity [
+    ^tuples detect: [:t |
+      (t at: 'category' ifAbsent: ['']) = category
+        and: [(t at: 'scope' ifAbsent: ['']) = scope
+        and: [(t at: 'identity' ifAbsent: ['']) = identity]]
+    ] ifNone: [nil]
+  ]
+
+"=== Test helpers ==="
+WRGHelper subclass: Object
+
+  classMethod: taskPayload: instanceId [
+    | p |
+    p := Dictionary new.
+    p at: 'workflow_instance' put: instanceId.
+    p at: 'role' put: 'implementer'.
+    ^p
+  ]
+
+  classMethod: wiPayload: instanceId [
+    | p |
+    p := Dictionary new.
+    p at: 'workflow_instance' put: instanceId.
+    ^p
+  ]
+
+  classMethod: seedTwoInstances: bbs [
+    "Two workflow instances: wf-1 (the target) and wf-2 (the decoy)."
+    "Workflow tuples (scope = identity = instance id)."
+    bbs addCategory: 'workflow' scope: 'wf-1' identity: 'wf-1' created: 10 payload: Dictionary new.
+    bbs addCategory: 'workflow' scope: 'wf-2' identity: 'wf-2' created: 11 payload: Dictionary new.
+
+    "Tasks for wf-1, seeded OUT of order (200 then 100) to prove the sort."
+    bbs addCategory: 'task' scope: 'agents' identity: 't-late' created: 200
+        payload: (self taskPayload: 'wf-1').
+    bbs addCategory: 'task' scope: 'agents' identity: 't-early' created: 100
+        payload: (self taskPayload: 'wf-1').
+    "Task for wf-2 — must NOT leak into the wf-1 record."
+    bbs addCategory: 'task' scope: 'agents' identity: 't-other' created: 150
+        payload: (self taskPayload: 'wf-2').
+
+    "Observations: one matches by scope, one by payload, one is wf-2's."
+    bbs addCategory: 'observation' scope: 'wf-1' identity: 'o-scope' created: 20
+        payload: Dictionary new.
+    bbs addCategory: 'observation' scope: 'misc' identity: 'o-payload' created: 21
+        payload: (self wiPayload: 'wf-1').
+    bbs addCategory: 'observation' scope: 'wf-2' identity: 'o-other' created: 22
+        payload: (self wiPayload: 'wf-2').
+
+    "Events: same shape — scope match, payload match, decoy."
+    bbs addCategory: 'event' scope: 'wf-1' identity: 'e-scope' created: 30
+        payload: Dictionary new.
+    bbs addCategory: 'event' scope: 'misc' identity: 'e-payload' created: 31
+        payload: (self wiPayload: 'wf-1').
+    bbs addCategory: 'event' scope: 'wf-2' identity: 'e-other' created: 32
+        payload: (self wiPayload: 'wf-2')
+  ]
+
+  classMethod: identitiesOf: tuples [
+    ^tuples collect: [:t | t at: 'identity' ifAbsent: ['?']]
+  ]
+
+  classMethod: array: arr includes: value [
+    ^(arr detect: [:x | x = value] ifNone: [nil]) notNil
+  ]
+
+"=== Runner ==="
+WRGRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== WorkflowRecordGatherer Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== Tests ==="
+TestWRG subclass: Object
+
+  classMethod: run: t [
+    self testTasksFilteredAndSorted: t.
+    self testObservationsScopeOrPayload: t.
+    self testEventsScopeOrPayload: t.
+    self testWorkflowViaRdp: t.
+    self testWorkflowScanFallback: t.
+    self testAbsentInstanceNilSafe: t
+  ]
+
+  classMethod: testTasksFilteredAndSorted: t [
+    | bbs record tasks ids |
+    '--- WRG1: tasks filtered to instance and sorted by created_at ---' println.
+    bbs := WRGStubBBS new.
+    WRGHelper seedTwoInstances: bbs.
+
+    record := WorkflowRecordGatherer gather: 'wf-1' scope: 'wf-1' bbs: bbs.
+    tasks := record at: 'tasks'.
+
+    t assertEqual: tasks size to: 2
+      message: 'WRG1: only the two wf-1 tasks are gathered'.
+    ids := WRGHelper identitiesOf: tasks.
+    t assertEqual: (ids at: 1) to: 't-early'
+      message: 'WRG1: earliest created_at sorts first'.
+    t assertEqual: (ids at: 2) to: 't-late'
+      message: 'WRG1: latest created_at sorts last'.
+    t assert: ((WRGHelper array: ids includes: 't-other') not)
+      message: 'WRG1: wf-2 task does not leak into the wf-1 record'
+  ]
+
+  classMethod: testObservationsScopeOrPayload: t [
+    | bbs record obs ids |
+    '--- WRG2: observations match by scope OR payload workflow_instance ---' println.
+    bbs := WRGStubBBS new.
+    WRGHelper seedTwoInstances: bbs.
+
+    record := WorkflowRecordGatherer gather: 'wf-1' scope: 'wf-1' bbs: bbs.
+    obs := record at: 'observations'.
+    ids := WRGHelper identitiesOf: obs.
+
+    t assertEqual: obs size to: 2
+      message: 'WRG2: scope-match and payload-match observations both gathered'.
+    t assert: (WRGHelper array: ids includes: 'o-scope')
+      message: 'WRG2: observation matched via tuple scope'.
+    t assert: (WRGHelper array: ids includes: 'o-payload')
+      message: 'WRG2: observation matched via payload workflow_instance'.
+    t assert: ((WRGHelper array: ids includes: 'o-other') not)
+      message: 'WRG2: wf-2 observation excluded'
+  ]
+
+  classMethod: testEventsScopeOrPayload: t [
+    | bbs record events ids |
+    '--- WRG3: events match by scope OR payload workflow_instance ---' println.
+    bbs := WRGStubBBS new.
+    WRGHelper seedTwoInstances: bbs.
+
+    record := WorkflowRecordGatherer gather: 'wf-1' scope: 'wf-1' bbs: bbs.
+    events := record at: 'events'.
+    ids := WRGHelper identitiesOf: events.
+
+    t assertEqual: events size to: 2
+      message: 'WRG3: scope-match and payload-match events both gathered'.
+    t assert: (WRGHelper array: ids includes: 'e-scope')
+      message: 'WRG3: event matched via tuple scope'.
+    t assert: (WRGHelper array: ids includes: 'e-payload')
+      message: 'WRG3: event matched via payload workflow_instance'.
+    t assert: ((WRGHelper array: ids includes: 'e-other') not)
+      message: 'WRG3: wf-2 event excluded'
+  ]
+
+  classMethod: testWorkflowViaRdp: t [
+    | bbs record wf |
+    '--- WRG4: workflow resolved via rdp: ---' println.
+    bbs := WRGStubBBS new.
+    WRGHelper seedTwoInstances: bbs.
+
+    record := WorkflowRecordGatherer gather: 'wf-1' scope: 'wf-1' bbs: bbs.
+    wf := record at: 'workflow'.
+
+    t assertEqual: (wf at: 'identity' ifAbsent: [nil]) to: 'wf-1'
+      message: 'WRG4: workflow tuple resolved by rdp: matches instance'
+  ]
+
+  classMethod: testWorkflowScanFallback: t [
+    | bbs record wf |
+    '--- WRG5: workflow found via identity scan when rdp: misses ---' println.
+    bbs := WRGStubBBS new.
+    "Workflow stored under a scope that the gather: call will NOT pass,
+     so rdp: returns nil and the identity-scan fallback must find it."
+    bbs addCategory: 'workflow' scope: 'weird-scope' identity: 'wf-3' created: 5
+        payload: Dictionary new.
+
+    record := WorkflowRecordGatherer gather: 'wf-3' scope: 'system' bbs: bbs.
+    wf := record at: 'workflow'.
+
+    t assertEqual: (wf at: 'identity' ifAbsent: [nil]) to: 'wf-3'
+      message: 'WRG5: scan fallback resolves workflow by identity'
+  ]
+
+  classMethod: testAbsentInstanceNilSafe: t [
+    | bbs record wf |
+    '--- WRG6: absent instance yields empty record (no throw) ---' println.
+    bbs := WRGStubBBS new.
+    WRGHelper seedTwoInstances: bbs.
+
+    record := WorkflowRecordGatherer gather: 'ghost' scope: 'nope' bbs: bbs.
+
+    wf := record at: 'workflow'.
+    t assertEqual: (wf size) to: 0
+      message: 'WRG6: missing workflow defaults to empty Dictionary'.
+    t assertEqual: (record at: 'tasks') size to: 0
+      message: 'WRG6: no tasks for absent instance'.
+    t assertEqual: (record at: 'observations') size to: 0
+      message: 'WRG6: no observations for absent instance'.
+    t assertEqual: (record at: 'events') size to: 0
+      message: 'WRG6: no events for absent instance'
+  ]
+
+"=== Main ==="
+WRGMain subclass: Object
+  classMethod: start [
+    | t |
+    t := WRGRunner new.
+    TestWRG run: t.
+    t report.
+    ^t failed
+  ]

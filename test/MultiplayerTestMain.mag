@@ -214,6 +214,12 @@ MultiplayerTestMain subclass: Object
         failures := failures copyWith: ('CaseBuilderMain CRASHED: ', e messageText).
         ('CRASH: CaseBuilderMain: ', e messageText) println].
 
+    [totalFailed := totalFailed + WRGMain start. ranSuites := ranSuites + 1]
+      on: Exception do: [:e |
+        failedSuites := failedSuites + 1.
+        failures := failures copyWith: ('WRGMain CRASHED: ', e messageText).
+        ('CRASH: WRGMain: ', e messageText) println].
+
     "--- Pending suites (documented reasons, not invoked) ---"
     '' println.
     '--- Pending multiplayer suites (skipped, tracked separately) ---' println.
