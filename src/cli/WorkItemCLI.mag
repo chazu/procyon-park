@@ -78,7 +78,7 @@ WorkItemCLI subclass: Object
       ^self
     ].
 
-    subcmd := args at: 3.
+    subcmd := args at: 2.
 
     subcmd = 'create'      ifTrue: [^self cmdCreate: args].
     subcmd = 'create-from' ifTrue: [^self cmdCreateFrom: args].

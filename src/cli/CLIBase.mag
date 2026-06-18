@@ -51,9 +51,9 @@ CLIBase subclass: Object
     url := baseUrl, path.
     jsonBody := Json encode: body.
     ts := DateTime now epochSeconds printString.
-    canonical := 'POST', (String with: Character lf),
-                 path, (String with: Character lf),
-                 ts, (String with: Character lf),
+    canonical := 'POST', String lf,
+                 path, String lf,
+                 ts, String lf,
                  (Sha256 hash: jsonBody).
     sig := nil.
     [sig := anIdentity sign: canonical] on: Exception do: [:e |
@@ -167,9 +167,9 @@ CLIBase subclass: Object
     url := baseUrl, path.
     jsonBody := Json encode: dict.
     ts := DateTime now epochSeconds printString.
-    canonical := 'POST', (String with: Character lf),
-                 path, (String with: Character lf),
-                 ts, (String with: Character lf),
+    canonical := 'POST', String lf,
+                 path, String lf,
+                 ts, String lf,
                  (Sha256 hash: jsonBody).
     sig := nil.
     [sig := anIdentity sign: canonical] on: Exception do: [:e |
@@ -335,9 +335,9 @@ CLIBase subclass: Object
     url := baseUrl, path.
     jsonBody := Json encode: dict.
     ts := DateTime now epochSeconds printString.
-    canonical := 'POST', (String with: Character lf),
-                 path, (String with: Character lf),
-                 ts, (String with: Character lf),
+    canonical := 'POST', String lf,
+                 path, String lf,
+                 ts, String lf,
                  (Sha256 hash: jsonBody).
     sig := nil.
     [sig := anIdentity sign: canonical] on: Exception do: [:e | ^self].

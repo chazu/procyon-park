@@ -17,6 +17,17 @@ Semantic Versioning.
   `index 0 out of bounds` crashes throughout the server and CLI.
 
 ### Fixed
+- `pp workitem <subcommand>` is no longer misrouted to "Unknown workitem
+  command". The dispatcher read the subcommand at `args at: 3`, but the
+  handler frame is `[workitem, sub, arg]`, so the subcommand is at
+  `args at: 2` (an off-by-one missed in the 1-based migration). Every
+  `pp workitem` subcommand (create, create-from, run, ready, …) was broken.
+- All `pp` CLI signed writes (`notify`, `observe`, `signal`, `workitem
+  create`, …) no longer crash. The request-signing canonical string built
+  its line separators with `String with: Character lf`, which now panics
+  (`primConcat: argument must be a string`) on current Maggie. Switched to
+  `String lf` (the `primLf` primitive), which yields identical bytes so
+  existing server-side signature verification stays compatible.
 - `pp worktree clean` no longer crashes the whole command when a single
   worktree fails to process. The sweep now handles each task inside its own
   rescue (logging and continuing on error) and skips malformed, non-string
