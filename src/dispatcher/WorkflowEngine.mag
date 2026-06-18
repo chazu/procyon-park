@@ -704,6 +704,34 @@ WorkflowEngine subclass: Object
     ^ctx
   ]
 
+  "--- AAR Case Skeleton Writer ---"
+
+  method: writeCaseSkeleton: instanceId scope: scope terminalState: state [
+    "Persist EXACTLY one 'case' tuple per terminal workflow by combining
+     WorkflowRecordGatherer (gather) + CaseBuilder (build) + bbs out:.
+     This is the institutional-memory skeleton for After-Action Review.
+
+     Two hard guarantees:
+       1. IDEMPOTENT — if a case already exists for this instance we bail
+          before doing any work, so re-driving a terminal path (or calling
+          this twice) never produces a second tuple.
+       2. BEST-EFFORT / NON-FATAL — every step after the idempotency check
+          is wrapped in on:Exception do: so a gatherer/builder/BBS failure
+          can NEVER propagate into the terminal completion/failure/cancel
+          path. A broken case write must not break workflow termination."
+    | record payload existing |
+    existing := bbs rdp: 'case' scope: scope identity: instanceId.
+    existing notNil ifTrue: [^self].
+    [
+      record := WorkflowRecordGatherer gather: instanceId scope: scope bbs: bbs.
+      payload := CaseBuilder buildCase: record terminalState: state.
+      payload at: 'created_at' put: DateTime now epochSeconds.
+      bbs out: 'case' scope: scope identity: instanceId payload: payload
+    ] on: Exception do: [:e |
+      bbs logEngine: 'warn' component: 'aar' scope: scope message: ('case skeleton failed (non-fatal): ', e messageText)
+    ]
+  ]
+
   "--- Workflow Completion ---"
 
   "wf-accepting variants — preferred when the caller already has the
@@ -772,6 +800,10 @@ WorkflowEngine subclass: Object
       p at: 'failed_at' put: DateTime now epochSeconds.
       p at: 'failure_reason' put: reason
     ].
+
+    "AAR: persist one idempotent 'case' tuple now that failed_at is stamped.
+     Best-effort — never throws into the failure path."
+    self writeCaseSkeleton: instanceId scope: scope terminalState: 'failed'.
 
     "Emit failure event"
     bbs emitEvent: scope identity: (Identity workflowFailed: instanceId) type: 'workflow-failed' summary: reason.
@@ -847,6 +879,10 @@ WorkflowEngine subclass: Object
       p at: 'status' put: 'completed'.
       p at: 'completed_at' put: DateTime now epochSeconds
     ].
+
+    "AAR: persist one idempotent 'case' tuple now that completed_at is
+     stamped (so the gatherer sees the end time). Best-effort — never throws."
+    self writeCaseSkeleton: instanceId scope: scope terminalState: 'completed'.
 
     "Promote originating work item to done (cascades to parent epic)."
     payload := wf at: 'payload' ifAbsent: [Dictionary new].
@@ -953,6 +989,11 @@ WorkflowEngine subclass: Object
         p at: 'cancelled_by' put: actor
       ]
     ].
+
+    "AAR: cancellation is a DISTINCT terminal path — it does NOT route
+     through failWorkflow: — so wire the case writer here too with the
+     'cancelled' terminal state. Best-effort/idempotent — never throws."
+    self writeCaseSkeleton: instanceId scope: scope terminalState: 'cancelled'.
 
     "Cancel pending/dispatched tasks belonging to this workflow"
     cancelledCount := 0.

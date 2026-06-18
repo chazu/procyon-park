@@ -1,0 +1,236 @@
+"Integration tests for WorkflowEngine>>writeCaseSkeleton:scope:terminalState:
+ and its wiring into the terminal workflow paths (complete / fail / cancel).
+
+ Invariants under test:
+   CSW1  completeWorkflow: persists EXACTLY ONE 'case' tuple for the
+         instance with terminal_state='completed'.
+   CSW2  Calling writeCaseSkeleton: again is IDEMPOTENT — still exactly
+         one 'case' tuple (no duplicate).
+   CSW3  failWorkflow:scope:reason: persists a 'case' with
+         terminal_state='failed'.
+   CSW4  A gatherer/builder exception is swallowed (best-effort): the
+         call does NOT throw and writes no 'case' tuple.
+
+ Real BBS (BBS withDataDir:) is used for CSW1-3 so the full
+ gather+build+out path executes end-to-end. A throwing stub BBS drives
+ CSW4 to prove the on:Exception guard never propagates into the terminal
+ path."
+
+"--- Runner ---"
+CSWRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== WorkflowEngine case-skeleton wiring Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+CSWHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedWorkflow: bbs id: instanceId scope: scope [
+    "Seed a running workflow tuple plus two task tuples for the instance."
+    | wfPayload tp1 tp2 |
+    wfPayload := Dictionary new.
+    wfPayload at: 'status' put: 'running'.
+    wfPayload at: 'template' put: 'demo-tmpl'.
+    wfPayload at: 'params' put: Dictionary new.
+    wfPayload at: 'started_at' put: 100.
+    bbs out: 'workflow' scope: scope identity: instanceId payload: wfPayload.
+
+    tp1 := Dictionary new.
+    tp1 at: 'workflow_instance' put: instanceId.
+    tp1 at: 'role' put: 'implementer'.
+    tp1 at: 'status' put: 'done'.
+    bbs out: 'task' scope: 'agents' identity: instanceId, ':task:impl' payload: tp1.
+
+    tp2 := Dictionary new.
+    tp2 at: 'workflow_instance' put: instanceId.
+    tp2 at: 'role' put: 'reviewer'.
+    tp2 at: 'status' put: 'done'.
+    bbs out: 'task' scope: 'agents' identity: instanceId, ':task:review' payload: tp2
+  ]
+
+  classMethod: casesFor: bbs id: instanceId [
+    "All 'case' tuples whose identity equals the instance id."
+    ^(bbs scanAll: 'case') select: [:c |
+      (c at: 'identity' ifAbsent: ['']) = instanceId
+    ]
+  ]
+
+"--- Throwing stub BBS (CSW4) ---
+ rdp: 'case' returns nil (so we proceed past the idempotency guard),
+ scanAll: throws to simulate a gatherer blow-up, logEngine: is a no-op,
+ and out: records whether it was (incorrectly) reached."
+CSWThrowBBS subclass: Object
+  instanceVars: outCalled
+
+  classMethod: new [ ^super new initThrow ]
+
+  method: initThrow [ outCalled := false ]
+
+  method: outCalled [ ^outCalled ]
+
+  method: rdp: category scope: scope identity: identity [ ^nil ]
+
+  method: scanAll: category [
+    Error signal: 'simulated gatherer failure'
+  ]
+
+  method: out: category scope: scope identity: identity payload: payload [
+    outCalled := true.
+    ^0
+  ]
+
+  method: logEngine: level component: component scope: aScope message: message [
+    "no-op — must not throw"
+    ^self
+  ]
+
+"=== Tests ==="
+TestCaseSkeletonWire subclass: Object
+
+  classMethod: run: t [
+    self testCompleteWritesOneCase: t.
+    self testIdempotentSecondCall: t.
+    self testFailWritesFailedCase: t.
+    self testExceptionIsSwallowed: t
+  ]
+
+  classMethod: testCompleteWritesOneCase: t [
+    | tempDir bbs engine wf cases caseTuple |
+    '--- CSW1: completeWorkflow writes exactly one completed case ---' println.
+    tempDir := CSWHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    CSWHelper seedWorkflow: bbs id: 'cw-1' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    wf := bbs rdp: 'workflow' scope: 'default' identity: 'cw-1'.
+    engine completeWorkflow: wf.
+
+    cases := CSWHelper casesFor: bbs id: 'cw-1'.
+    t assertEqual: cases size to: 1
+      message: 'CSW1: exactly one case tuple for cw-1'.
+    cases size = 1 ifTrue: [
+      caseTuple := cases at: 1.
+      t assertEqual: ((caseTuple at: 'payload') at: 'terminal_state' ifAbsent: [nil]) to: 'completed'
+        message: 'CSW1: case terminal_state=completed'.
+      t assertEqual: ((caseTuple at: 'payload') at: 'workflow_instance' ifAbsent: [nil]) to: 'cw-1'
+        message: 'CSW1: case workflow_instance=cw-1'.
+      t assert: (((caseTuple at: 'payload') at: 'created_at' ifAbsent: [nil]) notNil)
+        message: 'CSW1: case created_at stamped'
+    ]
+  ]
+
+  classMethod: testIdempotentSecondCall: t [
+    | tempDir bbs engine wf cases |
+    '--- CSW2: second writeCaseSkeleton call is idempotent ---' println.
+    tempDir := CSWHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    CSWHelper seedWorkflow: bbs id: 'cw-2' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    wf := bbs rdp: 'workflow' scope: 'default' identity: 'cw-2'.
+    engine completeWorkflow: wf.
+    "Drive it again directly — must NOT create a duplicate."
+    engine writeCaseSkeleton: 'cw-2' scope: 'default' terminalState: 'completed'.
+    engine writeCaseSkeleton: 'cw-2' scope: 'default' terminalState: 'completed'.
+
+    cases := CSWHelper casesFor: bbs id: 'cw-2'.
+    t assertEqual: cases size to: 1
+      message: 'CSW2: still exactly one case tuple after repeated calls'
+  ]
+
+  classMethod: testFailWritesFailedCase: t [
+    | tempDir bbs engine cases caseTuple |
+    '--- CSW3: failWorkflow writes a failed case ---' println.
+    tempDir := CSWHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    CSWHelper seedWorkflow: bbs id: 'fw-1' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    engine failWorkflow: 'fw-1' scope: 'default' reason: 'boom'.
+
+    cases := CSWHelper casesFor: bbs id: 'fw-1'.
+    t assertEqual: cases size to: 1
+      message: 'CSW3: exactly one case tuple for fw-1'.
+    cases size = 1 ifTrue: [
+      caseTuple := cases at: 1.
+      t assertEqual: ((caseTuple at: 'payload') at: 'terminal_state' ifAbsent: [nil]) to: 'failed'
+        message: 'CSW3: case terminal_state=failed'
+    ]
+  ]
+
+  classMethod: testExceptionIsSwallowed: t [
+    | stub engine threw |
+    '--- CSW4: gatherer exception is swallowed (best-effort) ---' println.
+    stub := CSWThrowBBS new.
+    engine := WorkflowEngine on: stub.
+
+    threw := false.
+    [engine writeCaseSkeleton: 'boom-1' scope: 'default' terminalState: 'completed']
+      on: Exception do: [:e | threw := true].
+
+    t assert: (threw not)
+      message: 'CSW4: writeCaseSkeleton never propagates a gatherer exception'.
+    t assert: (stub outCalled not)
+      message: 'CSW4: no case tuple written when gather throws'
+  ]
+
+"=== Main ==="
+CaseSkeletonWireMain subclass: Object
+  classMethod: start [
+    | t |
+    t := CSWRunner new.
+    TestCaseSkeletonWire run: t.
+    t report.
+    ^t failed
+  ]
