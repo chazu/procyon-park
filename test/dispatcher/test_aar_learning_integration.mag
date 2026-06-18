@@ -156,6 +156,24 @@ ALHelper subclass: Object
       payload: (ALHelper enrichmentPayload: instanceId)
   ]
 
+  classMethod: jsonDetailEnrichmentPayload: instanceId [
+    "Enrichment as the LIVE Archivist agent actually emits it: linkage fields
+     plus the four enrichment keys carried as a JSON object STRING in 'detail'.
+     There are NO flat aar/lessons/confidence keys on the payload itself — the
+     handler must decode 'detail' to recover them."
+    | e |
+    e := Dictionary new.
+    e at: 'workflow_instance' put: instanceId.
+    e at: 'task' put: instanceId, ':task:archivist'.
+    e at: 'detail' put: '{"aar":"Decoded from the JSON detail channel.","lessons":["json lesson a","json lesson b"],"confidence":0.66,"tags":["json-tag"]}'.
+    ^e
+  ]
+
+  classMethod: seedJsonDetailEnrichment: bbs id: instanceId scope: scope [
+    bbs out: 'observation' scope: scope identity: 'case-enrichment'
+      payload: (ALHelper jsonDetailEnrichmentPayload: instanceId)
+  ]
+
   classMethod: seedCompletedWorkflow: bbs id: instanceId scope: scope [
     | params wfPayload |
     params := Dictionary new.
@@ -202,6 +220,7 @@ TestAarLearningIntegration subclass: Object
 
   classMethod: run: t [
     self testHappyPath: t.
+    self testJsonDetailDecode: t.
     self testDeterministicPreserved: t.
     self testFaultAbsent: t.
     self testFaultEmpty: t.
@@ -243,6 +262,33 @@ TestAarLearningIntegration subclass: Object
     "3 skeleton tags + 2 new (procyon-park overlapped) = 5"
     t assertEqual: tags size to: 5
       message: 'AL1: tags unioned without duplicating overlap'
+  ]
+
+  classMethod: testJsonDetailDecode: t [
+    | tempDir bbs engine result p |
+    '--- AL1b: enrichment carried as JSON in detail is decoded and merged ---' println.
+    tempDir := ALHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ALHelper seedCase: bbs id: 'al-json' scope: 'default'.
+    ALHelper seedJsonDetailEnrichment: bbs id: 'al-json' scope: 'default'.
+    engine := WorkflowEngine on: bbs.
+
+    result := engine applyArchivistEnrichment: 'al-json' scope: 'default'.
+    t assert: result message: 'AL1b: handler returns true decoding detail JSON'.
+
+    p := ALHelper casePayload: bbs id: 'al-json' scope: 'default'.
+    t assertEqual: (p at: 'aar' ifAbsent: [nil])
+      to: 'Decoded from the JSON detail channel.'
+      message: 'AL1b: aar recovered from detail JSON'.
+    t assertEqual: (p at: 'lessons' ifAbsent: [nil]) size to: 2
+      message: 'AL1b: lessons recovered from detail JSON'.
+    t assertEqual: (p at: 'confidence' ifAbsent: [nil]) to: 0.66
+      message: 'AL1b: confidence recovered from detail JSON'.
+    t assert: ((p at: 'tags') includes: 'json-tag')
+      message: 'AL1b: tag from detail JSON unioned'.
+    "deterministic skeleton must survive a JSON-detail enrichment too"
+    t assertEqual: (p at: 'duration_minutes' ifAbsent: [nil]) to: 12
+      message: 'AL1b: deterministic duration_minutes preserved'
   ]
 
   classMethod: testDeterministicPreserved: t [

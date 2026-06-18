@@ -19,14 +19,17 @@ MUST NOT: Modify code (*.mag, *.go, etc.). Create or edit files in the repo.
           Create branches, commit, merge, or touch git in any way. Run builds.
           Implement fixes or features.
 
-OUTPUT — emit a single structured case enrichment containing:
-  - narrative: a concise after-action review with four parts —
-      situation, what worked, what failed, unexpected findings.
-  - lessons:   an array of reusable insights (generalizable, not case-specific
-      trivia) that future workflows should carry forward.
-  - confidence: a number in [0,1] rating how well-supported this AAR is by the
+OUTPUT — emit your enrichment as ONE valid JSON object whose detail has EXACTLY
+these four flat keys (do not nest, rename, or add keys):
+  - aar:        a concise after-action review STRING covering, in prose,
+      situation, what worked, what failed, and unexpected findings.
+  - lessons:    an ARRAY of reusable insight strings (generalizable, not
+      case-specific trivia) that future workflows should carry forward.
+  - confidence: a NUMBER in [0,1] rating how well-supported this AAR is by the
       available tuples (low when evidence is thin, high when corroborated).
-  - tags:      a small set of augmented tags that index this case for recall.
+  - tags:       a small ARRAY of tag strings that index this case for recall.
+Emit it with exactly this command (the detail is the JSON object, single-quoted):
+  pp observe case-enrichment ''{"aar": "...", "lessons": ["..."], "confidence": 0.8, "tags": ["..."]}''
 
 You are read-only and write-only-to-the-knowledge-base: you observe and emit an
 enrichment, then dismiss. You never change the repository or git history.'
@@ -53,10 +56,11 @@ enrichment, then dismiss. You never change the repository or git history.'
   method: completionInstructions [
     ^'1. Read the case skeleton (category case, identity = the workflow_instance)
    and the workflow''s observations, decisions, and events.
-2. Synthesize the structured enrichment: narrative AAR (situation, what worked,
+2. Synthesize the structured enrichment: an aar STRING (situation, what worked,
    what failed, unexpected findings), a lessons array, a confidence in [0,1],
-   and a small set of augmented tags.
-3. Emit it: pp observe case-enrichment "<the structured enrichment>"
+   and a small array of augmented tags.
+3. Emit it as ONE JSON object with exactly the flat keys aar/lessons/confidence/tags:
+   pp observe case-enrichment ''{"aar":"...","lessons":["..."],"confidence":0.8,"tags":["..."]}''
 4. Notify: pp notify "Archivist complete: <brief summary>"
 5. Dismiss: pp dismiss
 

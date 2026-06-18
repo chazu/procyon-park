@@ -27,6 +27,15 @@ Semantic Versioning.
   `index 0 out of bounds` crashes throughout the server and CLI.
 
 ### Fixed
+- AAR enrichment now actually populates the case. The live Archivist agent
+  emits its enrichment as a JSON object in the observation's `detail` field,
+  but the handler expected flat `aar`/`lessons`/`confidence` keys on the
+  payload — so every live enrichment silently no-op'd to empty
+  (`aar=''`/`lessons=[]`/`confidence=0`) even though the loop was wired and
+  crash-free. The handler now decodes `detail` JSON (falling back to the
+  payload for direct-dict callers), and the Archivist prompt was tightened to
+  emit exactly `{aar, lessons, confidence, tags}`. Verified live: a completed
+  workflow's case is enriched with a real AAR.
 - `pp workitem <subcommand>` is no longer misrouted to "Unknown workitem
   command". The dispatcher read the subcommand at `args at: 3`, but the
   handler frame is `[workitem, sub, arg]`, so the subcommand is at

@@ -847,21 +847,45 @@ WorkflowEngine subclass: Object
      Returns true iff CaseEnricher actually applied an enrichment to an
      existing case; false otherwise."
     [
-      | enrich payload |
+      | enrich payload enrichDict |
       enrich := self findArchivistEnrichment: instanceId scope: scope.
       enrich isNil ifTrue: [^false].
       payload := enrich at: 'payload' ifAbsent: [nil].
       payload isNil ifTrue: [^false].
       (payload isKindOf: Dictionary) ifFalse: [^false].
+      "The archivist emits its enrichment as a JSON object in the observation's
+       'detail'. Decode it to the flat {aar,lessons,confidence,tags} dict; fall
+       back to the payload itself for direct-dict callers."
+      enrichDict := self enrichmentDictFrom: payload.
       "Empty/malformed enrichment is a NO-OP: an observation that links to the
        instance but carries none of aar/lessons/confidence/tags must NOT stamp
        defaults onto the deterministic skeleton."
-      (self enrichmentHasContent: payload) ifFalse: [^false].
-      ^CaseEnricher applyEnrichment: payload toCaseWithInstance: instanceId scope: scope bbs: bbs
+      (self enrichmentHasContent: enrichDict) ifFalse: [^false].
+      ^CaseEnricher applyEnrichment: enrichDict toCaseWithInstance: instanceId scope: scope bbs: bbs
     ] on: Exception do: [:e |
       bbs logEngine: 'warn' component: 'aar' scope: scope message: ('archivist enrichment apply failed (non-fatal): ', e messageText).
       ^false
     ]
+  ]
+
+  method: enrichmentDictFrom: payload [
+    "Resolve the enrichment dict the archivist intended. The Archivist role
+     emits its enrichment as a single JSON object in the observation's 'detail'
+     field; decode it and use that when it parses to a content-bearing
+     Dictionary. Otherwise fall back to the payload itself, which keeps
+     direct-dict callers (and tests that set aar/lessons/confidence/tags inline
+     on the observation payload) working unchanged. Malformed JSON is swallowed
+     — off-critical-path: a bad detail string degrades to the payload fallback,
+     never throws."
+    | detail decoded |
+    detail := payload at: 'detail' ifAbsent: [nil].
+    (detail notNil and: [(detail isString) and: [detail isEmpty not]]) ifTrue: [
+      decoded := nil.
+      [decoded := Json decode: detail] on: Exception do: [:e | decoded := nil].
+      (decoded notNil and: [(decoded isKindOf: Dictionary) and: [self enrichmentHasContent: decoded]])
+        ifTrue: [^decoded]
+    ].
+    ^payload
   ]
 
   method: enrichmentHasContent: payload [
