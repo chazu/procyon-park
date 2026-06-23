@@ -7,13 +7,15 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+- The dashboard SSE route and per-tick broadcast are always registered again.
+  The `PP_NO_SSE` kill-switch (an operational mitigation for the per-tick
+  memory leak) has been removed now that the leak is fixed in the Maggie VM
+  (tracing string/dictionary GC plus a frame-bound block sweep). Verified
+  stable under a 12-subscriber SSE soak: RSS sawtooths under load and the
+  collector reclaims mid-load instead of growing unbounded toward an OOM kill.
+
 ### Added
-- `PP_NO_SSE` environment kill-switch for `pp serve`. When set, the dashboard
-  SSE route and per-tick broadcast are not registered, so no dashboard client
-  can attach. This is an operational mitigation for a per-tick memory leak that
-  only runs while a dashboard is connected (RSS grows ~1 GB/min until the OS
-  OOM-kills the process); with `PP_NO_SSE=1` the server stays flat. Remove the
-  workaround once the leak is fixed.
 - Board work-item detail modal. Clicking a card on the dashboard Board
   (Kanban) opens a dialog with the item's full detail — title, id, type,
   status, description, wave, labels, parent/children relationships,
