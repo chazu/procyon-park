@@ -16,6 +16,13 @@ Semantic Versioning.
   collector reclaims mid-load instead of growing unbounded toward an OOM kill.
 
 ### Added
+- `pp workitem delete <id> [--repo R] [--cascade]` — hard-delete a work item.
+  Unlike `cancel` (which only sets `status=cancelled` and preserves the tuple),
+  delete removes the tuple from the tuplespace entirely and is irreversible.
+  Backed by a new signed `POST /api/workitem/delete` (same ed25519 auth path as
+  `update`/`run`); requires an explicit `--repo`/scope (no silent default) for
+  the destructive op. `--cascade` also removes all descendant work items, so
+  deleting a done epic clears its stories too.
 - Board work-item detail modal now renders the item's comments
   (`payload.comments`) when present, as a styled section alongside the existing
   relationship blocks (nothing is shown when there are no comments).

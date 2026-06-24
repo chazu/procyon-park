@@ -90,6 +90,7 @@ WorkItemCLI subclass: Object
     subcmd = 'ready'    ifTrue: [^self cmdSetStatus: args status: 'ready'].
     subcmd = 'done'     ifTrue: [^self cmdSetStatus: args status: 'done'].
     subcmd = 'block'    ifTrue: [^self cmdBlock: args].
+    subcmd = 'delete'   ifTrue: [^self cmdDelete: args].
     subcmd = 'run'      ifTrue: [^self cmdRun: args].
     subcmd = 'plan'     ifTrue: [^self cmdPlan: args].
     subcmd = 'review'   ifTrue: [^self cmdReview: args].
@@ -685,6 +686,31 @@ WorkItemCLI subclass: Object
     self post: '/api/workitem/update' body: body
   ]
 
+  method: cmdDelete: args [
+    "pp workitem delete <identity> [--repo R] [--cascade]
+     HARD-DELETE a work item (irreversible — removes the tuple, not just a
+     status change). With --cascade, also deletes all descendant work items.
+     Scope is required (no silent default) for this destructive op."
+    | identity repo cascade body |
+    args size < 3 ifTrue: [
+      'Usage: pp workitem delete <identity> [--repo R] [--cascade]' println.
+      ^self
+    ].
+
+    identity := args at: 3.
+    repo := self flagValue: '--repo' in: args.
+    repo notNil ifTrue: [scope := repo].
+    (self requireScopeForCmd: 'delete' identity: identity) ifFalse: [^self].
+    cascade := args includes: '--cascade'.
+
+    body := Dictionary new.
+    body at: 'identity' put: identity.
+    body at: 'scope' put: scope.
+    body at: 'cascade' put: cascade.
+
+    self post: '/api/workitem/delete' body: body
+  ]
+
   method: cmdRun: args [
     "pp workitem run <identity> [--repo R]"
     | identity repo body |
@@ -987,6 +1013,7 @@ WorkItemCLI subclass: Object
     '  ready <id>                              Set status to ready' println.
     '  done <id>                               Set status to done' println.
     '  block <id> --reason "..."               Set status to blocked' println.
+    '  delete <id> [--repo R] [--cascade]      Hard-delete a work item (irreversible)' println.
     '  run <id>                                Execute via workflow' println.
     '  plan <id>                               Agentic planning/decomposition' println.
     '  review <id>                             Agentic review/refinement' println.

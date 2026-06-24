@@ -368,6 +368,9 @@ ApiServer subclass: Object
      FIRST browser-initiated mutation, restricted to the single-operator
      local dashboard. See handleWorkitemCancelRoute:."
     httpServer route: '/api/workitem/cancel' method: 'POST' handler: [:req | self handleWorkitemCancelRoute: req].
+    "Hard-delete (irreversible tuple removal). Signed route — same auth path
+     as update/run. See handleWorkitemDelete:."
+    self signedRouteOnly: '/api/workitem/delete' do: [:req :actorCtx | self handleWorkitemDelete: req actor: actorCtx].
     self get: '/api/dashboard' do: [:req | self handleDashboard: req].
     self get: '/api/history' do: [:req | self handleHistory: req].
     self registerUserRoutes
@@ -2483,6 +2486,58 @@ ApiServer subclass: Object
     fields at: 'cancelled_at' put: now.
     fields at: 'updated_at' put: now.
     ^self applyWorkitemFields: fields scope: scope identity: identity cascade: false actor: actor
+  ]
+
+  method: handleWorkitemDelete: req actor: actorCtx [
+    "POST /api/workitem/delete — HARD-DELETE a work item tuple. Unlike
+     /api/workitem/cancel (which only sets status='cancelled' and preserves
+     the tuple/history), this removes the tuple from the tuplespace entirely
+     and is NOT reversible. Signed route: same ed25519 auth path as update/run.
+     Body: {identity, scope, cascade?}. cascade=true also removes every
+     descendant work item (children first), so deleting an epic clears its
+     stories too."
+    | body scope identity cascade actor item deleted resp |
+    actor := self actorOf: actorCtx.
+    body := self parseBody: req.
+    body isNil ifTrue: [^self errorResponse: 400 message: 'Invalid JSON'].
+    identity := body at: 'identity' ifAbsent: [nil].
+    identity isNil ifTrue: [^self errorResponse: 400 message: 'identity required'].
+    scope := body at: 'scope' ifAbsent: ['default'].
+    cascade := body at: 'cascade' ifAbsent: [false].
+
+    item := bbs findInIndex: 'workitem' scope: scope identity: identity.
+    item isNil ifTrue: [^self errorResponse: 404 message: 'work item not found'].
+
+    cascade
+      ifTrue: [deleted := self deleteWorkitemTree: identity scope: scope]
+      ifFalse: [
+        deleted := Array new: 0.
+        (bbs inp: 'workitem' scope: scope identity: identity) notNil
+          ifTrue: [deleted := deleted copyWith: identity]
+      ].
+
+    resp := Dictionary new.
+    resp at: 'status' put: 'ok'.
+    resp at: 'deleted' put: deleted.
+    resp at: 'count' put: deleted size.
+    ^self okResponse: resp
+  ]
+
+  method: deleteWorkitemTree: identity scope: scope [
+    "Recursively hard-delete <identity> and all of its descendants via
+     bbs inp: (the tuplespace remove). Children are removed before their
+     parent. Returns an Array of the identities actually removed."
+    | deleted children |
+    deleted := Array new: 0.
+    children := bbs scanChildrenOf: identity scope: scope.
+    children do: [:c |
+      | sub |
+      sub := self deleteWorkitemTree: (c at: 'identity') scope: scope.
+      sub do: [:x | deleted := deleted copyWith: x]
+    ].
+    (bbs inp: 'workitem' scope: scope identity: identity) notNil
+      ifTrue: [deleted := deleted copyWith: identity].
+    ^deleted
   ]
 
   method: isLoopbackHost: hostHeader [
