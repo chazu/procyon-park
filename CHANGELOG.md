@@ -16,6 +16,16 @@ Semantic Versioning.
   collector reclaims mid-load instead of growing unbounded toward an OOM kill.
 
 ### Added
+- Board work-item detail modal now renders the item's comments
+  (`payload.comments`) when present, as a styled section alongside the existing
+  relationship blocks (nothing is shown when there are no comments).
+- "Hide from my board" — a non-destructive, per-viewer dismiss action in the
+  board detail modal, distinct from the global/permanent "Cancel item". Hidden
+  cards are tracked client-side in `localStorage` (`pp.dismissedCards`, keyed by
+  `scope|identity` so dismissal is per-board) and stay hidden across SSE
+  re-renders and page reloads by reusing the existing `.wi-hidden` filter path.
+  A "N hidden / show all" affordance near the board filters reverses it, and the
+  dismissed set is pruned to cards currently on the board to stay bounded.
 - Board work-item detail modal. Clicking a card on the dashboard Board
   (Kanban) opens a dialog with the item's full detail — title, id, type,
   status, description, wave, labels, parent/children relationships,
