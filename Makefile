@@ -2,10 +2,12 @@ BIN = pp
 GOBIN = $(shell go env GOPATH)/bin
 
 build:
+	rm -f $(BIN)
 	mag build -o $(BIN)
 	codesign -s - $(BIN)
 
 full:
+	rm -f $(BIN)
 	mag build --full -o $(BIN)
 	codesign -s - $(BIN)
 
