@@ -812,14 +812,18 @@ Dispatcher subclass: Object
      'full-pipeline-1776355403-3195', etc. — at least two hyphens and
      contains a digit. Conservative; system scopes (default, system,
      scope:foo) won't match."
-    | hyphens hasDigit |
+    | hyphens hasDigit code |
     aString isNil ifTrue: [^false].
     aString isString ifFalse: [^false].
     hyphens := 0.
     hasDigit := false.
     aString do: [:c |
-      c = $- ifTrue: [hyphens := hyphens + 1].
-      (c >= $0 and: [c <= $9]) ifTrue: [hasDigit := true]
+      "Compare by code point. Character has no relational ops in this VM
+       (Character >= Character returns nil), and integer char codes are the
+       project convention. Codes: '-'=45, '0'=48, '9'=57."
+      code := c value.
+      code = 45 ifTrue: [hyphens := hyphens + 1].
+      (code >= 48 and: [code <= 57]) ifTrue: [hasDigit := true]
     ].
     ^(hyphens >= 2) and: [hasDigit]
   ]

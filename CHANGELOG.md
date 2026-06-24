@@ -62,6 +62,14 @@ Semantic Versioning.
   (`dispatched_at`, plus non-string `launched_by`/`executed_by` coercion)
   that intermittently produced `SSE render failed for workflows: Message
   not understood: ifTrue:` and a per-tick panel flicker.
+- Dispatcher housekeep no longer crashes every ~5 minutes. Its workflow-id
+  heuristic compared characters with `>=`/`<=`, which the Maggie VM did not
+  implement for `Character` (the message returned nil), so `(c >= '0') and:
+  [...]` raised `Message not understood: and:` whenever any signal tuple was
+  present — aborting the orphan signal/token sweep and terminal-task reaping
+  and letting the tuplespace accumulate unbounded. Now compares by integer
+  code point (the project convention). The underlying VM gap (`Character`
+  `<=`/`>=`) was also fixed upstream in Maggie.
 
 ## [0.2.0] - 2026-06-18
 
