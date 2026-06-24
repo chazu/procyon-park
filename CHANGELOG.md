@@ -71,6 +71,21 @@ Semantic Versioning.
   code point (the project convention). The underlying VM gap (`Character`
   `<=`/`>=`) was also fixed upstream in Maggie.
 
+### Security
+- Hardened the `pp read` discoverability-hint helper (`warnStderr:`) to
+  escape `\`, `$`, and backtick in addition to `"` before the message is
+  passed through `/bin/sh`. Recovered from an orphaned Jun-18 retry branch:
+  the change was written but lost in a dispatch retry-storm, and the code on
+  `main` had regressed to escaping only `"`. Categories are a fixed
+  vocabulary so this was not exploitable, but the helper is now safe against
+  shell metacharacters if reused.
+
+### Changed
+- `pp read` scoped reads now scan once instead of twice. The discoverability
+  hint reuses the scan response already fetched for rendering, dropping a
+  redundant second non-consuming scan per scoped read. Also recovered from
+  the same orphaned Jun-18 branch.
+
 ## [0.2.0] - 2026-06-18
 
 ### Added
