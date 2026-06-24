@@ -1819,10 +1819,14 @@
       }
 
       // Open on card click (ignore clicks on existing interactive children).
-      board.addEventListener('click', (ev) => {
-        if (ev.target.closest('a, button, input, select, textarea, label')) return;
+      // Delegate from `document`, NOT from `board`: the SSE patch handler
+      // replaces #dashboard-workitems wholesale via outerHTML on every tick
+      // (see handlePatchElements), which detaches any listener bound to the
+      // board element itself. document is stable, so this survives re-renders.
+      document.addEventListener('click', (ev) => {
         const card = ev.target.closest('.wi-card');
-        if (!card) return;
+        if (!card || !card.closest('#dashboard-workitems')) return;
+        if (ev.target.closest('a, button, input, select, textarea, label')) return;
         const id = card.getAttribute('data-wi-id');
         if (!id) return;
         const scope = card.getAttribute('data-scope') || 'default';

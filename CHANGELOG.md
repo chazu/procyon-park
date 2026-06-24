@@ -64,6 +64,11 @@ Semantic Versioning.
   backend already indexes by category.)
 
 ### Fixed
+- Board work-item detail modal now actually opens on card click. The
+  click-to-open listener was bound to `#dashboard-workitems`, which the SSE
+  patch handler replaces wholesale via `outerHTML` on every tick — detaching
+  the listener after the first board render, so clicks silently did nothing.
+  It is now delegated from `document` (a stable root) and survives re-renders.
 - Dashboard "Active Workflows" panel now requires evidence of liveness (a
   live task, or a recent `started_at`) before showing a `running` workflow,
   instead of trusting the stored status absolutely. Abandoned/zombie
