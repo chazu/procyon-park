@@ -531,15 +531,21 @@ Dispatcher subclass: Object
      exists (and wasn't in this tick's terminal set, since those are already
      gone). Same for signal scopes that look like workflow instance ids."
     tokensByWf keysDo: [:wfId |
-      (self isOrphanWf: wfId live: liveWfIds terminal: terminalWfIds) ifTrue: [
+      [(self isOrphanWf: wfId live: liveWfIds terminal: terminalWfIds) ifTrue: [
         self cascadeRemove: (tokensByWf at: wfId) category: 'token'
-      ]
+      ]]
+        on: Exception do: [:e |
+          ('Dispatcher housekeep token-orphan skip (', wfId printString, '): ', e messageText) println
+        ]
     ].
     signalsByScope keysDo: [:sScope |
-      ((self looksLikeWorkflowInstanceId: sScope)
+      [((self looksLikeWorkflowInstanceId: sScope)
         and: [self isOrphanWf: sScope live: liveWfIds terminal: terminalWfIds])
         ifTrue: [
           self cascadeRemove: (signalsByScope at: sScope) category: 'signal'
+        ]]
+        on: Exception do: [:e |
+          ('Dispatcher housekeep signal-orphan skip (', sScope printString, '): ', e messageText) println
         ]
     ].
 

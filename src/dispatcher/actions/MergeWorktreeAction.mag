@@ -97,9 +97,14 @@ MergeWorktreeAction subclass: WorkflowAction
       ^self
     ].
 
-    "3. Clean up the worktree and impl branch"
+    "3. Clean up the worktree and impl branch. Force-delete the impl branch:
+     its commits were just merged into featureBranch above, but `git branch -d`
+     checks mergedness against the CURRENT HEAD (still main here — feature has
+     not landed yet), so the safe delete would refuse as 'not fully merged' and
+     leave the branch behind. The work is preserved in featureBranch, so -D is
+     safe."
     GitOps removeWorktree: worktreeDir in: repoPath.
-    GitOps deleteBranch: implBranch in: repoPath.
+    GitOps deleteBranchForce: implBranch in: repoPath.
 
     "4. Standalone workflow: also merge feature branch into main so the work
      actually lands. Without this the feature branch is just abandoned and

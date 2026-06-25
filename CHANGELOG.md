@@ -8,6 +8,14 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Fixed
+- `merge-worktree` now force-deletes the impl branch after merging it into the
+  feature branch, so completed standalone workflows no longer leave an orphan
+  `impl/<id>` branch behind (`git branch -d` refused it as "not fully merged"
+  because feature had not yet landed on main at cleanup time).
+- The dispatcher's periodic housekeeping no longer aborts the whole sweep when a
+  single malformed/transient tuple raises during the orphan scan; each orphan
+  candidate is now handled independently and a skip is logged with its key,
+  matching the per-item resilience of the rest of housekeep.
 - Story-workflow auto-merge no longer clobbers the dispatcher's working tree.
   The impl→feature merge now runs in an ephemeral git worktree (never switching
   or dirtying the primary checkout), and handles non-fast-forward merges. The
