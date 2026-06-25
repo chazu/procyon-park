@@ -16,6 +16,13 @@ Semantic Versioning.
   collector reclaims mid-load instead of growing unbounded toward an OOM kill.
 
 ### Added
+- Plan-time doctrine consumption (the payoff): the `planner` role's context
+  assembly now injects ACTIVE, applicable doctrine. Applicability is composed by
+  scope-union (`global` ∪ this-repo ∪ this-repo:path) from `payload.doctrine_scope`,
+  and maturity is gated to `active` only — proposed/rejected/retired never reach
+  planning, preserving the human promotion gate. This deliberately bypasses the
+  generic soft-category context path (which would leak unreviewed doctrine and
+  miss global scope).
 - Doctrine synthesis loop: a `Strategist` role (read-only / write-to-KB, like
   the Archivist) reads the swarm's `case` (AAR) tuples, clusters recurring
   generalizable lessons, dedupes against existing doctrine, and proposes new

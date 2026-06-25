@@ -232,7 +232,38 @@ Violations will be detected and reverted.
       ]
     ].
 
+    "Plan-time doctrine (the Orient layer): the planner consumes ACTIVE,
+     applicable doctrine. This BYPASSES the soft-category path on purpose —
+     a generic soft-category read would surface proposed/rejected/retired
+     entries and miss global scope, defeating the human promotion gate."
+    name = 'planner' ifTrue: [
+      result := result, (self activeDoctrineFor: bbs scope: scope)
+    ].
+
     ^result
+  ]
+
+  method: activeDoctrineFor: bbs scope: scope [
+    "Return ACTIVE doctrine tuples applicable to <scope>. Applicability is by
+     payload.doctrine_scope (global | <repo> | <repo>:<path>), NOT the BBS
+     storage scope, so doctrine is scanned across all scopes and composed by
+     scope-union {global, this-repo}. Maturity is gated to 'active' ONLY —
+     proposed/rejected/retired are never surfaced to planning.
+     (Tag-intersection is a future refinement; v1 surfaces all applicable
+     active doctrine and lets the planner apply judgment.)"
+    | all out |
+    all := bbs scanAll: 'doctrine'.
+    out := Array new: 0.
+    all do: [:t |
+      | p mat ds applies |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      mat := p at: 'maturity' ifAbsent: ['proposed'].
+      ds := p at: 'doctrine_scope' ifAbsent: ['global'].
+      applies := (ds = 'global')
+        or: [(ds = scope) or: [ds startsWith: (scope, ':')]].
+      (mat = 'active' and: [applies]) ifTrue: [out := out copyWith: t]
+    ].
+    ^out
   ]
 
   method: mostRecent: tuples count: n [
