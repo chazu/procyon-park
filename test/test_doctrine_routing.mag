@@ -1,0 +1,298 @@
+"Tests for doctrine routing into agent context (the consumption side of the
+ Orient layer). See Role>>activeDoctrineFor:scope:role: and assembleContext:.
+
+ Doctrine used to reach ONLY the planner, but ~80% of synthesized lessons are
+ execution-time guidance (IO-boundary guards, fail-safe cleanup, review triage).
+ These tests lock the new behavior: ACTIVE, applicable, role-targeted doctrine is
+ routed to the execution roles AND the planner, ranked for relevance and capped.
+
+ Invariants under test:
+   DRT1  An execution role (implementer) receives applicable ACTIVE doctrine via
+         activeDoctrineFor:scope:role: (the IO-boundary entry).
+   DRT2  The per-role cap (maxDoctrineEntries = 6) is respected — seeding 8
+         applicable active entries yields at most 6.
+   DRT3  proposed / retired / rejected doctrine is NEVER surfaced (active gate).
+   DRT4  Scope-union {global, this-repo}: global and this-repo entries surface;
+         a different repo's entry does not.
+   DRT5  The planner STILL receives doctrine (no regression).
+   DRT6  Role-tagged entries are surfaced only to their target role; untagged
+         entries are universal.
+   DRT7  assembleContext: for an execution role (implementer) injects the active
+         doctrine entry; consumesDoctrine: gates planner+execution roles only.
+
+ Standalone runner at bottom (DoctrineRoutingMain run)."
+
+DoctrineRoutingRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Doctrine Routing Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+DoctrineRoutingHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: payload: maturity scope: dscope tags: tags principle: principle [
+    | p |
+    p := Dictionary new.
+    p at: 'principle' put: principle.
+    p at: 'rationale' put: 'test rationale'.
+    p at: 'maturity' put: maturity.
+    p at: 'doctrine_scope' put: dscope.
+    p at: 'tags' put: tags.
+    ^p
+  ]
+
+  classMethod: seed: bbs identity: ident maturity: maturity scope: dscope tags: tags principle: principle [
+    bbs out: 'doctrine' scope: 'global' identity: ident
+      payload: (self payload: maturity scope: dscope tags: tags principle: principle)
+  ]
+
+  classMethod: hasIdentity: ident in: tuples [
+    tuples do: [:t | ((t at: 'identity' ifAbsent: ['']) = ident) ifTrue: [^true]].
+    ^false
+  ]
+
+"=== TestDoctrineRouting ==="
+TestDoctrineRouting subclass: Object
+
+  classMethod: run: t [
+    self testExecutionRoleReceivesDoctrine: t.
+    self testCapRespected: t.
+    self testNonActiveExcluded: t.
+    self testScopeUnion: t.
+    self testPlannerNoRegression: t.
+    self testRoleTagTargeting: t.
+    self testAssembleContextAndGate: t
+  ]
+
+  classMethod: testExecutionRoleReceivesDoctrine: t [
+    "DRT1: the implementer receives an applicable active doctrine entry."
+    | bbs role out |
+    '--- DRT1: execution role (implementer) receives active doctrine ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    DoctrineRoutingHelper seed: bbs identity: 'io-guard' maturity: 'active'
+      scope: 'global' tags: #('concern:io' 'lang:maggie')
+      principle: 'Guard Dictionary access at the Maggie IO boundary.'.
+
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'maggie-repo' role: 'implementer'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'io-guard' in: out)
+      message: 'DRT1: implementer sees the active IO-boundary doctrine entry'.
+    t assert: out size >= 1
+      message: 'DRT1: implementer receives at least one doctrine entry'
+  ]
+
+  classMethod: testCapRespected: t [
+    "DRT2: at most maxDoctrineEntries (6) returned even with 8 applicable."
+    | bbs role out i |
+    '--- DRT2: per-role cap (6) is respected ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    i := 1.
+    [i <= 8] whileTrue: [
+      DoctrineRoutingHelper seed: bbs identity: ('u', i printString)
+        maturity: 'active' scope: 'global' tags: (Array new: 0)
+        principle: ('Universal principle ', i printString).
+      i := i + 1
+    ].
+    t assertEqual: Role maxDoctrineEntries to: 6
+      message: 'DRT2: maxDoctrineEntries is 6'.
+    role := Reviewer new.
+    out := role activeDoctrineFor: bbs scope: 'maggie-repo' role: 'reviewer'.
+    t assertEqual: out size to: 6
+      message: 'DRT2: 8 applicable active entries are capped to 6'
+  ]
+
+  classMethod: testNonActiveExcluded: t [
+    "DRT3: proposed/retired/rejected are never surfaced."
+    | bbs role out |
+    '--- DRT3: non-active doctrine is excluded ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    DoctrineRoutingHelper seed: bbs identity: 'd-active' maturity: 'active'
+      scope: 'global' tags: (Array new: 0) principle: 'active one'.
+    DoctrineRoutingHelper seed: bbs identity: 'd-proposed' maturity: 'proposed'
+      scope: 'global' tags: (Array new: 0) principle: 'proposed one'.
+    DoctrineRoutingHelper seed: bbs identity: 'd-retired' maturity: 'retired'
+      scope: 'global' tags: (Array new: 0) principle: 'retired one'.
+    DoctrineRoutingHelper seed: bbs identity: 'd-rejected' maturity: 'rejected'
+      scope: 'global' tags: (Array new: 0) principle: 'rejected one'.
+
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'maggie-repo' role: 'implementer'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'd-active' in: out)
+      message: 'DRT3: active entry is surfaced'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'd-proposed' in: out) not
+      message: 'DRT3: proposed entry is NOT surfaced'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'd-retired' in: out) not
+      message: 'DRT3: retired entry is NOT surfaced'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'd-rejected' in: out) not
+      message: 'DRT3: rejected entry is NOT surfaced'.
+    t assertEqual: out size to: 1
+      message: 'DRT3: only the single active entry survives the gate'
+  ]
+
+  classMethod: testScopeUnion: t [
+    "DRT4: scope-union {global, this-repo}; other repos excluded."
+    | bbs role out |
+    '--- DRT4: scope-union (global + this-repo) ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    DoctrineRoutingHelper seed: bbs identity: 'g1' maturity: 'active'
+      scope: 'global' tags: (Array new: 0) principle: 'global principle'.
+    DoctrineRoutingHelper seed: bbs identity: 'r1' maturity: 'active'
+      scope: 'maggie-repo' tags: (Array new: 0) principle: 'this-repo principle'.
+    DoctrineRoutingHelper seed: bbs identity: 'rp1' maturity: 'active'
+      scope: 'maggie-repo:src/io' tags: (Array new: 0) principle: 'this-repo path'.
+    DoctrineRoutingHelper seed: bbs identity: 'o1' maturity: 'active'
+      scope: 'other-repo' tags: (Array new: 0) principle: 'other repo principle'.
+
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'maggie-repo' role: 'implementer'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'g1' in: out)
+      message: 'DRT4: global entry surfaces'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'r1' in: out)
+      message: 'DRT4: this-repo entry surfaces'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'rp1' in: out)
+      message: 'DRT4: this-repo:path entry surfaces'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'o1' in: out) not
+      message: 'DRT4: a different repo''s entry does NOT surface'
+  ]
+
+  classMethod: testPlannerNoRegression: t [
+    "DRT5: the planner still receives applicable active doctrine."
+    | bbs role out |
+    '--- DRT5: planner still receives doctrine (no regression) ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    DoctrineRoutingHelper seed: bbs identity: 'plan-doc' maturity: 'active'
+      scope: 'global' tags: #('phase:plan') principle: 'Decompose epics into orthogonal stories.'.
+
+    role := Planner new.
+    out := role activeDoctrineFor: bbs scope: 'maggie-repo' role: 'planner'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'plan-doc' in: out)
+      message: 'DRT5: planner sees the active doctrine entry'
+  ]
+
+  classMethod: testRoleTagTargeting: t [
+    "DRT6: a role:<name> tag restricts an entry to that role; untagged is universal."
+    | bbs impl rev outImpl outRev |
+    '--- DRT6: role-tag targeting ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    DoctrineRoutingHelper seed: bbs identity: 'rev-only' maturity: 'active'
+      scope: 'global' tags: #('role:reviewer' 'concern:triage')
+      principle: 'Reviewers triage by blocking severity.'.
+    DoctrineRoutingHelper seed: bbs identity: 'impl-only' maturity: 'active'
+      scope: 'global' tags: #('role:implementer' 'concern:io')
+      principle: 'Verify a change is not already at HEAD before implementing.'.
+    DoctrineRoutingHelper seed: bbs identity: 'univ' maturity: 'active'
+      scope: 'global' tags: (Array new: 0) principle: 'Cleanup must be fail-safe.'.
+
+    impl := Implementer new.
+    outImpl := impl activeDoctrineFor: bbs scope: 'maggie-repo' role: 'implementer'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'impl-only' in: outImpl)
+      message: 'DRT6: implementer sees role:implementer entry'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'univ' in: outImpl)
+      message: 'DRT6: implementer sees the untagged universal entry'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'rev-only' in: outImpl) not
+      message: 'DRT6: implementer does NOT see role:reviewer entry'.
+
+    rev := Reviewer new.
+    outRev := rev activeDoctrineFor: bbs scope: 'maggie-repo' role: 'reviewer'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'rev-only' in: outRev)
+      message: 'DRT6: reviewer sees role:reviewer entry'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'univ' in: outRev)
+      message: 'DRT6: reviewer sees the untagged universal entry'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'impl-only' in: outRev) not
+      message: 'DRT6: reviewer does NOT see role:implementer entry'
+  ]
+
+  classMethod: testAssembleContextAndGate: t [
+    "DRT7: assembleContext: injects doctrine for an execution role; consumesDoctrine:
+     gates planner + execution roles only."
+    | bbs impl ctx |
+    '--- DRT7: assembleContext: injection + consumesDoctrine: gate ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    DoctrineRoutingHelper seed: bbs identity: 'io-guard2' maturity: 'active'
+      scope: 'global' tags: #('concern:io')
+      principle: 'Guard Dictionary access at the Maggie IO boundary.'.
+
+    impl := Implementer new.
+    ctx := impl assembleContext: bbs scope: 'maggie-repo' taskId: 'task-1' workflowInstance: ''.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'io-guard2' in: ctx)
+      message: 'DRT7: assembleContext for implementer includes active doctrine'.
+
+    "Gate: planner + execution roles consume doctrine; others (strategist) do not."
+    t assert: (Implementer new consumesDoctrine: 'implementer')
+      message: 'DRT7: implementer consumes doctrine'.
+    t assert: (Planner new consumesDoctrine: 'planner')
+      message: 'DRT7: planner consumes doctrine'.
+    t assert: (Reviewer new consumesDoctrine: 'reviewer')
+      message: 'DRT7: reviewer consumes doctrine'.
+    t assert: (Scout new consumesDoctrine: 'scout')
+      message: 'DRT7: scout consumes doctrine'.
+    t assert: (Fixer new consumesDoctrine: 'fixer')
+      message: 'DRT7: fixer consumes doctrine'.
+    t assert: (Strategist new consumesDoctrine: 'strategist') not
+      message: 'DRT7: strategist does NOT consume doctrine via the active path'
+  ]
+
+"=== Main ==="
+DoctrineRoutingMain subclass: Object
+  classMethod: run [
+    | t |
+    t := DoctrineRoutingRunner new.
+    [TestDoctrineRouting run: t] on: Exception do: [:e |
+      ('TestDoctrineRouting CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDoctrineRouting crashed'
+    ].
+    t report.
+    ^t failed
+  ]

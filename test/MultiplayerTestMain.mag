@@ -363,13 +363,14 @@ MultiplayerTestMain subclass: Object
 CombinedTestMain subclass: Object
 
   classMethod: run [
-    | wfFailed mpFailed ccFailed arFailed dcFailed gmFailed |
+    | wfFailed mpFailed ccFailed arFailed dcFailed gmFailed drFailed |
     wfFailed := 0.
     mpFailed := 0.
     ccFailed := 0.
     arFailed := 0.
     dcFailed := 0.
     gmFailed := 0.
+    drFailed := 0.
 
     '============================================================' println.
     '=== Running TestWorkflowRefactorMain ===' println.
@@ -410,6 +411,12 @@ CombinedTestMain subclass: Object
         gmFailed := 1].
     gmFailed isNil ifTrue: [gmFailed := 0].
 
+    [drFailed := DoctrineRoutingMain run]
+      on: Exception do: [:e |
+        ('DoctrineRoutingMain CRASHED: ', e messageText) println.
+        drFailed := 1].
+    drFailed isNil ifTrue: [drFailed := 0].
+
     '' println.
     '============================================================' println.
     '=== Combined Test Summary ===' println.
@@ -421,7 +428,8 @@ CombinedTestMain subclass: Object
     ('Archivist-role failures:    ', arFailed printString) println.
     ('Doctrine-category failures: ', dcFailed printString) println.
     ('GitOps-merge failures:      ', gmFailed printString) println.
-    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed + gmFailed) = 0
+    ('Doctrine-routing failures:  ', drFailed printString) println.
+    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed + gmFailed + drFailed) = 0
       ifTrue:  ['COMBINED: ALL TESTS PASSED' println]
       ifFalse: ['COMBINED: SOME TESTS FAILED' println]
   ]

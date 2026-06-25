@@ -232,36 +232,196 @@ Violations will be detected and reverted.
       ]
     ].
 
-    "Plan-time doctrine (the Orient layer): the planner consumes ACTIVE,
-     applicable doctrine. This BYPASSES the soft-category path on purpose —
-     a generic soft-category read would surface proposed/rejected/retired
-     entries and miss global scope, defeating the human promotion gate."
-    name = 'planner' ifTrue: [
-      result := result, (self activeDoctrineFor: bbs scope: scope)
+    "Doctrine (the Orient layer): route ACTIVE, applicable doctrine into the
+     planner AND the execution roles (implementer/reviewer/scout/fixer). Orient
+     should bias every Act, not just every Decide — the synthesized lessons are
+     mostly execution-time guidance, so they must reach the roles that write
+     code and review it, not only the planner that decomposes epics.
+
+     This BYPASSES the soft-category path on purpose — a generic soft-category
+     read would surface proposed/rejected/retired entries and miss global scope,
+     defeating the human promotion gate. activeDoctrineFor:scope:role: keeps the
+     active-only gate and scope-union, then targets by role-tag and caps the
+     number of entries for relevance so agent context does not bloat."
+    (self consumesDoctrine: name) ifTrue: [
+      result := result, (self activeDoctrineFor: bbs scope: scope role: name)
     ].
 
     ^result
   ]
 
+  method: consumesDoctrine: roleName [
+    "Roles whose context is biased by doctrine: the planner consumes it at
+     plan-time (Orient -> Decide); the execution roles consume it at act-time
+     (Orient -> Act). Other roles (e.g. strategist, archivist, foreman) do not."
+    ^#('planner' 'implementer' 'reviewer' 'scout' 'fixer') includes: roleName
+  ]
+
+  classMethod: maxDoctrineEntries [
+    "Per-role cap on injected doctrine entries. Doctrine is advisory Orient-layer
+     bias, not task context — surfacing every applicable entry would crowd out
+     the role's actual working context. 6 keeps the most relevant lessons while
+     bounding bloat. Override per-role if a role wants a wider/narrower window."
+    ^6
+  ]
+
   method: activeDoctrineFor: bbs scope: scope [
-    "Return ACTIVE doctrine tuples applicable to <scope>. Applicability is by
-     payload.doctrine_scope (global | <repo> | <repo>:<path>), NOT the BBS
-     storage scope, so doctrine is scanned across all scopes and composed by
-     scope-union {global, this-repo}. Maturity is gated to 'active' ONLY —
-     proposed/rejected/retired are never surfaced to planning.
-     (Tag-intersection is a future refinement; v1 surfaces all applicable
-     active doctrine and lets the planner apply judgment.)"
-    | all out |
+    "Backward-compatible entry point: rank for this instance's own role."
+    ^self activeDoctrineFor: bbs scope: scope role: name
+  ]
+
+  method: activeDoctrineFor: bbs scope: scope role: aRole [
+    "Return ACTIVE doctrine tuples applicable to <scope>, targeted at <aRole>,
+     ranked for relevance and capped at maxDoctrineEntries.
+
+     Applicability is by payload.doctrine_scope (global | <repo> | <repo>:<path>),
+     NOT the BBS storage scope, so doctrine is scanned across all scopes and
+     composed by scope-union {global, this-repo}. Maturity is gated to 'active'
+     ONLY — proposed/rejected/retired are never surfaced.
+
+     Role targeting: when an entry carries a 'role:<name>' tag it is surfaced
+     ONLY to that role (or to all when the tag is 'role:universal'); entries
+     with no role: tag are universal. Existing entries carry concern:/lang:/
+     phase:/topic tags but no role: tag, so they are treated as universal and
+     ranked by tag-overlap against the consuming role + repo context. The cap
+     then bounds how many reach the agent so context does not bloat."
+    | all candidates |
     all := bbs scanAll: 'doctrine'.
-    out := Array new: 0.
+    candidates := Array new: 0.
     all do: [:t |
-      | p mat ds applies |
+      | p mat ds applies tags roleTag roleOk |
       p := t at: 'payload' ifAbsent: [Dictionary new].
       mat := p at: 'maturity' ifAbsent: ['proposed'].
       ds := p at: 'doctrine_scope' ifAbsent: ['global'].
       applies := (ds = 'global')
         or: [(ds = scope) or: [ds startsWith: (scope, ':')]].
-      (mat = 'active' and: [applies]) ifTrue: [out := out copyWith: t]
+      tags := p at: 'tags' ifAbsent: [#()].
+      roleTag := self roleTagOf: tags.
+      roleOk := (roleTag = '')
+        or: [(roleTag = 'universal') or: [roleTag = aRole]].
+      (mat = 'active' and: [applies and: [roleOk]]) ifTrue: [
+        candidates := candidates copyWith: t
+      ]
+    ].
+    ^self rankDoctrine: candidates role: aRole scope: scope
+        cap: self class maxDoctrineEntries
+  ]
+
+  method: roleTagOf: tags [
+    "Extract the role target from a doctrine entry's tags: the value of a
+     'role:<name>' tag (lowercased), or '' when no role: tag is present (i.e.
+     the entry is universal). Only the first role: tag is honored."
+    | prefix |
+    prefix := 'role:'.
+    tags do: [:tag |
+      (tag startsWith: prefix) ifTrue: [
+        ^(tag copyFrom: prefix size + 1 to: tag size) asLowercase
+      ]
+    ].
+    ^''
+  ]
+
+  method: doctrineIsUniversal: tags [
+    "Universal entries are always relevant to every consuming role: those with
+     no tags at all, or whose only role target is 'role:universal'."
+    | roleTag |
+    tags isEmpty ifTrue: [^true].
+    roleTag := self roleTagOf: tags.
+    ^roleTag = 'universal'
+  ]
+
+  method: doctrineContextTermsFor: aRole scope: scope [
+    "Context an entry's tags are scored against for relevance: the consuming
+     role and the repo (scope). Tags overlapping these rank ahead of unrelated
+     ones when the cap forces a choice."
+    | terms |
+    terms := Array new: 0.
+    terms := terms copyWith: aRole.
+    terms := terms copyWith: ('role:', aRole).
+    (scope notNil and: [scope isEmpty not]) ifTrue: [
+      terms := terms copyWith: scope.
+      terms := terms copyWith: ('repo:', scope)
+    ].
+    ^terms
+  ]
+
+  method: tagValue: tag [
+    "The value portion of a 'prefix:value' tag, or '' when the tag has no colon."
+    | idx |
+    idx := tag indexOf: ':'.
+    idx <= 0 ifTrue: [^''].
+    ^tag copyFrom: idx + 1 to: tag size
+  ]
+
+  method: doctrineOverlapScore: tags context: ctx [
+    "Count how many of an entry's tags overlap the context terms. A tag overlaps
+     when the tag itself, or its value after a ':', matches a context term."
+    | score |
+    score := 0.
+    tags do: [:tag |
+      | val |
+      (ctx includes: tag)
+        ifTrue: [score := score + 1]
+        ifFalse: [
+          val := self tagValue: tag.
+          (val isEmpty not and: [ctx includes: val]) ifTrue: [score := score + 1]
+        ]
+    ].
+    ^score
+  ]
+
+  method: rankDoctrine: candidates role: aRole scope: scope cap: cap [
+    "Rank applicable active doctrine for relevance and cap the count.
+     Universal/untagged entries are ALWAYS relevant, so they are included first
+     (most recent slice if they alone exceed the cap). Remaining slots are
+     filled by the tagged entries with the highest tag-overlap against the
+     role + repo context (ties broken by recency: higher id first)."
+    | ctx universal tagged scored out remaining i |
+    cap <= 0 ifTrue: [^Array new: 0].
+    ctx := self doctrineContextTermsFor: aRole scope: scope.
+    universal := Array new: 0.
+    tagged := Array new: 0.
+    candidates do: [:t |
+      | p tags |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      tags := p at: 'tags' ifAbsent: [#()].
+      (self doctrineIsUniversal: tags)
+        ifTrue: [universal := universal copyWith: t]
+        ifFalse: [tagged := tagged copyWith: t]
+    ].
+
+    "Score each tagged entry by tag-overlap with the context."
+    scored := Array new: 0.
+    tagged do: [:t |
+      | p tags pair |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      tags := p at: 'tags' ifAbsent: [#()].
+      pair := Dictionary new.
+      pair at: 'tuple' put: t.
+      pair at: 'score' put: (self doctrineOverlapScore: tags context: ctx).
+      pair at: 'id' put: (t at: 'id' ifAbsent: [0]).
+      scored := scored copyWith: pair
+    ].
+    scored sort: [:a :b |
+      | sa sb ia ib |
+      sa := a at: 'score'. sb := b at: 'score'.
+      sa > sb ifTrue: [-1] ifFalse: [
+        sa < sb ifTrue: [1] ifFalse: [
+          ia := a at: 'id'. ib := b at: 'id'.
+          ia > ib ifTrue: [-1] ifFalse: [ia < ib ifTrue: [1] ifFalse: [0]]
+        ]
+      ]
+    ].
+
+    "Universal entries first; then fill remaining slots with top-ranked tagged."
+    out := self mostRecent: universal count: cap.
+    remaining := cap - out size.
+    remaining > 0 ifTrue: [
+      i := 1.
+      [i <= scored size and: [out size < cap]] whileTrue: [
+        out := out copyWith: ((scored at: i) at: 'tuple').
+        i := i + 1
+      ]
     ].
     ^out
   ]

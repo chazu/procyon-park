@@ -7,6 +7,18 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+- Doctrine (the Orient layer) now biases every Act, not only the Decide step.
+  Synthesized doctrine — which is mostly execution-time guidance — is injected
+  into the context of the execution roles (implementer, reviewer, scout, fixer)
+  in addition to the planner, instead of reaching only the planner where it was
+  inert. Injected entries are still gated to `active` maturity and the
+  global∪this-repo scope union, are now role-targeted (an entry tagged
+  `role:<name>` reaches only that role; untagged entries are universal), and are
+  ranked by relevance and capped at 6 per role so agent context does not bloat.
+  Strategist proposals now emit a `role:` tag per principle so doctrine becomes
+  role-targeted going forward.
+
 ### Added
 - The dashboard Board now has a "Hide done"/"Show done" toggle in the board
   header that hides every card in the `done` column from the view. It is a

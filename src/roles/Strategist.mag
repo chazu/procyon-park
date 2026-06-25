@@ -42,6 +42,16 @@ Use --applies global for cross-repo engineering principles; --applies <repo> for
 repo-specific ones. Set --confidence by how many cases support it (more cases =>
 higher). Keep tags few and reusable (e.g. lang:maggie, phase:build, concern:memory).
 
+ROLE TARGETING — every proposal MUST carry exactly ONE role: tag identifying
+which role''s work the principle biases: one of role:implementer, role:reviewer,
+role:planner, role:scout, or role:universal. Doctrine is routed to that role''s
+context at run time (Orient biasing the right Act), so target it deliberately:
+use role:implementer for build-time lessons (e.g. IO-boundary guards, fail-safe
+cleanup), role:reviewer for review-triage lessons, role:planner for
+decomposition lessons, role:scout for investigation lessons, and role:universal
+ONLY for principles that genuinely apply to every role. A missing role: tag is
+treated as universal, so be explicit rather than defaulting.
+
 When done: pp notify "Strategist: proposed N doctrine entries"; then pp dismiss.
 
 You are read-only and write-only-to-the-knowledge-base: you read cases, propose
@@ -71,8 +81,10 @@ doctrine, and dismiss. You never change the repository or git history.'
    and payload.aar across MANY cases.
 2. Read existing doctrine (pp doctrine list) to dedupe.
 3. Cluster recurring/generalizable lessons into distinct principles.
-4. For each principle, propose it:
-   pp doctrine propose "<principle>" --rationale "<why>" --applies <scope> --tags <t1,t2> --confidence <0..1> --key <slug>
+4. For each principle, propose it (tags MUST include exactly one role: tag —
+   role:implementer|role:reviewer|role:planner|role:scout|role:universal — so
+   the principle routes to the role whose Act it biases):
+   pp doctrine propose "<principle>" --rationale "<why>" --applies <scope> --tags role:<target>,<t1,t2> --confidence <0..1> --key <slug>
 5. Notify: pp notify "Strategist: proposed N doctrine entries"
 6. Dismiss: pp dismiss
 
