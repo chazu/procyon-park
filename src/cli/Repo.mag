@@ -3,7 +3,6 @@
  Worktrees are managed at ~/.pp/worktrees/."
 
 Repo subclass: Object
-  classVars: CachedConfigs CachedExpiries
   instanceVars: ppDir reposDir worktreesDir
 
   classMethod: new [
@@ -11,11 +10,13 @@ Repo subclass: Object
   ]
 
   classMethod: invalidateRepoCache [
-    "Drop the repoForName: TTL cache. Called from cmdAdd:/cmdRemove:
-     so config changes take effect immediately rather than waiting
-     for the cache TTL to expire."
-    CachedConfigs := nil.
-    CachedExpiries := nil
+    "No-op: repoForName: no longer caches. The former class-var TTL cache
+     (CachedConfigs/CachedExpiries) was a data race — repoForName: is called
+     concurrently from the dispatcher tick, Scheduler dispatch,
+     CreateWorktreeAction, and DispatchWavesAction (separate goroutines), and
+     the unsynchronized shared Dictionaries got corrupted. Kept for API
+     compatibility with cmdAdd:/cmdRemove: callers."
+    ^self
   ]
 
   method: initialize [
@@ -561,34 +562,25 @@ PPEOF'.
 
      §6 hot-path: called from Scheduler>>dispatch (per task),
      WorkflowEngine>>instantiate:, CreateWorktreeAction>>execute:, and
-     DispatchWavesAction>>execute:. Each call previously forked a
-     stat (via File exists:) plus a JSON parse. We back the lookup with
-     a class-side TTL cache (5 s) — repo config files change rarely so
-     stale reads are bounded and `Repo invalidateRepoCache` is called
-     from add/remove paths."
-    | configPath contents now expires cached |
-    CachedConfigs isNil ifTrue: [CachedConfigs := Dictionary new].
-    CachedExpiries isNil ifTrue: [CachedExpiries := Dictionary new].
-    now := DateTime now epochSeconds.
-    expires := CachedExpiries at: aName ifAbsent: [nil].
-    (expires notNil and: [now < expires]) ifTrue: [
-      cached := CachedConfigs at: aName ifAbsent: [nil].
-      "cached may be nil meaning 'known not present'"
-      ^cached
-    ].
+     DispatchWavesAction>>execute: — all on separate dispatcher goroutines.
+
+     NO caching, deliberately. An earlier class-side TTL cache
+     (CachedConfigs/CachedExpiries) was a DATA RACE: those plain Dictionaries
+     were read and mutated concurrently from the goroutines above with no
+     synchronization, corrupting the Dictionary and surfacing as
+     'at:ifAbsent:: receiver is not a Dictionary' in scheduler dispatch /
+     create-worktree — which intermittently bricked ALL task dispatch (same
+     binary works one moment, fails the next). Config files are tiny and read
+     at most once per task dispatch, so a fresh stat + parse per call is
+     negligible and race-free. Do NOT reintroduce shared mutable caching here
+     without a Mutex."
+    | configPath contents |
     configPath := reposDir, '/', aName, '.json'.
-    (File exists: configPath) ifFalse: [
-      CachedConfigs at: aName put: nil.
-      CachedExpiries at: aName put: now + 5.
-      ^nil
-    ].
+    (File exists: configPath) ifFalse: [^nil].
     [
       contents := File readFileContents: configPath.
-      cached := Json decode: contents
-    ] on: Exception do: [:e | cached := nil].
-    CachedConfigs at: aName put: cached.
-    CachedExpiries at: aName put: now + 5.
-    ^cached
+      ^Json decode: contents
+    ] on: Exception do: [:e | ^nil]
   ]
 
   "--- Helpers ---"

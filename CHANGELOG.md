@@ -80,6 +80,15 @@ Semantic Versioning.
   backend already indexes by category.)
 
 ### Fixed
+- `Repo>>repoForName:` data race fixed (was intermittently bricking ALL task
+  dispatch). Its class-side TTL cache (`CachedConfigs`/`CachedExpiries`) was read
+  and mutated concurrently from the dispatcher tick, Scheduler dispatch,
+  CreateWorktreeAction, and DispatchWavesAction — separate goroutines — with no
+  synchronization. The corrupted Dictionary surfaced as `at:ifAbsent:: receiver
+  is not a Dictionary` in `scheduler dispatch`/`create-worktree`, so the same
+  binary would dispatch one task fine and fail the next. The cache is removed
+  (config files are tiny and read at most once per task dispatch); lookups are
+  now a race-free stat + parse.
 - Stuck-dispatched task reaper no longer false-positive reaps live
   long-running tasks. A local harness fork keeps its task in
   `status='dispatched'`/`worker_id=nil` for its entire run (worker_id is
