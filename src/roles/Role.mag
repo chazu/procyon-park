@@ -244,7 +244,18 @@ Violations will be detected and reverted.
      active-only gate and scope-union, then targets by role-tag and caps the
      number of entries for relevance so agent context does not bloat."
     (self consumesDoctrine: name) ifTrue: [
-      result := result, (self activeDoctrineFor: bbs scope: scope role: name)
+      | taskTuple queryText |
+      "Thread the task's free text into doctrine ranking so the (capped) slots
+       go to doctrine relevant to THIS task, not an arbitrary slice. When no
+       task description is available (nil tuple / empty field) the query is ''
+       and the ranking degrades gracefully to tag-overlap + universals +
+       confidence (see rankDoctrine:role:scope:query:cap:)."
+      taskTuple := bbs rdp: 'task' scope: scope identity: taskId.
+      queryText := taskTuple notNil
+        ifTrue: [(taskTuple at: 'payload' ifAbsent: [Dictionary new])
+                   at: 'description' ifAbsent: ['']]
+        ifFalse: [''].
+      result := result, (self activeDoctrineFor: bbs scope: scope role: name query: queryText)
     ].
 
     ^result
@@ -271,8 +282,15 @@ Violations will be detected and reverted.
   ]
 
   method: activeDoctrineFor: bbs scope: scope role: aRole [
+    "Backward-compatible entry point with no task query: rank by tag-overlap
+     against the role + repo context, universals, and confidence."
+    ^self activeDoctrineFor: bbs scope: scope role: aRole query: ''
+  ]
+
+  method: activeDoctrineFor: bbs scope: scope role: aRole query: queryText [
     "Return ACTIVE doctrine tuples applicable to <scope>, targeted at <aRole>,
-     ranked for relevance and capped at maxDoctrineEntries.
+     ranked for relevance to <queryText> (the task's free text) and capped at
+     maxDoctrineEntries.
 
      Applicability is by payload.doctrine_scope (global | <repo> | <repo>:<path>),
      NOT the BBS storage scope, so doctrine is scanned across all scopes and
@@ -281,9 +299,10 @@ Violations will be detected and reverted.
 
      Role targeting: when an entry carries a 'role:<name>' tag it is surfaced
      ONLY to that role (or to all when the tag is 'role:universal'); entries
-     with no role: tag are universal. Existing entries carry concern:/lang:/
-     phase:/topic tags but no role: tag, so they are treated as universal and
-     ranked by tag-overlap against the consuming role + repo context. The cap
+     with no role: tag are universal. These HARD gates run first; the survivors
+     are then SCORED by a deterministic hybrid of tag-overlap + IDF-weighted
+     lexical similarity to the task text (see rankDoctrine:role:scope:query:cap:),
+     with a small universal floor so cross-cutting wisdom always lands. The cap
      then bounds how many reach the agent so context does not bloat."
     | all candidates |
     all := bbs scanAll: 'doctrine'.
@@ -303,7 +322,7 @@ Violations will be detected and reverted.
         candidates := candidates copyWith: t
       ]
     ].
-    ^self rankDoctrine: candidates role: aRole scope: scope
+    ^self rankDoctrine: candidates role: aRole scope: scope query: queryText
         cap: self class maxDoctrineEntries
   ]
 
@@ -345,6 +364,18 @@ Violations will be detected and reverted.
     ^terms
   ]
 
+  method: doctrineContextTermsFor: aRole scope: scope query: queryText [
+    "Tag-match context for relevance scoring: the consuming role, the repo
+     (scope), AND keywords tokenized from the task description. A doctrine tag
+     (e.g. topic:sse, concern:dashboard) scores when its value matches one of
+     these terms, so task-relevant doctrine ranks ahead of unrelated entries."
+    | terms toks |
+    terms := self doctrineContextTermsFor: aRole scope: scope.
+    toks := self doctrineTokenize: queryText.
+    toks do: [:tk | terms := terms copyWith: tk].
+    ^terms
+  ]
+
   method: tagValue: tag [
     "The value portion of a 'prefix:value' tag, or '' when the tag has no colon."
     | idx |
@@ -370,60 +401,296 @@ Violations will be detected and reverted.
     ^score
   ]
 
-  method: rankDoctrine: candidates role: aRole scope: scope cap: cap [
-    "Rank applicable active doctrine for relevance and cap the count.
-     Universal/untagged entries are ALWAYS relevant, so they are included first
-     (most recent slice if they alone exceed the cap). Remaining slots are
-     filled by the tagged entries with the highest tag-overlap against the
-     role + repo context (ties broken by recency: higher id first)."
-    | ctx universal tagged scored out remaining i |
-    cap <= 0 ifTrue: [^Array new: 0].
-    ctx := self doctrineContextTermsFor: aRole scope: scope.
-    universal := Array new: 0.
-    tagged := Array new: 0.
-    candidates do: [:t |
-      | p tags |
-      p := t at: 'payload' ifAbsent: [Dictionary new].
-      tags := p at: 'tags' ifAbsent: [#()].
-      (self doctrineIsUniversal: tags)
-        ifTrue: [universal := universal copyWith: t]
-        ifFalse: [tagged := tagged copyWith: t]
-    ].
+  classMethod: doctrineUniversalFloor [
+    "How many of the capped slots are reserved for the highest-confidence
+     universal/untagged entries, so cross-cutting wisdom (e.g. 'commit
+     incrementally', 'cleanup must be fail-safe') always lands regardless of
+     how the task-specific score shakes out. 1-2 is the sweet spot: enough to
+     guarantee a floor of cross-cutting doctrine without crowding out the
+     task-relevant entries the cap is meant to surface."
+    ^2
+  ]
 
-    "Score each tagged entry by tag-overlap with the context."
+  method: doctrineUniversalFloor [ ^self class doctrineUniversalFloor ]
+
+  method: rankDoctrine: candidates role: aRole scope: scope query: queryText cap: cap [
+    "Pick the (<= cap) most relevant active+applicable doctrine entries for a
+     task, deterministically. NO randomness anywhere — the cap exists because
+     agent context is scarce, so the slots must go to the most relevant entries.
+
+     SCORING (per survivor of the hard gates):
+       tagScore  — number of the entry's tags whose value matches a task-derived
+                   context term (role, repo, description keywords). Weighted high
+                   (high precision).
+       textScore — IDF-weighted, length-normalized lexical overlap between the
+                   task query and the entry's principle+rationale, in [0,1000].
+                   Verbose rationales do not dominate (union-normalized).
+       score = (tagScore * tagWeight) + textScore   (tags somewhat heavier).
+
+     SELECTION:
+       1. Reserve up to doctrineUniversalFloor slots for the highest-confidence
+          universal/untagged entries (the universal floor).
+       2. Fill the remaining slots up to cap by descending score.
+       Tie-break is deterministic: score desc, then confidence desc, then
+       identity asc (a total order — same (query, corpus) always yields the
+       same ordering)."
+    | ctx queryTokens idf scored floor out chosen i |
+    cap <= 0 ifTrue: [^Array new: 0].
+
+    "Tag-match context = role + repo + task keywords."
+    ctx := self doctrineContextTermsFor: aRole scope: scope query: queryText.
+    queryTokens := self doctrineUniqueTokens: queryText.
+
+    "IDF computed over the candidate doctrine corpus (down-weights common tokens)."
+    idf := self doctrineIdf: candidates.
+
+    "Score every candidate."
     scored := Array new: 0.
-    tagged do: [:t |
+    candidates do: [:t |
       | p tags pair |
       p := t at: 'payload' ifAbsent: [Dictionary new].
       tags := p at: 'tags' ifAbsent: [#()].
       pair := Dictionary new.
       pair at: 'tuple' put: t.
-      pair at: 'score' put: (self doctrineOverlapScore: tags context: ctx).
-      pair at: 'id' put: (t at: 'id' ifAbsent: [0]).
+      pair at: 'score' put: (self doctrineScoreOf: p context: ctx
+                               query: queryTokens idf: idf).
+      pair at: 'conf' put: (self doctrineConfidenceMilli: p).
+      pair at: 'ident' put: (t at: 'identity' ifAbsent: ['']).
+      pair at: 'universal' put: (self doctrineIsUniversal: tags).
       scored := scored copyWith: pair
     ].
-    scored sort: [:a :b |
-      | sa sb ia ib |
-      sa := a at: 'score'. sb := b at: 'score'.
-      sa > sb ifTrue: [-1] ifFalse: [
-        sa < sb ifTrue: [1] ifFalse: [
-          ia := a at: 'id'. ib := b at: 'id'.
-          ia > ib ifTrue: [-1] ifFalse: [ia < ib ifTrue: [1] ifFalse: [0]]
-        ]
-      ]
-    ].
 
-    "Universal entries first; then fill remaining slots with top-ranked tagged."
-    out := self mostRecent: universal count: cap.
-    remaining := cap - out size.
-    remaining > 0 ifTrue: [
+    out := Array new: 0.
+    chosen := Set new.
+
+    "1. Universal floor: highest-confidence universal/untagged entries first."
+    floor := self doctrineUniversalFloor.
+    floor > cap ifTrue: [floor := cap].
+    floor > 0 ifTrue: [
+      | universals |
+      universals := scored select: [:e | e at: 'universal'].
+      universals := self doctrineSortByConfidence: universals.
       i := 1.
-      [i <= scored size and: [out size < cap]] whileTrue: [
-        out := out copyWith: ((scored at: i) at: 'tuple').
+      [i <= universals size and: [out size < floor]] whileTrue: [
+        | e |
+        e := universals at: i.
+        out := out copyWith: (e at: 'tuple').
+        chosen add: (e at: 'ident').
         i := i + 1
       ]
     ].
+
+    "2. Fill the remaining slots by descending score."
+    scored := self doctrineSortByScore: scored.
+    i := 1.
+    [i <= scored size and: [out size < cap]] whileTrue: [
+      | e |
+      e := scored at: i.
+      (chosen includes: (e at: 'ident')) ifFalse: [
+        out := out copyWith: (e at: 'tuple').
+        chosen add: (e at: 'ident')
+      ].
+      i := i + 1
+    ].
     ^out
+  ]
+
+  method: doctrineSortByScore: entries [
+    "Deterministic total order: score desc, then confidence desc, then identity
+     asc. Returns a fresh sorted array (does not mutate the input)."
+    | arr |
+    arr := entries copyFrom: 1 to: entries size.
+    arr sort: [:a :b |
+      | sa sb ca cb ida idb |
+      sa := a at: 'score'. sb := b at: 'score'.
+      sa > sb ifTrue: [-1] ifFalse: [ sa < sb ifTrue: [1] ifFalse: [
+        ca := a at: 'conf'. cb := b at: 'conf'.
+        ca > cb ifTrue: [-1] ifFalse: [ ca < cb ifTrue: [1] ifFalse: [
+          ida := a at: 'ident'. idb := b at: 'ident'.
+          ida < idb ifTrue: [-1] ifFalse: [ ida > idb ifTrue: [1] ifFalse: [0] ]
+        ]]
+      ]]
+    ].
+    ^arr
+  ]
+
+  method: doctrineSortByConfidence: entries [
+    "Deterministic total order: confidence desc, then identity asc."
+    | arr |
+    arr := entries copyFrom: 1 to: entries size.
+    arr sort: [:a :b |
+      | ca cb ida idb |
+      ca := a at: 'conf'. cb := b at: 'conf'.
+      ca > cb ifTrue: [-1] ifFalse: [ ca < cb ifTrue: [1] ifFalse: [
+        ida := a at: 'ident'. idb := b at: 'ident'.
+        ida < idb ifTrue: [-1] ifFalse: [ ida > idb ifTrue: [1] ifFalse: [0] ]
+      ]]
+    ].
+    ^arr
+  ]
+
+  method: doctrineScoreOf: payload context: ctx query: queryTokens idf: idf [
+    "Hybrid relevance score: tags weighted high (high precision), plus the
+     IDF-weighted lexical text score in [0,1000]. Tags are somewhat heavier so
+     a tag match outranks pure lexical similarity, but text still discriminates
+     between entries with equal tag overlap and contributes cross-boundary signal."
+    | tags tagScore textScore |
+    tags := payload at: 'tags' ifAbsent: [#()].
+    tagScore := self doctrineOverlapScore: tags context: ctx.
+    textScore := self doctrineTextScore: queryTokens
+                   docText: (self doctrineDocText: payload) idf: idf.
+    ^(tagScore * 1500) + textScore
+  ]
+
+  method: doctrineDocText: payload [
+    "The text an entry is lexically scored against: its principle plus rationale."
+    | pr ra |
+    pr := payload at: 'principle' ifAbsent: [''].
+    ra := payload at: 'rationale' ifAbsent: [''].
+    pr isString ifFalse: [pr := ''].
+    ra isString ifFalse: [ra := ''].
+    ^pr, ' ', ra
+  ]
+
+  method: doctrineTextScore: queryTokens docText: docText idf: idf [
+    "IDF-weighted, length-normalized lexical similarity in integer milli-units
+     [0,1000] (no floats: Maggie '/' truncates and float printing is unreliable).
+
+     Weighted Jaccard: (sum idf over q INTERSECT d) / (sum idf over q UNION d),
+     scaled by 1000. Union-normalization length-normalizes — a verbose rationale
+     grows the union denominator, so it cannot dominate on sheer length. Empty
+     query degrades to 0 (the caller then ranks by tag-overlap + confidence)."
+    | docTokens allTokens inter union |
+    queryTokens isEmpty ifTrue: [^0].
+    docTokens := self doctrineUniqueTokens: docText.
+    docTokens isEmpty ifTrue: [^0].
+    allTokens := Set new.
+    queryTokens do: [:tk | allTokens add: tk].
+    docTokens do: [:tk | allTokens add: tk].
+    inter := 0. union := 0.
+    allTokens do: [:tk |
+      | w |
+      w := idf at: tk ifAbsent: [1000].
+      union := union + w.
+      ((queryTokens includes: tk) and: [docTokens includes: tk])
+        ifTrue: [inter := inter + w]
+    ].
+    union <= 0 ifTrue: [^0].
+    ^(inter * 1000) // union
+  ]
+
+  method: doctrineIdf: candidates [
+    "Inverse document frequency (integer, scaled by 1000) over the candidate
+     doctrine corpus: idf(t) = 1000 * N / df(t). Rare tokens weigh more; tokens
+     common across candidates (e.g. 'must', surviving stopword stripping) weigh
+     less, so they do not drive relevance. Pure and deterministic; unit-testable."
+    | n df idf |
+    n := candidates size.
+    df := Dictionary new.
+    candidates do: [:t |
+      | p toks |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      toks := self doctrineUniqueTokens: (self doctrineDocText: p).
+      toks do: [:tk | df at: tk put: ((df at: tk ifAbsent: [0]) + 1) ]
+    ].
+    idf := Dictionary new.
+    df keysAndValuesDo: [:tk :d |
+      | denom |
+      denom := d.
+      denom < 1 ifTrue: [denom := 1].
+      idf at: tk put: ((1000 * n) // denom)
+    ].
+    ^idf
+  ]
+
+  method: doctrineUniqueTokens: aString [
+    "The deduplicated token set of a string (a Set, so includes:/do:/isEmpty work)."
+    | set |
+    set := Set new.
+    (self doctrineTokenize: aString) do: [:tk | set add: tk].
+    ^set
+  ]
+
+  method: doctrineTokenize: aString [
+    "Tokenizer: lowercase, split on non-alphanumeric, drop a small stopword set
+     and 1-character tokens. Returns an Array of tokens in order of appearance.
+     Pure and deterministic; unit-testable in isolation."
+    | s out n i start code isAlnum stops |
+    (aString isNil or: [aString isString not]) ifTrue: [^Array new: 0].
+    s := aString asLowercase.
+    out := Array new: 0.
+    stops := self doctrineStopwords.
+    n := s size.
+    i := 1.
+    start := 0.
+    [i <= n] whileTrue: [
+      "After lowercasing, ASCII letters are 97..122 and digits 48..57."
+      code := (s at: i) value.
+      isAlnum := (code >= 97 and: [code <= 122]) or: [(code >= 48) and: [code <= 57]].
+      isAlnum
+        ifTrue: [ start = 0 ifTrue: [start := i] ]
+        ifFalse: [
+          start > 0 ifTrue: [
+            out := self doctrineEmit: (s copyFrom: start to: i - 1) into: out stops: stops.
+            start := 0
+          ]
+        ].
+      i := i + 1
+    ].
+    start > 0 ifTrue: [
+      out := self doctrineEmit: (s copyFrom: start to: n) into: out stops: stops
+    ].
+    ^out
+  ]
+
+  method: doctrineEmit: tok into: out stops: stops [
+    "Append a candidate token to the token list unless it is too short or a
+     stopword. Helper for doctrineTokenize: (keeps the scan loop readable)."
+    (tok size >= 2 and: [(stops includes: tok) not])
+      ifTrue: [^out copyWith: tok].
+    ^out
+  ]
+
+  method: doctrineStopwords [
+    "A small stopword set stripped before scoring so ubiquitous glue words do
+     not generate spurious lexical overlap. Returns a Set for O(1) membership."
+    | s |
+    s := Set new.
+    #('the' 'and' 'for' 'are' 'but' 'not' 'you' 'all' 'any' 'can' 'was' 'has'
+      'had' 'its' 'this' 'that' 'with' 'from' 'they' 'will' 'would' 'there'
+      'their' 'what' 'which' 'when' 'them' 'then' 'than' 'into' 'over' 'such'
+      'only' 'some' 'must' 'should' 'before' 'after' 'every' 'each' 'been'
+      'being' 'have' 'were' 'where' 'while' 'about' 'against' 'across' 'per')
+      do: [:w | s add: w].
+    ^s
+  ]
+
+  method: doctrineConfidenceMilli: payload [
+    "Parse a confidence string like '0.72' into integer milli-units (720),
+     without floats (Maggie '/' truncates and float printing is unreliable).
+     Missing/garbage confidence defaults to 500 (0.5) so unscored entries sort
+     in the middle deterministically. Values in [0,1] map to [0,1000]."
+    | raw intPart frac fracCount seenDot |
+    raw := payload at: 'confidence' ifAbsent: [nil].
+    (raw isNil or: [raw isString not]) ifTrue: [^500].
+    raw := raw trimBoth.
+    raw isEmpty ifTrue: [^500].
+    intPart := 0. frac := 0. fracCount := 0. seenDot := false.
+    raw do: [:c |
+      | code |
+      code := c value.
+      code = 46
+        ifTrue: [seenDot := true]
+        ifFalse: [
+          (code >= 48 and: [code <= 57]) ifTrue: [
+            seenDot
+              ifTrue: [ fracCount < 3 ifTrue: [ frac := (frac * 10) + (code - 48). fracCount := fracCount + 1 ] ]
+              ifFalse: [ intPart := (intPart * 10) + (code - 48) ]
+          ]
+        ]
+    ].
+    [fracCount < 3] whileTrue: [ frac := frac * 10. fracCount := fracCount + 1 ].
+    ^(intPart * 1000) + frac
   ]
 
   method: mostRecent: tuples count: n [

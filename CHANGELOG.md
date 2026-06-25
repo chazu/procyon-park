@@ -8,6 +8,18 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Changed
+- Doctrine routed to a role is now chosen by relevance to the specific task,
+  not by arbitrary order. The (≤6) capped slots go to the doctrine most
+  relevant to the task at hand: each candidate that survives the existing hard
+  gates (active maturity, global∪this-repo scope union, role targeting) is
+  scored by a deterministic hybrid of tag overlap (against the role, repo, and
+  the task description's keywords) plus IDF-weighted, length-normalized lexical
+  similarity between the task text and the entry's principle+rationale. A small
+  universal floor reserves slots for the highest-confidence cross-cutting
+  (untagged) doctrine so it always lands. Selection is fully deterministic —
+  no randomness — with ties broken by confidence then identity. When a task has
+  no description the ranking degrades gracefully to tag overlap, universals, and
+  confidence.
 - Doctrine (the Orient layer) now biases every Act, not only the Decide step.
   Synthesized doctrine — which is mostly execution-time guidance — is injected
   into the context of the execution roles (implementer, reviewer, scout, fixer)

@@ -103,6 +103,52 @@ DoctrineRoutingHelper subclass: Object
     ^false
   ]
 
+  classMethod: indexOfIdentity: ident in: tuples [
+    "1-based position of <ident> in the ordered result, or 0 when absent."
+    | i |
+    i := 1.
+    tuples do: [:t |
+      ((t at: 'identity' ifAbsent: ['']) = ident) ifTrue: [^i].
+      i := i + 1
+    ].
+    ^0
+  ]
+
+  classMethod: identitySeqOf: tuples [
+    "The ordered identity sequence of a result, as a comma-joined string, so two
+     runs can be compared for byte-identical ordering (determinism check)."
+    | s first |
+    s := ''. first := true.
+    tuples do: [:t |
+      first ifFalse: [s := s, ','].
+      s := s, (t at: 'identity' ifAbsent: ['']).
+      first := false
+    ].
+    ^s
+  ]
+
+  classMethod: payload: maturity scope: dscope tags: tags principle: principle
+      rationale: rationale confidence: confidence [
+    "Like payload:scope:tags:principle: but with an explicit rationale and
+     confidence, for the relevance-ranking tests."
+    | p |
+    p := Dictionary new.
+    p at: 'principle' put: principle.
+    p at: 'rationale' put: rationale.
+    p at: 'maturity' put: maturity.
+    p at: 'doctrine_scope' put: dscope.
+    p at: 'tags' put: tags.
+    p at: 'confidence' put: confidence.
+    ^p
+  ]
+
+  classMethod: seed: bbs identity: ident maturity: maturity scope: dscope tags: tags
+      principle: principle rationale: rationale confidence: confidence [
+    bbs out: 'doctrine' scope: 'global' identity: ident
+      payload: (self payload: maturity scope: dscope tags: tags principle: principle
+                  rationale: rationale confidence: confidence)
+  ]
+
 "=== TestDoctrineRouting ==="
 TestDoctrineRouting subclass: Object
 
@@ -284,6 +330,238 @@ TestDoctrineRouting subclass: Object
       message: 'DRT7: strategist does NOT consume doctrine via the active path'
   ]
 
+"=== TestDoctrineRanking ===
+ Relevance-ranked selection: the (<= 6) capped slots go to the doctrine most
+ relevant to THIS task's text, deterministically, with a universal floor.
+
+ Invariants under test:
+   DRK1  A query mentioning 'dashboard SSE filter' ranks the SSE/dashboard
+         entry above unrelated ones.
+   DRK2  A query about 'Maggie dictionary parse boundary' ranks the IO-boundary
+         entry to the top.
+   DRK3  The cap (6) is respected under the query path.
+   DRK4  Active-only + scope-union + role gating still hold with a query present.
+   DRK5  The universal floor guarantees a high-confidence untagged/global entry
+         is present even when many tagged entries out-score it.
+   DRK6  Determinism: the same (query, corpus) yields the SAME ordering on
+         repeated calls (no randomness).
+   DRK7  Helper units: the tokenizer lowercases / splits / strips stopwords, and
+         IDF down-weights tokens common across the corpus."
+TestDoctrineRanking subclass: Object
+
+  classMethod: run: t [
+    self testSseQueryRanksTop: t.
+    self testIoBoundaryQueryRanksTop: t.
+    self testCapRespectedWithQuery: t.
+    self testGatesHoldWithQuery: t.
+    self testUniversalFloor: t.
+    self testDeterministic: t.
+    self testHelperUnits: t
+  ]
+
+  classMethod: seedCorpus: bbs [
+    "A small seeded ACTIVE corpus spanning unrelated topics."
+    DoctrineRoutingHelper seed: bbs identity: 'sse-dash' maturity: 'active'
+      scope: 'global' tags: #('concern:dashboard' 'topic:sse')
+      principle: 'Dashboard SSE filter updates must reconcile on reconnect.'
+      rationale: 'A dropped SSE stream leaves the dashboard filter stale until a full resync.'
+      confidence: '0.7'.
+    DoctrineRoutingHelper seed: bbs identity: 'io-boundary' maturity: 'active'
+      scope: 'global' tags: #('concern:io' 'lang:maggie')
+      principle: 'Guard Maggie Dictionary access at every parse boundary.'
+      rationale: 'Unchecked dictionary reads at the IO boundary crash on malformed input.'
+      confidence: '0.72'.
+    DoctrineRoutingHelper seed: bbs identity: 'gc-safe' maturity: 'active'
+      scope: 'global' tags: #('concern:gc')
+      principle: 'Cleanup of shared worktrees must be fail-safe.'
+      rationale: 'A fail-dangerous reaper removes live worktrees on an empty probe.'
+      confidence: '0.8'.
+    DoctrineRoutingHelper seed: bbs identity: 'index-cat' maturity: 'active'
+      scope: 'global' tags: #('concern:performance')
+      principle: 'Index hot-path reads by category before volume grows.'
+      rationale: 'Flat-index scans are O(total tuples) and tax every per-tick read.'
+      confidence: '0.78'
+  ]
+
+  classMethod: testSseQueryRanksTop: t [
+    "DRK1: the dashboard/SSE entry ranks above unrelated tagged entries."
+    | bbs role out idxSse idxGc idxPerf idxIo |
+    '--- DRK1: dashboard SSE filter query ranks the SSE entry top ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    self seedCorpus: bbs.
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer'
+      query: 'the dashboard SSE filter is stale after a reconnect'.
+    idxSse := DoctrineRoutingHelper indexOfIdentity: 'sse-dash' in: out.
+    idxGc := DoctrineRoutingHelper indexOfIdentity: 'gc-safe' in: out.
+    idxPerf := DoctrineRoutingHelper indexOfIdentity: 'index-cat' in: out.
+    idxIo := DoctrineRoutingHelper indexOfIdentity: 'io-boundary' in: out.
+    t assert: idxSse > 0 message: 'DRK1: SSE entry is present'.
+    t assert: (idxSse < idxGc) message: 'DRK1: SSE ranks above the gc entry'.
+    t assert: (idxSse < idxPerf) message: 'DRK1: SSE ranks above the perf entry'.
+    t assert: (idxSse < idxIo) message: 'DRK1: SSE ranks above the io entry'
+  ]
+
+  classMethod: testIoBoundaryQueryRanksTop: t [
+    "DRK2: a Maggie dictionary parse boundary query ranks the IO entry top."
+    | bbs role out idxIo idxSse idxGc idxPerf |
+    '--- DRK2: maggie dictionary parse boundary query ranks the IO entry top ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    self seedCorpus: bbs.
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer'
+      query: 'a Maggie dictionary read at the parse boundary crashed'.
+    idxIo := DoctrineRoutingHelper indexOfIdentity: 'io-boundary' in: out.
+    idxSse := DoctrineRoutingHelper indexOfIdentity: 'sse-dash' in: out.
+    idxGc := DoctrineRoutingHelper indexOfIdentity: 'gc-safe' in: out.
+    idxPerf := DoctrineRoutingHelper indexOfIdentity: 'index-cat' in: out.
+    t assert: idxIo > 0 message: 'DRK2: IO entry is present'.
+    t assert: (idxIo < idxSse) message: 'DRK2: IO ranks above the SSE entry'.
+    t assert: (idxIo < idxGc) message: 'DRK2: IO ranks above the gc entry'.
+    t assert: (idxIo < idxPerf) message: 'DRK2: IO ranks above the perf entry'
+  ]
+
+  classMethod: testCapRespectedWithQuery: t [
+    "DRK3: even with 9 applicable active entries, the query path caps at 6."
+    | bbs role out i |
+    '--- DRK3: cap (6) respected under the query path ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    i := 1.
+    [i <= 9] whileTrue: [
+      DoctrineRoutingHelper seed: bbs identity: ('c', i printString) maturity: 'active'
+        scope: 'global' tags: #('concern:dashboard' 'topic:sse')
+        principle: ('Dashboard SSE rule ', i printString)
+        rationale: 'SSE filter reconcile detail.' confidence: '0.6'.
+      i := i + 1
+    ].
+    role := Reviewer new.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'reviewer'
+      query: 'dashboard SSE filter'.
+    t assertEqual: out size to: 6
+      message: 'DRK3: 9 applicable active entries capped to 6 under the query'
+  ]
+
+  classMethod: testGatesHoldWithQuery: t [
+    "DRK4: active-only + scope-union + role gating survive the query path."
+    | bbs role out |
+    '--- DRK4: hard gates hold with a query present ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    "Active + applicable to this repo / global."
+    DoctrineRoutingHelper seed: bbs identity: 'g-active' maturity: 'active'
+      scope: 'global' tags: #('concern:io')
+      principle: 'Guard the IO boundary.' rationale: 'parse safety' confidence: '0.7'.
+    DoctrineRoutingHelper seed: bbs identity: 'r-active' maturity: 'active'
+      scope: 'pp-repo' tags: #('concern:io')
+      principle: 'Guard this repo IO boundary.' rationale: 'parse safety' confidence: '0.7'.
+    "Gated OUT: proposed, other-repo, role-tagged for a different role."
+    DoctrineRoutingHelper seed: bbs identity: 'g-proposed' maturity: 'proposed'
+      scope: 'global' tags: #('concern:io')
+      principle: 'Proposed IO rule.' rationale: 'parse safety' confidence: '0.7'.
+    DoctrineRoutingHelper seed: bbs identity: 'other-active' maturity: 'active'
+      scope: 'other-repo' tags: #('concern:io')
+      principle: 'Other repo IO rule.' rationale: 'parse safety' confidence: '0.7'.
+    DoctrineRoutingHelper seed: bbs identity: 'rev-tagged' maturity: 'active'
+      scope: 'global' tags: #('role:reviewer' 'concern:io')
+      principle: 'Reviewer-only IO rule.' rationale: 'parse safety' confidence: '0.7'.
+
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer'
+      query: 'IO boundary parse safety'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'g-active' in: out)
+      message: 'DRK4: global active entry surfaces under query'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'r-active' in: out)
+      message: 'DRK4: this-repo active entry surfaces under query'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'g-proposed' in: out) not
+      message: 'DRK4: proposed entry is still gated out under query'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'other-active' in: out) not
+      message: 'DRK4: other-repo entry is still gated out under query'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'rev-tagged' in: out) not
+      message: 'DRK4: role:reviewer entry is still gated out for the implementer'
+  ]
+
+  classMethod: testUniversalFloor: t [
+    "DRK5: a high-confidence untagged/global entry lands via the universal floor
+     even when several tagged entries out-score it on the query."
+    | bbs role out i |
+    '--- DRK5: universal floor guarantees cross-cutting doctrine lands ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    "Six tightly-relevant tagged entries (would otherwise fill all 6 slots)."
+    i := 1.
+    [i <= 6] whileTrue: [
+      DoctrineRoutingHelper seed: bbs identity: ('tag', i printString) maturity: 'active'
+        scope: 'global' tags: #('concern:dashboard' 'topic:sse')
+        principle: ('Dashboard SSE filter rule ', i printString)
+        rationale: 'SSE filter reconcile on reconnect.' confidence: '0.6'.
+      i := i + 1
+    ].
+    "Two cross-cutting untagged universals (high confidence)."
+    DoctrineRoutingHelper seed: bbs identity: 'commit-incr' maturity: 'active'
+      scope: 'global' tags: (Array new: 0)
+      principle: 'Commit incrementally.'
+      rationale: 'Small commits keep work recoverable.' confidence: '0.9'.
+    DoctrineRoutingHelper seed: bbs identity: 'fail-safe' maturity: 'active'
+      scope: 'global' tags: (Array new: 0)
+      principle: 'Cleanup must be fail-safe.'
+      rationale: 'Keep the resource on any ambiguous signal.' confidence: '0.85'.
+
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer'
+      query: 'dashboard SSE filter reconcile on reconnect'.
+    t assertEqual: out size to: 6 message: 'DRK5: cap still respected'.
+    t assert: ((DoctrineRoutingHelper hasIdentity: 'commit-incr' in: out)
+      or: [DoctrineRoutingHelper hasIdentity: 'fail-safe' in: out])
+      message: 'DRK5: at least one high-confidence universal lands via the floor'
+  ]
+
+  classMethod: testDeterministic: t [
+    "DRK6: the same (query, corpus) yields byte-identical ordering twice."
+    | bbs role q out1 out2 |
+    '--- DRK6: determinism (no randomness) ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    self seedCorpus: bbs.
+    role := Implementer new.
+    q := 'dashboard SSE filter and Maggie dictionary parse boundary'.
+    out1 := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q.
+    out2 := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q.
+    t assertEqual: (DoctrineRoutingHelper identitySeqOf: out1)
+      to: (DoctrineRoutingHelper identitySeqOf: out2)
+      message: 'DRK6: identical ordering across repeated calls'
+  ]
+
+  classMethod: testHelperUnits: t [
+    "DRK7: the pure helpers behave in isolation (tokenizer + IDF)."
+    | role toks idf hi lo corpus |
+    '--- DRK7: tokenizer + IDF helper units ---' println.
+    role := Implementer new.
+    toks := role doctrineTokenize: 'The Dashboard-SSE filter, RECONNECTED!'.
+    t assert: (toks includes: 'dashboard') message: 'DRK7: tokenizer lowercases + splits on hyphen'.
+    t assert: (toks includes: 'sse') message: 'DRK7: tokenizer keeps sse'.
+    t assert: (toks includes: 'filter') message: 'DRK7: tokenizer splits on comma/space'.
+    t assert: (toks includes: 'the') not message: 'DRK7: tokenizer strips the stopword the'.
+    t assert: (toks includes: 'reconnected') message: 'DRK7: tokenizer strips trailing punctuation'.
+
+    "IDF: a token in every doc weighs less than a token in one doc."
+    corpus := Array new: 0.
+    corpus := corpus copyWith: (self idfDoc: 'common rare1').
+    corpus := corpus copyWith: (self idfDoc: 'common rare2').
+    corpus := corpus copyWith: (self idfDoc: 'common rare3').
+    idf := role doctrineIdf: corpus.
+    hi := idf at: 'rare1' ifAbsent: [0].
+    lo := idf at: 'common' ifAbsent: [0].
+    t assert: (hi > lo) message: 'DRK7: IDF down-weights tokens common across the corpus'
+  ]
+
+  classMethod: idfDoc: principle [
+    "A minimal doctrine tuple shaped just enough for doctrineIdf:."
+    | p tup |
+    p := Dictionary new.
+    p at: 'principle' put: principle.
+    p at: 'rationale' put: ''.
+    tup := Dictionary new.
+    tup at: 'payload' put: p.
+    ^tup
+  ]
+
 "=== Main ==="
 DoctrineRoutingMain subclass: Object
   classMethod: run [
@@ -292,6 +570,10 @@ DoctrineRoutingMain subclass: Object
     [TestDoctrineRouting run: t] on: Exception do: [:e |
       ('TestDoctrineRouting CRASHED: ', e messageText) println.
       t assert: false message: 'TestDoctrineRouting crashed'
+    ].
+    [TestDoctrineRanking run: t] on: Exception do: [:e |
+      ('TestDoctrineRanking CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDoctrineRanking crashed'
     ].
     t report.
     ^t failed
