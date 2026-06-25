@@ -10,7 +10,8 @@
         produces a real merge commit and lands both, still never touching the
         primary tree.
    GM3  No ephemeral worktree is leaked after a merge.
-   GM4  isCleanTree: reports true for a clean tree and false for a dirty one.
+   GM4  isCleanTree: reports true for a clean tree (and for untracked-only
+        changes, which are never clobbered) and false for a dirty TRACKED tree.
    GM5  A conflicting merge raises, and leaves the target ref AND the primary
         tree untouched (no partial clobber, no mid-merge state).
 
@@ -117,12 +118,15 @@ TestGitOpsMerge subclass: Object
       t assert: false message: 'GM2: non-ff mergeBranch:into: raised unexpectedly — ', e messageText
     ].
 
-    "--- GM4: isCleanTree: clean vs dirty ---"
+    "--- GM4: isCleanTree: clean vs dirty (untracked ignored) ---"
     t assert: (GitOps isCleanTree: r)
       message: 'GM4: isCleanTree true for a clean tree'.
+    Shell run: 'echo junk > "', r, '/.untracked-artifact"'.
+    t assert: (GitOps isCleanTree: r)
+      message: 'GM4: isCleanTree ignores untracked files (they are never clobbered)'.
     Shell run: 'echo dirt > "', r, '/dirty.txt" && git -C "', r, '" add dirty.txt'.
     t assert: (GitOps isCleanTree: r) not
-      message: 'GM4: isCleanTree false when a file is staged'.
+      message: 'GM4: isCleanTree false when a TRACKED file is staged'.
 
     "--- GM5: conflicting merge raises, target ref + primary tree untouched ---"
     r3 := '/tmp/pp-gitops-test-conflict'.

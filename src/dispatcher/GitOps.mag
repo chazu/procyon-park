@@ -189,12 +189,15 @@ GitOps subclass: Object
   ]
 
   classMethod: isCleanTree: repoPath [
-    "Returns true if the primary working tree has no staged, unstaged, or
-     untracked changes — i.e. a checkout/merge into it cannot clobber work.
-     Uses plain capture: — capture:timeout: soft-fails to '' which would
-     misreport a dirty tree as clean and defeat the guard."
+    "Returns true if the primary working tree has no staged or unstaged changes
+     to TRACKED files — i.e. a checkout/merge into it cannot clobber committed-
+     -in-progress work. Untracked files (--untracked-files=no) are deliberately
+     ignored: git preserves them across checkout/merge, and almost every real
+     repo carries untracked dirs (.claude/, build artifacts) that must not block
+     landing. Uses plain capture: — capture:timeout: soft-fails to '' which
+     would misreport a dirty tree as clean and defeat the guard."
     | output |
-    output := Shell capture: 'git -C "', repoPath, '" status --porcelain'.
+    output := Shell capture: 'git -C "', repoPath, '" status --porcelain --untracked-files=no'.
     output isNil ifTrue: [^false].
     ^output trimSeparators isEmpty
   ]
