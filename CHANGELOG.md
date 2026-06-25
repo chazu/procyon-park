@@ -7,6 +7,15 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+- `pp doctrine propose --applies repo` now resolves to the concrete repo scope
+  (e.g. `procyon-park`) instead of storing the literal type `repo`. The consumer
+  composes applicability by scope-union `{global, <repo>}`, so a stored `repo`
+  matched nothing and repo-scoped doctrine reached no role at all — only global
+  doctrine ever surfaced. The synthesis prompt now also passes `--repo` and asks
+  for a `role:` tag. (Existing `repo`-typed entries were backfilled to their
+  concrete scope.)
+
 ### Changed
 - Doctrine routed to a role is now chosen by relevance to the specific task,
   not by arbitrary order. The (≤6) capped slots go to the doctrine most

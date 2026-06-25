@@ -80,6 +80,29 @@ DoctrineCLI subclass: Object
     r notNil ifTrue: [scope := r]
   ]
 
+  method: resolveAppliesToScope: applies [
+    "Resolve an --applies value to a CONCRETE doctrine_scope. The consumer's
+     scope-union check compares doctrine_scope to {global, <concrete-repo>},
+     so storing the literal type 'repo' makes the entry match NOTHING and it
+     reaches no role. 'global' stays global; 'repo' becomes the resolved repo
+     (defaultScope); 'repo:<path>'/'path:<path>' become '<repo>:<path>'; an
+     already-concrete value is kept verbatim. Without a concrete repo
+     (defaultScope is 'default'/'global'/empty) repo/path forms degrade to
+     'global' rather than storing an un-matchable literal."
+    | sc |
+    applies = 'global' ifTrue: [^'global'].
+    sc := self defaultScope.
+    (sc isNil or: [sc isEmpty or: [sc = 'default' or: [sc = 'global']]]) ifTrue: [
+      ((applies = 'repo') or: [(applies startsWith: 'repo:') or: [applies startsWith: 'path:']])
+        ifTrue: [^'global']
+        ifFalse: [^applies]
+    ].
+    applies = 'repo' ifTrue: [^sc].
+    (applies startsWith: 'repo:') ifTrue: [^sc, ':', (applies copyFrom: 6 to: applies size)].
+    (applies startsWith: 'path:') ifTrue: [^sc, ':', (applies copyFrom: 6 to: applies size)].
+    ^applies
+  ]
+
   "--- reads (unsigned) -------------------------------------------------"
 
   method: scanDoctrine [
@@ -176,6 +199,9 @@ DoctrineCLI subclass: Object
     rationale isNil ifTrue: [rationale := ''].
     applies := self flagValue: '--applies' in: args.
     applies isNil ifTrue: [applies := 'global'].
+    "Resolve the applicability TYPE to a concrete scope (repo -> the repo name)."
+    self applyScopeFlagFrom: args.
+    applies := self resolveAppliesToScope: applies.
     tagsArg := self flagValue: '--tags' in: args.
     conf := self flagValue: '--confidence' in: args.
     key := self flagValue: '--key' in: args.
@@ -215,7 +241,7 @@ DoctrineCLI subclass: Object
     body at: 'scope' put: self defaultScope.
     body at: 'identity' put: taskId.
     body at: 'role' put: 'strategist'.
-    body at: 'description' put: ('Synthesize doctrine from recent case (AAR) tuples in scope ', self defaultScope, '. Read payload.lessons and payload.aar across MANY cases (pp read case ', self defaultScope, '), dedupe against existing doctrine (pp doctrine list), cluster recurring/generalizable lessons into distinct principles, and propose each via: pp doctrine propose "<principle>" --rationale "<why>" --applies <global|repo> --tags <t1,t2> --confidence <0..1> --key <slug>. Propose PROPOSED doctrine only; do not promote.').
+    body at: 'description' put: ('Synthesize doctrine from recent case (AAR) tuples in scope ', self defaultScope, '. Read payload.lessons and payload.aar across MANY cases (pp read case ', self defaultScope, '), dedupe against existing doctrine (pp doctrine list), cluster recurring/generalizable lessons into distinct principles, and propose each via: pp doctrine propose "<principle>" --rationale "<why>" --applies <global|repo> --repo ', self defaultScope, ' --tags <t1,t2> --confidence <0..1> --key <slug>. Use --applies global for cross-cutting lessons and --applies repo for ones specific to this repo (the --repo flag resolves "repo" to a concrete scope so the doctrine actually reaches consumers). Add a role:<implementer|reviewer|planner|scout|universal> tag so the lesson is routed to the right role. Propose PROPOSED doctrine only; do not promote.').
     body at: 'repo' put: repo.
     CLIBase signedPost: '/api/task/create' body: body baseUrl: baseUrl.
     ('Strategist task enqueued: ', taskId, ' (scope ', self defaultScope, ') — watch: pp read doctrine ', self defaultScope) println
