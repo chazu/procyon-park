@@ -1,0 +1,233 @@
+"DoctrineCLI — manage doctrine: the swarm's plan-time 'Orient' layer.
+
+ Doctrine is advisory, contextual (applicability scope + tags), and matured
+ proposed -> active -> retired/rejected. It is distinct from execution-time
+ conventions (binding) and CUE templates (procedural).
+
+ Built entirely on the generic BBS endpoints — no doctrine-specific server
+ routes:
+   reads  : POST /api/scan, /api/rdp  (unsigned, non-consuming)
+   writes : POST /api/bbs/put          (ed25519-signed via CLIBase)
+
+ Doctrine is LINEAR + DURABLE (Categories>>isDurableCategory:), never pinned —
+ writes pass modality:'linear' so entries stay visible to rdp:. Each proposal
+ gets a fresh unique identity (dctr-<hex>); the human-readable name lives in
+ payload.key. See docs/design-doctrine-layer.md."
+
+DoctrineCLI subclass: Object
+  instanceVars: baseUrl scope
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: initialize [
+    baseUrl := System env: 'PP_URL'.
+    (baseUrl isNil or: [baseUrl isEmpty]) ifTrue: [baseUrl := 'http://localhost:7777'].
+    scope := System env: 'PP_SCOPE'.
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := nil]
+  ]
+
+  method: defaultScope [
+    ^scope isNil ifTrue: ['default'] ifFalse: [scope]
+  ]
+
+  method: runWith: args [
+    "Dispatch pp doctrine subcommands."
+    | sub |
+    args size < 2 ifTrue: [^self printUsage].
+    sub := args at: 2.
+    sub = 'list'    ifTrue: [^self cmdList: args].
+    sub = 'show'    ifTrue: [^self cmdShow: args].
+    sub = 'propose' ifTrue: [^self cmdPropose: args].
+    sub = 'promote' ifTrue: [^self cmdSetMaturity: args to: 'active'].
+    sub = 'retire'  ifTrue: [^self cmdSetMaturity: args to: 'retired'].
+    sub = 'reject'  ifTrue: [^self cmdSetMaturity: args to: 'rejected'].
+    (sub = 'help' or: [sub = '--help']) ifTrue: [^self printUsage].
+    ('Unknown doctrine command: ', sub) println.
+    self printUsage
+  ]
+
+  method: joinArray: arr with: sep [
+    "Join an Array of strings with a separator (no Array>>joinWith: in the VM)."
+    | s first |
+    s := ''.
+    first := true.
+    arr do: [:x |
+      first ifTrue: [s := x. first := false] ifFalse: [s := s, sep, x]
+    ].
+    ^s
+  ]
+
+  method: flagValue: flag in: args [
+    "Return the value following <flag> in args, or nil."
+    | i |
+    i := 1.
+    [i < args size] whileTrue: [
+      (args at: i) = flag ifTrue: [^args at: i + 1].
+      i := i + 1
+    ].
+    ^nil
+  ]
+
+  method: applyScopeFlagFrom: args [
+    "Resolve the BBS storage scope from --repo/--scope, mutating `scope`."
+    | r |
+    r := self flagValue: '--repo' in: args.
+    r isNil ifTrue: [r := self flagValue: '--scope' in: args].
+    r notNil ifTrue: [scope := r]
+  ]
+
+  "--- reads (unsigned) -------------------------------------------------"
+
+  method: scanDoctrine [
+    "Return an Array of doctrine tuples in the resolved scope (best-effort)."
+    | sc response result |
+    sc := self defaultScope.
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"doctrine","scope":"', sc, '"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^Array new: 0].
+      result := Json decode: response.
+      ^result at: 'tuples' ifAbsent: [Array new: 0]
+    ] on: Exception do: [:e | ^Array new: 0]
+  ]
+
+  method: rdpDoctrine: id [
+    "Return one doctrine tuple by identity, or nil."
+    | response result |
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/rdp -H "Content-Type: application/json" -d ''{"category":"doctrine","scope":"', self defaultScope, '","identity":"', id, '"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^nil].
+      result := Json decode: response.
+      ^result at: 'tuple' ifAbsent: [nil]
+    ] on: Exception do: [:e | ^nil]
+  ]
+
+  method: cmdList: args [
+    "pp doctrine list [--scope S] [--tag T] [--maturity M]"
+    | tagFilter matFilter tuples shown |
+    self applyScopeFlagFrom: args.
+    tagFilter := self flagValue: '--tag' in: args.
+    matFilter := self flagValue: '--maturity' in: args.
+    tuples := self scanDoctrine.
+    shown := 0.
+    tuples do: [:t |
+      | p mat tags ok |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      mat := p at: 'maturity' ifAbsent: ['?'].
+      tags := p at: 'tags' ifAbsent: [Array new: 0].
+      ok := true.
+      (matFilter notNil and: [(mat = matFilter) not]) ifTrue: [ok := false].
+      (tagFilter notNil and: [(tags includes: tagFilter) not]) ifTrue: [ok := false].
+      ok ifTrue: [
+        ((t at: 'identity'), '  [', mat, ']  (', (p at: 'doctrine_scope' ifAbsent: ['global']), ')  ', (p at: 'principle' ifAbsent: [''])) println.
+        shown := shown + 1
+      ]
+    ].
+    shown = 0 ifTrue: ['(no doctrine matches)' println]
+  ]
+
+  method: cmdShow: args [
+    "pp doctrine show <id> [--scope S]"
+    | id tuple p |
+    args size < 3 ifTrue: ['Usage: pp doctrine show <id> [--scope S]' println. ^self].
+    id := args at: 3.
+    self applyScopeFlagFrom: args.
+    tuple := self rdpDoctrine: id.
+    tuple isNil ifTrue: ['Not found.' println. ^self].
+    p := tuple at: 'payload'.
+    ('id:         ', (tuple at: 'identity')) println.
+    ('key:        ', (p at: 'key' ifAbsent: [''])) println.
+    ('maturity:   ', (p at: 'maturity' ifAbsent: ['?'])) println.
+    ('scope:      ', (p at: 'doctrine_scope' ifAbsent: ['global'])) println.
+    ('tags:       ', (self joinArray: (p at: 'tags' ifAbsent: [Array new: 0]) with: ',')) println.
+    ('confidence: ', (p at: 'confidence' ifAbsent: ['']) printString) println.
+    ('principle:  ', (p at: 'principle' ifAbsent: [''])) println.
+    ('rationale:  ', (p at: 'rationale' ifAbsent: [''])) println.
+    ('provenance: ', (p at: 'provenance' ifAbsent: [Array new: 0]) printString) println
+  ]
+
+  "--- writes (signed) --------------------------------------------------"
+
+  method: putDoctrine: id payload: payload [
+    "Signed upsert of a doctrine tuple as linear (durable, rdp-visible)."
+    | body |
+    body := Dictionary new.
+    body at: 'category' put: 'doctrine'.
+    body at: 'scope' put: self defaultScope.
+    body at: 'identity' put: id.
+    body at: 'modality' put: 'linear'.
+    body at: 'payload' put: payload.
+    ^CLIBase signedPost: '/api/bbs/put' body: body baseUrl: baseUrl
+  ]
+
+  method: cmdPropose: args [
+    "pp doctrine propose <principle> [--rationale R] [--applies global|repo:X|path:X]
+                                     [--tags t1,t2] [--confidence C] [--key K] [--repo R]"
+    | principle rationale applies tagsArg conf key tags id payload |
+    args size < 3 ifTrue: [
+      'Usage: pp doctrine propose "<principle>" [--rationale R] [--applies global|repo|repo:path] [--tags t1,t2] [--confidence 0.7] [--key name]' println.
+      ^self
+    ].
+    principle := args at: 3.
+    rationale := self flagValue: '--rationale' in: args.
+    rationale isNil ifTrue: [rationale := ''].
+    applies := self flagValue: '--applies' in: args.
+    applies isNil ifTrue: [applies := 'global'].
+    tagsArg := self flagValue: '--tags' in: args.
+    conf := self flagValue: '--confidence' in: args.
+    key := self flagValue: '--key' in: args.
+    key isNil ifTrue: [key := ''].
+    self applyScopeFlagFrom: args.
+
+    tags := Array new: 0.
+    tagsArg notNil ifTrue: [tags := tagsArg split: ','].
+
+    id := 'dctr-', ((ClaimId generate) at: 'hex').
+    payload := Dictionary new.
+    payload at: 'key' put: key.
+    payload at: 'principle' put: principle.
+    payload at: 'rationale' put: rationale.
+    payload at: 'doctrine_scope' put: applies.
+    payload at: 'tags' put: tags.
+    payload at: 'maturity' put: 'proposed'.
+    payload at: 'provenance' put: (Array new: 0).
+    conf notNil ifTrue: [payload at: 'confidence' put: conf].
+    payload at: 'created_at' put: DateTime now epochSeconds.
+
+    self putDoctrine: id payload: payload.
+    ('proposed doctrine ', id, ' (', applies, ')') println
+  ]
+
+  method: cmdSetMaturity: args to: newMaturity [
+    "pp doctrine promote|retire|reject <id> [--repo R] — read-modify-write maturity.
+     Promote one + retire/reject duplicates is the human-merge discipline (the
+     synthesis loop only ever writes fresh `proposed` entries)."
+    | id tuple p now |
+    args size < 3 ifTrue: [('Usage: pp doctrine ', newMaturity, ' <id>') println. ^self].
+    id := args at: 3.
+    self applyScopeFlagFrom: args.
+    tuple := self rdpDoctrine: id.
+    tuple isNil ifTrue: [('Not found: ', id) println. ^self].
+    p := tuple at: 'payload'.
+    now := DateTime now epochSeconds.
+    p at: 'maturity' put: newMaturity.
+    p at: 'updated_at' put: now.
+    newMaturity = 'active' ifTrue: [p at: 'promoted_at' put: now].
+    self putDoctrine: id payload: p.
+    (id, ' -> ', newMaturity) println
+  ]
+
+  method: printUsage [
+    'pp doctrine — manage doctrine (the plan-time Orient layer)' println.
+    '' println.
+    'Commands:' println.
+    '  list [--scope S] [--tag T] [--maturity M]    List doctrine entries' println.
+    '  show <id> [--scope S]                         Show one entry' println.
+    '  propose "<principle>" [--rationale R] [--applies global|repo|repo:path]' println.
+    '                        [--tags t1,t2] [--confidence C] [--key name]' println.
+    '  promote <id>                                  maturity -> active' println.
+    '  retire  <id>                                  maturity -> retired' println.
+    '  reject  <id>                                  maturity -> rejected' println.
+    ^self
+  ]

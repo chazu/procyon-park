@@ -16,6 +16,12 @@ Semantic Versioning.
   collector reclaims mid-load instead of growing unbounded toward an OOM kill.
 
 ### Added
+- `pp doctrine` CLI — manage the doctrine layer: `list [--scope][--tag][--maturity]`,
+  `show <id>`, `propose "<principle>" [--rationale][--applies][--tags][--confidence][--key]`,
+  and `promote`/`retire`/`reject <id>` for maturity transitions. Built on the
+  generic BBS endpoints (signed `/api/bbs/put`; unsigned `/api/scan`/`/api/rdp`) —
+  no doctrine-specific routes. Each proposal gets a fresh unique id (`dctr-<hex>`)
+  written linear+durable; the human name lives in `payload.key`.
 - `doctrine` tuple category — the foundation for the plan-time doctrine layer
   (the swarm's synthesized "Orient", distilled from `case`/AAR tuples). It is
   linear + durable (mirrors `case`): registered in `Categories>>valid` and
