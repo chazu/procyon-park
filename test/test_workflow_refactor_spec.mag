@@ -879,5 +879,3 @@ SpecWorkflowRefactorMain subclass: Object
 
     t report
   ]
-
-SpecWorkflowRefactorMain run

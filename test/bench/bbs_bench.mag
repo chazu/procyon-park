@@ -91,5 +91,3 @@ BbsBench subclass: Object
     contents isNil ifTrue: [^0].
     ^contents size
   ]
-
-BbsBench run

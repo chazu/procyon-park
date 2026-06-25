@@ -141,5 +141,3 @@ ArchivistRoleMain subclass: Object
     t report.
     ^t failed
   ]
-
-ArchivistRoleMain run

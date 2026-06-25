@@ -799,7 +799,7 @@ WorkflowEngine subclass: Object
    The archivist writes its structured enrichment as an OBSERVATION tuple.
    Rationale: the Archivist role (src/roles/Archivist.mag) is read-only /
    write-only-to-the-knowledge-base and already emits via
-   `pp observe case-enrichment \"<...>\"` — 'observation' is in its
+   `pp observe case-enrichment '<...>'` — 'observation' is in its
    hardCategories, 'decision' is not its channel. So we consume an
    observation, NOT a decision.
 

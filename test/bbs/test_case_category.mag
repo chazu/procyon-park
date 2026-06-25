@@ -88,5 +88,3 @@ CaseCategoryMain subclass: Object
     t report.
     ^t failed
   ]
-
-CaseCategoryMain run
