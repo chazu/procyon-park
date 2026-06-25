@@ -16,6 +16,12 @@ Semantic Versioning.
   collector reclaims mid-load instead of growing unbounded toward an OOM kill.
 
 ### Added
+- Doctrine synthesis loop: a `Strategist` role (read-only / write-to-KB, like
+  the Archivist) reads the swarm's `case` (AAR) tuples, clusters recurring
+  generalizable lessons, dedupes against existing doctrine, and proposes new
+  `proposed` doctrine via `pp doctrine propose`. `pp doctrine synthesize [--repo R]`
+  enqueues a Strategist task (no worktree/merge — it writes doctrine tuples
+  straight to the tuplespace). Humans promote proposals to `active`.
 - `pp doctrine` CLI — manage the doctrine layer: `list [--scope][--tag][--maturity]`,
   `show <id>`, `propose "<principle>" [--rationale][--applies][--tags][--confidence][--key]`,
   and `promote`/`retire`/`reject <id>` for maturity transitions. Built on the

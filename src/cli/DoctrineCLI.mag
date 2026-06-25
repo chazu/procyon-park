@@ -40,6 +40,7 @@ DoctrineCLI subclass: Object
     sub = 'list'    ifTrue: [^self cmdList: args].
     sub = 'show'    ifTrue: [^self cmdShow: args].
     sub = 'propose' ifTrue: [^self cmdPropose: args].
+    sub = 'synthesize' ifTrue: [^self cmdSynthesize: args].
     sub = 'promote' ifTrue: [^self cmdSetMaturity: args to: 'active'].
     sub = 'retire'  ifTrue: [^self cmdSetMaturity: args to: 'retired'].
     sub = 'reject'  ifTrue: [^self cmdSetMaturity: args to: 'rejected'].
@@ -199,6 +200,26 @@ DoctrineCLI subclass: Object
     ('proposed doctrine ', id, ' (', applies, ')') println
   ]
 
+  method: cmdSynthesize: args [
+    "pp doctrine synthesize [--repo R] — enqueue a Strategist task that reads
+     recent case (AAR) tuples and PROPOSES doctrine (via pp doctrine propose).
+     The Strategist is read-only/write-to-KB: no worktree, no merge — it writes
+     proposed doctrine straight to the tuplespace."
+    | repo taskId body |
+    self applyScopeFlagFrom: args.
+    repo := self flagValue: '--repo' in: args.
+    repo isNil ifTrue: [repo := 'procyon-park'].
+    taskId := 'strategist-', ((ClaimId generate) at: 'hex').
+    body := Dictionary new.
+    body at: 'scope' put: self defaultScope.
+    body at: 'identity' put: taskId.
+    body at: 'role' put: 'strategist'.
+    body at: 'description' put: ('Synthesize doctrine from recent case (AAR) tuples in scope ', self defaultScope, '. Read payload.lessons and payload.aar across MANY cases (pp read case ', self defaultScope, '), dedupe against existing doctrine (pp doctrine list), cluster recurring/generalizable lessons into distinct principles, and propose each via: pp doctrine propose "<principle>" --rationale "<why>" --applies <global|repo> --tags <t1,t2> --confidence <0..1> --key <slug>. Propose PROPOSED doctrine only; do not promote.').
+    body at: 'repo' put: repo.
+    CLIBase signedPost: '/api/task/create' body: body baseUrl: baseUrl.
+    ('Strategist task enqueued: ', taskId, ' (scope ', self defaultScope, ') — watch: pp read doctrine ', self defaultScope) println
+  ]
+
   method: cmdSetMaturity: args to: newMaturity [
     "pp doctrine promote|retire|reject <id> [--repo R] — read-modify-write maturity.
      Promote one + retire/reject duplicates is the human-merge discipline (the
@@ -226,6 +247,7 @@ DoctrineCLI subclass: Object
     '  show <id> [--scope S]                         Show one entry' println.
     '  propose "<principle>" [--rationale R] [--applies global|repo|repo:path]' println.
     '                        [--tags t1,t2] [--confidence C] [--key name]' println.
+    '  synthesize [--repo R]                        Enqueue a Strategist to propose doctrine from cases' println.
     '  promote <id>                                  maturity -> active' println.
     '  retire  <id>                                  maturity -> retired' println.
     '  reject  <id>                                  maturity -> rejected' println.
