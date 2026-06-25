@@ -71,6 +71,14 @@ Semantic Versioning.
   backend already indexes by category.)
 
 ### Fixed
+- Stuck-dispatched task reaper no longer false-positive reaps live
+  long-running tasks. A local harness fork keeps its task in
+  `status='dispatched'`/`worker_id=nil` for its entire run (worker_id is
+  multiplayer-only), so the 300s `stuckDispatchedThresholdSeconds` reaped
+  any task running longer than 5 minutes out from under a working harness
+  (e.g. an ~8-min implementer was reaped at retry 1, breaking the
+  workflow). Threshold raised to 2400s (above the 1800s max harness
+  timeout + grace); genuinely-dead forks are still reaped, just later.
 - Board work-item detail modal now actually opens on card click. The
   click-to-open listener was bound to `#dashboard-workitems`, which the SSE
   patch handler replaces wholesale via `outerHTML` on every tick — detaching

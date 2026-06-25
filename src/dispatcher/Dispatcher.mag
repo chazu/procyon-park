@@ -279,14 +279,26 @@ Dispatcher subclass: Object
   "--- Stuck-Dispatched Reaper ---"
 
   method: stuckDispatchedThresholdSeconds [
-    "Tasks that sit in status='dispatched' with no worker for longer than
-     this are considered orphaned. The local Scheduler forks a harness
-     synchronously and marks the task 'completed' on success; in
-     multiplayer mode a remote worker takes the task to 'claimed' via
-     /api/tasks/claim. Either way, a healthy task should leave the
-     'dispatched' state within a few seconds. 300s is a generous floor
-     to avoid racing slow harness starts."
-    ^300
+    "Tasks that sit in status='dispatched' with no worker_id for longer than
+     this are considered orphaned (a fork that died without the wrap-up
+     handler firing).
+
+     CRITICAL: a LOCAL harness fork does NOT advance the task past
+     'dispatched' while it runs and never sets worker_id (that is
+     multiplayer-only, via /api/tasks/claim). The task stays
+     'dispatched'/worker_id=nil for the *entire* harness run — up to the
+     harness timeout (base 1800s for an implementer). So this threshold
+     MUST exceed the longest a healthy fork can run, or live long-running
+     tasks get false-positive reaped out from under a working harness
+     (observed: an ~8-min implementer reaped at the old 300s floor).
+
+     2400s = 1800s (max harness timeout) + 600s grace. If any role's
+     defaultTimeout / transition timeout is raised above 1800s, raise this
+     too. Genuinely-dead forks are still reaped (just after ~40min), well
+     under dispatchOrphanStaleSeconds (4h). A proper fix would be
+     liveness-aware reaping (heartbeat or pid/slot check) instead of a
+     time threshold."
+    ^2400
   ]
 
   method: dispatchOrphanStaleSeconds [
