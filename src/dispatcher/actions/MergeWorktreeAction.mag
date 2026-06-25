@@ -4,10 +4,16 @@ MergeWorktreeAction subclass: WorkflowAction
 
   method: execute: transition instance: instanceId params: params [
     "Merge the impl branch back into the feature branch, clean up the worktree.
-     For standalone workflows (story / story-lite / hotfix / etc.) also fast-
-     forward the feature branch into main so the work actually lands.
-     Wave-child workflows stop at the shared feature branch — their parent
-     pipeline owns the feature-branch -> main merge."
+     For standalone workflows (story / story-lite / hotfix / etc.) also merge
+     the feature branch into main so the work actually lands. Wave-child
+     workflows stop at the shared feature branch — their parent pipeline owns
+     the feature-branch -> main merge.
+
+     The impl -> feature merge runs in an ephemeral worktree and never switches
+     or dirties the dispatcher's primary working tree (GitOps mergeBranch:into:).
+     The feature -> main merge is the one step that must touch the primary tree
+     (main is checked out there); it is GUARDED: if that tree has uncommitted
+     changes the merge is refused rather than clobbering them."
     | info payload repoPath featureBranch implBranch worktreeDir scope obsPayload standalone |
 
     "Find scope from the workflow tuple"
@@ -33,6 +39,15 @@ MergeWorktreeAction subclass: WorkflowAction
     "Pipeline-level merge: no impl branch, merge shared feature branch directly to main"
     implBranch isEmpty ifTrue: [
       bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Pipeline merge — merging ', featureBranch, ' into main in ', repoPath).
+      "Guard: refuse to advance main with a dirty primary tree (would clobber)."
+      (GitOps isCleanTree: repoPath) ifFalse: [
+        bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Primary tree dirty in ', repoPath, ' — refusing feature->main merge').
+        obsPayload := Dictionary new.
+        obsPayload at: 'detail' put: ('Refused pipeline merge: primary working tree ', repoPath, ' has uncommitted changes — resolve before landing ', featureBranch).
+        bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
+        engine failWorkflow: instanceId reason: 'Pipeline merge blocked: primary tree dirty — human intervention required'.
+        ^self
+      ].
       [
         GitOps checkoutBranch: 'main' in: repoPath
       ] on: Exception do: [:e |
@@ -41,7 +56,7 @@ MergeWorktreeAction subclass: WorkflowAction
         ^self
       ].
       [
-        GitOps mergeBranch: featureBranch in: repoPath
+        GitOps fastForwardOrMerge: featureBranch in: repoPath
       ] on: Exception do: [:e |
         bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Pipeline merge failed: ', e messageText).
         obsPayload := Dictionary new.
@@ -68,21 +83,11 @@ MergeWorktreeAction subclass: WorkflowAction
 
     bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Merging ', implBranch, ' into ', featureBranch, ' in ', repoPath).
 
-    "2. Checkout the feature branch"
+    "2. Merge impl into feature in an ephemeral worktree. This never switches or
+     dirties the primary tree — the old code did `git checkout featureBranch`
+     here, which raced with and clobbered the dispatcher's live checkout."
     [
-      GitOps checkoutBranch: featureBranch in: repoPath
-    ] on: Exception do: [:e |
-      bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Checkout failed: ', e messageText).
-      obsPayload := Dictionary new.
-      obsPayload at: 'detail' put: ('Checkout failed: ', e messageText).
-      bbs out: 'observation' scope: scope identity: 'merge-checkout-failed' payload: obsPayload.
-      engine failWorkflow: instanceId reason: 'Merge failed: could not checkout ', featureBranch, ' — ', e messageText.
-      ^self
-    ].
-
-    "3. Merge the impl branch"
-    [
-      GitOps mergeBranch: implBranch in: repoPath
+      GitOps mergeBranch: implBranch into: featureBranch in: repoPath
     ] on: Exception do: [:e |
       bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Merge failed: ', e messageText).
       obsPayload := Dictionary new.
@@ -92,16 +97,25 @@ MergeWorktreeAction subclass: WorkflowAction
       ^self
     ].
 
-    "4. Clean up the worktree and impl branch"
+    "3. Clean up the worktree and impl branch"
     GitOps removeWorktree: worktreeDir in: repoPath.
     GitOps deleteBranch: implBranch in: repoPath.
 
-    "5. Standalone workflow: also fast-forward feature branch into main so
-     the work actually lands. Without this step the feature branch is just
-     abandoned and 'merge-complete' is a lie (issue: agents report merged
-     but origin/main never moves)."
+    "4. Standalone workflow: also merge feature branch into main so the work
+     actually lands. Without this the feature branch is just abandoned and
+     'merge-complete' is a lie (agents report merged but origin/main never
+     moves)."
     standalone = 'true' ifTrue: [
       bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Standalone workflow — merging ', featureBranch, ' into main in ', repoPath).
+      "Guard: refuse to advance main with a dirty primary tree (would clobber)."
+      (GitOps isCleanTree: repoPath) ifFalse: [
+        bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Primary tree dirty in ', repoPath, ' — refusing feature->main merge').
+        obsPayload := Dictionary new.
+        obsPayload at: 'detail' put: ('Refused feature->main merge: primary working tree ', repoPath, ' has uncommitted changes — resolve before landing ', featureBranch).
+        bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
+        engine failWorkflow: instanceId reason: 'Feature->main blocked: primary tree dirty — human intervention required'.
+        ^self
+      ].
       [
         GitOps checkoutBranch: 'main' in: repoPath
       ] on: Exception do: [:e |
@@ -113,7 +127,7 @@ MergeWorktreeAction subclass: WorkflowAction
         ^self
       ].
       [
-        GitOps mergeBranch: featureBranch in: repoPath
+        GitOps fastForwardOrMerge: featureBranch in: repoPath
       ] on: Exception do: [:e |
         bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Feature->main merge failed: ', e messageText).
         obsPayload := Dictionary new.
@@ -141,15 +155,17 @@ MergeWorktreeAction subclass: WorkflowAction
       ^self
     ].
 
-    "5b. Wave-child workflow: stop at feature branch. Parent pipeline owns
-     the feature->main merge. Checkout main so repo isn't left on feature."
+    "4b. Wave-child workflow: stop at feature branch. Parent pipeline owns the
+     feature->main merge. The impl->feature merge above never touched the
+     primary tree, so this is just a defensive best-effort to keep the tree on
+     main; it is a no-op in the normal (already-on-main) case."
     [GitOps checkoutBranch: 'main' in: repoPath]
       on: Exception do: [:e |
         bbs logEngine: 'warn' component: 'merge-worktree' scope: scope message: ('Checkout main warning: ', e messageText)
       ].
 
-    "6. Write observation recording the merge. merged_to_main=false makes
-     clear to downstream consumers that this did NOT reach main — the parent
+    "5. Write observation recording the merge. merged_to_main=false makes clear
+     to downstream consumers that this did NOT reach main — the parent
      pipeline's merge-worktree will do that."
     obsPayload := Dictionary new.
     obsPayload at: 'detail' put: ('Merged ', implBranch, ' into ', featureBranch, ' (wave-child; parent pipeline will merge to main)').

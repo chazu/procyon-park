@@ -19,8 +19,10 @@ GitOps subclass: Object
   classMethod: defaultTimeoutPush [ ^60 ]
 
   classMethod: createFeatureBranch: branchName in: repoPath [
-    "git checkout -b <branchName> in repoPath. Signals Error on failure."
-    Shell runChecked: 'git -C "', repoPath, '" checkout -b "', branchName, '"'
+    "Create <branchName> at the current HEAD WITHOUT checking it out, so the
+     dispatcher's primary working tree is never switched out from under the
+     server or any concurrent reader. Signals Error on failure."
+    Shell runChecked: 'git -C "', repoPath, '" branch "', branchName, '"'
       timeout: self defaultTimeoutWrite
   ]
 
@@ -111,4 +113,109 @@ GitOps subclass: Object
     (output isNil or: [output isEmpty]) ifTrue: [^0].
     trimmed := output trimSeparators.
     ^[trimmed asInteger] on: Exception do: [:e | 0]
+  ]
+
+  "--- Tree-safe merging ----------------------------------------------------
+   The dispatcher's repoPath is a long-lived checkout (the server runs there).
+   Switching its branch via `git checkout` to perform a merge races with and
+   clobbers anything else using that tree. These helpers merge WITHOUT ever
+   touching the primary working tree. ---"
+
+  classMethod: sanitizeRef: ref [
+    "Turn a branch name into a safe single path segment (slashes -> dashes)."
+    ^ref replaceAll: '/' with: '-'
+  ]
+
+  classMethod: pruneEphemeralWorktree: tmpDir in: repoPath [
+    "Best-effort teardown of an ephemeral merge worktree. Never signals — used
+     both to clean up after a merge and to clear a stale dir left by a crash.
+     Deliberately avoids `git worktree remove`: on an already-missing path it
+     hangs under the timeout watchdog. `rm -rf` of the checkout dir followed by
+     `git worktree prune` (which deregisters worktrees whose dir is gone) is
+     idempotent and never hangs on a missing target. Uses runChecked:timeout:
+     (blocking, reliable) wrapped in exception handlers."
+    [Shell runChecked: 'rm -rf "', tmpDir, '"' timeout: self defaultTimeoutFast]
+      on: Exception do: [:e | nil].
+    [Shell runChecked: 'git -C "', repoPath, '" worktree prune' timeout: self defaultTimeoutFast]
+      on: Exception do: [:e | nil]
+  ]
+
+  classMethod: mergeBranch: sourceBranch into: targetBranch in: repoPath [
+    "Merge sourceBranch into targetBranch WITHOUT switching or dirtying the
+     primary working tree. The merge runs in an ephemeral detached worktree
+     under .git/; on success the targetBranch ref is moved with update-ref
+     (safe because targetBranch is never checked out — feature branches live
+     only as refs while impl work happens in the impl worktree). Handles
+     non-fast-forward merges (real merge commit). On conflict the ephemeral
+     worktree is aborted and removed and the targetBranch ref is left
+     untouched. Signals Error on any failure."
+    | tmpDir mergedSha |
+    tmpDir := repoPath, '/.git/pp-merge-', (self sanitizeRef: targetBranch).
+
+    "Clear any stale ephemeral worktree from a previous crashed merge."
+    self pruneEphemeralWorktree: tmpDir in: repoPath.
+
+    "1. Ephemeral detached worktree at the target branch tip."
+    Shell runChecked: 'git -C "', repoPath, '" worktree add --detach "', tmpDir, '" "', targetBranch, '"'
+      timeout: self defaultTimeoutWrite.
+
+    "2. Merge the source branch inside the ephemeral worktree."
+    [
+      Shell runChecked: 'git -C "', tmpDir, '" merge "', sourceBranch, '" --no-edit'
+        timeout: self defaultTimeoutWrite
+    ] on: Exception do: [:e |
+      "Abort and tear down so the repo is left exactly as before, then re-signal."
+      [Shell runChecked: 'git -C "', tmpDir, '" merge --abort' timeout: self defaultTimeoutFast]
+        on: Exception do: [:ignored | nil].
+      self pruneEphemeralWorktree: tmpDir in: repoPath.
+      Error signal: 'merge ', sourceBranch, ' into ', targetBranch, ' conflicted: ', e messageText
+    ].
+
+    "3. Move the target ref to the merged commit (target is not checked out,
+     so update-ref does not disturb any working tree). Use plain capture:
+     here — rev-parse is instant and needs no watchdog, and capture:timeout:
+     soft-fails to '' (it backgrounds the command, detaching stdout from the
+     capture). An empty sha would make update-ref hang, so guard explicitly."
+    mergedSha := (Shell capture: 'git -C "', tmpDir, '" rev-parse HEAD') trimSeparators.
+    mergedSha isEmpty ifTrue: [
+      self pruneEphemeralWorktree: tmpDir in: repoPath.
+      Error signal: 'merge ', sourceBranch, ' into ', targetBranch, ': could not resolve merged commit'
+    ].
+    Shell runChecked: 'git -C "', repoPath, '" update-ref "refs/heads/', targetBranch, '" "', mergedSha, '"'
+      timeout: self defaultTimeoutWrite.
+
+    "4. Tear down the ephemeral worktree."
+    self pruneEphemeralWorktree: tmpDir in: repoPath
+  ]
+
+  classMethod: isCleanTree: repoPath [
+    "Returns true if the primary working tree has no staged, unstaged, or
+     untracked changes — i.e. a checkout/merge into it cannot clobber work.
+     Uses plain capture: — capture:timeout: soft-fails to '' which would
+     misreport a dirty tree as clean and defeat the guard."
+    | output |
+    output := Shell capture: 'git -C "', repoPath, '" status --porcelain'.
+    output isNil ifTrue: [^false].
+    ^output trimSeparators isEmpty
+  ]
+
+  classMethod: fastForwardOrMerge: sourceBranch in: repoPath [
+    "Advance the currently checked-out branch to include sourceBranch. Tries a
+     fast-forward first (the common case: feature = main + work) and falls back
+     to a real merge commit. On conflict the merge is aborted (restoring the
+     working tree) and an Error is signalled. Signals Error on failure."
+    | ffFailed |
+    ffFailed := false.
+    [Shell runChecked: 'git -C "', repoPath, '" merge --ff-only "', sourceBranch, '"'
+       timeout: self defaultTimeoutWrite]
+      on: Exception do: [:e | ffFailed := true].
+    ffFailed ifTrue: [
+      [Shell runChecked: 'git -C "', repoPath, '" merge "', sourceBranch, '" --no-edit'
+         timeout: self defaultTimeoutWrite]
+        on: Exception do: [:e |
+          [Shell runChecked: 'git -C "', repoPath, '" merge --abort' timeout: self defaultTimeoutFast]
+            on: Exception do: [:ignored | nil].
+          Error signal: 'merge ', sourceBranch, ' into current branch conflicted: ', e messageText
+        ]
+    ]
   ]

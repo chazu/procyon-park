@@ -363,12 +363,13 @@ MultiplayerTestMain subclass: Object
 CombinedTestMain subclass: Object
 
   classMethod: run [
-    | wfFailed mpFailed ccFailed arFailed dcFailed |
+    | wfFailed mpFailed ccFailed arFailed dcFailed gmFailed |
     wfFailed := 0.
     mpFailed := 0.
     ccFailed := 0.
     arFailed := 0.
     dcFailed := 0.
+    gmFailed := 0.
 
     '============================================================' println.
     '=== Running TestWorkflowRefactorMain ===' println.
@@ -403,6 +404,12 @@ CombinedTestMain subclass: Object
         dcFailed := 1].
     dcFailed isNil ifTrue: [dcFailed := 0].
 
+    [gmFailed := GitOpsMergeMain run]
+      on: Exception do: [:e |
+        ('GitOpsMergeMain CRASHED: ', e messageText) println.
+        gmFailed := 1].
+    gmFailed isNil ifTrue: [gmFailed := 0].
+
     '' println.
     '============================================================' println.
     '=== Combined Test Summary ===' println.
@@ -413,7 +420,8 @@ CombinedTestMain subclass: Object
     ('Case-category failures:     ', ccFailed printString) println.
     ('Archivist-role failures:    ', arFailed printString) println.
     ('Doctrine-category failures: ', dcFailed printString) println.
-    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed) = 0
+    ('GitOps-merge failures:      ', gmFailed printString) println.
+    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed + gmFailed) = 0
       ifTrue:  ['COMBINED: ALL TESTS PASSED' println]
       ifFalse: ['COMBINED: SOME TESTS FAILED' println]
   ]

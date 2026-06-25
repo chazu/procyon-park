@@ -7,6 +7,15 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+- Story-workflow auto-merge no longer clobbers the dispatcher's working tree.
+  The impl→feature merge now runs in an ephemeral git worktree (never switching
+  or dirtying the primary checkout), and handles non-fast-forward merges. The
+  feature→main merge is guarded — refused if the working tree has uncommitted
+  changes rather than overwriting them. Previously every merge ran
+  `git checkout` in the live checkout, which raced with the server and aborted
+  on any dirty tree.
+
 ### Changed
 - The dashboard SSE route and per-tick broadcast are always registered again.
   The `PP_NO_SSE` kill-switch (an operational mitigation for the per-tick

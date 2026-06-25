@@ -1,0 +1,157 @@
+"Tests for GitOps tree-safe merging (GitOps mergeBranch:into:in: and the
+ isCleanTree: guard). These cover the core of the auto-merge fix: the impl ->
+ feature merge must NEVER switch or dirty the dispatcher's primary working tree
+ (the old checkout-based merge raced with and clobbered the live checkout).
+
+ Invariants under test:
+   GM1  mergeBranch:into: lands the source branch's commits on the target
+        branch, and leaves the primary tree on its original branch, clean.
+   GM2  A non-fast-forward merge (two impl branches off the same feature)
+        produces a real merge commit and lands both, still never touching the
+        primary tree.
+   GM3  No ephemeral worktree is leaked after a merge.
+   GM4  isCleanTree: reports true for a clean tree and false for a dirty one.
+   GM5  A conflicting merge raises, and leaves the target ref AND the primary
+        tree untouched (no partial clobber, no mid-merge state).
+
+ Standalone runner at bottom (GitOpsMergeMain run)."
+
+GitOpsMergeRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== GitOps Merge Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== Helpers ==="
+GitOpsMergeHelper subclass: Object
+
+  classMethod: branchOf: repoPath [
+    "The branch checked out in the primary tree, trimmed."
+    ^(Shell capture: 'git -C "', repoPath, '" branch --show-current') trimSeparators
+  ]
+
+  classMethod: tipSubjectOf: branch in: repoPath [
+    "The subject of the tip commit of a branch."
+    ^(Shell capture: 'git -C "', repoPath, '" log -1 --format=%s "', branch, '"') trimSeparators
+  ]
+
+  classMethod: ephemeralCountIn: repoPath [
+    "Number of ephemeral (.git/) worktrees still registered."
+    ^(Shell capture: 'git -C "', repoPath, '" worktree list | grep -c "/.git/"') trimSeparators
+  ]
+
+"=== Tests ==="
+TestGitOpsMerge subclass: Object
+
+  classMethod: run: t [
+    | r r2 r3 |
+
+    "--- GM1 + GM3: fast-forward impl -> feature, primary tree untouched ---"
+    r := '/tmp/pp-gitops-test-ff'.
+    Shell run: 'rm -rf "', r, '"; mkdir -p "', r, '" && cd "', r, '" && git init -q && git commit -q --allow-empty -m init && git checkout -q -b feature/s1 && git checkout -q -b impl/s1 && echo a > a.txt && git add a.txt && git commit -q -m "impl a" && git checkout -q main'.
+    [
+      GitOps mergeBranch: 'impl/s1' into: 'feature/s1' in: r.
+      t assertEqual: (GitOpsMergeHelper tipSubjectOf: 'feature/s1' in: r) to: 'impl a'
+        message: 'GM1: feature tip is the impl commit after merge'.
+      t assertEqual: (GitOpsMergeHelper branchOf: r) to: 'main'
+        message: 'GM1: primary tree still on main (never switched)'.
+      t assert: (GitOps isCleanTree: r)
+        message: 'GM1: primary tree clean after merge'.
+      t assertEqual: (GitOpsMergeHelper ephemeralCountIn: r) to: '0'
+        message: 'GM3: no ephemeral worktree leaked'
+    ] on: Exception do: [:e |
+      t assert: false message: 'GM1/GM3: mergeBranch:into: raised unexpectedly — ', e messageText
+    ].
+
+    "--- GM2: non-fast-forward merge (two impls off the same feature) ---"
+    r2 := '/tmp/pp-gitops-test-nonff'.
+    Shell run: 'rm -rf "', r2, '"; mkdir -p "', r2, '" && cd "', r2, '" && git init -q && git commit -q --allow-empty -m init && git checkout -q -b feature/s2 && git checkout -q -b impl-a/s2 && echo a > a.txt && git add a.txt && git commit -q -m "impl a" && git checkout -q -b impl-b/s2 feature/s2 && echo b > b.txt && git add b.txt && git commit -q -m "impl b" && git checkout -q main'.
+    [
+      GitOps mergeBranch: 'impl-a/s2' into: 'feature/s2' in: r2.
+      GitOps mergeBranch: 'impl-b/s2' into: 'feature/s2' in: r2.
+      t assert: ((Shell capture: 'git -C "', r2, '" cat-file -e feature/s2:a.txt 2>&1; echo $?') trimSeparators = '0')
+        message: 'GM2: impl-a file landed on feature after non-ff merge'.
+      t assert: ((Shell capture: 'git -C "', r2, '" cat-file -e feature/s2:b.txt 2>&1; echo $?') trimSeparators = '0')
+        message: 'GM2: impl-b file landed on feature after non-ff merge'.
+      t assertEqual: (GitOpsMergeHelper branchOf: r2) to: 'main'
+        message: 'GM2: primary tree still on main after non-ff merge'.
+      t assertEqual: (GitOpsMergeHelper ephemeralCountIn: r2) to: '0'
+        message: 'GM2: no ephemeral worktree leaked after non-ff merge'
+    ] on: Exception do: [:e |
+      t assert: false message: 'GM2: non-ff mergeBranch:into: raised unexpectedly — ', e messageText
+    ].
+
+    "--- GM4: isCleanTree: clean vs dirty ---"
+    t assert: (GitOps isCleanTree: r)
+      message: 'GM4: isCleanTree true for a clean tree'.
+    Shell run: 'echo dirt > "', r, '/dirty.txt" && git -C "', r, '" add dirty.txt'.
+    t assert: (GitOps isCleanTree: r) not
+      message: 'GM4: isCleanTree false when a file is staged'.
+
+    "--- GM5: conflicting merge raises, target ref + primary tree untouched ---"
+    r3 := '/tmp/pp-gitops-test-conflict'.
+    Shell run: 'rm -rf "', r3, '"; mkdir -p "', r3, '" && cd "', r3, '" && git init -q && echo base > c.txt && git add c.txt && git commit -q -m init && git checkout -q -b feature/s3 && echo featureside > c.txt && git commit -q -am "feature edits c" && git checkout -q -b impl/s3 main && echo implside > c.txt && git commit -q -am "impl edits c" && git checkout -q main'.
+    [
+      GitOps mergeBranch: 'impl/s3' into: 'feature/s3' in: r3.
+      t assert: false message: 'GM5: conflicting merge must raise (it did not)'
+    ] on: Exception do: [:e |
+      t assert: true message: 'GM5: conflicting merge raised as expected'.
+      t assertEqual: (GitOpsMergeHelper tipSubjectOf: 'feature/s3' in: r3) to: 'feature edits c'
+        message: 'GM5: feature ref unchanged after conflict (no partial clobber)'.
+      t assertEqual: (GitOpsMergeHelper branchOf: r3) to: 'main'
+        message: 'GM5: primary tree still on main after conflict'.
+      t assert: (GitOps isCleanTree: r3)
+        message: 'GM5: primary tree clean after conflict (no mid-merge state)'.
+      t assertEqual: (GitOpsMergeHelper ephemeralCountIn: r3) to: '0'
+        message: 'GM5: no ephemeral worktree leaked after conflict'
+    ]
+  ]
+
+"=== Main ==="
+GitOpsMergeMain subclass: Object
+  classMethod: run [
+    | t |
+    t := GitOpsMergeRunner new.
+    [TestGitOpsMerge run: t] on: Exception do: [:e |
+      ('TestGitOpsMerge CRASHED: ', e messageText) println.
+      t assert: false message: 'TestGitOpsMerge crashed'
+    ].
+    t report.
+    ^t failed
+  ]
