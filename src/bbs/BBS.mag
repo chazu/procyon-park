@@ -923,8 +923,15 @@ BBS subclass: Object
     "Categories that should be persisted across restarts. 'identity' is
      pinned-only (registered users / rotated keys) and must survive a
      restart — without it, every admin re-registration of a user is lost
-     the moment the server bounces."
-    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem' 'identity' 'case') includes: category
+     the moment the server bounces.
+
+     'doctrine' is linear + durable (mirrors 'case'): it is the swarm's
+     codified institutional memory (synthesized Orient), so it must survive
+     restart. It is deliberately NOT in Categories>>pinned — entries are
+     written/mutated via out:/update: directly so rdp:-based existence and
+     maturity-flip checks remain valid (the generic pinned put path writes
+     tuples invisible to rdp:). See docs/design-doctrine-layer.md."
+    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem' 'identity' 'case' 'doctrine') includes: category
   ]
 
   method: persistAfterChange [

@@ -6,7 +6,7 @@ Categories subclass: Object
     ^#('fact' 'convention' 'observation' 'decision' 'signal'
        'task' 'template' 'workflow' 'token' 'rule' 'ingestion'
        'event' 'obstacle' 'session' 'artifact' 'link' 'notification'
-       'workitem' 'identity' 'worker' 'watch' 'invite' 'case')
+       'workitem' 'identity' 'worker' 'watch' 'invite' 'case' 'doctrine')
   ]
 
   classMethod: isValid: aString [
@@ -21,7 +21,12 @@ Categories subclass: Object
   ]
 
   classMethod: pinned [
-    "Categories that are always persistent (never consumed by in:)."
+    "Categories that are always persistent (never consumed by in:).
+
+     NOTE: 'doctrine' is intentionally absent — it is linear + durable
+     (see BBS>>isDurableCategory:), written/mutated via out:/update: directly,
+     NOT via the generic pinned put path (whose tuples are invisible to
+     rdp:-based existence checks). See docs/design-doctrine-layer.md."
     ^#('fact' 'convention' 'template' 'rule' 'ingestion' 'artifact' 'link' 'decision' 'identity' 'case')
   ]
 

@@ -1,0 +1,318 @@
+"Tests for the 'doctrine' tuple category (synthesized Orient / plan-time
+ institutional memory). See docs/design-doctrine-layer.md.
+
+ Storage discipline under test: doctrine is LINEAR + DURABLE, mirroring 'case' —
+ it is in Categories>>valid and BBS>>isDurableCategory:, but deliberately NOT in
+ Categories>>pinned (the generic pinned put path writes tuples invisible to
+ rdp:-based existence checks). Entries are written/mutated via out:/update:
+ directly, never the generic pinned path.
+
+ Invariants under test:
+   DC1  Categories>>valid includes 'doctrine' (isValid: 'doctrine' = true).
+   DC2  Categories>>pinned does NOT include 'doctrine' (isPinned: = false).
+        This is the deliberate trap-avoidance, not an omission.
+   DC3  Categories>>validate: 'doctrine' does NOT raise.
+   DC4  BBS>>isDurableCategory: 'doctrine' = true (mirrors 'case').
+   DR1  Full-payload round-trip through the ACTIVE BBS store (out: → rdp: →
+        scanAll:), maturity flip via update:, and durability across a fresh
+        reload from disk. Covers ganso/SQLite by default; covers the JSON
+        in-memory store under PP_STORE=json (asserted in that branch).
+   DR2  Full-payload round-trip through a directly-constructed ganso/SQLite
+        store (GansoStore openAt:) — deterministic SQLite coverage every run.
+   GC1  'doctrine' is EXEMPT from `pp gc`: gcCases: (the retention sweep)
+        targets ONLY 'case'. A doctrine tuple survives a keep:0 sweep that
+        removes every case.
+
+ Standalone runner at bottom (DoctrineCategoryMain run)."
+
+DctrRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Doctrine Category Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+DctrHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: samplePayload [
+    "A full doctrine payload per the design data model — exercises nested
+     arrays (tags) and an array-of-dicts (provenance) through JSON encode/decode."
+    | p tags prov src |
+    p := Dictionary new.
+    p at: 'key'        put: 'prefer-linear-durable-over-pinned'.
+    p at: 'principle'  put: 'Write durable institutional memory via out:/update:, not the pinned put path.'.
+    p at: 'rationale'  put: 'Pinned tuples are invisible to rdp: existence checks (writeCaseSkeleton trap).'.
+    p at: 'scope'      put: 'global'.
+    tags := Array new: 0.
+    tags := tags copyWith: 'lang:maggie'.
+    tags := tags copyWith: 'concern:storage'.
+    tags := tags copyWith: 'role:planner'.
+    p at: 'tags'       put: tags.
+    p at: 'maturity'   put: 'proposed'.
+    src := Dictionary new.
+    src at: 'scope'    put: 'default'.
+    src at: 'identity' put: 'cw-1'.
+    prov := Array new: 0.
+    prov := prov copyWith: src.
+    p at: 'provenance' put: prov.
+    p at: 'confidence' put: 0.
+    p at: 'created_at' put: 1700000000.
+    p at: 'updated_at' put: 1700000000.
+    ^p
+  ]
+
+  classMethod: assertPayload: payload runner: t prefix: pre [
+    "Assert the round-tripped payload preserved every field, including nested."
+    t assertEqual: (payload at: 'key' ifAbsent: [nil]) to: 'prefer-linear-durable-over-pinned'
+      message: pre, ': key preserved'.
+    t assertEqual: (payload at: 'scope' ifAbsent: [nil]) to: 'global'
+      message: pre, ': scope preserved'.
+    t assertEqual: (payload at: 'maturity' ifAbsent: [nil]) to: 'proposed'
+      message: pre, ': maturity preserved'.
+    t assertEqual: ((payload at: 'tags' ifAbsent: [#()]) size) to: 3
+      message: pre, ': tags array preserved (3 entries)'.
+    t assert: ((payload at: 'tags' ifAbsent: [#()]) includes: 'lang:maggie')
+      message: pre, ': tag lang:maggie preserved'.
+    t assertEqual: ((payload at: 'provenance' ifAbsent: [#()]) size) to: 1
+      message: pre, ': provenance array preserved (1 entry)'.
+    ((payload at: 'provenance' ifAbsent: [#()]) size = 1) ifTrue: [
+      | prov0 |
+      prov0 := (payload at: 'provenance') at: 1.
+      t assertEqual: (prov0 at: 'identity' ifAbsent: [nil]) to: 'cw-1'
+        message: pre, ': provenance[0].identity preserved (nested dict)']
+  ]
+
+"--- gc-exemption harness: inject an in-memory BBS into SystemCommands so
+ gcCases: runs end-to-end without a live server (safeScan:/silentInp: are the
+ only HTTP touch points and are overridden here). ---"
+DoctrineGcCommands subclass: SystemCommands
+  instanceVars: tbbs
+
+  method: tbbs: aBbs [ tbbs := aBbs ]
+
+  method: safeScan: category scope: aScope [
+    ^tbbs scanAll: category
+  ]
+
+  method: silentInp: category scope: aScope identity: anIdentity [
+    ^tbbs inp: category scope: aScope identity: anIdentity
+  ]
+
+"=== TestDoctrineCategory ==="
+TestDoctrineCategory subclass: Object
+
+  classMethod: run: t [
+    self testCategoryMembership: t.
+    self testActiveStoreRoundTrip: t.
+    self testGansoStoreRoundTrip: t.
+    self testExemptFromGc: t
+  ]
+
+  classMethod: testCategoryMembership: t [
+    | raised |
+    '--- DC1-DC4: doctrine category membership ---' println.
+
+    "DC1: 'doctrine' is a valid category."
+    t assert: (Categories isValid: 'doctrine')
+      message: 'DC1: Categories isValid: doctrine is true'.
+    t assert: (Categories valid includes: 'doctrine')
+      message: 'DC1: Categories valid includes doctrine'.
+
+    "DC2: 'doctrine' is NOT pinned (deliberate — linear+durable, written via out:/update:)."
+    t assert: (Categories isPinned: 'doctrine') not
+      message: 'DC2: Categories isPinned: doctrine is FALSE'.
+    t assert: (Categories pinned includes: 'doctrine') not
+      message: 'DC2: Categories pinned does NOT include doctrine'.
+
+    "DC3: validate: 'doctrine' does NOT raise."
+    raised := false.
+    [Categories validate: 'doctrine']
+      on: Exception do: [:e | raised := true].
+    t assert: raised not
+      message: 'DC3: Categories validate: doctrine does not raise'.
+
+    "DC4: 'doctrine' is durable (mirrors 'case')."
+    t assert: (BBS new isDurableCategory: 'doctrine')
+      message: 'DC4: BBS isDurableCategory: doctrine is true'.
+    t assert: (BBS new isDurableCategory: 'case')
+      message: 'DC4: BBS isDurableCategory: case is true (mirror sanity)'
+  ]
+
+  classMethod: testActiveStoreRoundTrip: t [
+    "DR1: round-trip the full payload through whichever store the active env
+     selects (ganso by default; JSON under PP_STORE=json), via out:/update:."
+    | tempDir bbs round reloaded backend isJson |
+    '--- DR1: full-payload round-trip through the active BBS store ---' println.
+    tempDir := DctrHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    isJson := (System env: 'PP_STORE') = 'json'.
+    backend := bbs usesGanso ifTrue: ['ganso/SQLite'] ifFalse: ['json/in-memory'].
+    ('    active store backend: ', backend) println.
+
+    "Under PP_STORE=json the active store MUST be the JSON in-memory one;
+     otherwise it MUST be ganso. Locks that both code paths are reachable."
+    isJson
+      ifTrue: [t assert: bbs usesGanso not
+                 message: 'DR1: PP_STORE=json selects the JSON in-memory store']
+      ifFalse: [t assert: bbs usesGanso
+                  message: 'DR1: default selects the ganso/SQLite store'].
+
+    "Write via out: directly (NOT the pinned path) with a fresh unique id."
+    bbs out: 'doctrine' scope: 'global' identity: 'dctr-a1'
+      payload: DctrHelper samplePayload.
+
+    "rdp: must see it (would FAIL if it had been written pinned/persistent)."
+    round := bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-a1'.
+    t assert: round notNil
+      message: 'DR1: rdp: finds the doctrine tuple just written via out:'.
+    round notNil ifTrue: [
+      DctrHelper assertPayload: (round at: 'payload') runner: t prefix: 'DR1/rdp'].
+
+    "scanAll: surfaces exactly one tuple at this key (append-only, fresh id)."
+    t assertEqual: ((bbs scanAll: 'doctrine') select: [:d |
+        (d at: 'identity' ifAbsent: ['']) = 'dctr-a1']) size
+      to: 1
+      message: 'DR1: scanAll: surfaces exactly one dctr-a1 tuple'.
+
+    "Maturity flip via update: (replace-by-key on the durable category)."
+    bbs update: 'doctrine' scope: 'global' identity: 'dctr-a1' do: [:p |
+      p at: 'maturity' put: 'active'.
+      p at: 'promoted_at' put: 1700000100].
+    round := bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-a1'.
+    t assertEqual: ((round at: 'payload') at: 'maturity' ifAbsent: [nil]) to: 'active'
+      message: 'DR1: update: flipped maturity proposed -> active'.
+    t assertEqual: ((bbs scanAll: 'doctrine') select: [:d |
+        (d at: 'identity' ifAbsent: ['']) = 'dctr-a1']) size
+      to: 1
+      message: 'DR1: still exactly one tuple after update: (no duplicate)'.
+
+    "Durability: flush + fresh load from the same data dir (simulated restart)."
+    bbs flushIfDirty.
+    reloaded := BBS withDataDir: tempDir.
+    round := reloaded rdp: 'doctrine' scope: 'global' identity: 'dctr-a1'.
+    t assert: round notNil
+      message: 'DR1: doctrine tuple survives a fresh BBS load from disk (durable)'.
+    round notNil ifTrue: [
+      t assertEqual: ((round at: 'payload') at: 'maturity' ifAbsent: [nil]) to: 'active'
+        message: 'DR1: reloaded doctrine retains maturity=active']
+  ]
+
+  classMethod: testGansoStoreRoundTrip: t [
+    "DR2: deterministic ganso/SQLite coverage every run, regardless of env —
+     directly open a GansoStore and round-trip a linear doctrine tuple."
+    | tempDir store d round all |
+    '--- DR2: full-payload round-trip through a direct ganso/SQLite store ---' println.
+    tempDir := DctrHelper makeTempDir.
+    store := GansoStore openAt: tempDir, '/tuples.db'.
+    d := Tuple linear: 'doctrine' scope: 'global' identity: 'dctr-g1'
+      payload: DctrHelper samplePayload id: 1.
+    store putTuple: d.
+
+    round := store rdp: 'doctrine' scope: 'global' identity: 'dctr-g1'.
+    t assert: round notNil
+      message: 'DR2: ganso rdp: finds the doctrine tuple'.
+    round notNil ifTrue: [
+      DctrHelper assertPayload: (round at: 'payload') runner: t prefix: 'DR2/rdp'].
+
+    all := store scanAll: 'doctrine'.
+    t assertEqual: all size to: 1
+      message: 'DR2: ganso scanAll: doctrine returns exactly one tuple'
+  ]
+
+  classMethod: testExemptFromGc: t [
+    "GC1: gcCases: (the `pp gc` retention sweep) targets ONLY 'case'. With a
+     doctrine tuple and a case tuple both present, a keep:0 sweep removes the
+     case but leaves the doctrine tuple untouched."
+    | tempDir bbs sc casePayload removed survived sweptCase |
+    '--- GC1: doctrine is exempt from pp gc (gc sweeps only case) ---' println.
+    tempDir := DctrHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    "Seed one case (sweep target) and one doctrine (must survive)."
+    casePayload := Dictionary new.
+    casePayload at: 'created_at' put: 1000.
+    casePayload at: 'terminal_state' put: 'completed'.
+    bbs out: 'case' scope: 'default' identity: 'case-1' payload: casePayload.
+    bbs out: 'doctrine' scope: 'global' identity: 'dctr-x1'
+      payload: DctrHelper samplePayload.
+
+    sc := DoctrineGcCommands new.
+    sc tbbs: bbs.
+
+    "keep 0, no age guard → every case is swept."
+    removed := sc gcCases: false keep: 0 olderThanHours: 0.
+    t assertEqual: removed to: 1
+      message: 'GC1: gcCases swept exactly the one case'.
+
+    sweptCase := bbs rdp: 'case' scope: 'default' identity: 'case-1'.
+    t assert: sweptCase isNil
+      message: 'GC1: the case tuple was swept by gc'.
+
+    survived := bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-x1'.
+    t assert: survived notNil
+      message: 'GC1: the doctrine tuple is EXEMPT — survives gc'.
+    survived notNil ifTrue: [
+      DctrHelper assertPayload: (survived at: 'payload') runner: t prefix: 'GC1/survivor']
+  ]
+
+"=== Main ==="
+DoctrineCategoryMain subclass: Object
+  classMethod: run [
+    | t |
+    t := DctrRunner new.
+    [TestDoctrineCategory run: t] on: Exception do: [:e |
+      ('TestDoctrineCategory CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDoctrineCategory crashed'
+    ].
+    t report.
+    ^t failed
+  ]

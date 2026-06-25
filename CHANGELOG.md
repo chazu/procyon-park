@@ -16,6 +16,15 @@ Semantic Versioning.
   collector reclaims mid-load instead of growing unbounded toward an OOM kill.
 
 ### Added
+- `doctrine` tuple category — the foundation for the plan-time doctrine layer
+  (the swarm's synthesized "Orient", distilled from `case`/AAR tuples). It is
+  linear + durable (mirrors `case`): registered in `Categories>>valid` and
+  `BBS>>isDurableCategory:` so entries survive restart, but deliberately NOT in
+  `Categories>>pinned` — entries are written/mutated via `out:`/`update:`
+  directly so `rdp:`-based existence and maturity checks stay valid (the generic
+  pinned put path writes tuples invisible to `rdp:`). Doctrine is exempt from
+  `pp gc`, whose retention sweep targets only `case`. See
+  `docs/design-doctrine-layer.md`.
 - `pp workitem delete <id> [--repo R] [--cascade]` — hard-delete a work item.
   Unlike `cancel` (which only sets `status=cancelled` and preserves the tuple),
   delete removes the tuple from the tuplespace entirely and is irreversible.

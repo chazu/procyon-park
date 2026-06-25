@@ -363,11 +363,12 @@ MultiplayerTestMain subclass: Object
 CombinedTestMain subclass: Object
 
   classMethod: run [
-    | wfFailed mpFailed ccFailed arFailed |
+    | wfFailed mpFailed ccFailed arFailed dcFailed |
     wfFailed := 0.
     mpFailed := 0.
     ccFailed := 0.
     arFailed := 0.
+    dcFailed := 0.
 
     '============================================================' println.
     '=== Running TestWorkflowRefactorMain ===' println.
@@ -396,6 +397,12 @@ CombinedTestMain subclass: Object
         arFailed := 1].
     arFailed isNil ifTrue: [arFailed := 0].
 
+    [dcFailed := DoctrineCategoryMain run]
+      on: Exception do: [:e |
+        ('DoctrineCategoryMain CRASHED: ', e messageText) println.
+        dcFailed := 1].
+    dcFailed isNil ifTrue: [dcFailed := 0].
+
     '' println.
     '============================================================' println.
     '=== Combined Test Summary ===' println.
@@ -405,7 +412,8 @@ CombinedTestMain subclass: Object
     ('Multiplayer failures:       ', mpFailed printString) println.
     ('Case-category failures:     ', ccFailed printString) println.
     ('Archivist-role failures:    ', arFailed printString) println.
-    (wfFailed + mpFailed + ccFailed + arFailed) = 0
+    ('Doctrine-category failures: ', dcFailed printString) println.
+    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed) = 0
       ifTrue:  ['COMBINED: ALL TESTS PASSED' println]
       ifFalse: ['COMBINED: SOME TESTS FAILED' println]
   ]
