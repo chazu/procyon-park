@@ -41,6 +41,7 @@ DoctrineCLI subclass: Object
     sub = 'show'    ifTrue: [^self cmdShow: args].
     sub = 'propose' ifTrue: [^self cmdPropose: args].
     sub = 'synthesize' ifTrue: [^self cmdSynthesize: args].
+    sub = 'export' ifTrue: [^self cmdExport: args].
     sub = 'promote' ifTrue: [^self cmdSetMaturity: args to: 'active'].
     sub = 'retire'  ifTrue: [^self cmdSetMaturity: args to: 'retired'].
     sub = 'reject'  ifTrue: [^self cmdSetMaturity: args to: 'rejected'].
@@ -239,6 +240,26 @@ DoctrineCLI subclass: Object
     (id, ' -> ', newMaturity) println
   ]
 
+  method: cmdExport: args [
+    "pp doctrine export — STUB. Export promoted ('active') doctrine to pudl as a
+     downstream sink. Deliberately NOT implemented: there is zero pp->pudl
+     integration today and the target tool/protocol is undefined (the on-PATH
+     'pudl' is an unrelated data-lake CLI with no doctrine schema). Doctrine stays
+     LOOSELY coupled — PP owns it; pudl is a future export sink, never a read
+     dependency (preserves plan-time autonomy under comms-denial). See
+     docs/design-doctrine-layer.md."
+    | active |
+    active := 0.
+    self scanDoctrine do: [:t |
+      ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'maturity' ifAbsent: ['']) = 'active'
+        ifTrue: [active := active + 1]
+    ].
+    'pp doctrine export — STUB (not yet implemented).' println.
+    ('Would export ', active printString, ' active doctrine entries from scope ', self defaultScope, ' to pudl.') println.
+    'No pp->pudl integration exists yet; target protocol undefined. This is an' println.
+    'intentional placeholder so the loose-coupling boundary stays explicit.' println
+  ]
+
   method: printUsage [
     'pp doctrine — manage doctrine (the plan-time Orient layer)' println.
     '' println.
@@ -248,6 +269,7 @@ DoctrineCLI subclass: Object
     '  propose "<principle>" [--rationale R] [--applies global|repo|repo:path]' println.
     '                        [--tags t1,t2] [--confidence C] [--key name]' println.
     '  synthesize [--repo R]                        Enqueue a Strategist to propose doctrine from cases' println.
+    '  export                                       (stub) export active doctrine to pudl — not yet implemented' println.
     '  promote <id>                                  maturity -> active' println.
     '  retire  <id>                                  maturity -> retired' println.
     '  reject  <id>                                  maturity -> rejected' println.

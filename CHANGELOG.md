@@ -16,6 +16,15 @@ Semantic Versioning.
   collector reclaims mid-load instead of growing unbounded toward an OOM kill.
 
 ### Added
+- Dashboard **Doctrine** tab — a fetch-on-demand view of the plan-time Orient
+  layer. Lists doctrine across all scopes (sorted active → proposed → retired →
+  rejected) with maturity badge, applicability scope, tags, confidence, source
+  case count, and rationale; filterable by maturity. Fetched on tab activation
+  (doctrine is low-churn, so it is not streamed over the broadcast SSE).
+- `pp doctrine export` — explicit STUB for exporting active doctrine to pudl as a
+  downstream sink. Not implemented (no pp→pudl integration exists; target protocol
+  undefined). Keeps the loose-coupling boundary visible: PP owns doctrine; pudl is
+  a future export sink, never a read dependency.
 - Plan-time doctrine consumption (the payoff): the `planner` role's context
   assembly now injects ACTIVE, applicable doctrine. Applicability is composed by
   scope-union (`global` ∪ this-repo ∪ this-repo:path) from `payload.doctrine_scope`,

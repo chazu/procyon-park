@@ -1010,6 +1010,7 @@
     <button class="tab is-active" role="tab" data-tab="overview" aria-selected="true">Overview</button>
     <button class="tab" role="tab" data-tab="board" aria-selected="false">Board</button>
     <button class="tab" role="tab" data-tab="history" aria-selected="false">History</button>
+    <button class="tab" role="tab" data-tab="doctrine" aria-selected="false">Doctrine</button>
     <div class="tabbar-tail" aria-hidden="true"></div>
   </nav>
 
@@ -1139,6 +1140,24 @@
       </div>
     </section>
 
+    <section class="tab-view" id="view-doctrine" role="tabpanel">
+      <div class="history-plate">
+        <h2>Doctrine — plan-time Orient layer</h2>
+        <div class="history-filters">
+          <select id="doctrine-maturity" title="Maturity">
+            <option value="">any maturity</option>
+            <option value="active">active</option>
+            <option value="proposed">proposed</option>
+            <option value="retired">retired</option>
+            <option value="rejected">rejected</option>
+          </select>
+          <button type="button" id="doctrine-refresh">refresh</button>
+          <span class="filter-count" id="doctrine-count"></span>
+        </div>
+        <div id="doctrine-list"></div>
+      </div>
+    </section>
+
   </div>
 
   <!-- Work-item detail modal (Board card click). Hidden until opened. -->
@@ -1253,8 +1272,85 @@
         t.setAttribute('aria-selected', on ? 'true' : 'false');
       });
       views.forEach(v => v.classList.toggle('is-active', v.id === 'view-' + name));
+      if (name === 'doctrine') loadDoctrine();
       try { history.replaceState(null, '', '#' + name); } catch (_){}
     }
+
+    // --- Doctrine tab (plan-time Orient layer) — fetch-on-demand ---
+    // Doctrine is low-churn (changes only on propose/promote), so it is fetched
+    // on tab activation / refresh rather than streamed over the broadcast SSE.
+    const doctrineList    = document.getElementById('doctrine-list');
+    const doctrineCount   = document.getElementById('doctrine-count');
+    const doctrineMatSel  = document.getElementById('doctrine-maturity');
+    const doctrineRefresh = document.getElementById('doctrine-refresh');
+    const DOCTRINE_MAT_ORDER = { active: 0, proposed: 1, retired: 2, rejected: 3 };
+
+    function doctrineEsc(s){
+      return String(s == null ? '' : s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    async function loadDoctrine(){
+      if (!doctrineList) return;
+      doctrineList.innerHTML = '<div style="font-family:var(--f-mono);color:var(--cream-dim);font-size:12px;padding:8px 0">Loading…</div>';
+      let tuples = [];
+      try {
+        // No scope => scanAll across every scope (doctrine applicability is by
+        // payload.doctrine_scope, not the BBS storage scope).
+        const resp = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ category: 'doctrine' })
+        });
+        const data = await resp.json();
+        tuples = Array.isArray(data.tuples) ? data.tuples : [];
+      } catch (_) {
+        doctrineList.innerHTML = '<div style="font-family:var(--f-mono);color:var(--rose);font-size:12px">Failed to load doctrine.</div>';
+        return;
+      }
+      renderDoctrine(tuples);
+    }
+
+    function renderDoctrine(tuples){
+      const matFilter = doctrineMatSel ? doctrineMatSel.value : '';
+      const rows = tuples
+        .map(t => ({ id: t.identity, p: t.payload || {} }))
+        .filter(r => !matFilter || (r.p.maturity || '') === matFilter)
+        .sort((a, b) => {
+          const am = DOCTRINE_MAT_ORDER[a.p.maturity] ?? 9;
+          const bm = DOCTRINE_MAT_ORDER[b.p.maturity] ?? 9;
+          return am - bm;
+        });
+      if (!rows.length) {
+        doctrineList.innerHTML = '<div style="font-family:var(--f-mono);color:var(--cream-dim);font-size:12px;padding:8px 0">No doctrine.</div>';
+        doctrineCount.textContent = '';
+        return;
+      }
+      doctrineCount.textContent = rows.length + (matFilter ? ' / ' + tuples.length : '');
+      let h = '';
+      rows.forEach(r => {
+        const p = r.p;
+        const mat = p.maturity || '?';
+        const matColor = mat === 'active' ? 'var(--moss)' : (mat === 'proposed' ? 'var(--cobalt)' : 'var(--cream-dim)');
+        const tags = Array.isArray(p.tags) ? p.tags.join(', ') : '';
+        const prov = Array.isArray(p.provenance) ? p.provenance.length : 0;
+        h += '<div style="border:1px solid var(--surface);border-left:3px solid ' + matColor + ';padding:8px 10px;margin:6px 0;background:rgba(0,0,0,.12)">'
+          +  '<div style="font-family:var(--f-slab);font-weight:800;font-size:13px;color:var(--cream-hi)">' + doctrineEsc(p.principle || '(no principle)') + '</div>'
+          +  '<div style="font-family:var(--f-mono);font-size:10px;color:var(--cream-dim);margin-top:4px;letter-spacing:.04em">'
+          +    '<span style="color:' + matColor + ';text-transform:uppercase;font-weight:700">' + doctrineEsc(mat) + '</span>'
+          +    ' · applies: ' + doctrineEsc(p.doctrine_scope || 'global')
+          +    (tags ? ' · tags: ' + doctrineEsc(tags) : '')
+          +    (p.confidence != null ? ' · conf: ' + doctrineEsc(p.confidence) : '')
+          +    (prov ? ' · ' + prov + ' case(s)' : '')
+          +  '</div>'
+          +  (p.rationale ? '<div style="font-family:var(--f-mono);font-size:11px;color:var(--cream);margin-top:5px">' + doctrineEsc(p.rationale) + '</div>' : '')
+          +  '</div>';
+      });
+      doctrineList.innerHTML = h;
+    }
+
+    if (doctrineRefresh) doctrineRefresh.addEventListener('click', loadDoctrine);
+    if (doctrineMatSel) doctrineMatSel.addEventListener('change', loadDoctrine);
     tabs.forEach(t => t.addEventListener('click', () => activateTab(t.dataset.tab)));
     const startTab = (location.hash || '').replace('#','');
     if (startTab === 'board' || startTab === 'overview' || startTab === 'history') activateTab(startTab);
