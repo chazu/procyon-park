@@ -7,6 +7,13 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+- The dashboard Board now has a "Hide done"/"Show done" toggle in the board
+  header that hides every card in the `done` column from the view. It is a
+  client-side view filter only — no work item is deleted or mutated — and the
+  hide state persists across live SSE board updates and reloads, so done cards
+  arriving via the per-tick broadcast respect the current hide/show choice.
+
 ### Fixed
 - `merge-worktree` now force-deletes the impl branch after merging it into the
   feature branch, so completed standalone workflows no longer leave an orphan

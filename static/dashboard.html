@@ -768,6 +768,11 @@
       font-size: 11px;
       cursor: pointer;
     }
+    .board-filters button[aria-pressed="true"]{
+      background: var(--terra);
+      color: var(--cream-hi);
+      border-color: var(--terra);
+    }
     .board-filters button:hover{
       background: var(--terra);
       color: var(--cream-hi);
@@ -1071,6 +1076,7 @@
         <div class="board-filters" id="board-filters">
           <select id="board-filter-repo" title="Repo"><option value="">all repos</option></select>
           <button type="button" id="board-filter-clear">clear</button>
+          <button type="button" id="board-hide-done" aria-pressed="false" title="Toggle visibility of done cards">Hide done</button>
           <input type="text" id="board-filter-text" placeholder="search title…" />
           <span class="filter-count" id="board-filter-count"></span>
           <span class="board-dismissed" id="board-dismissed" hidden>
@@ -1498,6 +1504,7 @@
     const boardRepo  = document.getElementById('board-filter-repo');
     const boardText  = document.getElementById('board-filter-text');
     const boardClear = document.getElementById('board-filter-clear');
+    const boardHideDone = document.getElementById('board-hide-done');
     const boardCount = document.getElementById('board-filter-count');
     const boardDismissedWrap  = document.getElementById('board-dismissed');
     const boardDismissedCount = document.getElementById('board-dismissed-count');
@@ -1535,6 +1542,28 @@
       refreshBoardFilters();
     }
 
+    // --- "Hide done" view toggle ---
+    // Client-side VIEW filter only: hides every card in the 'done' column
+    // (.kanban-done) without deleting or mutating any work item. State persists
+    // in localStorage under pp.hideDone and is re-applied by applyBoardFilter()
+    // after every SSE wholesale re-render, so done cards arriving via the
+    // per-tick broadcast respect the current hide/show state.
+    const HIDE_DONE_KEY = 'pp.hideDone';
+    let hideDone = false;
+    try { hideDone = localStorage.getItem(HIDE_DONE_KEY) === '1'; } catch (_) { hideDone = false; }
+    function syncHideDoneButton(){
+      if (!boardHideDone) return;
+      boardHideDone.textContent = hideDone ? 'Show done' : 'Hide done';
+      boardHideDone.setAttribute('aria-pressed', hideDone ? 'true' : 'false');
+    }
+    function toggleHideDone(){
+      hideDone = !hideDone;
+      try { localStorage.setItem(HIDE_DONE_KEY, hideDone ? '1' : '0'); } catch (_) { /* best-effort */ }
+      syncHideDoneButton();
+      applyBoardFilter();   // re-applies .wi-hidden to done cards
+    }
+    syncHideDoneButton();
+
     function applyBoardFilter() {
       const repo = boardRepo.value;
       const text = boardText.value.trim().toLowerCase();
@@ -1564,6 +1593,8 @@
         if (dismissed) { hide = true; hiddenByDismiss++; }
         if (repo && r !== repo) hide = true;
         if (text && !card.textContent.toLowerCase().includes(text)) hide = true;
+        // VIEW-only "hide done": cards live in the .kanban-done column.
+        if (hideDone && card.closest('.kanban-done')) hide = true;
         card.classList.toggle('wi-hidden', hide);
         if (!hide) shown++;
       });
@@ -1594,6 +1625,7 @@
       applyBoardFilter();
     });
     if (boardDismissedShow) boardDismissedShow.addEventListener('click', undismissAll);
+    if (boardHideDone) boardHideDone.addEventListener('click', toggleHideDone);
 
     // --- History Explorer ---
     const histOp       = document.getElementById('hist-op');
