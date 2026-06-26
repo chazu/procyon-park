@@ -88,6 +88,13 @@ Dispatcher subclass: Object
     [workflowEngine applyCompletedArchivistEnrichments] on: Exception do: [:e |
       ('Dispatcher tick step error (applyCompletedArchivistEnrichments): ', e messageText) println
     ].
+    "Doctrine outcomes: fold each terminated workflow's outcome_score (once)
+     into the outcome stats of every doctrine injected into it. Strictly
+     off-critical-path — wrapped here AND internally so it can never gate or
+     flip workflow status. Single-writer (only this sweep writes the stats)."
+    [workflowEngine applyDoctrineOutcomes] on: Exception do: [:e |
+      ('Dispatcher tick step error (applyDoctrineOutcomes): ', e messageText) println
+    ].
     taskSnapshot := nil.
     [taskSnapshot := bbs scanAll: 'task'] on: Exception do: [:e |
       ('Dispatcher tick step error (task snapshot): ', e messageText) println

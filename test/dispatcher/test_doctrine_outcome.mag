@@ -1,0 +1,301 @@
+"Tests for the per-workflow OUTCOME scalar + per-doctrine outcome-stats fold.
+
+ Two layers under test:
+   1. PURE scalar — CaseBuilder>>outcomeScoreOf: maps a case-payload Dictionary
+      to an integer milli-units score [0,1000]:
+        DO1  clean completion (no thrash, files changed)        => ~1000
+        DO2  thrashy completion (retries + review_cycles > 0)    => mid
+        DO3  failure (terminal_state != 'completed')             => 0
+   2. SWEEP — WorkflowEngine>>applyDoctrineOutcomes (driven from the tick):
+        DO4  folds outcome_score into outcome-stats for EACH injected doctrine
+             at its CANONICAL doctrine_scope; BBS>>outcomeStatsFor: reads back
+             accurate n / ewma_score / success_rate.
+        DO5  idempotent — a second sweep does NOT double-count (case stamp).
+        DO6  a workflow with NO injection records folds nothing.
+        DO7  non-fatal — a throwing fold on one case cannot abort the sweep;
+             a sibling good case is still folded.
+
+ Layer 1 is pure (synthetic Dictionaries). Layer 2 uses a real BBS
+ (BBS withDataDir:) so the full scan + rdp + upsertSignal + stamp path runs."
+
+DORunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== DoctrineOutcome Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== Helpers ==="
+DOHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: case: terminal retries: retries reviews: reviews human: human files: files [
+    "A synthetic case payload carrying exactly the keys outcomeScoreOf: reads."
+    | p |
+    p := Dictionary new.
+    p at: 'terminal_state' put: terminal.
+    p at: 'retries' put: retries.
+    p at: 'review_cycles' put: reviews.
+    p at: 'human_interventions' put: human.
+    p at: 'files_changed' put: files.
+    ^p
+  ]
+
+  classMethod: ref: id scope: ds [
+    | r |
+    r := Dictionary new.
+    r at: 'id' put: id.
+    r at: 'doctrine_scope' put: ds.
+    ^r
+  ]
+
+  classMethod: seedCase: bbs id: instanceId scope: scope terminal: terminal retries: retries reviews: reviews files: files [
+    "Persist a 'case' tuple with a CaseBuilder-shaped payload (incl.
+     outcome_score) exactly as writeCaseSkeleton: would."
+    | p |
+    p := self case: terminal retries: retries reviews: reviews human: (retries + reviews) files: files.
+    p at: 'workflow_instance' put: instanceId.
+    p at: 'outcome_score' put: (CaseBuilder outcomeScoreOf: p).
+    bbs out: 'case' scope: scope identity: instanceId payload: p
+  ]
+
+  classMethod: seedInjection: bbs id: instanceId scope: scope task: task refs: refs [
+    | p |
+    p := Dictionary new.
+    p at: 'workflow_instance' put: instanceId.
+    p at: 'task_id' put: task.
+    p at: 'role' put: 'implementer'.
+    p at: 'doctrine_refs' put: refs.
+    p at: 'injected_at' put: 1700000000.
+    bbs out: 'doctrine-injection' scope: scope identity: task payload: p
+  ]
+
+  classMethod: caseStampedFor: bbs id: instanceId scope: scope [
+    | c |
+    c := bbs rdp: 'case' scope: scope identity: instanceId.
+    ^c isNil ifTrue: [nil] ifFalse: [(c at: 'payload') at: 'doctrine_outcome_applied' ifAbsent: [nil]]
+  ]
+
+"--- A BBS that throws when folding a doctrine whose id contains 'BOOM', to
+ prove the per-case sweep body is non-fatal. Every other op goes to super. ---"
+ThrowingFoldBBS subclass: BBS
+
+  method: upsertSignal: scope identity: identity payload: payload [
+    (identity = 'doctrine-outcome-stats:BOOM')
+      ifTrue: [Error signal: 'forced fold failure for BOOM'].
+    ^super upsertSignal: scope identity: identity payload: payload
+  ]
+
+"=== TestDoctrineOutcome ==="
+TestDoctrineOutcome subclass: Object
+
+  classMethod: run: t [
+    self testCleanCompletionScoresHigh: t.
+    self testThrashyCompletionScoresMid: t.
+    self testFailureScoresZero: t.
+    self testSweepFoldsPerDoctrine: t.
+    self testIdempotentSweep: t.
+    self testNoInjectionFoldsNothing: t.
+    self testNonFatalSweep: t
+  ]
+
+  classMethod: testCleanCompletionScoresHigh: t [
+    | p score |
+    '--- DO1: clean completion scores ~1000 ---' println.
+    p := DOHelper case: 'completed' retries: 0 reviews: 0 human: 0 files: 7.
+    score := CaseBuilder outcomeScoreOf: p.
+    t assertEqual: score to: 1000
+      message: 'DO1: a clean first-pass completion scores 1000'
+  ]
+
+  classMethod: testThrashyCompletionScoresMid: t [
+    | p score |
+    '--- DO2: thrashy completion scores mid ---' println.
+    "retries=2, reviews=1, human=3 (proxy), files>0 =>
+     penalty = 2*120 + 1*100 + 3*80 = 580 => 1000-580 = 420."
+    p := DOHelper case: 'completed' retries: 2 reviews: 1 human: 3 files: 5.
+    score := CaseBuilder outcomeScoreOf: p.
+    t assertEqual: score to: 420
+      message: 'DO2: thrashy completion scores mid (420)'.
+    t assert: (score > 0 and: [score < 1000])
+      message: 'DO2: thrashy score is strictly between fail and clean'
+  ]
+
+  classMethod: testFailureScoresZero: t [
+    | p score noopP |
+    '--- DO3: failure scores ~0 ---' println.
+    p := DOHelper case: 'failed' retries: 0 reviews: 0 human: 0 files: 9.
+    score := CaseBuilder outcomeScoreOf: p.
+    t assertEqual: score to: 0
+      message: 'DO3: a failed workflow scores 0 regardless of files changed'.
+    "noop guard: a completion that changed NO files is penalised below clean."
+    noopP := DOHelper case: 'completed' retries: 0 reviews: 0 human: 0 files: 0.
+    t assertEqual: (CaseBuilder outcomeScoreOf: noopP) to: 800
+      message: 'DO3: a no-op (0 files) completion is penalised to 800'
+  ]
+
+  classMethod: testSweepFoldsPerDoctrine: t [
+    | tempDir bbs engine refs s1 s2 |
+    '--- DO4: sweep folds outcome_score into each injected doctrine ---' println.
+    tempDir := DOHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    engine := WorkflowEngine on: bbs.
+
+    "A clean completion (score 1000) into a workflow that had TWO doctrine
+     refs at DISTINCT canonical scopes injected across two tasks."
+    refs := Array new: 0.
+    refs := refs copyWith: (DOHelper ref: 'dctr-a' scope: 'global').
+    refs := refs copyWith: (DOHelper ref: 'dctr-b' scope: 'procyon-park').
+    DOHelper seedCase: bbs id: 'wf-1' scope: 'default' terminal: 'completed' retries: 0 reviews: 0 files: 4.
+    DOHelper seedInjection: bbs id: 'wf-1' scope: 'default' task: 'wf-1:t1' refs: refs.
+
+    engine applyDoctrineOutcomes.
+
+    s1 := bbs outcomeStatsFor: 'dctr-a' scope: 'global'.
+    s2 := bbs outcomeStatsFor: 'dctr-b' scope: 'procyon-park'.
+    t assertEqual: (s1 at: 'n') to: 1
+      message: 'DO4: dctr-a outcome stats n=1 after one fold'.
+    t assertEqual: (s1 at: 'ewma_score') to: 1000
+      message: 'DO4: dctr-a ewma seeds to the first score (1000)'.
+    t assertEqual: (s1 at: 'success_rate') to: 1000
+      message: 'DO4: dctr-a success_rate = 1000 (1/1 completions)'.
+    t assertEqual: (s2 at: 'n') to: 1
+      message: 'DO4: dctr-b (distinct canonical scope) also folded n=1'.
+    "Stats live at the doctrine_scope, NOT the workflow scope 'default'."
+    t assertEqual: ((bbs outcomeStatsFor: 'dctr-a' scope: 'default') at: 'n') to: 0
+      message: 'DO4: nothing folded at the workflow scope (canonical-scope only)'.
+    t assert: (DOHelper caseStampedFor: bbs id: 'wf-1' scope: 'default') notNil
+      message: 'DO4: the case is stamped doctrine_outcome_applied after folding'
+  ]
+
+  classMethod: testIdempotentSweep: t [
+    | tempDir bbs engine refs s |
+    '--- DO5: second sweep does not double-count (stamp respected) ---' println.
+    tempDir := DOHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    engine := WorkflowEngine on: bbs.
+
+    refs := Array new: 0.
+    refs := refs copyWith: (DOHelper ref: 'dctr-x' scope: 'global').
+    DOHelper seedCase: bbs id: 'wf-2' scope: 'default' terminal: 'completed' retries: 2 reviews: 1 files: 3.
+    DOHelper seedInjection: bbs id: 'wf-2' scope: 'default' task: 'wf-2:t1' refs: refs.
+
+    engine applyDoctrineOutcomes.
+    engine applyDoctrineOutcomes.
+    engine applyDoctrineOutcomes.
+
+    s := bbs outcomeStatsFor: 'dctr-x' scope: 'global'.
+    t assertEqual: (s at: 'n') to: 1
+      message: 'DO5: n stays 1 across three sweeps (idempotent via stamp)'.
+    t assertEqual: (s at: 'ewma_score') to: 420
+      message: 'DO5: ewma reflects the single thrashy score (420), not 3x'.
+    t assertEqual: (s at: 'success_rate') to: 1000
+      message: 'DO5: success_rate = 1000 (the one completion counted once)'
+  ]
+
+  classMethod: testNoInjectionFoldsNothing: t [
+    | tempDir bbs engine |
+    '--- DO6: a workflow with no injection records folds nothing ---' println.
+    tempDir := DOHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    engine := WorkflowEngine on: bbs.
+
+    "Case exists but NO doctrine-injection record references it."
+    DOHelper seedCase: bbs id: 'wf-3' scope: 'default' terminal: 'completed' retries: 0 reviews: 0 files: 2.
+
+    engine applyDoctrineOutcomes.
+
+    t assertEqual: ((bbs outcomeStatsFor: 'dctr-none' scope: 'global') at: 'n') to: 0
+      message: 'DO6: no injection => no doctrine outcome-stats written'.
+    "The case is still stamped so the no-op is not re-evaluated forever."
+    t assert: (DOHelper caseStampedFor: bbs id: 'wf-3' scope: 'default') notNil
+      message: 'DO6: an injection-free case is still stamped (sweep is a no-op next tick)'
+  ]
+
+  classMethod: testNonFatalSweep: t [
+    | tempDir bbs engine badRefs goodRefs sGood |
+    '--- DO7: a throwing fold cannot abort the sweep ---' println.
+    tempDir := DOHelper makeTempDir.
+    bbs := ThrowingFoldBBS withDataDir: tempDir.
+    engine := WorkflowEngine on: bbs.
+
+    "case-bad injects doctrine 'BOOM' (its fold throws). case-good injects
+     'dctr-ok'. The per-case on:Exception wrapper must isolate the failure so
+     the good case is still folded."
+    badRefs := Array new: 0.
+    badRefs := badRefs copyWith: (DOHelper ref: 'BOOM' scope: 'global').
+    goodRefs := Array new: 0.
+    goodRefs := goodRefs copyWith: (DOHelper ref: 'dctr-ok' scope: 'global').
+    DOHelper seedCase: bbs id: 'wf-bad' scope: 'default' terminal: 'completed' retries: 0 reviews: 0 files: 1.
+    DOHelper seedInjection: bbs id: 'wf-bad' scope: 'default' task: 'wf-bad:t1' refs: badRefs.
+    DOHelper seedCase: bbs id: 'wf-good' scope: 'default' terminal: 'completed' retries: 0 reviews: 0 files: 1.
+    DOHelper seedInjection: bbs id: 'wf-good' scope: 'default' task: 'wf-good:t1' refs: goodRefs.
+
+    "Must not raise even though folding BOOM throws."
+    engine applyDoctrineOutcomes.
+
+    sGood := bbs outcomeStatsFor: 'dctr-ok' scope: 'global'.
+    t assertEqual: (sGood at: 'n') to: 1
+      message: 'DO7: the good case is folded despite a sibling case throwing'.
+    "The bad case threw BEFORE its stamp, so it remains unstamped (will retry)."
+    t assert: (DOHelper caseStampedFor: bbs id: 'wf-bad' scope: 'default') isNil
+      message: 'DO7: the throwing case is left unstamped (stamp is written last)'
+  ]
+
+"=== Main ==="
+DoctrineOutcomeMain subclass: Object
+  classMethod: run [
+    | t |
+    t := DORunner new.
+    TestDoctrineOutcome run: t.
+    t report.
+    ^t failed
+  ]

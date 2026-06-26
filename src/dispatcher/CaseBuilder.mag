@@ -120,9 +120,61 @@ CaseBuilder subclass: Object
     case at: 'review_cycles' put: reviewCycles.
     case at: 'human_interventions' put: humanInterventions.
     case at: 'files_changed' put: filesChanged.
+    "--- outcome_score: a single per-workflow OUTCOME scalar folded into
+     per-doctrine outcome stats by the off-critical-path sweep. Stored in
+     integer MILLI-units [0,1000] (Maggie has no reliable floats — see
+     Role>>doctrineConfidenceMilli:); 1000 ≈ a clean first-pass completion,
+     ~500 a thrashy completion, 0 a non-completion. Computed from the keys
+     just written above so it is a deterministic, pure function of the case. ---"
+    case at: 'outcome_score' put: (self outcomeScoreOf: case).
     case at: 'actions' put: actions.
     case at: 'tags' put: tags.
     ^case
+  ]
+
+  classMethod: outcomeScoreOf: aCase [
+    "PURE outcome scalar in integer milli-units [0,1000] from an already-built
+     case-payload Dictionary. Unit-testable in isolation (no I/O, no clock).
+
+       base = (terminal_state = 'completed') ? 1000 : 0
+       A non-completion scores 0 outright — penalty only refines a completion.
+       penalty = capped weighted sum of thrash signals on a completion:
+         retries             * 120  (W_RETRY)
+         review_cycles       * 100  (W_REVIEW)
+         human_interventions *  80  (W_HUMAN)
+         files_changed = 0 noop on a completed workflow: + 200 (W_NOOP)
+       outcome = (base - penalty) clamped to [0,1000].
+
+     So a clean first-pass completion (no retries / reviews / interventions,
+     files changed) scores 1000; a thrashy completion scores mid; a failure 0.
+     NULL/EMPTY TOLERANT: a non-Dictionary / missing fields degrade to 0/defaults."
+    | terminal completed retries reviewCycles human filesChanged base penalty noop score |
+    (aCase isKindOf: Dictionary) ifFalse: [^0].
+    terminal := aCase at: 'terminal_state' ifAbsent: [''].
+    completed := terminal = 'completed'.
+    completed ifFalse: [^0].
+    base := 1000.
+    retries := self numAt: 'retries' in: aCase.
+    reviewCycles := self numAt: 'review_cycles' in: aCase.
+    human := self numAt: 'human_interventions' in: aCase.
+    filesChanged := self numAt: 'files_changed' in: aCase.
+    noop := (filesChanged = 0) ifTrue: [200] ifFalse: [0].
+    penalty := (retries * 120) + (reviewCycles * 100) + (human * 80) + noop.
+    score := base - penalty.
+    score < 0 ifTrue: [^0].
+    score > 1000 ifTrue: [^1000].
+    ^score
+  ]
+
+  classMethod: numAt: key in: dict [
+    "Non-negative integer accessor for a numeric case field; nil / absent / a
+     loosely-deserialized String all coerce to a number, never a crash."
+    | v |
+    v := dict at: key ifAbsent: [0].
+    v isNil ifTrue: [^0].
+    (v isKindOf: Integer) ifTrue: [^v].
+    (v isKindOf: String) ifTrue: [^v asInteger].
+    ^v
   ]
 
   classMethod: payloadOf: aTuple [

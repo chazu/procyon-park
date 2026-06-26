@@ -992,6 +992,101 @@ WorkflowEngine subclass: Object
     ]
   ]
 
+  "--- Doctrine Outcome Folding (off-critical-path) ---"
+
+  method: applyDoctrineOutcomes [
+    "Off-critical-path sweep (driven from the Dispatcher tick): for every
+     terminated workflow — i.e. every persisted 'case' — whose case has NOT
+     yet been folded into per-doctrine outcome stats, attribute its
+     outcome_score back to each doctrine injected into the workflow, then
+     stamp the case so the fold happens EXACTLY once.
+
+     Three hard guarantees:
+       1. IDEMPOTENT — a case already carrying 'doctrine_outcome_applied' is
+          skipped, so re-running every tick never double-counts.
+       2. SINGLE-WRITER — only this sweep ever writes the
+          'doctrine-outcome-stats:<id>' signals, so the read-modify-write of
+          the EWMA stats has no race.
+       3. NON-FATAL — each case is wrapped in its own on:Exception so a
+          malformed case / injection tuple can neither abort the sweep nor
+          escape into the tick loop."
+    (bbs scanAll: 'case') do: [:c |
+      [
+        | p instanceId scope score success refs |
+        p := c at: 'payload' ifAbsent: [nil].
+        (p isKindOf: Dictionary) ifTrue: [
+          "Idempotency: skip cases already folded."
+          ((p at: 'doctrine_outcome_applied' ifAbsent: [nil]) isNil) ifTrue: [
+            instanceId := c at: 'identity'.
+            scope := c at: 'scope'.
+            "outcome_score is stored on the case by CaseBuilder; recompute it
+             from the case payload when a legacy case predates the field."
+            score := p at: 'outcome_score'
+              ifAbsent: [CaseBuilder outcomeScoreOf: p].
+            score isNil ifTrue: [score := CaseBuilder outcomeScoreOf: p].
+            success := (p at: 'terminal_state' ifAbsent: ['']) = 'completed'.
+            refs := bbs injectedDoctrineForWorkflow: instanceId scope: scope.
+            refs do: [:r |
+              (r isKindOf: Dictionary) ifTrue: [
+                | id ds |
+                id := r at: 'id' ifAbsent: [nil].
+                ds := r at: 'doctrine_scope' ifAbsent: ['global'].
+                (id notNil and: [(id isString) and: [id isEmpty not]]) ifTrue: [
+                  self foldDoctrineOutcome: id scope: ds score: score success: success
+                ]
+              ]
+            ].
+            "Stamp the case LAST so a mid-fold crash leaves it unstamped and the
+             next sweep retries (at worst over-counts a partial fold, which is
+             far better than silently dropping the outcome)."
+            bbs update: 'case' scope: scope identity: instanceId do: [:cp |
+              cp at: 'doctrine_outcome_applied' put: DateTime now epochSeconds
+            ]
+          ]
+        ]
+      ] on: Exception do: [:e |
+        bbs logEngine: 'warn' component: 'doctrine-outcome' scope: 'system' message: ('doctrine outcome sweep skip: ', e messageText)
+      ]
+    ]
+  ]
+
+  method: foldDoctrineOutcome: id scope: dscope score: score success: success [
+    "Fold one workflow outcome into a doctrine's per-scope outcome-stats signal
+     at its canonical doctrine_scope. Identity 'doctrine-outcome-stats:<id>',
+     payload {n, sum_score, ewma_score, n_success, n_fail, last_updated}.
+
+     EWMA (alpha = 3/10, integer milli-units) so recent outcomes dominate and a
+     stale-but-once-good doctrine decays: ewma' = (3*score + 7*ewma) // 10. The
+     first observation seeds ewma directly. Single-writer (the sweep) so the
+     read-modify-write via upsertSignal: cannot race."
+    | sigId existing prior n sumScore ewma nSuccess nFail payload |
+    sigId := 'doctrine-outcome-stats:', id.
+    existing := bbs rdp: 'signal' scope: dscope identity: sigId.
+    prior := (existing notNil and: [((existing at: 'payload' ifAbsent: [nil]) isKindOf: Dictionary)])
+      ifTrue: [existing at: 'payload'] ifFalse: [Dictionary new].
+    n := prior at: 'n' ifAbsent: [0].
+    sumScore := prior at: 'sum_score' ifAbsent: [0].
+    ewma := prior at: 'ewma_score' ifAbsent: [nil].
+    nSuccess := prior at: 'n_success' ifAbsent: [0].
+    nFail := prior at: 'n_fail' ifAbsent: [0].
+
+    n := n + 1.
+    sumScore := sumScore + score.
+    ewma := ewma isNil
+      ifTrue: [score]
+      ifFalse: [((3 * score) + (7 * ewma)) // 10].
+    success ifTrue: [nSuccess := nSuccess + 1] ifFalse: [nFail := nFail + 1].
+
+    payload := Dictionary new.
+    payload at: 'n' put: n.
+    payload at: 'sum_score' put: sumScore.
+    payload at: 'ewma_score' put: ewma.
+    payload at: 'n_success' put: nSuccess.
+    payload at: 'n_fail' put: nFail.
+    payload at: 'last_updated' put: DateTime now epochSeconds.
+    bbs upsertSignal: dscope identity: sigId payload: payload
+  ]
+
   "--- Workflow Completion ---"
 
   "wf-accepting variants — preferred when the caller already has the

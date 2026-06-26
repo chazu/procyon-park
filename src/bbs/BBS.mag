@@ -554,6 +554,42 @@ BBS subclass: Object
     ^out
   ]
 
+  method: outcomeStatsFor: doctrineId scope: doctrineScope [
+    "Reader for the per-doctrine outcome-stats signal the outcome sweep folds
+     (see WorkflowEngine>>foldDoctrineOutcome:scope:score:success:). Returns
+     {n, ewma_score, success_rate} where ewma_score and success_rate are
+     integer MILLI-units [0,1000] (no floats). Consumed by W3 ranking + display.
+
+     NULL/EMPTY TOLERANT by construction: a nil/blank/non-string doctrineId, a
+     failing read, a missing signal, a non-Dictionary payload, and a zero n all
+     degrade to {n:0, ewma_score:0, success_rate:0} — never a crash."
+    | out sigId existing p n ewma nSuccess |
+    out := Dictionary new.
+    out at: 'n' put: 0.
+    out at: 'ewma_score' put: 0.
+    out at: 'success_rate' put: 0.
+    (doctrineId isNil or: [(doctrineId isString) not or: [doctrineId isEmpty]])
+      ifTrue: [^out].
+    sigId := 'doctrine-outcome-stats:', doctrineId.
+    existing := [self rdp: 'signal' scope: doctrineScope identity: sigId]
+      on: Exception do: [:e | nil].
+    existing isNil ifTrue: [^out].
+    p := existing at: 'payload' ifAbsent: [nil].
+    (p isKindOf: Dictionary) ifFalse: [^out].
+    "Numbers may round-trip through the durable store as a non-Integer Number;
+     coerce only nil to 0 and otherwise trust the stored numeric value."
+    n := p at: 'n' ifAbsent: [0].
+    n isNil ifTrue: [n := 0].
+    ewma := p at: 'ewma_score' ifAbsent: [0].
+    ewma isNil ifTrue: [ewma := 0].
+    nSuccess := p at: 'n_success' ifAbsent: [0].
+    nSuccess isNil ifTrue: [nSuccess := 0].
+    out at: 'n' put: n.
+    out at: 'ewma_score' put: ewma.
+    out at: 'success_rate' put: (n > 0 ifTrue: [(nSuccess * 1000) // n] ifFalse: [0]).
+    ^out
+  ]
+
   "--- Work-Item Parent/Child Derivation ---"
 
   method: childrenOfParent: parentId in: tuples [

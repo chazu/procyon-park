@@ -8,6 +8,27 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Per-doctrine outcome attribution — every terminated workflow now contributes a
+  single OUTCOME scalar to the outcome stats of each doctrine that was injected
+  into it, closing the Observe→Orient loop opened by doctrine-injection capture.
+  `CaseBuilder>>buildCase:` computes `outcome_score` (integer milli-units
+  `[0,1000]`, no floats): a clean first-pass completion scores ~1000, a thrashy
+  completion (retries / review cycles / interventions, or a 0-file no-op) scores
+  mid, and a non-completion scores 0 — a pure, unit-testable function
+  (`CaseBuilder>>outcomeScoreOf:`). A new off-critical-path sweep
+  (`WorkflowEngine>>applyDoctrineOutcomes`, hooked into `Dispatcher>>onTick`
+  beside the archivist-enrichment sweep) folds each terminated workflow's score
+  into a per-doctrine `doctrine-outcome-stats:<id>` signal at the doctrine's
+  CANONICAL `doctrine_scope` — `{n, sum_score, ewma_score, n_success, n_fail,
+  last_updated}` with an EWMA (α=3/10) so recent outcomes dominate and a
+  stale-but-once-good doctrine decays. The fold is IDEMPOTENT (a
+  `doctrine_outcome_applied` stamp on the case means a re-run never
+  double-counts), SINGLE-WRITER (only the sweep writes the stats, so no race),
+  and NON-FATAL (each case is wrapped in `on:Exception` so a malformed
+  case/injection can never abort the sweep or gate a tick). A new reader
+  `BBS>>outcomeStatsFor:scope:` returns `{n, ewma_score, success_rate}`
+  (null/empty tolerant) for ranking + display. (new `TestDoctrineOutcome` suite,
+  wired into `CombinedTestMain`.)
 - Doctrine-injection attribution capture — every doctrine-consuming task now
   records WHICH doctrine (id + canonical `doctrine_scope`) was injected into it,
   so a later outcome sweep can attribute the task's result back to the doctrine
