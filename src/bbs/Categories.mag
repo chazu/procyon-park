@@ -6,7 +6,8 @@ Categories subclass: Object
     ^#('fact' 'convention' 'observation' 'decision' 'signal'
        'task' 'template' 'workflow' 'token' 'rule' 'ingestion'
        'event' 'obstacle' 'session' 'artifact' 'link' 'notification'
-       'workitem' 'identity' 'worker' 'watch' 'invite' 'case' 'doctrine')
+       'workitem' 'identity' 'worker' 'watch' 'invite' 'case' 'doctrine'
+       'doctrine-feedback')
   ]
 
   classMethod: isValid: aString [
@@ -23,10 +24,12 @@ Categories subclass: Object
   classMethod: pinned [
     "Categories that are always persistent (never consumed by in:).
 
-     NOTE: 'doctrine' is intentionally absent — it is linear + durable
-     (see BBS>>isDurableCategory:), written/mutated via out:/update: directly,
-     NOT via the generic pinned put path (whose tuples are invisible to
-     rdp:-based existence checks). See docs/design-doctrine-layer.md."
+     NOTE: 'doctrine' and 'doctrine-feedback' are intentionally absent — they
+     are linear + durable (see BBS>>isDurableCategory:), written via out:
+     directly, NOT via the generic pinned put path (whose tuples are invisible
+     to rdp:-based existence checks). 'doctrine-feedback' is append-only: each
+     vote is a fresh dfb-<hex> tuple, never a read-modify-write of a shared
+     aggregate. See docs/design-doctrine-layer.md."
     ^#('fact' 'convention' 'template' 'rule' 'ingestion' 'artifact' 'link' 'decision' 'identity' 'case')
   ]
 

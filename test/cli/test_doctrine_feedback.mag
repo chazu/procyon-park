@@ -1,0 +1,447 @@
+"Tests for the 'doctrine-feedback' capture + tally layer — race-free agent votes
+ on doctrine. See DoctrineCLI>>cmdFeedback: / feedbackTallyFor:scope:.
+
+ Storage discipline under test: doctrine-feedback is LINEAR + DURABLE, mirroring
+ 'doctrine'/'case' — in Categories>>valid and BBS>>isDurableCategory:, but NOT in
+ Categories>>pinned. Each vote is an APPEND-ONLY fresh dfb-<hex> tuple (never a
+ read-modify-write of a shared aggregate), so concurrent votes never clobber.
+
+ The single most important correctness rule (SCOPE CONSISTENCY): a vote is written
+ at the doctrine's OWN doctrine_scope (canonical), NOT the voter's repo/workflow
+ scope, and feedbackTallyFor: tallies that same canonical scope. A GLOBAL doctrine
+ voted on from any repo therefore converges on the 'global' feedback scope.
+
+ Invariants under test:
+   FB1  Category membership: valid + durable + NOT pinned; round-trips through the
+        active store (out: -> rdp:/scan:) and survives a reload from disk; direct
+        ganso/SQLite round-trip too.
+   FB2  Two votes on the same doctrine => TWO tuples (append-only, no clobber).
+   FB3  Tally counts up/down/net/total; empty/NULL tolerant (no feedback -> zeros).
+   FB4  --down without --reason is refused (no write); --reason optional on --up.
+   FB5  --up/--down are mutually exclusive AND one is required (both/neither -> no write).
+   FB6  Auto-attribution reads PP_TASK/PP_WORKFLOW into the payload; degrades to ''
+        (task/workflow) and 'manual' (role) when unset.
+   FB7  Unknown doctrine id warns and writes NOTHING (no orphan vote).
+   FB8  SCOPE: a GLOBAL doctrine voted from two different voter contexts (different
+        PP_WORKFLOW / --repo) both land in the 'global' feedback scope, and
+        feedbackTallyFor: 'global' returns net=+2 (votes are NOT split or lost).
+
+ Standalone runner at bottom (DoctrineFeedbackMain run)."
+
+DfbRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Doctrine Feedback Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- A DoctrineCLI subclass whose IO seams (doctrine/task reads, feedback
+ write/scan, env) are backed by an in-memory BBS, so cmdFeedback: / the tally /
+ the validation / the attribution wrapper all run END-TO-END without a server.
+ Only the seams are stubbed — the logic under test is the real DoctrineCLI. ---"
+TestFeedbackCLI subclass: DoctrineCLI
+  instanceVars: tbbs envWf envTask writeLog
+
+  classMethod: onBbs: aBbs [
+    | c |
+    c := self new.
+    c bindBbs: aBbs.
+    ^c
+  ]
+
+  method: bindBbs: aBbs [
+    tbbs := aBbs.
+    envWf := nil.
+    envTask := nil.
+    writeLog := Array new: 0
+  ]
+
+  method: envWf: w [ envWf := w ]
+  method: envTask: tk [ envTask := tk ]
+  method: writeCount [ ^writeLog size ]
+  method: tbbs [ ^tbbs ]
+
+  "--- seams ---"
+  method: feedbackEnvWorkflow [ ^envWf ]
+  method: feedbackEnvTask [ ^envTask ]
+
+  method: rdpDoctrine: id [
+    ^tbbs rdp: 'doctrine' scope: 'global' identity: id
+  ]
+
+  method: rdpTask: id [
+    ^tbbs rdp: 'task' scope: 'global' identity: id
+  ]
+
+  method: writeFeedbackTuple: id scope: dscope payload: payload [
+    writeLog := writeLog copyWith: id.
+    tbbs out: 'doctrine-feedback' scope: dscope identity: id payload: payload.
+    ^nil
+  ]
+
+  method: scanFeedback: aScope [
+    ^tbbs scan: 'doctrine-feedback' scope: aScope
+  ]
+
+"--- Helpers ---"
+DfbHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedDoctrine: bbs id: id scope: dscope key: key [
+    "Seed an ACTIVE doctrine at storage scope 'global' (mirrors routing tests)
+     whose payload doctrine_scope is dscope — the CANONICAL feedback scope."
+    | p |
+    p := Dictionary new.
+    p at: 'key' put: key.
+    p at: 'doctrine_scope' put: dscope.
+    p at: 'maturity' put: 'active'.
+    bbs out: 'doctrine' scope: 'global' identity: id payload: p
+  ]
+
+  classMethod: seedTask: bbs id: id role: role [
+    | p |
+    p := Dictionary new.
+    p at: 'role' put: role.
+    bbs out: 'task' scope: 'global' identity: id payload: p
+  ]
+
+  classMethod: feedbackArgs: id verdict: verdict [
+    "#('doctrine' 'feedback' <id> <verdict>) — verdict e.g. '--up'."
+    | a |
+    a := Array new: 0.
+    a := a copyWith: 'doctrine'.
+    a := a copyWith: 'feedback'.
+    a := a copyWith: id.
+    a := a copyWith: verdict.
+    ^a
+  ]
+
+  classMethod: feedbackTuple: doctrineId verdict: verdict [
+    "A minimal doctrine-feedback tuple shaped for tallyFeedbackTuples:forDoctrine:."
+    | p tup |
+    p := Dictionary new.
+    p at: 'doctrine_id' put: doctrineId.
+    p at: 'verdict' put: verdict.
+    tup := Dictionary new.
+    tup at: 'identity' put: ('dfb-', verdict).
+    tup at: 'payload' put: p.
+    ^tup
+  ]
+
+"=== TestDoctrineFeedback ==="
+TestDoctrineFeedback subclass: Object
+
+  classMethod: run: t [
+    self testCategoryMembershipAndRoundTrip: t.
+    self testGansoRoundTrip: t.
+    self testAppendOnlyNoClobber: t.
+    self testTallyCounts: t.
+    self testTallyEmptyTolerant: t.
+    self testDownRequiresReason: t.
+    self testVerdictMutualExclusionAndRequired: t.
+    self testAttributionReadsEnv: t.
+    self testAttributionDegradesUnset: t.
+    self testUnknownDoctrineWritesNothing: t.
+    self testScopeCanonicalGlobalAcrossRepos: t
+  ]
+
+  classMethod: testCategoryMembershipAndRoundTrip: t [
+    "FB1: valid + durable + NOT pinned; out:/rdp:/scan: + reload from disk."
+    | tempDir bbs round reloaded |
+    '--- FB1: doctrine-feedback membership + active-store round-trip + reload ---' println.
+    t assert: (Categories isValid: 'doctrine-feedback')
+      message: 'FB1: Categories isValid: doctrine-feedback is true'.
+    t assert: (Categories isPinned: 'doctrine-feedback') not
+      message: 'FB1: Categories isPinned: doctrine-feedback is FALSE (linear)'.
+    t assert: (BBS new isDurableCategory: 'doctrine-feedback')
+      message: 'FB1: BBS isDurableCategory: doctrine-feedback is true'.
+
+    tempDir := DfbHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    bbs out: 'doctrine-feedback' scope: 'global' identity: 'dfb-r1'
+      payload: ((DfbHelper feedbackTuple: 'dctr-1' verdict: 'up') at: 'payload').
+
+    round := bbs rdp: 'doctrine-feedback' scope: 'global' identity: 'dfb-r1'.
+    t assert: round notNil
+      message: 'FB1: rdp: finds the feedback tuple written via out: (linear, not pinned)'.
+
+    "Durability: flush + fresh load from the same data dir (simulated restart)."
+    bbs flushIfDirty.
+    reloaded := BBS withDataDir: tempDir.
+    round := reloaded rdp: 'doctrine-feedback' scope: 'global' identity: 'dfb-r1'.
+    t assert: round notNil
+      message: 'FB1: feedback tuple survives a fresh BBS load from disk (durable)'.
+    round notNil ifTrue: [
+      t assertEqual: ((round at: 'payload') at: 'verdict' ifAbsent: [nil]) to: 'up'
+        message: 'FB1: reloaded feedback retains verdict=up']
+  ]
+
+  classMethod: testGansoRoundTrip: t [
+    "FB1 (ganso half): deterministic ganso/SQLite coverage every run."
+    | tempDir store d round all |
+    '--- FB1: direct ganso/SQLite round-trip ---' println.
+    tempDir := DfbHelper makeTempDir.
+    store := GansoStore openAt: tempDir, '/tuples.db'.
+    d := Tuple linear: 'doctrine-feedback' scope: 'global' identity: 'dfb-g1'
+      payload: ((DfbHelper feedbackTuple: 'dctr-1' verdict: 'down') at: 'payload') id: 1.
+    store putTuple: d.
+    round := store rdp: 'doctrine-feedback' scope: 'global' identity: 'dfb-g1'.
+    t assert: round notNil
+      message: 'FB1: ganso rdp: finds the feedback tuple'.
+    all := store scanAll: 'doctrine-feedback'.
+    t assertEqual: all size to: 1
+      message: 'FB1: ganso scanAll: doctrine-feedback returns exactly one tuple'
+  ]
+
+  classMethod: testAppendOnlyNoClobber: t [
+    "FB2: two votes on the same doctrine produce TWO tuples (no clobber)."
+    | bbs cli |
+    '--- FB2: two votes => two append-only tuples ---' println.
+    bbs := BBS withDataDir: DfbHelper makeTempDir.
+    DfbHelper seedDoctrine: bbs id: 'dctr-2' scope: 'global' key: 'k2'.
+    cli := TestFeedbackCLI onBbs: bbs.
+    cli cmdFeedback: (DfbHelper feedbackArgs: 'dctr-2' verdict: '--up').
+    cli cmdFeedback: (DfbHelper feedbackArgs: 'dctr-2' verdict: '--up').
+    t assertEqual: cli writeCount to: 2
+      message: 'FB2: two cmdFeedback calls wrote two tuples'.
+    t assertEqual: (bbs scan: 'doctrine-feedback' scope: 'global') size to: 2
+      message: 'FB2: scan shows TWO distinct feedback tuples (append-only, no clobber)'
+  ]
+
+  classMethod: testTallyCounts: t [
+    "FB3: tally counts up/down/net/total for the right doctrine_id."
+    | bbs cli tally pureTally tuples |
+    '--- FB3: tally up/down/net/total ---' println.
+    bbs := BBS withDataDir: DfbHelper makeTempDir.
+    DfbHelper seedDoctrine: bbs id: 'dctr-3' scope: 'global' key: 'k3'.
+    DfbHelper seedDoctrine: bbs id: 'dctr-other' scope: 'global' key: 'other'.
+    cli := TestFeedbackCLI onBbs: bbs.
+    "3 up, 1 down on dctr-3; one up on a DIFFERENT doctrine (must not bleed in)."
+    cli cmdFeedback: (DfbHelper feedbackArgs: 'dctr-3' verdict: '--up').
+    cli cmdFeedback: (DfbHelper feedbackArgs: 'dctr-3' verdict: '--up').
+    cli cmdFeedback: (DfbHelper feedbackArgs: 'dctr-3' verdict: '--up').
+    cli runWith: #('doctrine' 'feedback' 'dctr-3' '--down' '--reason' 'flaky in practice').
+    cli cmdFeedback: (DfbHelper feedbackArgs: 'dctr-other' verdict: '--up').
+
+    tally := cli feedbackTallyFor: 'dctr-3' scope: 'global'.
+    t assertEqual: (tally at: 'up') to: 3 message: 'FB3: up=3'.
+    t assertEqual: (tally at: 'down') to: 1 message: 'FB3: down=1'.
+    t assertEqual: (tally at: 'net') to: 2 message: 'FB3: net=+2'.
+    t assertEqual: (tally at: 'total') to: 4 message: 'FB3: total=4'.
+
+    "Pure tally helper in isolation."
+    tuples := Array new: 0.
+    tuples := tuples copyWith: (DfbHelper feedbackTuple: 'dctr-3' verdict: 'up').
+    tuples := tuples copyWith: (DfbHelper feedbackTuple: 'dctr-3' verdict: 'down').
+    tuples := tuples copyWith: (DfbHelper feedbackTuple: 'dctr-3' verdict: 'down').
+    pureTally := cli tallyFeedbackTuples: tuples forDoctrine: 'dctr-3'.
+    t assertEqual: (pureTally at: 'net') to: -1 message: 'FB3: pure tally net=1up-2down=-1'
+  ]
+
+  classMethod: testTallyEmptyTolerant: t [
+    "FB3: no feedback => all zeros; nil tuples tolerated."
+    | bbs cli tally nilTally |
+    '--- FB3: empty/NULL tolerant tally ---' println.
+    bbs := BBS withDataDir: DfbHelper makeTempDir.
+    cli := TestFeedbackCLI onBbs: bbs.
+    tally := cli feedbackTallyFor: 'dctr-none' scope: 'global'.
+    t assertEqual: (tally at: 'up') to: 0 message: 'FB3: empty up=0'.
+    t assertEqual: (tally at: 'down') to: 0 message: 'FB3: empty down=0'.
+    t assertEqual: (tally at: 'net') to: 0 message: 'FB3: empty net=0'.
+    t assertEqual: (tally at: 'total') to: 0 message: 'FB3: empty total=0'.
+    nilTally := cli tallyFeedbackTuples: nil forDoctrine: 'dctr-none'.
+    t assertEqual: (nilTally at: 'total') to: 0 message: 'FB3: nil tuples => zeros'
+  ]
+
+  classMethod: testDownRequiresReason: t [
+    "FB4: --down without --reason is refused (no write); --up needs no reason."
+    | bbs cli |
+    '--- FB4: --down requires --reason ---' println.
+    bbs := BBS withDataDir: DfbHelper makeTempDir.
+    DfbHelper seedDoctrine: bbs id: 'dctr-4' scope: 'global' key: 'k4'.
+    cli := TestFeedbackCLI onBbs: bbs.
+    cli cmdFeedback: (DfbHelper feedbackArgs: 'dctr-4' verdict: '--down').
+    t assertEqual: cli writeCount to: 0
+      message: 'FB4: --down without --reason wrote NOTHING'.
+    t assert: (cli validateFeedbackUp: false down: true reason: '') notNil
+      message: 'FB4: validate refuses --down with empty reason'.
+
+    "--up needs no reason and DOES write."
+    cli cmdFeedback: (DfbHelper feedbackArgs: 'dctr-4' verdict: '--up').
+    t assertEqual: cli writeCount to: 1
+      message: 'FB4: --up with no reason is accepted and writes'.
+    t assert: (cli validateFeedbackUp: true down: false reason: '') isNil
+      message: 'FB4: validate accepts --up with empty reason'
+  ]
+
+  classMethod: testVerdictMutualExclusionAndRequired: t [
+    "FB5: --up/--down mutually exclusive AND one required."
+    | bbs cli |
+    '--- FB5: --up/--down mutually exclusive + required ---' println.
+    bbs := BBS withDataDir: DfbHelper makeTempDir.
+    DfbHelper seedDoctrine: bbs id: 'dctr-5' scope: 'global' key: 'k5'.
+    cli := TestFeedbackCLI onBbs: bbs.
+
+    "Both flags => refused, no write."
+    cli runWith: #('doctrine' 'feedback' 'dctr-5' '--up' '--down' '--reason' 'x').
+    t assertEqual: cli writeCount to: 0
+      message: 'FB5: both --up and --down wrote NOTHING'.
+    t assert: (cli validateFeedbackUp: true down: true reason: 'x') notNil
+      message: 'FB5: validate refuses both flags'.
+
+    "Neither flag => refused, no write."
+    cli runWith: #('doctrine' 'feedback' 'dctr-5').
+    t assertEqual: cli writeCount to: 0
+      message: 'FB5: neither --up nor --down wrote NOTHING'.
+    t assert: (cli validateFeedbackUp: false down: false reason: '') notNil
+      message: 'FB5: validate refuses neither flag'
+  ]
+
+  classMethod: testAttributionReadsEnv: t [
+    "FB6: auto-attribution reads PP_WORKFLOW / PP_TASK / derived role into payload."
+    | bbs cli payload |
+    '--- FB6: attribution reads PP_TASK/PP_WORKFLOW ---' println.
+    bbs := BBS withDataDir: DfbHelper makeTempDir.
+    DfbHelper seedTask: bbs id: 'task-42' role: 'implementer'.
+    cli := TestFeedbackCLI onBbs: bbs.
+    cli envWf: 'wf-7'.
+    cli envTask: 'task-42'.
+    payload := cli feedbackPayloadForDoctrine: 'dctr-6' scope: 'global'
+      verdict: 'up' reason: ''.
+    t assertEqual: (payload at: 'workflow_instance') to: 'wf-7'
+      message: 'FB6: workflow_instance read from PP_WORKFLOW'.
+    t assertEqual: (payload at: 'task_id') to: 'task-42'
+      message: 'FB6: task_id read from PP_TASK'.
+    t assertEqual: (payload at: 'role') to: 'implementer'
+      message: 'FB6: role derived from the task tuple payload.role'.
+    t assertEqual: (payload at: 'doctrine_scope') to: 'global'
+      message: 'FB6: payload carries the canonical doctrine_scope'
+  ]
+
+  classMethod: testAttributionDegradesUnset: t [
+    "FB6: unset env degrades to '' (task/workflow) and 'manual' (role)."
+    | bbs cli payload |
+    '--- FB6: attribution degrades to ''''/manual when unset ---' println.
+    bbs := BBS withDataDir: DfbHelper makeTempDir.
+    cli := TestFeedbackCLI onBbs: bbs.
+    "envWf/envTask default to nil (unset)."
+    payload := cli feedbackPayloadForDoctrine: 'dctr-6b' scope: 'some-repo'
+      verdict: 'down' reason: 'concrete actionable reason'.
+    t assertEqual: (payload at: 'workflow_instance') to: ''
+      message: 'FB6: workflow_instance degrades to empty when PP_WORKFLOW unset'.
+    t assertEqual: (payload at: 'task_id') to: ''
+      message: 'FB6: task_id degrades to empty when PP_TASK unset'.
+    t assertEqual: (payload at: 'role') to: 'manual'
+      message: 'FB6: role degrades to manual when PP_TASK unset'.
+    t assertEqual: (payload at: 'reason') to: 'concrete actionable reason'
+      message: 'FB6: reason preserved on the payload'
+  ]
+
+  classMethod: testUnknownDoctrineWritesNothing: t [
+    "FB7: an unknown doctrine id warns and writes NOTHING (no orphan vote)."
+    | bbs cli |
+    '--- FB7: unknown doctrine id writes nothing ---' println.
+    bbs := BBS withDataDir: DfbHelper makeTempDir.
+    cli := TestFeedbackCLI onBbs: bbs.
+    cli cmdFeedback: (DfbHelper feedbackArgs: 'dctr-does-not-exist' verdict: '--up').
+    t assertEqual: cli writeCount to: 0
+      message: 'FB7: voting on an unknown doctrine wrote NOTHING'.
+    t assertEqual: (bbs scanAll: 'doctrine-feedback') size to: 0
+      message: 'FB7: no orphan feedback tuple exists'
+  ]
+
+  classMethod: testScopeCanonicalGlobalAcrossRepos: t [
+    "FB8: a GLOBAL doctrine voted from two different voter contexts (different
+     PP_WORKFLOW / --repo) both land in the 'global' feedback scope; the tally at
+     the canonical 'global' scope returns net=+2 (votes are NOT split or lost)."
+    | bbs cliA cliB tally repoATally |
+    '--- FB8: SCOPE — global doctrine, votes from different repos converge ---' println.
+    bbs := BBS withDataDir: DfbHelper makeTempDir.
+    DfbHelper seedDoctrine: bbs id: 'dctr-global' scope: 'global' key: 'global-rule'.
+
+    "Voter A: workflow wf-A, repo repo-a."
+    cliA := TestFeedbackCLI onBbs: bbs.
+    cliA envWf: 'wf-A'.
+    cliA runWith: #('doctrine' 'feedback' 'dctr-global' '--up' '--repo' 'repo-a').
+
+    "Voter B: workflow wf-B, repo repo-b — a DIFFERENT context entirely."
+    cliB := TestFeedbackCLI onBbs: bbs.
+    cliB envWf: 'wf-B'.
+    cliB runWith: #('doctrine' 'feedback' 'dctr-global' '--up' '--repo' 'repo-b').
+
+    "Both votes must land in the CANONICAL 'global' feedback scope."
+    t assertEqual: (bbs scan: 'doctrine-feedback' scope: 'global') size to: 2
+      message: 'FB8: both votes landed in the global feedback scope'.
+    t assertEqual: (bbs scan: 'doctrine-feedback' scope: 'repo-a') size to: 0
+      message: 'FB8: NO vote was split into the voter''s repo-a scope'.
+    t assertEqual: (bbs scan: 'doctrine-feedback' scope: 'repo-b') size to: 0
+      message: 'FB8: NO vote was split into the voter''s repo-b scope'.
+
+    tally := cliA feedbackTallyFor: 'dctr-global' scope: 'global'.
+    t assertEqual: (tally at: 'net') to: 2
+      message: 'FB8: tally at canonical global scope returns net=+2 (no undercount)'.
+
+    "Tallying at a voter repo scope finds nothing — the canonical scope is the
+     only correct one to query."
+    repoATally := cliA feedbackTallyFor: 'dctr-global' scope: 'repo-a'.
+    t assertEqual: (repoATally at: 'net') to: 0
+      message: 'FB8: tally at a voter-repo scope is empty (canonical scope only)'
+  ]
+
+"=== Main ==="
+DoctrineFeedbackMain subclass: Object
+  classMethod: run [
+    | t |
+    t := DfbRunner new.
+    [TestDoctrineFeedback run: t] on: Exception do: [:e |
+      ('TestDoctrineFeedback CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDoctrineFeedback crashed'
+    ].
+    t report.
+    ^t failed
+  ]

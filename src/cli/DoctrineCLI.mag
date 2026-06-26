@@ -40,6 +40,7 @@ DoctrineCLI subclass: Object
     sub = 'list'    ifTrue: [^self cmdList: args].
     sub = 'show'    ifTrue: [^self cmdShow: args].
     sub = 'propose' ifTrue: [^self cmdPropose: args].
+    sub = 'feedback' ifTrue: [^self cmdFeedback: args].
     sub = 'synthesize' ifTrue: [^self cmdSynthesize: args].
     sub = 'crystallize' ifTrue: [^self cmdCrystallize: args].
     sub = 'export' ifTrue: [^self cmdExport: args].
@@ -128,6 +129,31 @@ DoctrineCLI subclass: Object
       result := Json decode: response.
       ^result at: 'tuple' ifAbsent: [nil]
     ] on: Exception do: [:e | ^nil]
+  ]
+
+  method: rdpTask: id [
+    "Return one task tuple by identity (unsigned rdp:), or nil. Used only to
+     derive payload.role for feedback attribution; network/parse-tolerant."
+    | response result |
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/rdp -H "Content-Type: application/json" -d ''{"category":"task","scope":"', self defaultScope, '","identity":"', id, '"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^nil].
+      result := Json decode: response.
+      ^result at: 'tuple' ifAbsent: [nil]
+    ] on: Exception do: [:e | ^nil]
+  ]
+
+  method: scanFeedback: aScope [
+    "Return an Array of doctrine-feedback tuples in a CANONICAL doctrine_scope
+     (best-effort, unsigned). aScope is the doctrine's own doctrine_scope — the
+     scope every vote on that doctrine is written to — never the voter's repo."
+    | response result |
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"doctrine-feedback","scope":"', aScope, '"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^Array new: 0].
+      result := Json decode: response.
+      ^result at: 'tuples' ifAbsent: [Array new: 0]
+    ] on: Exception do: [:e | ^Array new: 0]
   ]
 
   method: cmdList: args [
@@ -269,6 +295,184 @@ DoctrineCLI subclass: Object
     body at: 'repo' put: repo.
     CLIBase signedPost: '/api/task/create' body: body baseUrl: baseUrl.
     ('Strategist task enqueued: ', taskId, ' (scope ', self defaultScope, ') — watch: pp read doctrine ', self defaultScope) println
+  ]
+
+  "--- feedback: the race-free capture layer for votes on doctrine ------
+
+   An agent (or a human) votes up/down on a doctrine entry. Each vote is an
+   APPEND-ONLY tuple with a fresh dfb-<hex> identity — never a read-modify-write
+   of a shared aggregate (which would race when two agents vote at once, the
+   fresh-id-per-write discipline). The vote is written at the doctrine's own
+   doctrine_scope (CANONICAL), NOT the voter's repo/workflow scope: a GLOBAL
+   doctrine can be voted on from any repo, and the ranker aggregates over
+   doctrine_scope, so votes must converge on one scope or they split and
+   feedbackTallyFor: silently undercounts."
+
+  method: validateFeedbackUp: up down: down reason: reason [
+    "Return an error string when the verdict flags are invalid, else nil.
+     Exactly one of --up/--down required (reject both/neither); --down REQUIRES
+     --reason (the actionable verdict — friction by design); --reason is
+     optional on --up."
+    (up and: [down]) ifTrue: [
+      ^'--up and --down are mutually exclusive; specify exactly one.'].
+    (up or: [down]) ifFalse: [
+      ^'specify exactly one of --up / --down.'].
+    (down and: [reason isNil or: [reason isEmpty]]) ifTrue: [
+      ^'--down requires --reason (the actionable verdict; friction by design).'].
+    ^nil
+  ]
+
+  method: feedbackEnvWorkflow [
+    "PP_WORKFLOW (harness-set; nil when unset). Seam for deterministic tests."
+    ^System env: 'PP_WORKFLOW'
+  ]
+
+  method: feedbackEnvTask [
+    "PP_TASK (harness-set; nil when unset). Seam for deterministic tests."
+    ^System env: 'PP_TASK'
+  ]
+
+  method: resolveTaskRole [
+    "Derive the voter's role from the PP_TASK task tuple payload.role. Degrades
+     to 'manual' when PP_TASK is unset OR the task cannot be resolved (env- and
+     network-guarded — a missing server never breaks a manual vote)."
+    | task tuple p role |
+    task := self feedbackEnvTask.
+    (task isNil or: [task isEmpty]) ifTrue: [^'manual'].
+    tuple := self rdpTask: task.
+    tuple isNil ifTrue: [^'manual'].
+    p := tuple at: 'payload' ifAbsent: [nil].
+    (p isKindOf: Dictionary) ifFalse: [^'manual'].
+    role := p at: 'role' ifAbsent: ['manual'].
+    (role isNil or: [role isEmpty]) ifTrue: [^'manual'].
+    ^role
+  ]
+
+  method: feedbackPayloadForDoctrine: doctrineId scope: dscope verdict: verdict
+      reason: reason workflow: wf task: task role: role [
+    "PURE: build a feedback tuple payload. Every attribution field is
+     null-tolerant — a nil env degrades to '' (task/workflow) or 'manual'
+     (role), never a crash. doctrine_scope is the CANONICAL scope this vote is
+     written/tallied at."
+    | p |
+    p := Dictionary new.
+    p at: 'doctrine_id'       put: doctrineId.
+    p at: 'doctrine_scope'    put: dscope.
+    p at: 'verdict'           put: verdict.
+    p at: 'reason'            put: (reason isNil ifTrue: [''] ifFalse: [reason]).
+    p at: 'workflow_instance' put: ((wf isNil or: [wf isEmpty]) ifTrue: [''] ifFalse: [wf]).
+    p at: 'task_id'           put: ((task isNil or: [task isEmpty]) ifTrue: [''] ifFalse: [task]).
+    p at: 'role'              put: ((role isNil or: [role isEmpty]) ifTrue: ['manual'] ifFalse: [role]).
+    p at: 'rated_at'          put: DateTime now epochSeconds.
+    ^p
+  ]
+
+  method: feedbackPayloadForDoctrine: doctrineId scope: dscope verdict: verdict reason: reason [
+    "Auto-attributed wrapper: read PP_WORKFLOW / PP_TASK / derived role from the
+     environment, then delegate to the pure builder."
+    ^self feedbackPayloadForDoctrine: doctrineId scope: dscope verdict: verdict
+        reason: reason
+        workflow: self feedbackEnvWorkflow
+        task: self feedbackEnvTask
+        role: self resolveTaskRole
+  ]
+
+  method: writeFeedbackTuple: id scope: dscope payload: payload [
+    "Signed APPEND-ONLY write of a doctrine-feedback tuple as linear (durable,
+     rdp/scan-visible). Fresh dfb-<hex> identity => never clobbers a prior vote.
+     Scope is the CANONICAL doctrine_scope. Overridable seam for tests."
+    | body |
+    body := Dictionary new.
+    body at: 'category' put: 'doctrine-feedback'.
+    body at: 'scope'    put: dscope.
+    body at: 'identity' put: id.
+    body at: 'modality' put: 'linear'.
+    body at: 'payload'  put: payload.
+    ^CLIBase signedPost: '/api/bbs/put' body: body baseUrl: baseUrl
+  ]
+
+  method: tallyDict: up down: down [
+    "Assemble the {up, down, net, total} tally Dictionary."
+    | d |
+    d := Dictionary new.
+    d at: 'up'    put: up.
+    d at: 'down'  put: down.
+    d at: 'net'   put: up - down.
+    d at: 'total' put: up + down.
+    ^d
+  ]
+
+  method: tallyFeedbackTuples: tuples forDoctrine: doctrineId [
+    "PURE: count up/down votes for doctrineId across the given tuples. NULL/empty
+     tolerant — nil tuples, missing/non-dict payloads, and unknown verdicts are
+     skipped; no votes => all zeros."
+    | up down |
+    up := 0. down := 0.
+    tuples isNil ifFalse: [
+      tuples do: [:t |
+        | p |
+        p := (t isKindOf: Dictionary) ifTrue: [t at: 'payload' ifAbsent: [nil]] ifFalse: [nil].
+        (p isKindOf: Dictionary) ifTrue: [
+          (p at: 'doctrine_id' ifAbsent: [nil]) = doctrineId ifTrue: [
+            | v |
+            v := p at: 'verdict' ifAbsent: [''].
+            v = 'up'   ifTrue: [up := up + 1].
+            v = 'down' ifTrue: [down := down + 1]
+          ]
+        ]
+      ]
+    ].
+    ^self tallyDict: up down: down
+  ]
+
+  method: feedbackTallyFor: doctrineId scope: aScope [
+    "Tally votes for doctrineId at its CANONICAL doctrine_scope. Callers (surface,
+     rank) pass the candidate doctrine's own doctrine_scope so global-doctrine
+     votes cast from any repo are counted together, never split. Scans the
+     'doctrine-feedback' category in that scope and counts by verdict."
+    ^self tallyFeedbackTuples: (self scanFeedback: aScope) forDoctrine: doctrineId
+  ]
+
+  method: cmdFeedback: args [
+    "pp doctrine feedback <id> --up|--down [--reason R] [--repo R]
+     Record an APPEND-ONLY vote on a doctrine at the doctrine's CANONICAL
+     doctrine_scope, attributed to the current task/workflow (or 'manual')."
+    | id up down reason err tuple p dscope verdict payload fbId key |
+    args size < 3 ifTrue: [
+      'Usage: pp doctrine feedback <id> --up|--down [--reason R]' println.
+      ^self
+    ].
+    id := args at: 3.
+    up := self hasFlag: '--up' in: args.
+    down := self hasFlag: '--down' in: args.
+    reason := self flagValue: '--reason' in: args.
+    reason isNil ifTrue: [reason := ''].
+
+    "Validate verdict flags BEFORE any network/write — no orphan/partial vote."
+    err := self validateFeedbackUp: up down: down reason: reason.
+    err notNil ifTrue: [('Refused: ', err) println. ^self].
+
+    "Resolve the doctrine; refuse to write an orphan vote against an unknown id."
+    self applyScopeFlagFrom: args.
+    tuple := self rdpDoctrine: id.
+    tuple isNil ifTrue: [
+      ('Not found: ', id, ' — no vote recorded (refusing to orphan-vote).') println.
+      ^self
+    ].
+    p := tuple at: 'payload' ifAbsent: [Dictionary new].
+
+    "CANONICAL scope := the doctrine's own doctrine_scope (NOT the voter's repo)."
+    dscope := p at: 'doctrine_scope' ifAbsent: ['global'].
+    (dscope isNil or: [dscope isEmpty]) ifTrue: [dscope := 'global'].
+
+    verdict := up ifTrue: ['up'] ifFalse: ['down'].
+    payload := self feedbackPayloadForDoctrine: id scope: dscope verdict: verdict reason: reason.
+    fbId := 'dfb-', ((ClaimId generate) at: 'hex').
+    self writeFeedbackTuple: fbId scope: dscope payload: payload.
+
+    key := p at: 'key' ifAbsent: [''].
+    (key isNil or: [key isEmpty]) ifTrue: [key := id].
+    ('recorded ', verdict, ' on doctrine "', key, '" (scope ', dscope, ', ', fbId, ')') println
   ]
 
   "--- crystallize: the loop-closing forward edge -----------------------
@@ -738,6 +942,9 @@ DoctrineCLI subclass: Object
     '  show <id> [--scope S]                         Show one entry' println.
     '  propose "<principle>" [--rationale R] [--applies global|repo|repo:path]' println.
     '                        [--tags t1,t2] [--confidence C] [--key name]' println.
+    '  feedback <id> --up|--down [--reason R]       Record an append-only vote on a doctrine. Exactly one of' println.
+    '                        --up/--down (--reason REQUIRED on --down); written at the doctrine''s canonical' println.
+    '                        doctrine_scope and auto-attributed to PP_TASK/PP_WORKFLOW (or ''manual'').' println.
     '  synthesize [--repo R]                        Enqueue a Strategist to propose doctrine from cases' println.
     '  crystallize <id> --as workitem [--title T] [--type story|epic] [--repo R] [--template-change]' println.
     '                        Spawn a derivative work item from doctrine (the loop-closing forward edge):' println.

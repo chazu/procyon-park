@@ -8,6 +8,20 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Doctrine feedback capture + tally — the race-free layer for agent votes on
+  doctrine. New `doctrine-feedback` tuple category (linear + durable, NOT pinned;
+  added to `Categories>>valid` and `BBS>>isDurableCategory:`) and
+  `pp doctrine feedback <id> --up|--down [--reason R]`. Each vote is an
+  APPEND-ONLY fresh `dfb-<hex>` tuple (never a read-modify-write of a shared
+  aggregate), so concurrent votes never race/clobber. Votes are written at the
+  doctrine's OWN `doctrine_scope` (canonical) — a global doctrine voted on from
+  any repo converges on the `global` feedback scope rather than splitting — and
+  auto-attributed to `PP_TASK`/`PP_WORKFLOW` (degrading to `''`/`manual` when
+  unset). Exactly one of `--up`/`--down` is required and `--reason` is mandatory
+  on `--down` (friction by design). The pure `feedbackTallyFor:scope:` helper
+  returns `{up, down, net, total}` over that same canonical scope (empty/NULL
+  tolerant). New `test/cli/test_doctrine_feedback.mag` suite wired into
+  `CombinedTestMain`.
 - Automatic doctrine synthesis (C2 loop-closure). The Dispatcher now re-orients
   the doctrine layer on its own: every ~5min (`Dispatcher>>maybeAutoSynthesize`,
   alongside housekeeping) it buckets `case` (AAR) tuples by scope and, for any

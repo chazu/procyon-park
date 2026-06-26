@@ -930,8 +930,13 @@ BBS subclass: Object
      restart. It is deliberately NOT in Categories>>pinned — entries are
      written/mutated via out:/update: directly so rdp:-based existence and
      maturity-flip checks remain valid (the generic pinned put path writes
-     tuples invisible to rdp:). See docs/design-doctrine-layer.md."
-    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem' 'identity' 'case' 'doctrine') includes: category
+     tuples invisible to rdp:). See docs/design-doctrine-layer.md.
+
+     'doctrine-feedback' is the same shape: linear + durable, NOT pinned. It is
+     append-only — each agent vote on a doctrine is a fresh dfb-<hex> tuple, so
+     concurrent votes never race/clobber a shared aggregate. Durable so votes
+     survive a server restart and a later tally counts the full history."
+    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem' 'identity' 'case' 'doctrine' 'doctrine-feedback') includes: category
   ]
 
   method: persistAfterChange [
