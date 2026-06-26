@@ -99,7 +99,11 @@ TestDoctrineCrystallize subclass: Object
     self testResolveNullTolerant: t.
     self testRenderHelpers: t.
     self testGansoRoundTrip: t.
-    self testCliCrystallizeHelpers: t
+    self testCliCrystallizeHelpers: t.
+    self testConventionCrystallizeRoundTrip: t.
+    self testCrystallizeAffirmationGate: t.
+    self testConventionDistillation: t.
+    self testConventionIsPinned: t
   ]
 
   classMethod: testCliCrystallizeHelpers: t [
@@ -175,6 +179,134 @@ TestDoctrineCrystallize subclass: Object
     cli appendWorkitemLink: payload scope: 'myrepo' identity: 'wi-crystal-1'.
     t assertEqual: (DoctrineWriter linksOf: payload) size to: 1
       message: 'CX8g: appendWorkitemLink is idempotent (no duplicate link)'
+  ]
+
+  classMethod: seedActiveDoctrine: bbs scope: scope identity: id [
+    "Seed an ACTIVE doctrine with a principle + rationale (crystallize precond)."
+    | p |
+    p := Dictionary new.
+    p at: 'key' put: 'no-bare-insert'.
+    p at: 'principle' put: 'Mint a fresh unique identity per append-only write.'.
+    p at: 'rationale' put: 'bare INSERT clobbers active entries on re-run.'.
+    p at: 'maturity' put: 'active'.
+    p at: 'crystallized_into' put: (Array new: 0).
+    bbs out: 'doctrine' scope: scope identity: id payload: p
+  ]
+
+  classMethod: testConventionCrystallizeRoundTrip: t [
+    "CX8: crystallize doctrine -> convention link is set and the doctrine stays
+     ACTIVE; decrystallize (uncrystallize:) clears the link, doctrine still
+     active. Mirrors the CLI read-modify-write at the engine level."
+    | tempDir bbs links reloaded p |
+    '--- CX8: convention crystallize/decrystallize keeps doctrine active ---' println.
+    tempDir := DcxHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    self seedActiveDoctrine: bbs scope: 'global' identity: 'dctr-cv'.
+
+    "Crystallize into a convention link."
+    DoctrineWriter crystallize: bbs scope: 'global' identity: 'dctr-cv'
+      into: 'convention' linkScope: 'global' linkIdentity: 'conv-cv1'.
+    p := (bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-cv') at: 'payload'.
+    links := DoctrineWriter linksOf: p.
+    t assertEqual: links size to: 1
+      message: 'CX8: crystallized_into has the convention link'.
+    t assertEqual: (p at: 'maturity' ifAbsent: ['?']) to: 'active'
+      message: 'CX8: doctrine maturity remains active after crystallize'.
+
+    "Decrystallize: clear the link; doctrine remains active."
+    DoctrineWriter uncrystallize: bbs scope: 'global' identity: 'dctr-cv'
+      from: 'convention' linkScope: 'global' linkIdentity: 'conv-cv1'.
+    p := (bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-cv') at: 'payload'.
+    links := DoctrineWriter linksOf: p.
+    t assertEqual: links size to: 0
+      message: 'CX8: decrystallize clears the convention link'.
+    t assertEqual: (p at: 'maturity' ifAbsent: ['?']) to: 'active'
+      message: 'CX8: doctrine maturity still active after decrystallize'.
+
+    "Durable across reload."
+    bbs flushIfDirty.
+    reloaded := BBS withDataDir: tempDir.
+    links := DoctrineWriter linksOf: ((reloaded rdp: 'doctrine' scope: 'global' identity: 'dctr-cv') at: 'payload').
+    t assertEqual: links size to: 0
+      message: 'CX8: cleared link survives reload'
+  ]
+
+  classMethod: testCrystallizeAffirmationGate: t [
+    "CX9: the four-clause affirmation gate. ALL FOUR flags required; any missing
+     flag refuses (allAffirmed: false)."
+    | cli all three none missing |
+    '--- CX9: four-clause affirmation gate ---' println.
+    cli := DoctrineCLI new.
+
+    "Empty args -> none affirmed, four missing, refused."
+    none := Array new: 0.
+    t assert: (cli allAffirmed: none) not
+      message: 'CX9: no flags -> not affirmed (refused)'.
+    t assertEqual: (cli missingAffirmations: none) size to: 4
+      message: 'CX9: all four clauses missing when no flags given'.
+
+    "Only three of four -> still refused."
+    three := Array new: 0.
+    three := three copyWith: '--affirm-unconditional'.
+    three := three copyWith: '--affirm-no-false-positive'.
+    three := three copyWith: '--affirm-mechanical'.
+    t assert: (cli allAffirmed: three) not
+      message: 'CX9: three of four flags -> still refused'.
+    missing := cli missingAffirmations: three.
+    t assertEqual: missing size to: 1
+      message: 'CX9: exactly one clause missing with three flags'.
+    t assertEqual: ((missing at: 1) at: 'flag') to: '--affirm-evidence'
+      message: 'CX9: the missing clause is the evidence one'.
+
+    "All four -> affirmed (passes)."
+    all := Array new: 0.
+    all := all copyWith: 'crystallize'.
+    all := all copyWith: 'dctr-x'.
+    all := all copyWith: '--affirm-unconditional'.
+    all := all copyWith: '--affirm-no-false-positive'.
+    all := all copyWith: '--affirm-mechanical'.
+    all := all copyWith: '--affirm-evidence'.
+    t assert: (cli allAffirmed: all)
+      message: 'CX9: all four flags -> affirmed (gate passes)'.
+    t assertEqual: (cli missingAffirmations: all) size to: 0
+      message: 'CX9: nothing missing when all four flags present'
+  ]
+
+  classMethod: testConventionDistillation: t [
+    "CX10: a convention payload distilled from doctrine carries the principle as
+     the terse binding `detail` (the field Role.mag renders), is marked binding,
+     and back-links to the source doctrine."
+    | cli dp conv from |
+    '--- CX10: convention distilled from doctrine ---' println.
+    cli := DoctrineCLI new.
+    dp := Dictionary new.
+    dp at: 'principle' put: 'Mint a fresh unique identity per append-only write.'.
+    dp at: 'rationale' put: 'the long why stays on the doctrine.'.
+    dp at: 'key' put: 'no-bare-insert'.
+
+    conv := cli conventionPayloadFrom: dp doctrineId: 'dctr-z'.
+    t assertEqual: (conv at: 'detail' ifAbsent: [nil]) to: 'Mint a fresh unique identity per append-only write.'
+      message: 'CX10: detail == doctrine principle (terse binding statement)'.
+    t assertEqual: (conv at: 'binding' ifAbsent: [nil]) to: true
+      message: 'CX10: convention is marked binding'.
+    from := conv at: 'crystallized_from' ifAbsent: [nil].
+    t assert: (from notNil)
+      message: 'CX10: convention back-links to its source doctrine'.
+    t assertEqual: (from at: 'identity' ifAbsent: [nil]) to: 'dctr-z'
+      message: 'CX10: back-link identity is the source doctrine id'.
+    t assertEqual: (from at: 'category' ifAbsent: [nil]) to: 'doctrine'
+      message: 'CX10: back-link category is doctrine'
+  ]
+
+  classMethod: testConventionIsPinned: t [
+    "CX11: conventions MUST be written via the pinned path (so scanAll: convention
+     surfaces them to the Role consumer). Guard the requirement at the category
+     level: 'convention' is pinned; 'doctrine' is NOT."
+    '--- CX11: convention is a pinned category (doctrine is not) ---' println.
+    t assert: (Categories isPinned: 'convention')
+      message: 'CX11: convention is in the pinned category list'.
+    t assert: (Categories isPinned: 'doctrine') not
+      message: 'CX11: doctrine is NOT pinned (linear+durable, written via out:)'
   ]
 
   classMethod: testAppendDurableAndIdempotent: t [

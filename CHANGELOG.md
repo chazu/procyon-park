@@ -8,6 +8,20 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- `pp doctrine crystallize <id> --as convention` — the RARE, human-only
+  advisory→binding transition. Converts a matured (`active`) doctrine into a
+  BINDING convention, the only verb that changes binding status. Gated behind a
+  strict four-clause QUALIFICATION TEST that must be affirmed in full —
+  `--affirm-unconditional --affirm-no-false-positive --affirm-mechanical
+  --affirm-evidence` (the friction is by design; a wrong convention taxes every
+  agent on every task). It never auto-fires and is never Strategist-proposed. On
+  pass it writes the convention via the same PINNED path existing conventions use
+  (so `bbs scanAll: convention` surfaces it to the execution-time Role consumer)
+  and records the forward `crystallized_into` link doctrine→convention; the
+  doctrine is kept as the rationale/lineage source (maturity untouched).
+  `pp doctrine decrystallize <id> --convention <convId>` reverses it: retires the
+  convention and clears the matching link, restoring the doctrine to
+  purely-advisory.
 - Doctrine now carries a forward provenance edge, `crystallized_into`, completing
   the C2 lineage `case → doctrine → {convention | workitem}`. A doctrine payload
   gains a `crystallized_into: [ {category, scope, identity} ]` array (mirror of
