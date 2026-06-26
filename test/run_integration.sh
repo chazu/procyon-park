@@ -13,5 +13,8 @@ echo "=== auto bootstrap ==="
 echo "=== invite end-to-end ==="
 ./test/test_invite_e2e.sh
 
+echo "=== doctrine CLI end-to-end ==="
+./test/test_doctrine_cli_e2e.sh
+
 echo ""
 echo "All integration tests passed."

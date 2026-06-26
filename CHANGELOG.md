@@ -8,6 +8,17 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- End-to-end / dispatch-level integration test for the `pp doctrine` CLI
+  (`test/test_doctrine_cli_e2e.sh`, wired into `test/run_integration.sh`). It
+  builds `pp` under a scratch HOME, starts a live server, and drives every
+  subcommand reachable via `DoctrineCLI>>runWith:` (propose → list → show →
+  promote → crystallize `--as workitem` → crystallize `--as convention` with and
+  without the four `--affirm-*` flags → decrystallize → retire → reject). The
+  critical assertion is that BOTH `crystallize --as workitem` AND
+  `--as convention` reach their own logic — closing the gap that let a
+  duplicate-`cmdCrystallize:` merge silently shadow the workitem handler and ship
+  (fixed in 33db668). A cheap structural guard additionally fails the suite if
+  any `DoctrineCLI` selector is defined twice.
 - `pp doctrine crystallize <id> --as convention` — the RARE, human-only
   advisory→binding transition. Converts a matured (`active`) doctrine into a
   BINDING convention, the only verb that changes binding status. Gated behind a
