@@ -46,7 +46,6 @@ DoctrineCLI subclass: Object
     sub = 'promote' ifTrue: [^self cmdSetMaturity: args to: 'active'].
     sub = 'retire'  ifTrue: [^self cmdSetMaturity: args to: 'retired'].
     sub = 'reject'  ifTrue: [^self cmdSetMaturity: args to: 'rejected'].
-    sub = 'crystallize'   ifTrue: [^self cmdCrystallize: args].
     sub = 'decrystallize' ifTrue: [^self cmdDecrystallize: args].
     (sub = 'help' or: [sub = '--help']) ifTrue: [^self printUsage].
     ('Unknown doctrine command: ', sub) println.
@@ -379,8 +378,9 @@ DoctrineCLI subclass: Object
     id := args at: 3.
     as := self flagValue: '--as' in: args.
     as isNil ifTrue: [as := 'workitem'].
+    as = 'convention' ifTrue: [^self crystallizeAsConvention: args].
     as = 'workitem' ifFalse: [
-      ('Error: unsupported crystallization target --as ', as, '. Only --as workitem is supported.') println.
+      ('Error: unsupported crystallization target --as ', as, '. Use --as workitem or --as convention.') println.
       ^self
     ].
     self applyScopeFlagFrom: args.
@@ -614,7 +614,7 @@ DoctrineCLI subclass: Object
     ^found
   ]
 
-  method: cmdCrystallize: args [
+  method: crystallizeAsConvention: args [
     "pp doctrine crystallize <id> --as convention
          --affirm-unconditional --affirm-no-false-positive
          --affirm-mechanical --affirm-evidence [--repo R]
