@@ -85,8 +85,9 @@ DctrHelper subclass: Object
 
   classMethod: samplePayload [
     "A full doctrine payload per the design data model — exercises nested
-     arrays (tags) and an array-of-dicts (provenance) through JSON encode/decode."
-    | p tags prov src |
+     arrays (tags) and array-of-dicts (provenance BACKWARD edge +
+     crystallized_into FORWARD edge) through JSON encode/decode."
+    | p tags prov src crys link |
     p := Dictionary new.
     p at: 'key'        put: 'prefer-linear-durable-over-pinned'.
     p at: 'principle'  put: 'Write durable institutional memory via out:/update:, not the pinned put path.'.
@@ -104,6 +105,15 @@ DctrHelper subclass: Object
     prov := Array new: 0.
     prov := prov copyWith: src.
     p at: 'provenance' put: prov.
+    "crystallized_into — FORWARD edge mirror of provenance: a scope-qualified
+     {category,scope,identity} link to a downstream artifact."
+    link := Dictionary new.
+    link at: 'category' put: 'convention'.
+    link at: 'scope'    put: 'global'.
+    link at: 'identity' put: 'conv-1'.
+    crys := Array new: 0.
+    crys := crys copyWith: link.
+    p at: 'crystallized_into' put: crys.
     p at: 'confidence' put: 0.
     p at: 'created_at' put: 1700000000.
     p at: 'updated_at' put: 1700000000.
@@ -128,7 +138,17 @@ DctrHelper subclass: Object
       | prov0 |
       prov0 := (payload at: 'provenance') at: 1.
       t assertEqual: (prov0 at: 'identity' ifAbsent: [nil]) to: 'cw-1'
-        message: pre, ': provenance[0].identity preserved (nested dict)']
+        message: pre, ': provenance[0].identity preserved (nested dict)'].
+    "crystallized_into — FORWARD edge round-trips identically to provenance."
+    t assertEqual: ((payload at: 'crystallized_into' ifAbsent: [#()]) size) to: 1
+      message: pre, ': crystallized_into array preserved (1 entry)'.
+    ((payload at: 'crystallized_into' ifAbsent: [#()]) size = 1) ifTrue: [
+      | crys0 |
+      crys0 := (payload at: 'crystallized_into') at: 1.
+      t assertEqual: (crys0 at: 'category' ifAbsent: [nil]) to: 'convention'
+        message: pre, ': crystallized_into[0].category preserved (nested dict)'.
+      t assertEqual: (crys0 at: 'identity' ifAbsent: [nil]) to: 'conv-1'
+        message: pre, ': crystallized_into[0].identity preserved (nested dict)']
   ]
 
 "--- gc-exemption harness: inject an in-memory BBS into SystemCommands so

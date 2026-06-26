@@ -84,9 +84,29 @@ payload:
   maturity:    proposed | active | retired | rejected
   provenance:  [ {scope, identity}, ... ]  # source cases; scope-qualified, may
                                            # dangle after case GC → resolution must be null-tolerant
+  crystallized_into: [ {category, scope, identity}, ... ]
+                                           # FORWARD C2 edge — mirror of provenance,
+                                           # opposite direction: the downstream artifacts
+                                           # (convention | workitem) this doctrine
+                                           # crystallized into. Defaults to []. Scope-
+                                           # qualified; a target may DANGLE if the
+                                           # convention/workitem is later removed →
+                                           # resolution must be null-tolerant (mirror
+                                           # provenance handling), never crash.
   confidence:  0..1
   created_at, updated_at, promoted_at
 ```
+
+`provenance` and `crystallized_into` together make the lineage legible in both
+directions — `case → doctrine → {convention | workitem}` — so a binding rule can
+be traced back to the after-action reports that produced it and forward to the
+artifacts it shaped. Appends to `crystallized_into` are **idempotent** (no
+duplicate link for the same `{category, scope, identity}`) and go through the
+engine-side `DoctrineWriter>>crystallize:scope:identity:into:linkScope:linkIdentity:`
+helper, which mutates the durable tuple via `BBS>>update:` (replace-by-key) —
+the same mechanism the maturity ladder uses. The verbs that *populate* the edge
+(`to-convention`, `to-workitem`) are separate stories; this layer is only the
+link substrate.
 
 ## Pipeline skeleton
 

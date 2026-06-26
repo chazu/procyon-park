@@ -169,7 +169,25 @@ DoctrineCLI subclass: Object
     ('confidence: ', (p at: 'confidence' ifAbsent: ['']) printString) println.
     ('principle:  ', (p at: 'principle' ifAbsent: [''])) println.
     ('rationale:  ', (p at: 'rationale' ifAbsent: [''])) println.
-    ('provenance: ', (p at: 'provenance' ifAbsent: [Array new: 0]) printString) println
+    ('provenance: ', (p at: 'provenance' ifAbsent: [Array new: 0]) printString) println.
+    "crystallized_into — the forward C2 edge: downstream artifacts this doctrine
+     crystallized into (convention | workitem). NULL-TOLERANT: missing field or a
+     dangling target (artifact later removed) renders gracefully, never crashes."
+    self showCrystallizedInto: p
+  ]
+
+  method: showCrystallizedInto: p [
+    "Render the crystallized_into down-stream artifacts of a doctrine payload."
+    | links |
+    links := DoctrineWriter linksOf: p.
+    links isEmpty ifTrue: [
+      'crystallized_into: (none)' println.
+      ^self
+    ].
+    'crystallized_into:' println.
+    links do: [:l |
+      ('  -> ', (DoctrineWriter formatLink: l)) println
+    ]
   ]
 
   "--- writes (signed) --------------------------------------------------"
@@ -220,6 +238,10 @@ DoctrineCLI subclass: Object
     payload at: 'tags' put: tags.
     payload at: 'maturity' put: 'proposed'.
     payload at: 'provenance' put: (Array new: 0).
+    "crystallized_into — the forward C2 edge (doctrine -> {convention|workitem}).
+     Mirror of provenance, opposite direction. Starts empty; the to-convention /
+     to-workitem verbs populate it later via DoctrineWriter>>crystallize:..."
+    payload at: 'crystallized_into' put: (Array new: 0).
     conf notNil ifTrue: [payload at: 'confidence' put: conf].
     payload at: 'created_at' put: DateTime now epochSeconds.
 

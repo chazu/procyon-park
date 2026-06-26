@@ -1,0 +1,102 @@
+"DoctrineWriter — engine-side, pure consumer of doctrine writes.
+
+ Operates on a BBS instance DIRECTLY via out:/update: (never the signed CLI
+ path). This is the engine-side counterpart to DoctrineCLI's read-modify-write
+ maturity transitions (cmdSetMaturity:to:), but it mutates the durable doctrine
+ tuple in-process rather than over a signed HTTP POST.
+
+ This story adds the crystallized_into LINK SUBSTRATE — the forward C2 edge that
+ completes the doctrine lineage:
+
+     case  --provenance-->  doctrine  --crystallized_into-->  {convention | workitem}
+
+ provenance points BACKWARD (doctrine -> source cases); crystallized_into is its
+ mirror, pointing FORWARD (doctrine -> the artifacts it crystallized into). Each
+ link is a scope-qualified {category, scope, identity} reference.
+
+ NOTE: this story ONLY adds the substrate (append + null-tolerant resolution).
+ The verbs that POPULATE it (doctrine to-convention, doctrine to-workitem) are
+ separate stories. See docs/design-doctrine-layer.md §Data model."
+
+DoctrineWriter subclass: Object
+
+  classMethod: crystallize: bbs scope: scope identity: identity into: linkCategory linkScope: linkScope linkIdentity: linkIdentity [
+    "Idempotently append a crystallized_into link {category,scope,identity} to a
+     doctrine tuple, addressed by its unique identity, via BBS>>update:
+     (replace-by-key on the durable category — same mechanism maturity
+     transitions use).
+
+     Idempotent: a link whose {category,scope,identity} already exists is never
+     duplicated. The tuple's updated_at is bumped ONLY when a new link is added,
+     so a no-op crystallize leaves the tuple byte-identical.
+
+     Returns the new tuple id, or nil if no doctrine tuple was found at
+     (scope, identity) — callers must tolerate nil."
+    ^bbs update: 'doctrine' scope: scope identity: identity do: [:p |
+      | links exists link |
+      links := p at: 'crystallized_into' ifAbsent: [nil].
+      "NULL-TOLERANT: a legacy tuple may lack the field, or carry a non-array
+       value — coerce to an empty array rather than crash."
+      (links isNil or: [(links isKindOf: Array) not]) ifTrue: [links := Array new: 0].
+      exists := false.
+      links do: [:l |
+        ((l isKindOf: Dictionary)
+          and: [(l at: 'category' ifAbsent: [nil]) = linkCategory
+          and: [(l at: 'scope'    ifAbsent: [nil]) = linkScope
+          and: [(l at: 'identity' ifAbsent: [nil]) = linkIdentity]]])
+            ifTrue: [exists := true]].
+      exists ifFalse: [
+        link := Dictionary new.
+        link at: 'category' put: linkCategory.
+        link at: 'scope'    put: linkScope.
+        link at: 'identity' put: linkIdentity.
+        links := links copyWith: link.
+        p at: 'crystallized_into' put: links.
+        p at: 'updated_at' put: DateTime now epochSeconds]]
+  ]
+
+  classMethod: linksOf: payload [
+    "Return the crystallized_into Array from a doctrine payload, NULL-TOLERANT:
+     a missing field or a non-array value resolves to an empty Array, never a
+     crash."
+    | links |
+    payload isNil ifTrue: [^Array new: 0].
+    links := payload at: 'crystallized_into' ifAbsent: [nil].
+    (links isNil or: [(links isKindOf: Array) not]) ifTrue: [^Array new: 0].
+    ^links
+  ]
+
+  classMethod: resolve: bbs links: links [
+    "Resolve each crystallized_into link to its downstream artifact tuple via
+     rdp:, NULL-TOLERANT: a link whose target (convention/workitem) was removed
+     dangles — its `target` resolves to nil and readers MUST tolerate it, never
+     crash. Returns an Array of Dictionaries: {link, target} where target may be
+     nil for a dangling link."
+    | out |
+    out := Array new: 0.
+    (links isNil or: [(links isKindOf: Array) not]) ifTrue: [^out].
+    links do: [:l |
+      | cat sc id target entry |
+      (l isKindOf: Dictionary) ifTrue: [
+        cat := l at: 'category' ifAbsent: [nil].
+        sc  := l at: 'scope'    ifAbsent: [nil].
+        id  := l at: 'identity' ifAbsent: [nil].
+        target := nil.
+        (cat notNil and: [sc notNil and: [id notNil]]) ifTrue: [
+          target := [bbs rdp: cat scope: sc identity: id]
+            on: Exception do: [:e | nil]].
+        entry := Dictionary new.
+        entry at: 'link'   put: l.
+        entry at: 'target' put: target.
+        out := out copyWith: entry]].
+    ^out
+  ]
+
+  classMethod: formatLink: link [
+    "Render one crystallized_into link as `category:scope:identity`, NULL-TOLERANT
+     about missing fields (rendered as '?')."
+    (link isKindOf: Dictionary) ifFalse: [^'?'].
+    ^(link at: 'category' ifAbsent: ['?']), ':',
+     (link at: 'scope'    ifAbsent: ['?']), ':',
+     (link at: 'identity' ifAbsent: ['?'])
+  ]

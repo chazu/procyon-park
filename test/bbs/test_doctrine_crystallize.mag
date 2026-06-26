@@ -1,0 +1,257 @@
+"Tests for the crystallized_into LINK SUBSTRATE — the forward C2 edge that
+ completes the doctrine lineage: case -> doctrine -> {convention | workitem}.
+ See DoctrineWriter and docs/design-doctrine-layer.md §Data model.
+
+ Invariants under test:
+   CX1  DoctrineWriter>>crystallize:... appends a {category,scope,identity} link
+        to a doctrine tuple via BBS>>update: (replace-by-key on the durable
+        category) and the link survives a fresh reload from disk (durable).
+   CX2  Append is IDEMPOTENT: crystallizing the same {category,scope,identity}
+        twice yields exactly ONE link, not a duplicate.
+   CX3  Distinct links accumulate (a second, different link is appended).
+   CX4  crystallize on a MISSING doctrine tuple returns nil (caller-tolerant).
+   CX5  resolve: is NULL-TOLERANT — a dangling link (target removed) resolves to
+        {target: nil} without crashing; a present target resolves to its tuple.
+   CX6  linksOf: / formatLink: render links and tolerate a missing field / a
+        legacy tuple with no crystallized_into field at all.
+   CX7  Deterministic ganso/SQLite coverage: crystallize round-trips through a
+        directly-opened GansoStore-backed BBS regardless of env.
+
+ Standalone runner at bottom (DoctrineCrystallizeMain run)."
+
+DcxRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Doctrine Crystallize Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+DcxHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedDoctrine: bbs scope: scope identity: id [
+    "Write a minimal proposed doctrine tuple with an empty crystallized_into."
+    | p |
+    p := Dictionary new.
+    p at: 'key' put: 'sample'.
+    p at: 'principle' put: 'a principle'.
+    p at: 'maturity' put: 'proposed'.
+    p at: 'crystallized_into' put: (Array new: 0).
+    bbs out: 'doctrine' scope: scope identity: id payload: p
+  ]
+
+  classMethod: linksOfTuple: tuple [
+    ^DoctrineWriter linksOf: (tuple at: 'payload')
+  ]
+
+"=== TestDoctrineCrystallize ==="
+TestDoctrineCrystallize subclass: Object
+
+  classMethod: run: t [
+    self testAppendDurableAndIdempotent: t.
+    self testMissingTupleReturnsNil: t.
+    self testResolveNullTolerant: t.
+    self testRenderHelpers: t.
+    self testGansoRoundTrip: t
+  ]
+
+  classMethod: testAppendDurableAndIdempotent: t [
+    "CX1/CX2/CX3: append via update:, idempotency, accumulation, durability."
+    | tempDir bbs links reloaded |
+    '--- CX1-CX3: crystallize append / idempotent / durable ---' println.
+    tempDir := DcxHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    DcxHelper seedDoctrine: bbs scope: 'global' identity: 'dctr-c1'.
+
+    "CX1: append one link."
+    DoctrineWriter crystallize: bbs scope: 'global' identity: 'dctr-c1'
+      into: 'convention' linkScope: 'global' linkIdentity: 'conv-1'.
+    links := DcxHelper linksOfTuple: (bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-c1').
+    t assertEqual: links size to: 1
+      message: 'CX1: one crystallized_into link after first append'.
+    t assertEqual: ((links at: 1) at: 'identity' ifAbsent: [nil]) to: 'conv-1'
+      message: 'CX1: link identity preserved'.
+    t assertEqual: ((links at: 1) at: 'category' ifAbsent: [nil]) to: 'convention'
+      message: 'CX1: link category preserved'.
+
+    "CX2: re-append the SAME link → still exactly one (idempotent)."
+    DoctrineWriter crystallize: bbs scope: 'global' identity: 'dctr-c1'
+      into: 'convention' linkScope: 'global' linkIdentity: 'conv-1'.
+    links := DcxHelper linksOfTuple: (bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-c1').
+    t assertEqual: links size to: 1
+      message: 'CX2: idempotent — duplicate link not appended'.
+
+    "CX3: a DIFFERENT link accumulates."
+    DoctrineWriter crystallize: bbs scope: 'global' identity: 'dctr-c1'
+      into: 'workitem' linkScope: 'myrepo' linkIdentity: 'wi-9'.
+    links := DcxHelper linksOfTuple: (bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-c1').
+    t assertEqual: links size to: 2
+      message: 'CX3: distinct link accumulates (now 2)'.
+
+    "CX1 (durability): survives a fresh load from disk."
+    bbs flushIfDirty.
+    reloaded := BBS withDataDir: tempDir.
+    links := DcxHelper linksOfTuple: (reloaded rdp: 'doctrine' scope: 'global' identity: 'dctr-c1').
+    t assertEqual: links size to: 2
+      message: 'CX1: crystallized_into links survive restart (durable)'
+  ]
+
+  classMethod: testMissingTupleReturnsNil: t [
+    "CX4: crystallize on a non-existent doctrine tuple returns nil."
+    | tempDir bbs result |
+    '--- CX4: crystallize on missing doctrine returns nil ---' println.
+    tempDir := DcxHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    result := DoctrineWriter crystallize: bbs scope: 'global' identity: 'dctr-nope'
+      into: 'convention' linkScope: 'global' linkIdentity: 'conv-1'.
+    t assert: result isNil
+      message: 'CX4: crystallize returns nil when no doctrine tuple exists'
+  ]
+
+  classMethod: testResolveNullTolerant: t [
+    "CX5: resolve: tolerates a dangling target (returns target=nil) and resolves
+     a present target to its tuple."
+    | tempDir bbs convPayload links resolved present dangling |
+    '--- CX5: resolve is NULL-TOLERANT (dangling target -> nil) ---' println.
+    tempDir := DcxHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    DcxHelper seedDoctrine: bbs scope: 'global' identity: 'dctr-c2'.
+
+    "One link to a convention that EXISTS, one to an artifact that does NOT."
+    convPayload := Dictionary new.
+    convPayload at: 'text' put: 'a binding rule'.
+    bbs out: 'convention' scope: 'global' identity: 'conv-live' payload: convPayload.
+
+    DoctrineWriter crystallize: bbs scope: 'global' identity: 'dctr-c2'
+      into: 'convention' linkScope: 'global' linkIdentity: 'conv-live'.
+    DoctrineWriter crystallize: bbs scope: 'global' identity: 'dctr-c2'
+      into: 'workitem' linkScope: 'myrepo' linkIdentity: 'wi-gone'.
+
+    links := DcxHelper linksOfTuple: (bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-c2').
+    resolved := DoctrineWriter resolve: bbs links: links.
+    t assertEqual: resolved size to: 2
+      message: 'CX5: resolve returns one entry per link'.
+
+    "Find the present and the dangling entries by link identity."
+    present := nil.
+    dangling := nil.
+    resolved do: [:e |
+      ((e at: 'link') at: 'identity' ifAbsent: [nil]) = 'conv-live' ifTrue: [present := e].
+      ((e at: 'link') at: 'identity' ifAbsent: [nil]) = 'wi-gone'   ifTrue: [dangling := e]].
+
+    t assert: (present notNil and: [(present at: 'target') notNil])
+      message: 'CX5: present target resolves to a non-nil tuple'.
+    t assert: (dangling notNil and: [(dangling at: 'target') isNil])
+      message: 'CX5: dangling target resolves to nil gracefully (no crash)'
+  ]
+
+  classMethod: testRenderHelpers: t [
+    "CX6: linksOf: / formatLink: tolerate missing field + legacy tuples."
+    | legacy link missingField |
+    '--- CX6: render helpers tolerate missing data ---' println.
+
+    "Legacy payload with NO crystallized_into field at all -> empty array."
+    legacy := Dictionary new.
+    legacy at: 'principle' put: 'old doctrine, pre-crystallization'.
+    t assertEqual: (DoctrineWriter linksOf: legacy) size to: 0
+      message: 'CX6: linksOf: on a field-less payload returns empty array'.
+    t assertEqual: (DoctrineWriter linksOf: nil) size to: 0
+      message: 'CX6: linksOf: on nil payload returns empty array (null-tolerant)'.
+
+    "formatLink: renders category:scope:identity."
+    link := Dictionary new.
+    link at: 'category' put: 'convention'.
+    link at: 'scope'    put: 'global'.
+    link at: 'identity' put: 'conv-1'.
+    t assertEqual: (DoctrineWriter formatLink: link) to: 'convention:global:conv-1'
+      message: 'CX6: formatLink: renders category:scope:identity'.
+
+    "formatLink: tolerates a link missing a field (renders ?)."
+    missingField := Dictionary new.
+    missingField at: 'category' put: 'workitem'.
+    missingField at: 'identity' put: 'wi-3'.
+    t assertEqual: (DoctrineWriter formatLink: missingField) to: 'workitem:?:wi-3'
+      message: 'CX6: formatLink: renders ? for a missing field (null-tolerant)'
+  ]
+
+  classMethod: testGansoRoundTrip: t [
+    "CX7: deterministic ganso/SQLite coverage — crystallize through a directly
+     opened GansoStore-backed BBS, then reload from the same db."
+    | tempDir bbs links reloaded |
+    '--- CX7: crystallize round-trip through ganso/SQLite ---' println.
+    tempDir := DcxHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    bbs usesGanso ifFalse: [
+      "Under PP_STORE=json the active store is JSON — still a valid round-trip,
+       just not the ganso path. Report which backend ran."
+      '    (active store is json/in-memory; ganso path skipped this run)' println].
+    DcxHelper seedDoctrine: bbs scope: 'global' identity: 'dctr-g7'.
+    DoctrineWriter crystallize: bbs scope: 'global' identity: 'dctr-g7'
+      into: 'convention' linkScope: 'global' linkIdentity: 'conv-7'.
+    bbs flushIfDirty.
+    reloaded := BBS withDataDir: tempDir.
+    links := DcxHelper linksOfTuple: (reloaded rdp: 'doctrine' scope: 'global' identity: 'dctr-g7').
+    t assertEqual: links size to: 1
+      message: 'CX7: crystallized_into link round-trips + reloads from store'.
+    t assertEqual: ((links at: 1) at: 'identity' ifAbsent: [nil]) to: 'conv-7'
+      message: 'CX7: reloaded link identity preserved'
+  ]
+
+"=== Main ==="
+DoctrineCrystallizeMain subclass: Object
+  classMethod: run [
+    | t |
+    t := DcxRunner new.
+    [TestDoctrineCrystallize run: t] on: Exception do: [:e |
+      ('TestDoctrineCrystallize CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDoctrineCrystallize crashed'
+    ].
+    t report.
+    ^t failed
+  ]

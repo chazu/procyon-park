@@ -7,6 +7,18 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+- Doctrine now carries a forward provenance edge, `crystallized_into`, completing
+  the C2 lineage `case → doctrine → {convention | workitem}`. A doctrine payload
+  gains a `crystallized_into: [ {category, scope, identity} ]` array (mirror of
+  `provenance`, opposite direction; defaults to `[]`). A new engine-side
+  `DoctrineWriter` appends links idempotently via `BBS>>update:` (no duplicate for
+  the same `{category, scope, identity}`), and link resolution is null-tolerant —
+  a target that later disappears dangles to `nil` instead of crashing readers.
+  `pp doctrine show <id>` now lists the downstream artifacts. This adds only the
+  link substrate; the verbs that populate it (`to-convention`, `to-workitem`) come
+  later.
+
 ### Fixed
 - `files_changed` in workflow cases no longer always reads 0. No code ever
   produced a `files_changed` observation, so `CaseBuilder` always fell back to
