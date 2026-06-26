@@ -60,11 +60,13 @@ MissionCLI subclass: Object
     | sub |
     args size < 2 ifTrue: [^self printUsage].
     sub := args at: 2.
-    sub = 'start'   ifTrue: [^self cmdStart: args].
-    sub = 'list'    ifTrue: [^self cmdList: args].
-    sub = 'show'    ifTrue: [^self cmdShow: args].
-    sub = 'approve' ifTrue: [^self cmdApprove: args].
-    sub = 'reject'  ifTrue: [^self cmdReject: args].
+    sub = 'start'      ifTrue: [^self cmdStart: args].
+    sub = 'list'       ifTrue: [^self cmdList: args].
+    sub = 'show'       ifTrue: [^self cmdShow: args].
+    sub = 'set-intent' ifTrue: [^self cmdSetIntent: args].
+    sub = 'set-plan'   ifTrue: [^self cmdSetPlan: args].
+    sub = 'approve'    ifTrue: [^self cmdApprove: args].
+    sub = 'reject'     ifTrue: [^self cmdReject: args].
     (sub = 'help' or: [sub = '--help']) ifTrue: [^self printUsage].
     ('Unknown mission command: ', sub) println.
     self printUsage
@@ -243,6 +245,54 @@ MissionCLI subclass: Object
     ]
   ]
 
+  "--- agent writeback (used by the mission-brief workflow) ------------"
+
+  method: cmdSetIntent: args [
+    "pp mission set-intent <id> <intent-markdown> [--repo R]
+     Read-modify-write of payload.intent — preserves brief/status/plan. Used by
+     the mission-brief workflow's interpret-intent (planner) task to record the
+     STRUCTURED INTENT it extracted from the brief, back into THIS mission tuple."
+    | id intent m p |
+    args size < 4 ifTrue: [
+      'Usage: pp mission set-intent <id> "<intent markdown>" [--repo R]' println.
+      ^self
+    ].
+    id := args at: 3.
+    intent := args at: 4.
+    self applyScopeFlagFrom: args.
+    m := self rdpMission: id.
+    m isNil ifTrue: [('Not found: ', id) println. ^self].
+    p := m at: 'payload' ifAbsent: [Dictionary new].
+    p at: 'intent' put: intent.
+    p at: 'updated_at' put: DateTime now epochSeconds.
+    self putMission: id payload: p.
+    (id, ' intent updated') println
+  ]
+
+  method: cmdSetPlan: args [
+    "pp mission set-plan <id> <plan-markdown> [--repo R]
+     Read-modify-write that writes payload.plan AND flips status to
+     'awaiting-approval' in one step — the terminal write of the mission-brief
+     workflow's synthesize-plan (planner) task. Preserves brief/intent. The plan
+     is stored AS MARKDOWN so the dashboard renders it without the filesystem."
+    | id plan m p |
+    args size < 4 ifTrue: [
+      'Usage: pp mission set-plan <id> "<plan markdown>" [--repo R]' println.
+      ^self
+    ].
+    id := args at: 3.
+    plan := args at: 4.
+    self applyScopeFlagFrom: args.
+    m := self rdpMission: id.
+    m isNil ifTrue: [('Not found: ', id) println. ^self].
+    p := m at: 'payload' ifAbsent: [Dictionary new].
+    p at: 'plan' put: plan.
+    p at: 'status' put: 'awaiting-approval'.
+    p at: 'updated_at' put: DateTime now epochSeconds.
+    self putMission: id payload: p.
+    (id, ' plan written, status -> awaiting-approval') println
+  ]
+
   method: cmdApprove: args [
     "pp mission approve <id> [--repo R] — awaiting-approval -> approved."
     ^self setStatusFor: args to: 'approved' reason: nil action: 'approve'
@@ -314,6 +364,8 @@ MissionCLI subclass: Object
     '  start "<brief>" [--repo R]      Create a mission and kick the mission-brief workflow' println.
     '  list [--repo R] [--status S]    List missions (id, status, one-line brief)' println.
     '  show <id> [--repo R]            Show brief, intent, status, and plan' println.
+    '  set-intent <id> "<md>" [--repo R]   Write structured intent (workflow agents)' println.
+    '  set-plan <id> "<md>" [--repo R]     Write plan + flip to awaiting-approval (workflow agents)' println.
     '  approve <id> [--repo R]         awaiting-approval -> approved' println.
     '  reject <id> [--reason R] [--repo R]   awaiting-approval -> rejected (+ reason)' println.
     ^self

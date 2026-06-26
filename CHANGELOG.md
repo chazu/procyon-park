@@ -20,6 +20,19 @@ Semantic Versioning.
   `pp mission show <id>`, `pp mission approve <id>`, and
   `pp mission reject <id> [--reason R]` round out the surface; approve/reject are
   gated on `awaiting-approval` status (any other status is refused).
+- `mission-brief` workflow — the intake flow `pp mission start` launches:
+  interpret-intent (planner) → research (scout) → review (reviewer, adversarial)
+  → synthesize-plan (planner), bracketed by create-worktree/merge-worktree.
+  Roles are reused (no new role class); mission-specific guidance lives in the
+  transition prompts. The mission id is threaded so agents write structured
+  intent and the final plan back into the mission tuple. The workflow terminates
+  by storing a markdown plan (intent, success criteria, research synthesis,
+  proposed high-level breakdown, risks, definition-of-done) and flipping the
+  mission to `awaiting-approval` — it does NOT park on an approval gate.
+- `pp mission set-intent <id> "<md>"` and `pp mission set-plan <id> "<md>"` —
+  agent-facing read-modify-write commands used by the `mission-brief` workflow to
+  record the structured intent and the plan back into the mission tuple.
+  `set-plan` also flips the mission to `awaiting-approval` in the same write.
 - Doctrine divergence backstop (the "lie-detector") — a new off-critical-path
   sweep (`Dispatcher>>maybeFlagDoctrineDivergence`, sibling of
   `maybeFlagDislikedDoctrine`, on the every-30-tick branch with its own

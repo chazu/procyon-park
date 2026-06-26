@@ -168,7 +168,10 @@ TestMissionCli subclass: Object
     self testApprove: t.
     self testRejectWithReason: t.
     self testApproveRejectRefusedWhenNotAwaiting: t.
-    self testListFiltersByStatus: t
+    self testListFiltersByStatus: t.
+    self testSetIntentWritesIntent: t.
+    self testSetPlanWritesPlanAndAwaitingApproval: t.
+    self testMissionBriefTemplateStructure: t
   ]
 
   classMethod: testCategoryMembership: t [
@@ -393,6 +396,142 @@ TestMissionCli subclass: Object
       on: Exception do: [:e | crashed := true].
     t assert: crashed not
       message: 'MS8: cmdList: --status approved does not crash'
+  ]
+
+  classMethod: testSetIntentWritesIntent: t [
+    "MS9: set-intent (mission-brief interpret-intent writeback) records
+     payload.intent via read-modify-write, preserving brief + status."
+    | bbs cli m p |
+    '--- MS9: set-intent writes payload.intent, preserves brief+status ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    MsnHelper seedMission: bbs id: 'msn-i1' status: 'researching' brief: 'the brief'.
+    cli := TestMissionCLI onBbs: bbs.
+    cli runWith: #('mission' 'set-intent' 'msn-i1'
+      '## Intent\nObjective: X\n## Success Criteria\n- crit A').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-i1'.
+    t assert: m notNil message: 'MS9: mission still present after set-intent'.
+    p := m at: 'payload'.
+    t assert: ((p at: 'intent' ifAbsent: [nil]) notNil)
+      message: 'MS9: payload.intent is populated'.
+    t assert: (((p at: 'intent' ifAbsent: ['']) indexOf: 'Success Criteria') > 0)
+      message: 'MS9: intent markdown contains Success Criteria'.
+    t assertEqual: (p at: 'status' ifAbsent: [nil]) to: 'researching'
+      message: 'MS9: status unchanged (still researching) after set-intent'.
+    t assertEqual: (p at: 'brief' ifAbsent: [nil]) to: 'the brief'
+      message: 'MS9: brief preserved through set-intent read-modify-write'
+  ]
+
+  classMethod: testSetPlanWritesPlanAndAwaitingApproval: t [
+    "MS10: set-plan (mission-brief synthesize-plan terminal write) stores the
+     plan markdown AND flips status to awaiting-approval, preserving brief+intent."
+    | bbs cli m p plan setArgs |
+    '--- MS10: set-plan writes plan markdown + flips to awaiting-approval ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    "Seed a mission that already has an intent (interpret-intent ran)."
+    p := Dictionary new.
+    p at: 'brief' put: 'ship the thing'.
+    p at: 'intent' put: '## Intent\nObjective: ship'.
+    p at: 'plan' put: nil.
+    p at: 'status' put: 'researching'.
+    p at: 'workflow_instance' put: 'wf-x'.
+    p at: 'created_at' put: 1700000000.
+    bbs out: 'mission' scope: 'default' identity: 'msn-p1' payload: p.
+
+    cli := TestMissionCLI onBbs: bbs.
+    plan := '# Mission Plan\n## Intent\nX\n## Success Criteria\n- A\n## Work Breakdown\n- epic one'.
+    setArgs := Array new: 0.
+    setArgs := setArgs copyWith: 'mission'.
+    setArgs := setArgs copyWith: 'set-plan'.
+    setArgs := setArgs copyWith: 'msn-p1'.
+    setArgs := setArgs copyWith: plan.
+    cli runWith: setArgs.
+
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-p1'.
+    t assert: m notNil message: 'MS10: mission present after set-plan'.
+    p := m at: 'payload'.
+    t assertEqual: (p at: 'status' ifAbsent: [nil]) to: 'awaiting-approval'
+      message: 'MS10: status flipped to awaiting-approval'.
+    t assert: ((p at: 'plan' ifAbsent: [nil]) notNil and: [(p at: 'plan') isEmpty not])
+      message: 'MS10: payload.plan is non-empty markdown'.
+    t assert: (((p at: 'plan' ifAbsent: ['']) indexOf: 'Mission Plan') > 0)
+      message: 'MS10: plan markdown contains the Mission Plan heading'.
+    t assert: (((p at: 'plan' ifAbsent: ['']) indexOf: 'Success Criteria') > 0)
+      message: 'MS10: plan markdown contains Success Criteria'.
+    t assert: (((p at: 'plan' ifAbsent: ['']) indexOf: 'Work Breakdown') > 0)
+      message: 'MS10: plan markdown contains a Work Breakdown'.
+    t assertEqual: (p at: 'brief' ifAbsent: [nil]) to: 'ship the thing'
+      message: 'MS10: brief preserved through set-plan'.
+    t assert: ((p at: 'intent' ifAbsent: [nil]) notNil)
+      message: 'MS10: intent preserved through set-plan'
+  ]
+
+  classMethod: testMissionBriefTemplateStructure: t [
+    "MS11: the mission-brief workflow template parses + loads, threads the mission
+     id, reuses only scout/reviewer/planner, and terminates (no parked gate)."
+    | path payload starts terminals transitions roles ids gateFound interpret synth allText |
+    '--- MS11: mission-brief.cue parses + loads with the right structure ---' println.
+    path := File workingDirectory, '/workflows/mission-brief.cue'.
+    (File exists: path) ifFalse: [
+      t assert: false message: 'MS11: workflows/mission-brief.cue exists'. ^self
+    ].
+    [payload := TemplateLoader new loadTemplateFile: path]
+      on: Exception do: [:e |
+        t assert: false message: 'MS11: mission-brief.cue loads without error (', e messageText, ')'.
+        ^self
+      ].
+    t assert: payload notNil message: 'MS11: template payload is non-nil'.
+
+    starts := payload at: 'start_places' ifAbsent: [Array new: 0].
+    terminals := payload at: 'terminal_places' ifAbsent: [Array new: 0].
+    t assert: (starts includes: 'brief') message: 'MS11: start place is brief'.
+    t assert: (terminals includes: 'done') message: 'MS11: terminal place is done'.
+
+    transitions := payload at: 'transitions' ifAbsent: [Array new: 0].
+    t assert: (transitions size >= 5) message: 'MS11: at least 5 transitions'.
+
+    roles := Array new: 0.
+    ids := Array new: 0.
+    gateFound := false.
+    allText := ''.
+    transitions do: [:tr |
+      | r id descr |
+      id := tr at: 'id' ifAbsent: [''].
+      ids := ids copyWith: id.
+      r := tr at: 'role' ifAbsent: [nil].
+      r notNil ifTrue: [roles := roles copyWith: r].
+      descr := tr at: 'description' ifAbsent: [''].
+      allText := allText, descr.
+      "A parked gate would be a precondition keyed on mission approval/status."
+      (allText indexOf: 'awaiting-approval-gate') > 0 ifTrue: [gateFound := true]
+    ].
+
+    "Reuse-only: every role is one of scout/reviewer/planner (no new role class)."
+    roles do: [:r |
+      t assert: ((r = 'scout') or: [(r = 'reviewer') or: [r = 'planner']])
+        message: 'MS11: role ', r, ' is one of scout/reviewer/planner (no new role)'
+    ].
+    t assert: (roles includes: 'planner') message: 'MS11: uses planner (intent + plan)'.
+    t assert: (roles includes: 'scout') message: 'MS11: uses scout (research)'.
+    t assert: (roles includes: 'reviewer') message: 'MS11: uses reviewer (adversarial review)'.
+
+    t assert: (ids includes: 'interpret-intent') message: 'MS11: has interpret-intent transition'.
+    t assert: (ids includes: 'research') message: 'MS11: has research transition'.
+    t assert: (ids includes: 'review') message: 'MS11: has review transition'.
+    t assert: (ids includes: 'synthesize-plan') message: 'MS11: has synthesize-plan transition'.
+
+    "Mission id is threaded so agents write back to the right tuple."
+    t assert: ((allText indexOf: '{{mission}}') > 0)
+      message: 'MS11: prompts interpolate {{mission}} (id threaded for writeback)'.
+    t assert: ((allText indexOf: 'set-intent') > 0)
+      message: 'MS11: interpret-intent writes intent via pp mission set-intent'.
+    t assert: ((allText indexOf: 'set-plan') > 0)
+      message: 'MS11: synthesize-plan writes plan via pp mission set-plan'.
+    t assert: ((allText indexOf: 'awaiting-approval') > 0)
+      message: 'MS11: plan write targets awaiting-approval status'.
+
+    "Terminates: no parked approval gate holding the worktree."
+    t assert: gateFound not
+      message: 'MS11: no parked approval gate — workflow terminates on its own'
   ]
 
 "=== Main ==="
