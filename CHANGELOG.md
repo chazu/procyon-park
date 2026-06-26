@@ -8,6 +8,17 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Missions dashboard panel — the web dashboard now surfaces missions, with
+  `awaiting-approval` ones FOREGROUNDED in their own group. Each mission renders
+  a one-line brief plus its plan markdown (rendered to HTML, every line escaped)
+  in an expandable card. Awaiting-approval cards carry **Approve** / **Reject**
+  controls that POST `/api/mission/approve` | `/api/mission/reject` (unsigned but
+  loopback-gated, mirroring `/api/workitem/cancel`); the status flip is consistent
+  with the `pp mission approve/reject` CLI (only `awaiting-approval` missions can
+  be decided — any other status is refused with 409). The SSE snapshot re-renders
+  the panel each tick, so an approved/rejected mission drops out of the awaiting
+  list live. Each mission render is independently guarded, so a single malformed
+  mission tuple is skipped without blanking the panel.
 - Mission artifact + `pp mission` CLI — a durable, high-level Auftragstaktik
   intent artifact. New `mission` tuple category (linear + durable, NOT pinned;
   written/mutated via `out:`/`update:`). `pp mission start "<brief>" [--repo R]`

@@ -1,0 +1,337 @@
+"Tests for the dashboard Missions panel + the mission plan-gate routes:
+   DashboardSSE>>renderMissionsHtml:  (panel render)
+   POST /api/mission/approve | /api/mission/reject
+        (handleMissionDecisionScope:identity:to:reason: + isLoopbackHost: gate)
+
+ A mission is the high-level Auftragstaktik intent artifact. The dashboard
+ surfaces missions awaiting approval with their plan rendered and approve/reject
+ controls; approving/rejecting flips status, mirroring the `pp mission` CLI (W1).
+
+ Invariants under test:
+   MP1  renderMissionsHtml: emits one card per mission, foregrounds
+        awaiting-approval, renders the plan markdown into HTML, and attaches
+        approve/reject controls ONLY to awaiting-approval missions.
+   MP2  a MALFORMED mission tuple is SKIPPED — the panel still renders the
+        well-formed siblings (per-card exception guard).
+   MP3  renderMarkdownPlan: promotes headings + bullet lists and HTML-escapes
+        every line (no raw HTML injection from plan content).
+   MP4  /api/mission/approve flips awaiting-approval -> approved (200).
+   MP5  /api/mission/reject flips awaiting-approval -> rejected + records reason.
+   MP6  approve/reject on a NON-awaiting mission is REFUSED (409, unchanged) —
+        mirroring the CLI's status guard.
+   MP7  decision on a missing mission -> 404.
+   MP8  the routes are loopback-gated (isLoopbackHost: reused from cancel)."
+
+MsnPanelRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                         ifFalse: [
+                           failed := failed + 1.
+                           failures := failures copyWith: msg.
+                           ('FAIL: ', msg,
+                            ' (got: ', actual printString,
+                            ' expected: ', expected printString, ')') println
+                         ]
+  ]
+
+  method: report [
+    '=== Mission Panel Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+MsnPanelHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: newServer: bbs [
+    | dispatcher server |
+    dispatcher := Dispatcher on: bbs harnessFactory: nil.
+    server := ApiServer on: 0 bbs: bbs dispatcher: dispatcher.
+    ^server
+  ]
+
+  classMethod: seedMission: bbs id: id status: status brief: brief plan: plan [
+    | p |
+    p := Dictionary new.
+    p at: 'brief' put: brief.
+    p at: 'intent' put: nil.
+    p at: 'plan' put: plan.
+    p at: 'status' put: status.
+    p at: 'workflow_instance' put: nil.
+    p at: 'created_at' put: 1700000000.
+    bbs out: 'mission' scope: 'default' identity: id payload: p
+  ]
+
+  classMethod: contains: haystack sub: needle [
+    ^(haystack indexOf: needle) > 0
+  ]
+
+  classMethod: lf [
+    ^(Character lf) asString
+  ]
+
+  classMethod: count: needle in: haystack [
+    "Count non-overlapping occurrences of needle in haystack (Maggie has no
+     occurrencesOfSubstring:). indexOf: is 1-based and returns 0 when absent."
+    | n rest pos |
+    n := 0.
+    rest := haystack.
+    [pos := rest indexOf: needle. pos > 0] whileTrue: [
+      n := n + 1.
+      rest := rest copyFrom: pos + needle size to: rest size
+    ].
+    ^n
+  ]
+
+"=== MP1: panel render — one card per mission, controls only on awaiting ==="
+TestMissionPanelRender subclass: Object
+  classMethod: run: t [
+    | tempDir bbs sse snap html lf plan |
+    '--- MP1: renderMissionsHtml: foregrounds awaiting + controls ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    lf := MsnPanelHelper lf.
+    plan := '# Plan', lf, '## Work', lf, '- do the thing'.
+    MsnPanelHelper seedMission: bbs id: 'msn-await' status: 'awaiting-approval'
+      brief: 'Ship the mission panel' plan: plan.
+    MsnPanelHelper seedMission: bbs id: 'msn-approved' status: 'approved'
+      brief: 'Already decided' plan: '# Old plan'.
+
+    sse := DashboardSSE on: bbs.
+    snap := sse computeSnapshot.
+    html := snap at: 'missionsHtml'.
+
+    t assert: (MsnPanelHelper contains: html sub: 'id="dashboard-missions"')
+      message: 'MP1: panel uses the expected root id'.
+    t assert: (MsnPanelHelper contains: html sub: 'msn-await')
+      message: 'MP1: awaiting mission rendered'.
+    t assert: (MsnPanelHelper contains: html sub: 'msn-approved')
+      message: 'MP1: decided mission rendered too'.
+    t assert: (MsnPanelHelper contains: html sub: 'Awaiting approval')
+      message: 'MP1: awaiting-approval group is foregrounded'.
+    "Plan markdown rendered into HTML (heading + list)."
+    t assert: (MsnPanelHelper contains: html sub: '<h3>Plan</h3>')
+      message: 'MP1: plan heading rendered'.
+    t assert: (MsnPanelHelper contains: html sub: '<li>do the thing</li>')
+      message: 'MP1: plan bullet rendered'.
+    "Controls appear for the awaiting mission only — exactly one approve button."
+    t assertEqual: (MsnPanelHelper count: 'class="mission-approve"' in: html) to: 1
+      message: 'MP1: exactly one approve control (awaiting only)'.
+    t assertEqual: (MsnPanelHelper count: 'class="mission-reject"' in: html) to: 1
+      message: 'MP1: exactly one reject control (awaiting only)'.
+    t assert: (MsnPanelHelper contains: html sub: 'data-mission-id="msn-await"')
+      message: 'MP1: approve/reject carry the mission id for the POST'
+  ]
+
+"=== MP2: a malformed mission tuple is skipped; panel still renders ==="
+TestMissionPanelMalformed subclass: Object
+  classMethod: run: t [
+    | tempDir bbs sse snap html badPayload |
+    '--- MP2: malformed mission tuple is skipped ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "A well-formed awaiting mission..."
+    MsnPanelHelper seedMission: bbs id: 'msn-good' status: 'awaiting-approval'
+      brief: 'Good one' plan: '# Plan'.
+    "...and a malformed one whose status is a non-string (breaks comparisons)."
+    badPayload := Dictionary new.
+    badPayload at: 'status' put: 12345.
+    badPayload at: 'brief' put: 999.
+    bbs out: 'mission' scope: 'default' identity: 'msn-bad' payload: badPayload.
+
+    sse := DashboardSSE on: bbs.
+    snap := sse computeSnapshot.
+    html := snap at: 'missionsHtml'.
+
+    t assert: (html notNil and: [html isEmpty not])
+      message: 'MP2: panel still renders despite a malformed tuple'.
+    t assert: (MsnPanelHelper contains: html sub: 'id="dashboard-missions"')
+      message: 'MP2: panel root present (not blanked)'.
+    t assert: (MsnPanelHelper contains: html sub: 'msn-good')
+      message: 'MP2: well-formed sibling still rendered'
+  ]
+
+"=== MP3: renderMarkdownPlan: escapes HTML + promotes structure ==="
+TestMissionPlanMarkdown subclass: Object
+  classMethod: run: t [
+    | tempDir bbs sse html lf md |
+    '--- MP3: plan markdown escaped + structured ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    sse := DashboardSSE on: bbs.
+
+    lf := MsnPanelHelper lf.
+    md := '## Heading', lf, '- item one', lf, 'A <script>alert(1)</script> line'.
+    html := sse renderMarkdownPlan: md.
+    t assert: (MsnPanelHelper contains: html sub: '<h4>Heading</h4>')
+      message: 'MP3: ## promoted to <h4>'.
+    t assert: (MsnPanelHelper contains: html sub: '<li>item one</li>')
+      message: 'MP3: bullet promoted to <li>'.
+    t assert: (MsnPanelHelper contains: html sub: '&lt;script&gt;')
+      message: 'MP3: raw HTML in the plan is escaped (no injection)'.
+    t assert: (MsnPanelHelper contains: html sub: '<script>') not
+      message: 'MP3: no unescaped <script> survives'.
+    t assertEqual: (sse renderMarkdownPlan: nil) to: ''
+      message: 'MP3: non-string plan -> empty string'
+  ]
+
+"=== MP4: approve flips awaiting-approval -> approved ==="
+TestMissionApprove subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server resp item |
+    '--- MP4: approve -> approved ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := MsnPanelHelper newServer: bbs.
+    MsnPanelHelper seedMission: bbs id: 'msn-ap' status: 'awaiting-approval' brief: 'b' plan: '# p'.
+
+    resp := server handleMissionDecisionScope: 'default' identity: 'msn-ap'
+      to: 'approved' reason: nil.
+    t assertEqual: resp status to: 200 message: 'MP4: approve -> 200'.
+    item := bbs rdp: 'mission' scope: 'default' identity: 'msn-ap'.
+    t assertEqual: ((item at: 'payload') at: 'status' ifAbsent: [nil]) to: 'approved'
+      message: 'MP4: status flipped to approved'
+  ]
+
+"=== MP5: reject flips awaiting-approval -> rejected + reason ==="
+TestMissionReject subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server resp item |
+    '--- MP5: reject -> rejected + reason ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := MsnPanelHelper newServer: bbs.
+    MsnPanelHelper seedMission: bbs id: 'msn-rj' status: 'awaiting-approval' brief: 'b' plan: '# p'.
+
+    resp := server handleMissionDecisionScope: 'default' identity: 'msn-rj'
+      to: 'rejected' reason: 'scope too broad'.
+    t assertEqual: resp status to: 200 message: 'MP5: reject -> 200'.
+    item := bbs rdp: 'mission' scope: 'default' identity: 'msn-rj'.
+    t assertEqual: ((item at: 'payload') at: 'status' ifAbsent: [nil]) to: 'rejected'
+      message: 'MP5: status flipped to rejected'.
+    t assertEqual: ((item at: 'payload') at: 'reason' ifAbsent: [nil]) to: 'scope too broad'
+      message: 'MP5: reason recorded on the mission'
+  ]
+
+"=== MP6: decision refused on a non-awaiting mission (409, unchanged) ==="
+TestMissionRefusedWhenNotAwaiting subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server resp item |
+    '--- MP6: decision refused when not awaiting-approval ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := MsnPanelHelper newServer: bbs.
+    MsnPanelHelper seedMission: bbs id: 'msn-res' status: 'researching' brief: 'b' plan: nil.
+
+    resp := server handleMissionDecisionScope: 'default' identity: 'msn-res'
+      to: 'approved' reason: nil.
+    t assertEqual: resp status to: 409 message: 'MP6: approve on researching -> 409'.
+    item := bbs rdp: 'mission' scope: 'default' identity: 'msn-res'.
+    t assertEqual: ((item at: 'payload') at: 'status' ifAbsent: [nil]) to: 'researching'
+      message: 'MP6: status unchanged after refused approve'.
+
+    resp := server handleMissionDecisionScope: 'default' identity: 'msn-res'
+      to: 'rejected' reason: 'no'.
+    t assertEqual: resp status to: 409 message: 'MP6: reject on researching -> 409'.
+    item := bbs rdp: 'mission' scope: 'default' identity: 'msn-res'.
+    t assert: ((item at: 'payload') at: 'reason' ifAbsent: ['sentinel']) = 'sentinel'
+      message: 'MP6: refused reject did NOT record a reason'
+  ]
+
+"=== MP7: decision on a missing mission -> 404 ==="
+TestMissionMissing subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server resp |
+    '--- MP7: missing mission -> 404 ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := MsnPanelHelper newServer: bbs.
+
+    resp := server handleMissionDecisionScope: 'default' identity: 'msn-ghost'
+      to: 'approved' reason: nil.
+    t assertEqual: resp status to: 404 message: 'MP7: missing mission -> 404'
+  ]
+
+"=== MP8: loopback gate reused from cancel ==="
+TestMissionLoopbackGate subclass: Object
+  classMethod: run: t [
+    | tempDir bbs server |
+    '--- MP8: loopback gate ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := MsnPanelHelper newServer: bbs.
+    t assert: (server isLoopbackHost: 'localhost:7777') message: 'MP8: localhost accepted'.
+    t assert: (server isLoopbackHost: '192.168.1.5:7777') not message: 'MP8: LAN IP rejected'
+  ]
+
+"=== Main ==="
+MissionPanelMain subclass: Object
+  classMethod: run [
+    | t |
+    t := MsnPanelRunner new.
+    [TestMissionPanelRender run: t] on: Exception do: [:e |
+      ('TestMissionPanelRender CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionPanelRender crashed'].
+    [TestMissionPanelMalformed run: t] on: Exception do: [:e |
+      ('TestMissionPanelMalformed CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionPanelMalformed crashed'].
+    [TestMissionPlanMarkdown run: t] on: Exception do: [:e |
+      ('TestMissionPlanMarkdown CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionPlanMarkdown crashed'].
+    [TestMissionApprove run: t] on: Exception do: [:e |
+      ('TestMissionApprove CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionApprove crashed'].
+    [TestMissionReject run: t] on: Exception do: [:e |
+      ('TestMissionReject CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionReject crashed'].
+    [TestMissionRefusedWhenNotAwaiting run: t] on: Exception do: [:e |
+      ('TestMissionRefusedWhenNotAwaiting CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionRefusedWhenNotAwaiting crashed'].
+    [TestMissionMissing run: t] on: Exception do: [:e |
+      ('TestMissionMissing CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionMissing crashed'].
+    [TestMissionLoopbackGate run: t] on: Exception do: [:e |
+      ('TestMissionLoopbackGate CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionLoopbackGate crashed'].
+    t report.
+    ^t failed
+  ]

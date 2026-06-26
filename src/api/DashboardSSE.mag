@@ -157,6 +157,7 @@ DashboardSSE subclass: Object
     snap at: 'workers' put: (bbs scanAll: 'worker').
     snap at: 'notifications' put: (bbs scanAll: 'notification').
     snap at: 'watches' put: (bbs scanAll: 'watch').
+    snap at: 'missions' put: (bbs scanAll: 'mission').
     "Each render is wrapped independently so a single bad tuple only
      blanks one panel — not the whole dashboard. The fallback HTML uses
      the same root id the dashboard JS expects so the SSE patch still
@@ -173,6 +174,8 @@ DashboardSSE subclass: Object
       (self safeRender: 'presence' rootId: 'dashboard-presence' do: [self renderPresenceHtml: snap]).
     snap at: 'notificationsAnonHtml' put:
       (self safeRender: 'notifications' rootId: 'dashboard-notifications' do: [self renderNotificationsHtml: (snap at: 'notifications')]).
+    snap at: 'missionsHtml' put:
+      (self safeRender: 'missions' rootId: 'dashboard-missions' do: [self renderMissionsHtml: snap]).
     ^snap
   ]
 
@@ -200,6 +203,7 @@ DashboardSSE subclass: Object
     self sendElements: (snap at: 'workitemsHtml') to: entry.
     self sendElements: (snap at: 'scopeViolationsHtml') to: entry.
     self sendElements: (snap at: 'presenceHtml') to: entry.
+    self sendElements: (snap at: 'missionsHtml') to: entry.
     self sendNotifsTo: entry snapshot: snap
   ]
 
@@ -490,6 +494,154 @@ DashboardSSE subclass: Object
     ].
     s := s, '</div></div>'.
     ^s
+  ]
+
+  method: renderMissionsHtml: snap [
+    "Render the Missions panel — the high-level Auftragstaktik intent artifact.
+     Missions awaiting approval are FOREGROUNDED (rendered first, plan expanded,
+     approve/reject controls attached); decided/researching missions follow for
+     context. Each mission is rendered inside its OWN exception guard so a single
+     malformed tuple is SKIPPED — the panel still renders. The panel-level
+     safeRender wrap in computeSnapshot is a second backstop."
+    | s missions awaiting others |
+    missions := snap at: 'missions' ifAbsent: [#()].
+    s := '<div id="dashboard-missions"><h2>Missions</h2>'.
+    awaiting := Array new: 0.
+    others := Array new: 0.
+    missions do: [:m |
+      [
+        | p st |
+        p := m at: 'payload' ifAbsent: [Dictionary new].
+        st := p at: 'status' ifAbsent: ['?'].
+        st = 'awaiting-approval'
+          ifTrue: [awaiting := awaiting copyWith: m]
+          ifFalse: [others := others copyWith: m]
+      ] on: Exception do: [:e |
+        ('SSE mission partition skipped a malformed tuple: ', e messageText) println
+      ]
+    ].
+    (awaiting isEmpty and: [others isEmpty]) ifTrue: [
+      ^s, '<div class="empty-state">No missions yet.</div></div>'
+    ].
+    awaiting isEmpty ifFalse: [
+      s := s, '<div class="mission-group mission-group--awaiting"><h3>Awaiting approval</h3>'.
+      awaiting do: [:m |
+        s := s, ([self renderMissionCard: m awaiting: true]
+          on: Exception do: [:e |
+            ('SSE mission card skipped (malformed tuple): ', e messageText) println. ''])
+      ].
+      s := s, '</div>'
+    ].
+    others isEmpty ifFalse: [
+      s := s, '<div class="mission-group mission-group--decided"><h3>Other missions</h3>'.
+      others do: [:m |
+        s := s, ([self renderMissionCard: m awaiting: false]
+          on: Exception do: [:e |
+            ('SSE mission card skipped (malformed tuple): ', e messageText) println. ''])
+      ].
+      s := s, '</div>'
+    ].
+    ^s, '</div>'
+  ]
+
+  method: renderMissionCard: m awaiting: isAwaiting [
+    "Render one mission as an expandable card: a one-line brief + the PLAN
+     markdown rendered into HTML inside a <details>. awaiting-approval missions
+     also carry Approve/Reject controls (data-mission-id + data-scope drive the
+     loopback POST in dashboard.html). All user-controlled fields are HTML-escaped."
+    | p id scope status brief plan briefLine planHtml controls openAttr |
+    p := m at: 'payload' ifAbsent: [Dictionary new].
+    id := m at: 'identity' ifAbsent: ['?'].
+    scope := m at: 'scope' ifAbsent: ['default'].
+    status := p at: 'status' ifAbsent: ['?'].
+    brief := p at: 'brief' ifAbsent: [''].
+    plan := p at: 'plan' ifAbsent: [nil].
+    briefLine := self oneLineBrief: brief.
+    ((plan isKindOf: String) and: [plan isEmpty not])
+      ifTrue: [planHtml := self renderMarkdownPlan: plan]
+      ifFalse: [planHtml := '<div class="empty-state">No plan yet.</div>'].
+    controls := ''.
+    isAwaiting ifTrue: [
+      controls := '<div class="mission-actions">',
+        '<button type="button" class="mission-approve" data-mission-id="', (self htmlEscape: id),
+          '" data-scope="', (self htmlEscape: scope), '">Approve</button>',
+        '<button type="button" class="mission-reject" data-mission-id="', (self htmlEscape: id),
+          '" data-scope="', (self htmlEscape: scope), '">Reject</button>',
+        '</div>'
+    ].
+    openAttr := isAwaiting ifTrue: [' open'] ifFalse: [''].
+    ^'<div class="mission-card mission-', (self htmlEscape: status),
+      '" data-mission-id="', (self htmlEscape: id),
+      '" data-scope="', (self htmlEscape: scope), '">',
+      '<div class="mission-head">',
+        '<span class="mission-status">', (self htmlEscape: status), '</span> ',
+        '<span class="mission-brief">', (self htmlEscape: briefLine), '</span>',
+      '</div>',
+      '<details class="mission-plan"', openAttr, '>',
+        '<summary>Plan</summary>',
+        '<div class="mission-plan-body">', planHtml, '</div>',
+      '</details>',
+      controls,
+      '<div class="mission-id"><small>', (self htmlEscape: id), '</small></div>',
+      '</div>'
+  ]
+
+  method: oneLineBrief: s [
+    "Collapse a (possibly multi-line) brief to one truncated line. Returns a
+     plain (UNescaped) string — the caller escapes. Non-strings -> ''."
+    | str cut |
+    (s isKindOf: String) ifFalse: [^''].
+    str := s.
+    cut := str indexOf: (Character lf) asString.
+    cut > 0 ifTrue: [str := str copyFrom: 1 to: cut - 1].
+    str size > 90 ifTrue: [str := (str copyFrom: 1 to: 87), '...'].
+    ^str
+  ]
+
+  method: renderMarkdownPlan: text [
+    "Minimal, defensive Markdown -> HTML for a mission plan. EVERY line is
+     HTML-escaped before any markup is added, so a plan can never inject raw
+     HTML. Recognizes ATX headings (#, ##, ###), bullet lists (- / *), and
+     blank-line-separated paragraphs; anything else degrades to an escaped
+     paragraph. Non-strings -> ''."
+    | out inList lines |
+    (text isKindOf: String) ifFalse: [^''].
+    text isEmpty ifTrue: [^''].
+    out := ''.
+    inList := false.
+    lines := text split: ((Character lf) asString).
+    lines do: [:rawLine |
+      | l trimmed |
+      l := rawLine.
+      (l isEmpty not and: [(l copyFrom: l size to: l size) = ((Character cr) asString)])
+        ifTrue: [l := l copyFrom: 1 to: l size - 1].
+      trimmed := l trimBoth.
+      trimmed isEmpty ifTrue: [
+        inList ifTrue: [out := out, '</ul>'. inList := false]
+      ] ifFalse: [
+        (trimmed startsWith: '### ') ifTrue: [
+          inList ifTrue: [out := out, '</ul>'. inList := false].
+          out := out, '<h5>', (self htmlEscape: (trimmed copyFrom: 5 to: trimmed size)), '</h5>'
+        ] ifFalse: [
+        (trimmed startsWith: '## ') ifTrue: [
+          inList ifTrue: [out := out, '</ul>'. inList := false].
+          out := out, '<h4>', (self htmlEscape: (trimmed copyFrom: 4 to: trimmed size)), '</h4>'
+        ] ifFalse: [
+        (trimmed startsWith: '# ') ifTrue: [
+          inList ifTrue: [out := out, '</ul>'. inList := false].
+          out := out, '<h3>', (self htmlEscape: (trimmed copyFrom: 3 to: trimmed size)), '</h3>'
+        ] ifFalse: [
+        ((trimmed startsWith: '- ') or: [trimmed startsWith: '* ']) ifTrue: [
+          inList ifFalse: [out := out, '<ul>'. inList := true].
+          out := out, '<li>', (self htmlEscape: (trimmed copyFrom: 3 to: trimmed size)), '</li>'
+        ] ifFalse: [
+          inList ifTrue: [out := out, '</ul>'. inList := false].
+          out := out, '<p>', (self htmlEscape: trimmed), '</p>'
+        ]]]]
+      ]
+    ].
+    inList ifTrue: [out := out, '</ul>'].
+    ^out
   ]
 
   method: renderWorkflowsHtml: snap [

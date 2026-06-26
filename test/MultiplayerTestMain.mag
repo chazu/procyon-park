@@ -375,7 +375,7 @@ MultiplayerTestMain subclass: Object
 CombinedTestMain subclass: Object
 
   classMethod: run [
-    | wfFailed mpFailed ccFailed arFailed dcFailed gmFailed drFailed cxFailed fbFailed diFailed doFailed msnFailed |
+    | wfFailed mpFailed ccFailed arFailed dcFailed gmFailed drFailed cxFailed fbFailed diFailed doFailed msnFailed mpnFailed |
     wfFailed := 0.
     mpFailed := 0.
     ccFailed := 0.
@@ -388,6 +388,7 @@ CombinedTestMain subclass: Object
     diFailed := 0.
     doFailed := 0.
     msnFailed := 0.
+    mpnFailed := 0.
 
     '============================================================' println.
     '=== Running TestWorkflowRefactorMain ===' println.
@@ -464,6 +465,12 @@ CombinedTestMain subclass: Object
         msnFailed := 1].
     msnFailed isNil ifTrue: [msnFailed := 0].
 
+    [mpnFailed := MissionPanelMain run]
+      on: Exception do: [:e |
+        ('MissionPanelMain CRASHED: ', e messageText) println.
+        mpnFailed := 1].
+    mpnFailed isNil ifTrue: [mpnFailed := 0].
+
     '' println.
     '============================================================' println.
     '=== Combined Test Summary ===' println.
@@ -481,7 +488,8 @@ CombinedTestMain subclass: Object
     ('Doctrine-injection fails:   ', diFailed printString) println.
     ('Doctrine-outcome fails:     ', doFailed printString) println.
     ('Mission-CLI failures:       ', msnFailed printString) println.
-    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed + gmFailed + drFailed + cxFailed + fbFailed + diFailed + doFailed + msnFailed) = 0
+    ('Mission-panel failures:     ', mpnFailed printString) println.
+    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed + gmFailed + drFailed + cxFailed + fbFailed + diFailed + doFailed + msnFailed + mpnFailed) = 0
       ifTrue:  ['COMBINED: ALL TESTS PASSED' println]
       ifFalse: ['COMBINED: SOME TESTS FAILED' println]
   ]

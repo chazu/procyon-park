@@ -279,6 +279,82 @@
 
     #dashboard-completions, #dashboard-scope-violations, #dashboard-presence{ margin-top: 16px; }
 
+    /* ══════════════ MISSIONS ══════════════ */
+    .mission-group{ margin-top: 6px; }
+    .mission-group + .mission-group{ margin-top: 14px; }
+    .mission-group > h3{
+      font-family: var(--f-slab);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--cream-dim);
+      margin: 0 0 8px;
+    }
+    .mission-card{
+      border: 1px solid var(--rule-hi);
+      background: var(--surface-hi);
+      padding: 9px 10px;
+      margin-bottom: 9px;
+    }
+    .mission-group--awaiting .mission-card{
+      border-color: var(--moss);
+      box-shadow: 3px 3px 0 var(--moss-deep);
+    }
+    .mission-head{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+    .mission-status{
+      font-family: var(--f-slab);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--surface);
+      background: var(--cream-dim);
+      padding: 1px 6px;
+    }
+    .mission-card.mission-awaiting-approval .mission-status{ background: var(--moss); color: var(--surface); }
+    .mission-card.mission-approved .mission-status{ background: var(--moss-deep); color: var(--cream-hi); }
+    .mission-card.mission-rejected .mission-status{ background: var(--terra-deep); color: var(--cream-hi); }
+    .mission-brief{ color: var(--cream); font-size: 13px; }
+    .mission-plan{ margin-top: 8px; }
+    .mission-plan > summary{
+      cursor: pointer;
+      color: var(--cream-dim);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      user-select: none;
+    }
+    .mission-plan-body{
+      margin-top: 6px;
+      padding: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--rule);
+      color: var(--cream);
+      font-size: 13px;
+      max-height: 340px;
+      overflow: auto;
+    }
+    .mission-plan-body h3{ font-size: 14px; margin: 8px 0 4px; color: var(--cream-hi); }
+    .mission-plan-body h4{ font-size: 13px; margin: 7px 0 3px; color: var(--cream-hi); }
+    .mission-plan-body h5{ font-size: 12px; margin: 6px 0 3px; color: var(--cream-hi); }
+    .mission-plan-body p{ margin: 4px 0; }
+    .mission-plan-body ul{ margin: 4px 0 4px 18px; }
+    .mission-actions{ margin-top: 9px; display:flex; gap: 8px; }
+    .mission-actions button{
+      font-family: var(--f-slab);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 4px 12px;
+      border: 1px solid var(--rule-hi);
+      background: var(--surface);
+      color: var(--cream);
+      cursor: pointer;
+    }
+    .mission-actions button:disabled{ opacity: .5; cursor: default; }
+    .mission-actions .mission-approve{ background: var(--moss-deep); border-color: var(--moss); color: var(--cream-hi); }
+    .mission-actions .mission-reject{ background: var(--terra-deep); border-color: var(--terra); color: var(--cream-hi); }
+    .mission-id{ margin-top: 6px; color: var(--cream-dim); }
+
     /* ══════════════ PRESENCE ══════════════ */
     .presence .presence-grid{
       display: grid;
@@ -1024,6 +1100,12 @@
     <section class="tab-view is-active" id="view-overview" role="tabpanel">
       <div class="layout">
         <div class="col">
+          <div class="panel panel--moss">
+            <div id="dashboard-missions">
+              <h2>Missions</h2>
+              <div class="empty-state">Connecting…</div>
+            </div>
+          </div>
           <div class="panel panel--terra">
             <div id="dashboard-workflows">
               <h2>Active Workflows</h2>
@@ -1368,7 +1450,7 @@
     // the stale-state gap introduced by the per-connection bounded queue.
     const SSE_DASHBOARD_CATEGORIES = [
       'workflow', 'workitem', 'task', 'token',
-      'notification', 'event', 'worker', 'identity'
+      'notification', 'event', 'worker', 'identity', 'mission'
     ];
 
     let es = null;
@@ -1433,6 +1515,48 @@
       };
     }
     openEventSource();
+
+    // Mission plan-gate controls. The SSE tick replaces #dashboard-missions
+    // wholesale (outerHTML) every tick, so listeners are delegated from the
+    // stable `document` — a listener bound to a button would be detached on the
+    // next render. Approve/reject POST the loopback-gated mission routes; the
+    // SSE re-render then drops the decided card out of the awaiting list.
+    function postMissionDecision(action, scope, identity, reason, btn) {
+      const params = new URLSearchParams({ scope: scope || 'default', identity: identity });
+      if (reason) params.set('reason', reason);
+      const siblings = btn.parentElement ? btn.parentElement.querySelectorAll('button') : [btn];
+      siblings.forEach(b => { b.disabled = true; });
+      fetch('/api/mission/' + action + '?' + params.toString(),
+            { method: 'POST', credentials: 'same-origin' })
+        .then(r => {
+          if (!r.ok) return r.json().catch(() => ({})).then(j => { throw new Error(j.error || ('HTTP ' + r.status)); });
+          return r.json().catch(() => ({}));
+        })
+        // On success the next SSE tick re-renders the panel and the card moves
+        // out of "Awaiting approval"; nothing else to do here.
+        .catch(err => {
+          siblings.forEach(b => { b.disabled = false; });
+          alert('Mission ' + action + ' failed: ' + err.message);
+        });
+    }
+    document.addEventListener('click', (ev) => {
+      const approve = ev.target.closest('.mission-approve');
+      const reject  = ev.target.closest('.mission-reject');
+      const btn = approve || reject;
+      if (!btn || !btn.closest('#dashboard-missions')) return;
+      ev.preventDefault();
+      const id    = btn.getAttribute('data-mission-id');
+      const scope = btn.getAttribute('data-scope') || 'default';
+      if (!id) return;
+      if (approve) {
+        if (!confirm('Approve mission "' + id + '"? This unblocks the plan.')) return;
+        postMissionDecision('approve', scope, id, null, btn);
+      } else {
+        const reason = prompt('Reject mission "' + id + '" — optional reason:', '');
+        if (reason === null) return; // cancelled
+        postMissionDecision('reject', scope, id, reason.trim() || null, btn);
+      }
+    });
 
     const filterScope    = document.getElementById('filter-scope');
     const filterWorkflow = document.getElementById('filter-workflow');

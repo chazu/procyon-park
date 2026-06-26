@@ -368,6 +368,12 @@ ApiServer subclass: Object
      FIRST browser-initiated mutation, restricted to the single-operator
      local dashboard. See handleWorkitemCancelRoute:."
     httpServer route: '/api/workitem/cancel' method: 'POST' handler: [:req | self handleWorkitemCancelRoute: req].
+    "Mission plan-gate decisions (status -> approved|rejected). Unsigned but
+     loopback-gated, mirroring /api/workitem/cancel — the single-operator local
+     dashboard's approve/reject controls. Status-flip logic mirrors the
+     `pp mission approve/reject` CLI (W1). See handleMissionDecisionRoute:to:."
+    httpServer route: '/api/mission/approve' method: 'POST' handler: [:req | self handleMissionDecisionRoute: req to: 'approved'].
+    httpServer route: '/api/mission/reject' method: 'POST' handler: [:req | self handleMissionDecisionRoute: req to: 'rejected'].
     "Hard-delete (irreversible tuple removal). Signed route — same auth path
      as update/run. See handleWorkitemDelete:."
     self signedRouteOnly: '/api/workitem/delete' do: [:req :actorCtx | self handleWorkitemDelete: req actor: actorCtx].
@@ -2486,6 +2492,56 @@ ApiServer subclass: Object
     fields at: 'cancelled_at' put: now.
     fields at: 'updated_at' put: now.
     ^self applyWorkitemFields: fields scope: scope identity: identity cascade: false actor: actor
+  ]
+
+  method: handleMissionDecisionRoute: req to: newStatus [
+    "POST /api/mission/approve | /api/mission/reject ?scope=&identity=[&reason=]
+     Flip an awaiting-approval mission to approved|rejected. UNSIGNED but
+     LOOPBACK-GATED, mirroring /api/workitem/cancel — the single-operator local
+     dashboard's plan-gate control. Non-loopback callers get 403. The status-flip
+     rule mirrors the `pp mission approve/reject` CLI (W1): ONLY awaiting-approval
+     missions may be decided; any other status is refused (409, unchanged)."
+    | host scope identity reason |
+    host := req header: 'Host'.
+    (self isLoopbackHost: host) ifFalse: [
+      ^self errorResponse: 403 message: 'mission approval is restricted to the local dashboard (loopback only)'
+    ].
+    scope := req queryParam: 'scope'.
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default'].
+    identity := req queryParam: 'identity'.
+    (identity isNil or: [identity isEmpty]) ifTrue: [^self errorResponse: 400 message: 'identity required'].
+    reason := req queryParam: 'reason'.
+    (reason isNil or: [reason isEmpty]) ifTrue: [reason := nil].
+    ^self handleMissionDecisionScope: scope identity: identity to: newStatus reason: reason
+  ]
+
+  method: handleMissionDecisionScope: scope identity: identity to: newStatus reason: reason [
+    "Testable core of the mission plan-gate decision. Guarded read-modify-write
+     of a mission's status, mirroring MissionCLI>>setStatusFor:to:reason:action:
+     — ONLY awaiting-approval missions may be approved/rejected. Returns:
+       404 if the mission does not exist,
+       409 if it is not awaiting-approval (status unchanged),
+       200 {status:'ok', mission, new_status} on success.
+     Uses bbs update: (consume + re-write, durable-persisted) so exactly one
+     mission tuple survives — never a duplicate."
+    | existing cur newId resp |
+    existing := bbs rdp: 'mission' scope: scope identity: identity.
+    existing isNil ifTrue: [^self errorResponse: 404 message: 'mission not found'].
+    cur := (existing at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: ['?'].
+    cur = 'awaiting-approval' ifFalse: [
+      ^self errorResponse: 409 message: 'mission is ', cur, ' — only awaiting-approval missions can be ', newStatus
+    ].
+    newId := bbs update: 'mission' scope: scope identity: identity do: [:p |
+      p at: 'status' put: newStatus.
+      reason notNil ifTrue: [p at: 'reason' put: reason].
+      p at: 'updated_at' put: DateTime now epochSeconds
+    ].
+    newId isNil ifTrue: [^self errorResponse: 404 message: 'mission not found'].
+    resp := Dictionary new.
+    resp at: 'status' put: 'ok'.
+    resp at: 'mission' put: identity.
+    resp at: 'new_status' put: newStatus.
+    ^self okResponse: resp
   ]
 
   method: handleWorkitemDelete: req actor: actorCtx [
