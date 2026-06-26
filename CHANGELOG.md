@@ -8,6 +8,22 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Vote-weighted doctrine relevance ranking — practitioner votes now bias which
+  scarce doctrine slots reach an agent's Orient context. The deterministic ranker
+  (`Role>>rankDoctrine:role:scope:query:cap:netVotes:`) adds a BOUNDED, saturating
+  net-vote term to the existing tag+text relevance score: `score = tagScore*1500 +
+  textScore + voteTerm`, where `voteTerm` is a sign-preserving log-scale function
+  of `net = up - down` (`Role>>doctrineVoteTerm:`), hard-clamped to ±600 — strictly
+  below one tag match (1500) and full text relevance (1000). So loved doctrine
+  rises and disliked doctrine sinks AMONG comparably-relevant entries, but a
+  loved-but-irrelevant entry can never crowd out a relevant one, and a runaway vote
+  count cannot dominate. Votes are read once per ranking at each doctrine's
+  canonical `doctrine_scope` (`Role>>doctrineNetVotesFor:bbs:`, fault-tolerant: a
+  failing scan / malformed payload / no votes all yield net 0). All existing hard
+  gates (active-only, scope-union, role targeting) and the universal-confidence
+  floor are preserved exactly, and a zero-vote corpus ranks IDENTICALLY to before
+  (net=0 contributes 0). Fully deterministic — no randomness; the score→confidence
+  →identity total order is unchanged. (new `TestDoctrineVoteWeighting` suite.)
 - Doctrine vote surfacing + review-flag sweep — humans can now see per-doctrine
   vote tallies and are alerted when active doctrine is consistently disliked.
   `pp doctrine show <id>` renders a `votes: up N / down M / net K` line and

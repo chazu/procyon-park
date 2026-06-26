@@ -353,9 +353,11 @@ The doctrine above was selected to guide THIS task. If — and only if — you f
      ONLY to that role (or to all when the tag is 'role:universal'); entries
      with no role: tag are universal. These HARD gates run first; the survivors
      are then SCORED by a deterministic hybrid of tag-overlap + IDF-weighted
-     lexical similarity to the task text (see rankDoctrine:role:scope:query:cap:),
-     with a small universal floor so cross-cutting wisdom always lands. The cap
-     then bounds how many reach the agent so context does not bloat."
+     lexical similarity to the task text PLUS a bounded net-vote term (see
+     rankDoctrine:role:scope:query:cap:netVotes:), so practitioner-loved doctrine
+     wins the scarce slots among comparable entries and disliked doctrine sinks —
+     while a small universal floor still guarantees cross-cutting wisdom lands. The
+     cap then bounds how many reach the agent so context does not bloat."
     | all candidates |
     all := bbs scanAll: 'doctrine'.
     candidates := Array new: 0.
@@ -385,6 +387,7 @@ The doctrine above was selected to guide THIS task. If — and only if — you f
     ].
     ^self rankDoctrine: candidates role: aRole scope: scope query: queryText
         cap: self class maxDoctrineEntries
+        netVotes: (self doctrineNetVotesFor: candidates bbs: bbs)
   ]
 
   method: roleTagOf: tags [
@@ -499,7 +502,107 @@ The doctrine above was selected to guide THIS task. If — and only if — you f
 
   method: doctrineUniversalFloor [ ^self class doctrineUniversalFloor ]
 
+  classMethod: doctrineVotePerStep [
+    "Score points per saturating vote-step (see doctrineVoteTerm:). Deliberately
+     SMALL: the vote term only ADJUSTS ordering among comparably-relevant entries,
+     it never overrides topical relevance. One tag match is worth 1500 and full
+     text relevance is worth up to 1000 (see doctrineScoreOf:), so the vote term
+     is engineered to stay strictly below BOTH (capped at doctrineVoteCeiling)."
+    ^120
+  ]
+
+  classMethod: doctrineVoteCeiling [
+    "Hard ceiling on the magnitude of the vote term, in score points. BELOW one
+     tag match (1500) AND below full text relevance (1000): a loved-but-irrelevant
+     entry (relevance ~0) gains at most +600 and so can NEVER outrank a clearly-
+     relevant entry. Guarantees a runaway vote count cannot dominate ranking."
+    ^600
+  ]
+
+  method: doctrineVotePerStep [ ^self class doctrineVotePerStep ]
+  method: doctrineVoteCeiling [ ^self class doctrineVoteCeiling ]
+
+  method: doctrineVoteTerm: net [
+    "Bounded, saturating contribution of NET votes (up - down) to a doctrine's
+     relevance score. Sign-preserving, log-scale magnitude (floor(log2(|net|))+1
+     steps), then HARD-clamped to doctrineVoteCeiling. Pure integer math — no
+     floats, no abs/negated, no randomness — so the total order stays deterministic.
+
+     PROPERTIES that satisfy the design constraints:
+       net = 0           -> 0     (zero-vote doctrine contributes NOTHING, so it
+                                    ranks EXACTLY as before this change).
+       net > 0           -> + (loved doctrine rises among comparable entries).
+       net < 0           -> - (disliked doctrine sinks).
+       |term| monotonic non-decreasing in |net|, and <= doctrineVoteCeiling (600),
+       which is below one tag match (1500) AND below full text relevance (1000):
+       relevance always leads; a runaway vote count saturates and cannot dominate."
+    | mag steps pow term |
+    net = 0 ifTrue: [^0].
+    mag := net > 0 ifTrue: [net] ifFalse: [0 - net].
+    "steps := floor(log2(mag)) + 1 via repeated doubling (1->1, 2->2, 3->2, 4->3,
+     7->3, 8->4 ...): slow, saturating growth so high vote counts barely move."
+    steps := 0. pow := 1.
+    [pow <= mag] whileTrue: [steps := steps + 1. pow := pow * 2].
+    term := steps * self doctrineVotePerStep.
+    term > self doctrineVoteCeiling ifTrue: [term := self doctrineVoteCeiling].
+    ^net > 0 ifTrue: [term] ifFalse: [0 - term]
+  ]
+
+  method: doctrineNetVotesFor: candidates bbs: bbs [
+    "Read vote tallies ONCE per ranking: returns a Dictionary mapping each
+     candidate doctrine's identity -> NET votes (up - down). Votes are aggregated
+     at the doctrine's CANONICAL doctrine_scope — the scope EVERY vote on it is
+     written to (see DoctrineCLI feedback capture) — so a global doctrine's votes
+     cast from any repo converge here, never split.
+
+     Votes are a STABLE input: scanned once, folded deterministically, then handed
+     to the scorer. FAULT-TOLERANT by construction: a nil bbs, a failing scan, a
+     non-Dictionary payload, a missing doctrine_id, or simply no votes all yield
+     net 0 for that doctrine — the graceful default that preserves prior ordering."
+    | net scopes feedback |
+    net := Dictionary new.
+    (candidates isNil or: [candidates isEmpty or: [bbs isNil]]) ifTrue: [^net].
+    "Distinct canonical doctrine_scopes across the candidates (scan each once)."
+    scopes := Set new.
+    candidates do: [:t |
+      | p ds |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      ds := p at: 'doctrine_scope' ifAbsent: ['global'].
+      (ds isNil or: [(ds isString) not or: [ds isEmpty]]) ifTrue: [ds := 'global'].
+      scopes add: ds
+    ].
+    feedback := Array new: 0.
+    scopes do: [:ds |
+      | tuples |
+      tuples := [bbs scan: 'doctrine-feedback' scope: ds]
+        on: Exception do: [:e | Array new: 0].
+      tuples notNil ifTrue: [tuples do: [:ft | feedback := feedback copyWith: ft]]
+    ].
+    "Fold each vote into its doctrine's running net (+1 up, -1 down)."
+    feedback do: [:ft |
+      | p did v cur |
+      p := (ft isKindOf: Dictionary) ifTrue: [ft at: 'payload' ifAbsent: [nil]] ifFalse: [nil].
+      (p isKindOf: Dictionary) ifTrue: [
+        did := p at: 'doctrine_id' ifAbsent: [nil].
+        did notNil ifTrue: [
+          v := p at: 'verdict' ifAbsent: [''].
+          cur := net at: did ifAbsent: [0].
+          v = 'up'   ifTrue: [net at: did put: cur + 1].
+          v = 'down' ifTrue: [net at: did put: cur - 1]
+        ]
+      ]
+    ].
+    ^net
+  ]
+
   method: rankDoctrine: candidates role: aRole scope: scope query: queryText cap: cap [
+    "Backward-compatible entry: rank with NO vote signal (every net = 0, so the
+     vote term contributes nothing and ordering is purely relevance-based)."
+    ^self rankDoctrine: candidates role: aRole scope: scope query: queryText
+        cap: cap netVotes: Dictionary new
+  ]
+
+  method: rankDoctrine: candidates role: aRole scope: scope query: queryText cap: cap netVotes: netVotes [
     "Pick the (<= cap) most relevant active+applicable doctrine entries for a
      task, deterministically. NO randomness anywhere — the cap exists because
      agent context is scarce, so the slots must go to the most relevant entries.
@@ -511,7 +614,14 @@ The doctrine above was selected to guide THIS task. If — and only if — you f
        textScore — IDF-weighted, length-normalized lexical overlap between the
                    task query and the entry's principle+rationale, in [0,1000].
                    Verbose rationales do not dominate (union-normalized).
-       score = (tagScore * tagWeight) + textScore   (tags somewhat heavier).
+       voteTerm  — BOUNDED, saturating function of NET practitioner votes
+                   (doctrineVoteTerm:), in [-600,+600]. Subordinate to relevance
+                   by construction (below one tag match AND full text relevance):
+                   it ADJUSTS ordering among comparably-relevant entries and sinks
+                   disliked doctrine, but never lets a loved-but-irrelevant entry
+                   crowd out a relevant one. net = 0 contributes exactly 0, so a
+                   zero-vote corpus ranks IDENTICALLY to before this term existed.
+       score = (tagScore * tagWeight) + textScore + voteTerm.
 
      SELECTION:
        1. Reserve up to doctrineUniversalFloor slots for the highest-confidence
@@ -538,8 +648,10 @@ The doctrine above was selected to guide THIS task. If — and only if — you f
       tags := p at: 'tags' ifAbsent: [#()].
       pair := Dictionary new.
       pair at: 'tuple' put: t.
-      pair at: 'score' put: (self doctrineScoreOf: p context: ctx
-                               query: queryTokens idf: idf).
+      pair at: 'score' put: ((self doctrineScoreOf: p context: ctx
+                                query: queryTokens idf: idf)
+                              + (self doctrineVoteTerm:
+                                   (netVotes at: (t at: 'identity' ifAbsent: ['']) ifAbsent: [0]))).
       pair at: 'conf' put: (self doctrineConfidenceMilli: p).
       pair at: 'ident' put: (t at: 'identity' ifAbsent: ['']).
       pair at: 'universal' put: (self doctrineIsUniversal: tags).

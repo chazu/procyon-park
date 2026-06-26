@@ -159,6 +159,35 @@ DoctrineRoutingHelper subclass: Object
     ^l
   ]
 
+  classMethod: vote: bbs doctrine: did scope: dscope verdict: verdict identity: vid [
+    "Write a single APPEND-ONLY doctrine-feedback vote at the doctrine's CANONICAL
+     doctrine_scope, shaped exactly as DoctrineCLI's capture layer writes it (the
+     ranker reads payload.doctrine_id / payload.verdict from this category)."
+    | p |
+    p := Dictionary new.
+    p at: 'doctrine_id' put: did.
+    p at: 'doctrine_scope' put: dscope.
+    p at: 'verdict' put: verdict.
+    p at: 'reason' put: (verdict = 'down' ifTrue: ['test downvote reason'] ifFalse: ['']).
+    bbs out: 'doctrine-feedback' scope: dscope identity: vid payload: p
+  ]
+
+  classMethod: voteUp: bbs doctrine: did scope: dscope times: n prefix: pfx [
+    | i | i := 1.
+    [i <= n] whileTrue: [
+      self vote: bbs doctrine: did scope: dscope verdict: 'up' identity: (pfx, '-up-', i printString).
+      i := i + 1
+    ]
+  ]
+
+  classMethod: voteDown: bbs doctrine: did scope: dscope times: n prefix: pfx [
+    | i | i := 1.
+    [i <= n] whileTrue: [
+      self vote: bbs doctrine: did scope: dscope verdict: 'down' identity: (pfx, '-dn-', i printString).
+      i := i + 1
+    ]
+  ]
+
   classMethod: seedLinked: bbs identity: ident maturity: maturity scope: dscope tags: tags
       principle: principle crystallizedInto: links [
     "Seed a doctrine carrying a crystallized_into forward-edge array (the lineage
@@ -895,6 +924,241 @@ TestDoctrineVotingPrompt subclass: Object
       message: 'DVP4: a downvote requires a reason'
   ]
 
+"=== TestDoctrineVoteWeighting ===
+ Net practitioner votes bias slot selection AMONG comparably-relevant doctrine,
+ BOUNDED so topical relevance still leads, fully deterministic, all hard gates +
+ the universal floor intact.
+
+ Invariants under test:
+   DVW1  Among two EQUAL-relevance entries, strong net-up ranks ABOVE net-down —
+         the vote term even flips the deterministic identity tie-break.
+   DVW2  A loved-but-topically-IRRELEVANT entry (huge net-up) does NOT outrank a
+         clearly-relevant ZERO-VOTE entry (bounded weight proven).
+   DVW3  doctrineVoteTerm: is sign-preserving, monotonic, saturating and bounded
+         (a runaway vote count cannot dominate); net = 0 contributes exactly 0.
+   DVW4  Ties (equal relevance AND equal net) break deterministically: confidence
+         desc, then identity asc — identical across repeated calls.
+   DVW5  A ZERO-VOTE corpus ranks IDENTICALLY to the relevance-only ranker (no
+         regression) and deterministically.
+   DVW6  Hard gates (active-only, scope-union, role) + the universal floor still
+         hold with votes present; votes can NEVER resurrect a gated entry."
+TestDoctrineVoteWeighting subclass: Object
+
+  classMethod: run: t [
+    self testVoteTermBoundedUnit: t.
+    self testEqualRelevanceNetUpOutranksNetDown: t.
+    self testLovedIrrelevantDoesNotOutrankRelevant: t.
+    self testTieBreakDeterministicWithVotes: t.
+    self testZeroVoteNoRegression: t.
+    self testGatesAndFloorHoldWithVotes: t
+  ]
+
+  classMethod: testVoteTermBoundedUnit: t [
+    "DVW3: the pure vote term — sign, monotonicity, saturation, bound, net=0->0."
+    | role ceil t1 t5 tBig tNeg |
+    '--- DVW3: doctrineVoteTerm: is bounded + saturating + sign-preserving ---' println.
+    role := Implementer new.
+    ceil := Role doctrineVoteCeiling.
+    t assertEqual: (role doctrineVoteTerm: 0) to: 0
+      message: 'DVW3: net=0 contributes exactly 0 (graceful default)'.
+    t1 := role doctrineVoteTerm: 1.
+    t5 := role doctrineVoteTerm: 5.
+    tBig := role doctrineVoteTerm: 1000000.
+    tNeg := role doctrineVoteTerm: -1000000.
+    t assert: (t1 > 0) message: 'DVW3: a net upvote is positive'.
+    t assert: ((role doctrineVoteTerm: -1) < 0) message: 'DVW3: a net downvote is negative'.
+    t assert: (t5 >= t1) message: 'DVW3: magnitude is monotonic non-decreasing in |net|'.
+    t assert: (tBig <= ceil) message: 'DVW3: a runaway vote count saturates at the ceiling'.
+    t assert: (tBig = ceil) message: 'DVW3: huge net reaches exactly the ceiling'.
+    t assert: (tNeg = (0 - ceil)) message: 'DVW3: negative side is the symmetric ceiling'.
+    "Bounded BELOW relevance units: under one tag match (1500) AND full text (1000)."
+    t assert: (ceil < 1000) message: 'DVW3: ceiling is below full text relevance (1000)'.
+    t assert: (ceil < 1500) message: 'DVW3: ceiling is below one tag match (1500)'
+  ]
+
+  classMethod: seedTwinWidgets: bbs [
+    "Two entries with IDENTICAL relevance to a 'widget' query (same tags, same
+     principle+rationale, same confidence): they differ ONLY by identity, so
+     without votes the deterministic tie-break (identity asc) puts 'aaa-twin'
+     first. Named so identity order is OPPOSITE the vote order we apply."
+    DoctrineRoutingHelper seed: bbs identity: 'aaa-twin' maturity: 'active'
+      scope: 'global' tags: #('topic:widget')
+      principle: 'Widget assembly must validate inputs before wiring.'
+      rationale: 'Unvalidated widget inputs corrupt the assembly downstream.'
+      confidence: '0.7'.
+    DoctrineRoutingHelper seed: bbs identity: 'zzz-twin' maturity: 'active'
+      scope: 'global' tags: #('topic:widget')
+      principle: 'Widget assembly must validate inputs before wiring.'
+      rationale: 'Unvalidated widget inputs corrupt the assembly downstream.'
+      confidence: '0.7'
+  ]
+
+  classMethod: testEqualRelevanceNetUpOutranksNetDown: t [
+    "DVW1: equal relevance — net-up ranks above net-down (and flips identity tie)."
+    | bbs role q baseOut idxA0 idxZ0 out idxA idxZ |
+    '--- DVW1: equal-relevance net-up outranks net-down ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    self seedTwinWidgets: bbs.
+    role := Implementer new.
+    q := 'widget assembly validate inputs before wiring'.
+
+    "Baseline (no votes): identity tie-break puts aaa-twin first."
+    baseOut := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q.
+    idxA0 := DoctrineRoutingHelper indexOfIdentity: 'aaa-twin' in: baseOut.
+    idxZ0 := DoctrineRoutingHelper indexOfIdentity: 'zzz-twin' in: baseOut.
+    t assert: (idxA0 > 0 and: [idxZ0 > 0]) message: 'DVW1: both twins present'.
+    t assert: (idxA0 < idxZ0)
+      message: 'DVW1: without votes the identity tie-break ranks aaa-twin first'.
+
+    "Now upvote the identity-later twin and downvote the identity-earlier one."
+    DoctrineRoutingHelper voteUp: bbs doctrine: 'zzz-twin' scope: 'global' times: 5 prefix: 'z'.
+    DoctrineRoutingHelper voteDown: bbs doctrine: 'aaa-twin' scope: 'global' times: 3 prefix: 'a'.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q.
+    idxA := DoctrineRoutingHelper indexOfIdentity: 'aaa-twin' in: out.
+    idxZ := DoctrineRoutingHelper indexOfIdentity: 'zzz-twin' in: out.
+    t assert: (idxZ < idxA)
+      message: 'DVW1: net-up zzz-twin now ranks ABOVE net-down aaa-twin'
+  ]
+
+  classMethod: testLovedIrrelevantDoesNotOutrankRelevant: t [
+    "DVW2: a loved-but-irrelevant entry can NOT outrank a relevant zero-vote one."
+    | bbs role q out idxRel idxLoved |
+    '--- DVW2: bounded weight — loved-irrelevant does not crowd out relevant ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    "Clearly relevant to the query (tag match + text), ZERO votes."
+    DoctrineRoutingHelper seed: bbs identity: 'relevant' maturity: 'active'
+      scope: 'global' tags: #('topic:widget')
+      principle: 'Widget assembly must validate inputs before wiring.'
+      rationale: 'Widget validation prevents corrupt assembly.' confidence: '0.6'.
+    "Topically IRRELEVANT to the query, but massively upvoted."
+    DoctrineRoutingHelper seed: bbs identity: 'loved-irrelevant' maturity: 'active'
+      scope: 'global' tags: #('topic:plumbing')
+      principle: 'Plumbing fixtures must be torque-checked.'
+      rationale: 'Loose plumbing fixtures leak under pressure.' confidence: '0.6'.
+    DoctrineRoutingHelper voteUp: bbs doctrine: 'loved-irrelevant' scope: 'global'
+      times: 1000 prefix: 'L'.
+
+    role := Implementer new.
+    q := 'widget assembly validate inputs before wiring'.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q.
+    idxRel := DoctrineRoutingHelper indexOfIdentity: 'relevant' in: out.
+    idxLoved := DoctrineRoutingHelper indexOfIdentity: 'loved-irrelevant' in: out.
+    t assert: (idxRel > 0) message: 'DVW2: the relevant zero-vote entry is present'.
+    t assert: (idxRel < idxLoved)
+      message: 'DVW2: relevance still leads — relevant zero-vote outranks loved-irrelevant'
+  ]
+
+  classMethod: testTieBreakDeterministicWithVotes: t [
+    "DVW4: equal relevance AND equal net → confidence desc, then identity asc;
+     identical across repeated calls (no randomness)."
+    | bbs role q out seq1 seq2 idxHi idxLo |
+    '--- DVW4: deterministic tie-break with equal votes ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    "Two twins, same relevance, DIFFERENT confidence, SAME net (+2 each)."
+    DoctrineRoutingHelper seed: bbs identity: 'tie-hi' maturity: 'active'
+      scope: 'global' tags: #('topic:widget')
+      principle: 'Widget assembly must validate inputs before wiring.'
+      rationale: 'Validation prevents corrupt assembly.' confidence: '0.9'.
+    DoctrineRoutingHelper seed: bbs identity: 'tie-lo' maturity: 'active'
+      scope: 'global' tags: #('topic:widget')
+      principle: 'Widget assembly must validate inputs before wiring.'
+      rationale: 'Validation prevents corrupt assembly.' confidence: '0.6'.
+    DoctrineRoutingHelper voteUp: bbs doctrine: 'tie-hi' scope: 'global' times: 2 prefix: 'h'.
+    DoctrineRoutingHelper voteUp: bbs doctrine: 'tie-lo' scope: 'global' times: 2 prefix: 'l'.
+
+    role := Implementer new.
+    q := 'widget assembly validate inputs before wiring'.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q.
+    idxHi := DoctrineRoutingHelper indexOfIdentity: 'tie-hi' in: out.
+    idxLo := DoctrineRoutingHelper indexOfIdentity: 'tie-lo' in: out.
+    t assert: (idxHi < idxLo)
+      message: 'DVW4: equal score+net → higher confidence ranks first (deterministic)'.
+    seq1 := DoctrineRoutingHelper identitySeqOf:
+      (role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q).
+    seq2 := DoctrineRoutingHelper identitySeqOf:
+      (role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q).
+    t assertEqual: seq1 to: seq2
+      message: 'DVW4: ordering is deterministic with votes present'
+  ]
+
+  classMethod: testZeroVoteNoRegression: t [
+    "DVW5: a zero-vote corpus ranks exactly as the relevance-only ranker did.
+     With no feedback every net=0, so doctrineVoteTerm: adds 0 to every score and
+     the ordering is identical to the pre-vote relevance ranking (DRK1 behavior)."
+    | bbs role q out seqA seqB idxSse idxGc idxPerf idxIo |
+    '--- DVW5: zero-vote corpus = no ranking regression ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    TestDoctrineRanking seedCorpus: bbs.
+    role := Implementer new.
+    q := 'the dashboard SSE filter is stale after a reconnect'.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q.
+    idxSse := DoctrineRoutingHelper indexOfIdentity: 'sse-dash' in: out.
+    idxGc := DoctrineRoutingHelper indexOfIdentity: 'gc-safe' in: out.
+    idxPerf := DoctrineRoutingHelper indexOfIdentity: 'index-cat' in: out.
+    idxIo := DoctrineRoutingHelper indexOfIdentity: 'io-boundary' in: out.
+    "Same relevance ordering DRK1 asserts — proves the vote term did not perturb it."
+    t assert: (idxSse > 0 and: [idxSse < idxGc and: [idxSse < idxPerf and: [idxSse < idxIo]]])
+      message: 'DVW5: zero-vote ordering matches the relevance-only ranking (no regression)'.
+    "And it is deterministic."
+    seqA := DoctrineRoutingHelper identitySeqOf:
+      (role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q).
+    seqB := DoctrineRoutingHelper identitySeqOf:
+      (role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q).
+    t assertEqual: seqA to: seqB
+      message: 'DVW5: zero-vote ordering is deterministic'
+  ]
+
+  classMethod: testGatesAndFloorHoldWithVotes: t [
+    "DVW6: votes do not weaken any hard gate, do not resurrect gated entries, and
+     the universal floor still lands a high-confidence cross-cutting entry."
+    | bbs role q out seq1 seq2 |
+    '--- DVW6: hard gates + universal floor hold with votes present ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    "Active + applicable, relevant, upvoted."
+    DoctrineRoutingHelper seed: bbs identity: 'g-active' maturity: 'active'
+      scope: 'global' tags: #('concern:io')
+      principle: 'Guard the IO boundary.' rationale: 'parse safety' confidence: '0.7'.
+    "High-confidence universal (floor candidate), no votes."
+    DoctrineRoutingHelper seed: bbs identity: 'floor-univ' maturity: 'active'
+      scope: 'global' tags: (Array new: 0)
+      principle: 'Cleanup must be fail-safe.'
+      rationale: 'Keep the resource on any ambiguous signal.' confidence: '0.95'.
+    "Gated OUT — and heavily UPVOTED to prove votes cannot resurrect them."
+    DoctrineRoutingHelper seed: bbs identity: 'g-proposed' maturity: 'proposed'
+      scope: 'global' tags: #('concern:io')
+      principle: 'Proposed IO rule.' rationale: 'parse safety' confidence: '0.7'.
+    DoctrineRoutingHelper seed: bbs identity: 'other-active' maturity: 'active'
+      scope: 'other-repo' tags: #('concern:io')
+      principle: 'Other repo IO rule.' rationale: 'parse safety' confidence: '0.7'.
+    DoctrineRoutingHelper seed: bbs identity: 'rev-tagged' maturity: 'active'
+      scope: 'global' tags: #('role:reviewer' 'concern:io')
+      principle: 'Reviewer-only IO rule.' rationale: 'parse safety' confidence: '0.7'.
+    DoctrineRoutingHelper voteUp: bbs doctrine: 'g-active' scope: 'global' times: 4 prefix: 'ga'.
+    DoctrineRoutingHelper voteUp: bbs doctrine: 'g-proposed' scope: 'global' times: 9 prefix: 'gp'.
+    DoctrineRoutingHelper voteUp: bbs doctrine: 'other-active' scope: 'other-repo' times: 9 prefix: 'oa'.
+    DoctrineRoutingHelper voteUp: bbs doctrine: 'rev-tagged' scope: 'global' times: 9 prefix: 'rt'.
+
+    role := Implementer new.
+    q := 'IO boundary parse safety'.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'g-active' in: out)
+      message: 'DVW6: active applicable entry still surfaces'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'floor-univ' in: out)
+      message: 'DVW6: universal floor still lands the high-confidence cross-cutting entry'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'g-proposed' in: out) not
+      message: 'DVW6: upvotes do NOT resurrect a proposed (gated) entry'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'other-active' in: out) not
+      message: 'DVW6: upvotes do NOT resurrect an other-repo (gated) entry'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'rev-tagged' in: out) not
+      message: 'DVW6: upvotes do NOT resurrect a role-mismatched (gated) entry'.
+    seq1 := DoctrineRoutingHelper identitySeqOf:
+      (role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q).
+    seq2 := DoctrineRoutingHelper identitySeqOf:
+      (role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: q).
+    t assertEqual: seq1 to: seq2
+      message: 'DVW6: ordering deterministic with gates + votes + floor combined'
+  ]
+
 "=== Main ==="
 DoctrineRoutingMain subclass: Object
   classMethod: run [
@@ -915,6 +1179,10 @@ DoctrineRoutingMain subclass: Object
     [TestDoctrineVotingPrompt run: t] on: Exception do: [:e |
       ('TestDoctrineVotingPrompt CRASHED: ', e messageText) println.
       t assert: false message: 'TestDoctrineVotingPrompt crashed'
+    ].
+    [TestDoctrineVoteWeighting run: t] on: Exception do: [:e |
+      ('TestDoctrineVoteWeighting CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDoctrineVoteWeighting crashed'
     ].
     t report.
     ^t failed
