@@ -19,7 +19,11 @@
    CB5  files_changed is taken from the FIRST observation whose payload
         carries files_changed.
    CB6  Description longer than 120 chars is truncated to 120; negative
-        duration math is floored at 0."
+        duration math is floored at 0.
+   CB7  PRODUCER side (real git): GitOps changedFileCount:since:in: — the value
+        MergeWorktreeAction puts into the merge-complete observation — reads >0
+        for a branch that touched files, and soft-fails to 0 on empty output.
+        This is the gap CB5 (synthetic observation) cannot catch."
 
 CBRunner subclass: Object
   instanceVars: passed failed failures
@@ -134,7 +138,8 @@ TestCaseBuilder subclass: Object
     self testMissingEndTime: t.
     self testEmptyTasks: t.
     self testFilesChangedFromObservation: t.
-    self testTruncateAndNegativeDurationFloor: t
+    self testTruncateAndNegativeDurationFloor: t.
+    self testProducerEmitsFilesChanged: t
   ]
 
   classMethod: twoTasks [
@@ -299,6 +304,41 @@ TestCaseBuilder subclass: Object
     a0 := (case at: 'actions') at: 1.
     t assertEqual: (a0 at: 'description') size to: 120
       message: 'CB6: long description truncated to 120 chars'
+  ]
+
+  classMethod: testProducerEmitsFilesChanged: t [
+    "CB7 — PRODUCER side. CB5 only proves CaseBuilder READS files_changed from a
+     synthetic observation; it cannot catch the real bug, which was that NO code
+     ever produced the key (so the case always defaulted to 0). This test
+     exercises the producer — GitOps changedFileCount:since:in:, the value
+     MergeWorktreeAction puts into the merge-complete observation payload — on a
+     real branch that touched 2 files, and proves the payload carries
+     files_changed > 0. It also proves the soft-fail guard: empty git output for
+     a nonexistent ref returns 0 and never crashes the merge."
+    | r count obsPayload emptyCount |
+    '--- CB7: producer emits files_changed > 0 (the gap CB5 cannot catch) ---' println.
+    r := '/tmp/pp-casebuilder-producer-test'.
+    "A feature branch off main that touches TWO files (three-dot main...feature
+     must read 2, matching the reviewer's git diff --stat main...HEAD view)."
+    Shell run: 'rm -rf "', r, '"; mkdir -p "', r, '" && cd "', r, '" && git init -q && git commit -q --allow-empty -m init && git checkout -q -b feature/cb && echo one > one.txt && echo two > two.txt && git add one.txt two.txt && git commit -q -m "touch two files" && git checkout -q main'.
+
+    count := GitOps changedFileCount: 'feature/cb' since: 'main' in: r.
+    t assertEqual: count to: 2
+      message: 'CB7: a 2-file branch change reads files_changed=2, not 0'.
+
+    "Mirror what MergeWorktreeAction does at each merge-complete emit site."
+    obsPayload := Dictionary new.
+    obsPayload at: 'files_changed' put: count.
+    t assert: ((obsPayload at: 'files_changed') > 0)
+      message: 'CB7: merge-complete observation payload carries files_changed > 0'.
+
+    "Soft-fail guard: empty/garbage git output (nonexistent ref) returns 0 and
+     never crashes the merge (Shell capture: is unreliable)."
+    emptyCount := GitOps changedFileCount: 'no-such-branch' since: 'main' in: r.
+    t assertEqual: emptyCount to: 0
+      message: 'CB7: nonexistent ref / empty git output soft-fails to 0'.
+
+    Shell run: 'rm -rf "', r, '"'
   ]
 
 "=== Main ==="

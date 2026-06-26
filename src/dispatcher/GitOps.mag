@@ -115,6 +115,28 @@ GitOps subclass: Object
     ^[trimmed asInteger] on: Exception do: [:e | 0]
   ]
 
+  classMethod: changedFileCount: branch since: base in: repoPath [
+    "Count the files <branch> changed since it diverged from <base>, using a
+     THREE-DOT diff (base...branch). This is the merge-base delta — the same
+     semantics the reviewer sees via `git diff --stat main...HEAD`
+     (ClaudeHarness.mag:228) — NOT a post-merge HEAD~1..HEAD count, which reads
+     0 for fast-forward / merge commits.
+
+     MUST be called BEFORE the branch is force-deleted, or git has no ref to
+     diff. Guards the soft-fail behaviour of Shell capture: (nil / '' output)
+     by returning 0 — never crashes the merge (Shell capture: is unreliable per
+     project_pp_treesafe_merge)."
+    | output trimmed |
+    "Use plain capture: (NOT capture:timeout:) — the latter backgrounds the
+     command and soft-fails to '' (project_pp_treesafe_merge; same reason
+     isCleanTree: and mergeBranch:into:'s rev-parse use plain capture:). The
+     `diff --name-only | wc -l` is instant and needs no watchdog."
+    output := Shell capture: 'git -C "', repoPath, '" diff --name-only "', base, '...', branch, '" 2>/dev/null | wc -l'.
+    (output isNil or: [output isEmpty]) ifTrue: [^0].
+    trimmed := output trimSeparators.
+    ^[trimmed asInteger] on: Exception do: [:e | 0]
+  ]
+
   "--- Tree-safe merging ----------------------------------------------------
    The dispatcher's repoPath is a long-lived checkout (the server runs there).
    Switching its branch via `git checkout` to perform a merge races with and

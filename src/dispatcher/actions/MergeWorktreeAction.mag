@@ -14,7 +14,7 @@ MergeWorktreeAction subclass: WorkflowAction
      The feature -> main merge is the one step that must touch the primary tree
      (main is checked out there); it is GUARDED: if that tree has uncommitted
      changes the merge is refused rather than clobbering them."
-    | info payload repoPath featureBranch implBranch worktreeDir scope obsPayload standalone |
+    | info payload repoPath featureBranch implBranch worktreeDir scope obsPayload standalone filesChanged |
 
     "Find scope from the workflow tuple"
     scope := engine scopeForInstance: instanceId.
@@ -65,6 +65,10 @@ MergeWorktreeAction subclass: WorkflowAction
         engine failWorkflow: instanceId reason: 'Pipeline merge conflict: ', featureBranch, ' into main — human intervention required'.
         ^self
       ].
+      "Count files the feature branch changed since main BEFORE the branch is
+       deleted below — afterwards git has no ref to diff. implBranch is empty in
+       the pipeline case, so the feature branch carries the work."
+      filesChanged := GitOps changedFileCount: featureBranch since: 'main' in: repoPath.
       GitOps deleteBranch: featureBranch in: repoPath.
       "Best-effort push origin/main so the work is actually visible."
       [GitOps pushBranch: 'main' in: repoPath]
@@ -75,6 +79,7 @@ MergeWorktreeAction subclass: WorkflowAction
       obsPayload at: 'detail' put: ('Pipeline merged ', featureBranch, ' into main').
       obsPayload at: 'repoPath' put: repoPath.
       obsPayload at: 'featureBranch' put: featureBranch.
+      obsPayload at: 'files_changed' put: filesChanged.
       obsPayload at: 'merged_to_main' put: 'true'.
       bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
       bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Pipeline merge complete — ', featureBranch, ' merged into main').
@@ -103,6 +108,11 @@ MergeWorktreeAction subclass: WorkflowAction
      not landed yet), so the safe delete would refuse as 'not fully merged' and
      leave the branch behind. The work is preserved in featureBranch, so -D is
      safe."
+    "Count files the impl branch changed since main BEFORE it is force-deleted
+     below — afterwards git has no ref to diff. Three-dot main...implBranch
+     matches the reviewer's view; a post-merge HEAD~1..HEAD would read 0 on a
+     fast-forward. Used in both the standalone and wave-child observations."
+    filesChanged := GitOps changedFileCount: implBranch since: 'main' in: repoPath.
     GitOps removeWorktree: worktreeDir in: repoPath.
     GitOps deleteBranchForce: implBranch in: repoPath.
 
@@ -154,6 +164,7 @@ MergeWorktreeAction subclass: WorkflowAction
       obsPayload at: 'repoPath' put: repoPath.
       obsPayload at: 'featureBranch' put: featureBranch.
       obsPayload at: 'implBranch' put: implBranch.
+      obsPayload at: 'files_changed' put: filesChanged.
       obsPayload at: 'merged_to_main' put: 'true'.
       bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
       bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Complete — ', implBranch, ' -> ', featureBranch, ' -> main').
@@ -177,6 +188,7 @@ MergeWorktreeAction subclass: WorkflowAction
     obsPayload at: 'repoPath' put: repoPath.
     obsPayload at: 'featureBranch' put: featureBranch.
     obsPayload at: 'implBranch' put: implBranch.
+    obsPayload at: 'files_changed' put: filesChanged.
     obsPayload at: 'merged_to_main' put: 'false'.
     bbs out: 'observation' scope: scope identity: 'merge-complete' payload: obsPayload.
 

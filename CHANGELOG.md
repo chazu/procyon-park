@@ -8,6 +8,15 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Fixed
+- `files_changed` in workflow cases no longer always reads 0. No code ever
+  produced a `files_changed` observation, so `CaseBuilder` always fell back to
+  its default of 0 and undercounted real merged work. `MergeWorktreeAction` now
+  computes the count via a new `GitOps changedFileCount:since:in:` (three-dot
+  `main...<branch>`, matching the reviewer's `git diff --stat main...HEAD` view)
+  and emits it into the `merge-complete` observation at all three merge sites
+  (pipeline, standalone, wave-child). The count is taken before the branch is
+  force-deleted, and soft-fails to 0 on empty git output so a merge never
+  crashes. A 2-file change now records `files_changed=2`, not 0.
 - `pp doctrine propose --applies repo` now resolves to the concrete repo scope
   (e.g. `procyon-park`) instead of storing the literal type `repo`. The consumer
   composes applicability by scope-union `{global, <repo>}`, so a stored `repo`
