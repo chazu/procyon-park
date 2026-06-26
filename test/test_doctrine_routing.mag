@@ -149,6 +149,26 @@ DoctrineRoutingHelper subclass: Object
                   rationale: rationale confidence: confidence)
   ]
 
+  classMethod: link: category scope: lscope identity: lident [
+    "A single crystallized_into forward-edge link {category,scope,identity}."
+    | l |
+    l := Dictionary new.
+    l at: 'category' put: category.
+    l at: 'scope'    put: lscope.
+    l at: 'identity' put: lident.
+    ^l
+  ]
+
+  classMethod: seedLinked: bbs identity: ident maturity: maturity scope: dscope tags: tags
+      principle: principle crystallizedInto: links [
+    "Seed a doctrine carrying a crystallized_into forward-edge array (the lineage
+     substrate the suppression filter reads)."
+    | p |
+    p := self payload: maturity scope: dscope tags: tags principle: principle.
+    p at: 'crystallized_into' put: links.
+    bbs out: 'doctrine' scope: 'global' identity: ident payload: p
+  ]
+
 "=== TestDoctrineRouting ==="
 TestDoctrineRouting subclass: Object
 
@@ -562,6 +582,204 @@ TestDoctrineRanking subclass: Object
     ^tup
   ]
 
+"=== TestDoctrineCrystallizeSuppression ===
+ Double-counting guard at the Orient consumption boundary: a doctrine that has
+ crystallized INTO a CONVENTION is unconditional and already lands as a binding
+ convention at execution time, so it is SUPPRESSED from advisory injection. A
+ doctrine that merely spawned a WORKITEM, or that carries no crystallized_into
+ at all, is UNAFFECTED — it never lost its judgment clause.
+
+ Invariants under test:
+   DCS1  A doctrine whose crystallized_into includes a convention link is
+         EXCLUDED from the injected set.
+   DCS2  A doctrine whose crystallized_into has ONLY a workitem link is still
+         injected.
+   DCS3  A doctrine with no crystallized_into is injected as before.
+   DCS4  Suppression frees a slot: an entry that would have been crowded out
+         (rank 7 of 7 under the cap of 6) now lands once a convention-linked
+         entry is suppressed.
+   DCS5  The existing hard gates (active-only, scope-union, role) AND
+         determinism still hold alongside the suppression filter."
+TestDoctrineCrystallizeSuppression subclass: Object
+
+  classMethod: run: t [
+    self testConventionLinkSuppressed: t.
+    self testWorkitemLinkStillInjected: t.
+    self testNoLinkInjected: t.
+    self testSuppressionFreesSlot: t.
+    self testGatesAndDeterminismHold: t
+  ]
+
+  classMethod: testConventionLinkSuppressed: t [
+    "DCS1: a doctrine crystallized into a convention is excluded."
+    | bbs role out |
+    '--- DCS1: convention-linked doctrine is suppressed from advisory ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    DoctrineRoutingHelper seedLinked: bbs identity: 'crystal-conv' maturity: 'active'
+      scope: 'global' tags: (Array new: 0)
+      principle: 'This lesson crystallized into a binding convention.'
+      crystallizedInto: (Array with: (DoctrineRoutingHelper link: 'convention'
+                          scope: 'global' identity: 'conv-1')).
+    DoctrineRoutingHelper seed: bbs identity: 'plain' maturity: 'active'
+      scope: 'global' tags: (Array new: 0) principle: 'A plain advisory lesson.'.
+
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'maggie-repo' role: 'implementer'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'crystal-conv' in: out) not
+      message: 'DCS1: convention-crystallized doctrine is NOT injected'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'plain' in: out)
+      message: 'DCS1: the plain advisory doctrine is still injected'
+  ]
+
+  classMethod: testWorkitemLinkStillInjected: t [
+    "DCS2: a doctrine linked ONLY to a workitem keeps its judgment clause."
+    | bbs role out |
+    '--- DCS2: workitem-linked doctrine stays in rotation ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    DoctrineRoutingHelper seedLinked: bbs identity: 'crystal-wi' maturity: 'active'
+      scope: 'global' tags: (Array new: 0)
+      principle: 'This lesson spawned a workitem but kept its conditionality.'
+      crystallizedInto: (Array with: (DoctrineRoutingHelper link: 'workitem'
+                          scope: 'maggie-repo' identity: 'wi-1')).
+
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'maggie-repo' role: 'implementer'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'crystal-wi' in: out)
+      message: 'DCS2: workitem-only-linked doctrine IS still injected'
+  ]
+
+  classMethod: testNoLinkInjected: t [
+    "DCS3: a doctrine with no crystallized_into is injected as before."
+    | bbs role out |
+    '--- DCS3: uncrystallized doctrine is unaffected ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    DoctrineRoutingHelper seed: bbs identity: 'no-link' maturity: 'active'
+      scope: 'global' tags: (Array new: 0) principle: 'No forward edge at all.'.
+
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'maggie-repo' role: 'implementer'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'no-link' in: out)
+      message: 'DCS3: uncrystallized doctrine IS injected'.
+
+    "Belt-and-braces: an empty crystallized_into array is also unsuppressed."
+    DoctrineRoutingHelper seedLinked: bbs identity: 'empty-link' maturity: 'active'
+      scope: 'global' tags: (Array new: 0) principle: 'Empty forward-edge array.'
+      crystallizedInto: (Array new: 0).
+    out := role activeDoctrineFor: bbs scope: 'maggie-repo' role: 'implementer'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'empty-link' in: out)
+      message: 'DCS3: empty crystallized_into is treated as unsuppressed'
+  ]
+
+  classMethod: testSuppressionFreesSlot: t [
+    "DCS4: suppressing a convention-linked entry frees a capped slot so an entry
+     that would have been crowded out (the 7th of 7 under cap=6) now lands.
+
+     Two parallel corpora (the BBS doctrine store is append-only, so re-seeding an
+     identity does not replace it — we vary the corpus across two stores instead):
+       Corpus A: 6 high-relevance entries + 1 low-relevance 'loser'. cap=6 → the
+                 loser is rank 7 and crowded out.
+       Corpus B: identical, except one of the 6 high entries is crystallized into
+                 a CONVENTION → it is suppressed, leaving 5 high + loser = 6, so
+                 the loser now occupies the freed slot."
+    | bbsA bbsB role outA outB i |
+    '--- DCS4: suppression frees a capped slot ---' println.
+    bbsA := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    bbsB := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    role := Implementer new.
+
+    "Corpus A: six plain high-relevance entries + one low-relevance loser."
+    i := 1.
+    [i <= 6] whileTrue: [
+      DoctrineRoutingHelper seed: bbsA identity: ('hi', i printString) maturity: 'active'
+        scope: 'global' tags: #('concern:dashboard' 'topic:sse')
+        principle: ('Dashboard SSE filter rule ', i printString)
+        rationale: 'SSE filter reconcile on reconnect.' confidence: '0.6'.
+      i := i + 1
+    ].
+    DoctrineRoutingHelper seed: bbsA identity: 'loser' maturity: 'active'
+      scope: 'global' tags: #('concern:unrelated')
+      principle: 'An unrelated lesson about packaging.'
+      rationale: 'Has nothing to do with the query.' confidence: '0.5'.
+
+    outA := role activeDoctrineFor: bbsA scope: 'pp-repo' role: 'implementer'
+      query: 'dashboard SSE filter reconcile on reconnect'.
+    t assertEqual: outA size to: 6 message: 'DCS4: cap respected without suppression'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'loser' in: outA) not
+      message: 'DCS4: low-relevance entry is crowded out without suppression'.
+
+    "Corpus B: same, but hi1 is crystallized into a convention (→ suppressed)."
+    DoctrineRoutingHelper seedLinked: bbsB identity: 'hi1' maturity: 'active'
+      scope: 'global' tags: #('concern:dashboard' 'topic:sse')
+      principle: 'Dashboard SSE filter rule 1'
+      crystallizedInto: (Array with: (DoctrineRoutingHelper link: 'convention'
+                          scope: 'global' identity: 'conv-sse')).
+    i := 2.
+    [i <= 6] whileTrue: [
+      DoctrineRoutingHelper seed: bbsB identity: ('hi', i printString) maturity: 'active'
+        scope: 'global' tags: #('concern:dashboard' 'topic:sse')
+        principle: ('Dashboard SSE filter rule ', i printString)
+        rationale: 'SSE filter reconcile on reconnect.' confidence: '0.6'.
+      i := i + 1
+    ].
+    DoctrineRoutingHelper seed: bbsB identity: 'loser' maturity: 'active'
+      scope: 'global' tags: #('concern:unrelated')
+      principle: 'An unrelated lesson about packaging.'
+      rationale: 'Has nothing to do with the query.' confidence: '0.5'.
+
+    outB := role activeDoctrineFor: bbsB scope: 'pp-repo' role: 'implementer'
+      query: 'dashboard SSE filter reconcile on reconnect'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'hi1' in: outB) not
+      message: 'DCS4: the convention-crystallized entry is suppressed'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'loser' in: outB)
+      message: 'DCS4: the freed slot now lands the previously-excluded entry'.
+    t assertEqual: outB size to: 6 message: 'DCS4: slot count still filled to cap'
+  ]
+
+  classMethod: testGatesAndDeterminismHold: t [
+    "DCS5: active-only + scope-union + role gates AND determinism survive the
+     suppression filter."
+    | bbs role out seq1 seq2 |
+    '--- DCS5: hard gates + determinism hold with suppression ---' println.
+    bbs := BBS withDataDir: DoctrineRoutingHelper makeTempDir.
+    "Active + applicable, mix of suppressed and not."
+    DoctrineRoutingHelper seed: bbs identity: 'g-active' maturity: 'active'
+      scope: 'global' tags: #('concern:io') principle: 'Guard the IO boundary.'.
+    DoctrineRoutingHelper seedLinked: bbs identity: 'g-conv' maturity: 'active'
+      scope: 'global' tags: #('concern:io') principle: 'Crystallized into a convention.'
+      crystallizedInto: (Array with: (DoctrineRoutingHelper link: 'convention'
+                          scope: 'global' identity: 'conv-io')).
+    "Gated OUT by existing hard gates."
+    DoctrineRoutingHelper seed: bbs identity: 'g-proposed' maturity: 'proposed'
+      scope: 'global' tags: #('concern:io') principle: 'Proposed IO rule.'.
+    DoctrineRoutingHelper seed: bbs identity: 'other-active' maturity: 'active'
+      scope: 'other-repo' tags: #('concern:io') principle: 'Other repo IO rule.'.
+    DoctrineRoutingHelper seed: bbs identity: 'rev-tagged' maturity: 'active'
+      scope: 'global' tags: #('role:reviewer' 'concern:io')
+      principle: 'Reviewer-only IO rule.'.
+
+    role := Implementer new.
+    out := role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer'
+      query: 'IO boundary'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'g-active' in: out)
+      message: 'DCS5: active applicable entry still surfaces'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'g-conv' in: out) not
+      message: 'DCS5: convention-crystallized entry suppressed'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'g-proposed' in: out) not
+      message: 'DCS5: proposed entry still gated out'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'other-active' in: out) not
+      message: 'DCS5: other-repo entry still gated out'.
+    t assert: (DoctrineRoutingHelper hasIdentity: 'rev-tagged' in: out) not
+      message: 'DCS5: role:reviewer entry still gated out for implementer'.
+
+    "Determinism: same (query, corpus) → identical ordering twice."
+    seq1 := DoctrineRoutingHelper identitySeqOf:
+      (role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: 'IO boundary').
+    seq2 := DoctrineRoutingHelper identitySeqOf:
+      (role activeDoctrineFor: bbs scope: 'pp-repo' role: 'implementer' query: 'IO boundary').
+    t assertEqual: seq1 to: seq2
+      message: 'DCS5: ordering is deterministic with suppression active'
+  ]
+
 "=== Main ==="
 DoctrineRoutingMain subclass: Object
   classMethod: run [
@@ -574,6 +792,10 @@ DoctrineRoutingMain subclass: Object
     [TestDoctrineRanking run: t] on: Exception do: [:e |
       ('TestDoctrineRanking CRASHED: ', e messageText) println.
       t assert: false message: 'TestDoctrineRanking crashed'
+    ].
+    [TestDoctrineCrystallizeSuppression run: t] on: Exception do: [:e |
+      ('TestDoctrineCrystallizeSuppression CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDoctrineCrystallizeSuppression crashed'
     ].
     t report.
     ^t failed

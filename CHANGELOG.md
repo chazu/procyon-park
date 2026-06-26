@@ -33,6 +33,20 @@ Semantic Versioning.
   link substrate; the verbs that populate it (`to-convention`, `to-workitem`) come
   later.
 
+### Changed
+- Doctrine advisory injection (the Orient consumption path) now SUPPRESSES any
+  active doctrine that has crystallized INTO a `convention`. Once a doctrine
+  becomes a binding convention it is unconditional and already reaches agents as
+  a convention at execution time, so re-injecting it as advisory double-counts
+  the guidance and wastes a scarce capped slot. The hard candidate gate in
+  `Role>>activeDoctrineFor:scope:role:query:` now drops entries whose
+  `crystallized_into` includes a `category='convention'` link, freeing the slot
+  for non-redundant guidance. Suppression is precise — a `workitem`-only link
+  never suppresses (that doctrine kept its judgment clause) — and null-tolerant —
+  a missing or empty `crystallized_into` is never suppressed. Storage, synthesis,
+  and the crystallize verbs are unchanged; the suppressed doctrine still survives
+  as the convention's rationale/lineage record.
+
 ### Fixed
 - `files_changed` in workflow cases no longer always reads 0. No code ever
   produced a `files_changed` observation, so `CaseBuilder` always fell back to

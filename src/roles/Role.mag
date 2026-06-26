@@ -308,7 +308,7 @@ Violations will be detected and reverted.
     all := bbs scanAll: 'doctrine'.
     candidates := Array new: 0.
     all do: [:t |
-      | p mat ds applies tags roleTag roleOk |
+      | p mat ds applies tags roleTag roleOk notRedundant |
       p := t at: 'payload' ifAbsent: [Dictionary new].
       mat := p at: 'maturity' ifAbsent: ['proposed'].
       ds := p at: 'doctrine_scope' ifAbsent: ['global'].
@@ -318,7 +318,16 @@ Violations will be detected and reverted.
       roleTag := self roleTagOf: tags.
       roleOk := (roleTag = '')
         or: [(roleTag = 'universal') or: [roleTag = aRole]].
-      (mat = 'active' and: [applies and: [roleOk]]) ifTrue: [
+      "Double-counting guard: a doctrine that has crystallized INTO a CONVENTION
+       is — by the crystallize qualification clause — now UNCONDITIONAL, so as
+       advisory it is pure redundancy: the binding convention already lands in
+       execution-time context. Suppress it from advisory injection entirely (it
+       survives only as the convention's rationale/lineage record), freeing a
+       scarce slot for non-redundant guidance. A doctrine that merely spawned a
+       WORKITEM (or kept its own conditionality) NEVER lost its judgment clause
+       and STAYS in rotation."
+      notRedundant := (self doctrineCrystallizedIntoConvention: p) not.
+      (mat = 'active' and: [applies and: [roleOk and: [notRedundant]]]) ifTrue: [
         candidates := candidates copyWith: t
       ]
     ].
@@ -338,6 +347,31 @@ Violations will be detected and reverted.
       ]
     ].
     ^''
+  ]
+
+  method: doctrineCrystallizedIntoConvention: payload [
+    "True iff this doctrine payload's crystallized_into forward-edge includes a
+     link whose category is 'convention'. Such a doctrine has crystallized into a
+     BINDING convention and is now unconditional, so re-injecting it as advisory
+     double-counts the guidance the convention already supplies at execution time.
+
+     PRECISE: only a category='convention' link suppresses. A 'workitem' link (or
+     any other category) does NOT — that doctrine kept its judgment clause and
+     stays in advisory rotation.
+
+     NULL-TOLERANT: a missing field, a non-Array value, or non-Dictionary link
+     entries are all treated as 'no convention link' (the normal, unsuppressed
+     case) — never a crash."
+    | links |
+    payload isNil ifTrue: [^false].
+    links := payload at: 'crystallized_into' ifAbsent: [nil].
+    (links isNil or: [(links isKindOf: Array) not]) ifTrue: [^false].
+    links do: [:l |
+      ((l isKindOf: Dictionary)
+        and: [(l at: 'category' ifAbsent: [nil]) = 'convention'])
+          ifTrue: [^true]
+    ].
+    ^false
   ]
 
   method: doctrineIsUniversal: tags [
