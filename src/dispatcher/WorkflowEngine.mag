@@ -793,6 +793,56 @@ WorkflowEngine subclass: Object
     ]
   ]
 
+  "--- Doctrine Auto-Synthesis Dispatch (C2 loop-closure) ---"
+
+  method: dispatchStrategist: scope [
+    "Best-effort: enqueue EXACTLY ONE 'strategist' task in `scope` so a
+     Strategist agent re-synthesises doctrine from the accumulated case (AAR)
+     tuples. This is the server-side, automatic mirror of the manual
+     `pp doctrine synthesize` (DoctrineCLI>>cmdSynthesize:), driven by the
+     Dispatcher tick (Dispatcher>>maybeAutoSynthesize) when enough new cases
+     have piled up. It closes the Observe(cases) -> Orient(doctrine) loop
+     without a human poke.
+
+     Two hard guarantees (mirroring dispatchArchivist:):
+       1. IDEMPOTENT — if an in-flight strategist task (role='strategist' with
+          status in {pending,dispatched,claimed}) already exists in this scope
+          we bail before creating a second one. Only ONE synthesis runs at a
+          time per scope.
+       2. BEST-EFFORT / NON-FATAL — the whole body is wrapped in on:Exception
+          so a scan/BBS failure can NEVER propagate into the tick loop. This
+          task NEVER gates any tick step.
+
+     Direct bbs out: (server-side) — NOT an HTTP POST. The description is
+     sourced from Strategist synthesisDescriptionForScope: so the manual and
+     automatic paths share one prompt."
+    [
+      | existing taskId taskPayload |
+      "Idempotency guard: skip if an in-flight strategist task already exists
+       in this scope."
+      existing := (bbs scanAll: 'task') detect: [:t |
+        | p status |
+        p := t at: 'payload' ifAbsent: [Dictionary new].
+        status := p at: 'status' ifAbsent: [''].
+        ((t at: 'scope' ifAbsent: [nil]) = scope)
+          and: [((p at: 'role' ifAbsent: ['']) = 'strategist')
+          and: [(status = 'pending') or: [(status = 'dispatched') or: [status = 'claimed']]]]
+      ] ifNone: [nil].
+      existing notNil ifTrue: [^self].
+
+      taskId := 'strategist-', ((ClaimId generate) at: 'hex').
+      taskPayload := Dictionary new.
+      taskPayload at: 'role' put: 'strategist'.
+      taskPayload at: 'status' put: 'pending'.
+      taskPayload at: 'description' put: (Strategist synthesisDescriptionForScope: scope).
+      taskPayload at: 'repo' put: scope.
+
+      bbs out: 'task' scope: scope identity: taskId payload: taskPayload
+    ] on: Exception do: [:e |
+      bbs logEngine: 'warn' component: 'doctrine' scope: scope message: ('strategist dispatch failed (non-fatal): ', e messageText)
+    ]
+  ]
+
   "--- AAR Archivist Enrichment Consumption (loop closer) ---"
 
   "CHANNEL CONTRACT (decided + documented here):

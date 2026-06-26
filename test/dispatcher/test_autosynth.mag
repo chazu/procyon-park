@@ -1,0 +1,309 @@
+"Integration tests for Dispatcher>>maybeAutoSynthesize and
+ WorkflowEngine>>dispatchStrategist: — the C2 loop-closure that re-orients
+ doctrine AUTOMATICALLY when enough new case (AAR) tuples accumulate.
+
+ Invariants under test:
+   AS-a  Below threshold (N-1 new cases) -> NO strategist task enqueued.
+   AS-b  At/above threshold (N new cases) -> EXACTLY ONE strategist task for
+         that scope, watermark advanced.
+   AS-c  Idempotency: a second sweep immediately after does NOT enqueue a
+         second strategist (in-flight guard + watermark/cooldown).
+   AS-d  Per-scope isolation: scope A over threshold fires; scope B under
+         threshold does not.
+   AS-e  Cooldown: within cooldown no re-fire even with new cases; past
+         cooldown with >= threshold new, fires again.
+   AS-f  Disabled via config (DOCTRINE_AUTOSYNTH=0 equivalent) -> never fires.
+   AS-g  Non-fatal: a malformed case tuple in the scan does not abort the
+         sweep or escape.
+
+ Real BBS (BBS withDataDir:) is used so the full scan + out: + upsertSignal
+ path executes end-to-end against an in-memory tuplespace. Config is overridden
+ deterministically via a Dispatcher subclass so tests do not depend on ambient
+ environment variables."
+
+"--- Deterministic-config Dispatcher ---
+ Overrides the three auto-synth config knobs so the suite is hermetic and the
+ real env-read fallbacks (autoSynthEnabled/Threshold/CooldownSecs) are not
+ exercised here (they are trivial guarded reads)."
+AutoSynthTestDispatcher subclass: Dispatcher
+  instanceVars: cfgEnabled cfgThreshold cfgCooldown
+
+  method: cfgEnabled: e threshold: th cooldown: cd [
+    cfgEnabled := e.
+    cfgThreshold := th.
+    cfgCooldown := cd
+  ]
+
+  method: autoSynthEnabled [ ^cfgEnabled ]
+  method: autoSynthThreshold [ ^cfgThreshold ]
+  method: autoSynthCooldownSecs [ ^cfgCooldown ]
+
+"--- Runner ---"
+ASRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== Dispatcher auto-synth Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+ASHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: now [ ^DateTime now epochSeconds ]
+
+  classMethod: seedCases: bbs scope: scope count: n createdAt: ts [
+    "Write n 'case' tuples in `scope`, each stamping payload.created_at=ts."
+    1 to: n do: [:i |
+      | p |
+      p := Dictionary new.
+      p at: 'created_at' put: ts.
+      p at: 'lessons' put: (Array new: 0).
+      bbs out: 'case' scope: scope identity: ('case-', scope, '-', i printString) payload: p
+    ]
+  ]
+
+  classMethod: seedWatermark: bbs scope: scope epoch: epoch [
+    | wm |
+    wm := Dictionary new.
+    wm at: 'last_synth_epoch' put: epoch.
+    bbs upsertSignal: scope identity: 'doctrine-synth-watermark' payload: wm
+  ]
+
+  classMethod: strategistTasksIn: bbs scope: scope [
+    "All 'task' tuples with role='strategist' in `scope`."
+    ^(bbs scanAll: 'task') select: [:t |
+      | p |
+      p := t at: 'payload' ifAbsent: [Dictionary new].
+      ((t at: 'scope' ifAbsent: [nil]) = scope)
+        and: [(p at: 'role' ifAbsent: ['']) = 'strategist']
+    ]
+  ]
+
+  classMethod: watermarkEpochIn: bbs scope: scope [
+    | wm |
+    wm := bbs rdp: 'signal' scope: scope identity: 'doctrine-synth-watermark'.
+    ^wm isNil
+      ifTrue: [nil]
+      ifFalse: [(wm at: 'payload' ifAbsent: [Dictionary new]) at: 'last_synth_epoch' ifAbsent: [nil]]
+  ]
+
+  classMethod: dispatcherOn: bbs enabled: e threshold: th cooldown: cd [
+    | d |
+    d := AutoSynthTestDispatcher on: bbs harnessFactory: nil.
+    d cfgEnabled: e threshold: th cooldown: cd.
+    ^d
+  ]
+
+"=== Tests ==="
+TestAutoSynth subclass: Object
+
+  classMethod: run: t [
+    self testBelowThreshold: t.
+    self testAtThresholdFiresOnce: t.
+    self testIdempotentSecondSweep: t.
+    self testPerScopeIsolation: t.
+    self testCooldown: t.
+    self testDisabled: t.
+    self testNonFatalMalformedCase: t
+  ]
+
+  classMethod: testBelowThreshold: t [
+    | tempDir bbs disp |
+    '--- AS-a: below threshold (N-1) does NOT fire ---' println.
+    tempDir := ASHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "threshold 4, only 3 new cases."
+    ASHelper seedCases: bbs scope: 'scopeA' count: 3 createdAt: (ASHelper now).
+    disp := ASHelper dispatcherOn: bbs enabled: true threshold: 4 cooldown: 3600.
+    disp maybeAutoSynthesize.
+
+    t assertEqual: (ASHelper strategistTasksIn: bbs scope: 'scopeA') size to: 0
+      message: 'AS-a: no strategist task below threshold'.
+    t assert: (ASHelper watermarkEpochIn: bbs scope: 'scopeA') isNil
+      message: 'AS-a: watermark untouched below threshold'
+  ]
+
+  classMethod: testAtThresholdFiresOnce: t [
+    | tempDir bbs disp tasks wmEpoch |
+    '--- AS-b: at threshold fires exactly one, watermark advances ---' println.
+    tempDir := ASHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ASHelper seedCases: bbs scope: 'scopeA' count: 4 createdAt: (ASHelper now).
+    disp := ASHelper dispatcherOn: bbs enabled: true threshold: 4 cooldown: 3600.
+    disp maybeAutoSynthesize.
+
+    tasks := ASHelper strategistTasksIn: bbs scope: 'scopeA'.
+    t assertEqual: tasks size to: 1
+      message: 'AS-b: exactly one strategist task at threshold'.
+    tasks size = 1 ifTrue: [
+      | p |
+      p := (tasks at: 1) at: 'payload'.
+      t assertEqual: (p at: 'role' ifAbsent: [nil]) to: 'strategist'
+        message: 'AS-b: task role=strategist'.
+      t assertEqual: (p at: 'status' ifAbsent: [nil]) to: 'pending'
+        message: 'AS-b: task status=pending'.
+      t assertEqual: (p at: 'repo' ifAbsent: [nil]) to: 'scopeA'
+        message: 'AS-b: task repo=scopeA'.
+      t assert: ((p at: 'description' ifAbsent: ['']) isEmpty not)
+        message: 'AS-b: task carries a synthesis description'
+    ].
+    wmEpoch := ASHelper watermarkEpochIn: bbs scope: 'scopeA'.
+    t assert: (wmEpoch notNil and: [wmEpoch > 0])
+      message: 'AS-b: watermark advanced to a positive epoch'
+  ]
+
+  classMethod: testIdempotentSecondSweep: t [
+    | tempDir bbs disp |
+    '--- AS-c: second sweep immediately after does NOT fire again ---' println.
+    tempDir := ASHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ASHelper seedCases: bbs scope: 'scopeA' count: 5 createdAt: (ASHelper now).
+    disp := ASHelper dispatcherOn: bbs enabled: true threshold: 4 cooldown: 3600.
+    disp maybeAutoSynthesize.
+    "Immediately sweep again — in-flight strategist + advanced watermark +
+     cooldown all forbid a second dispatch."
+    disp maybeAutoSynthesize.
+    disp maybeAutoSynthesize.
+
+    t assertEqual: (ASHelper strategistTasksIn: bbs scope: 'scopeA') size to: 1
+      message: 'AS-c: still exactly one strategist after repeated sweeps'
+  ]
+
+  classMethod: testPerScopeIsolation: t [
+    | tempDir bbs disp ts |
+    '--- AS-d: scope A fires, scope B (under threshold) does not ---' println.
+    tempDir := ASHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ts := ASHelper now.
+    ASHelper seedCases: bbs scope: 'scopeA' count: 4 createdAt: ts.
+    ASHelper seedCases: bbs scope: 'scopeB' count: 2 createdAt: ts.
+    disp := ASHelper dispatcherOn: bbs enabled: true threshold: 4 cooldown: 3600.
+    disp maybeAutoSynthesize.
+
+    t assertEqual: (ASHelper strategistTasksIn: bbs scope: 'scopeA') size to: 1
+      message: 'AS-d: scope A fired (over threshold)'.
+    t assertEqual: (ASHelper strategistTasksIn: bbs scope: 'scopeB') size to: 0
+      message: 'AS-d: scope B did not fire (under threshold)'.
+    t assert: (ASHelper watermarkEpochIn: bbs scope: 'scopeB') isNil
+      message: 'AS-d: scope B watermark untouched'
+  ]
+
+  classMethod: testCooldown: t [
+    | tempDir bbs disp now |
+    '--- AS-e: within cooldown no re-fire; past cooldown fires ---' println.
+    tempDir := ASHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    now := ASHelper now.
+
+    "WITHIN cooldown: watermark just set (epoch=now), but cases are NEW
+     (created_at after the watermark). newCount >= threshold yet cooldown
+     not elapsed -> must NOT fire."
+    ASHelper seedWatermark: bbs scope: 'scopeC' epoch: now.
+    ASHelper seedCases: bbs scope: 'scopeC' count: 5 createdAt: now + 1000.
+    disp := ASHelper dispatcherOn: bbs enabled: true threshold: 4 cooldown: 3600.
+    disp maybeAutoSynthesize.
+    t assertEqual: (ASHelper strategistTasksIn: bbs scope: 'scopeC') size to: 0
+      message: 'AS-e: no fire within cooldown despite new cases'.
+
+    "PAST cooldown: watermark far in the past, cases new -> fires."
+    ASHelper seedWatermark: bbs scope: 'scopeD' epoch: now - 10000.
+    ASHelper seedCases: bbs scope: 'scopeD' count: 5 createdAt: now.
+    disp maybeAutoSynthesize.
+    t assertEqual: (ASHelper strategistTasksIn: bbs scope: 'scopeD') size to: 1
+      message: 'AS-e: fires again once cooldown has elapsed'
+  ]
+
+  classMethod: testDisabled: t [
+    | tempDir bbs disp |
+    '--- AS-f: disabled config never fires ---' println.
+    tempDir := ASHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    ASHelper seedCases: bbs scope: 'scopeA' count: 20 createdAt: (ASHelper now).
+    disp := ASHelper dispatcherOn: bbs enabled: false threshold: 4 cooldown: 3600.
+    disp maybeAutoSynthesize.
+
+    t assertEqual: (ASHelper strategistTasksIn: bbs scope: 'scopeA') size to: 0
+      message: 'AS-f: no strategist task when disabled'.
+    t assert: (ASHelper watermarkEpochIn: bbs scope: 'scopeA') isNil
+      message: 'AS-f: watermark untouched when disabled'
+  ]
+
+  classMethod: testNonFatalMalformedCase: t [
+    | tempDir bbs disp threw |
+    '--- AS-g: malformed case tuple does not abort or escape the sweep ---' println.
+    tempDir := ASHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "scopeA: valid, over threshold -> should fire."
+    ASHelper seedCases: bbs scope: 'scopeA' count: 4 createdAt: (ASHelper now).
+    "scopeBad: a case whose payload is a String, not a Dictionary. The
+     created_at read on a non-Dictionary throws inside the per-scope guard."
+    bbs out: 'case' scope: 'scopeBad' identity: 'case-bad-1' payload: 'not-a-dict'.
+
+    disp := ASHelper dispatcherOn: bbs enabled: true threshold: 4 cooldown: 3600.
+    threw := false.
+    [disp maybeAutoSynthesize] on: Exception do: [:e | threw := true].
+
+    t assert: threw not
+      message: 'AS-g: malformed case did not escape the sweep'.
+    t assertEqual: (ASHelper strategistTasksIn: bbs scope: 'scopeA') size to: 1
+      message: 'AS-g: valid scope still fired despite malformed case elsewhere'
+  ]
+
+"=== Main ==="
+AutoSynthMain subclass: Object
+  classMethod: start [
+    | t |
+    t := ASRunner new.
+    TestAutoSynth run: t.
+    t report.
+    ^t failed
+  ]

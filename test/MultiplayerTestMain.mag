@@ -268,6 +268,12 @@ MultiplayerTestMain subclass: Object
         failures := failures copyWith: ('ArchivistDispatchMain CRASHED: ', e messageText).
         ('CRASH: ArchivistDispatchMain: ', e messageText) println].
 
+    [totalFailed := totalFailed + AutoSynthMain start. ranSuites := ranSuites + 1]
+      on: Exception do: [:e |
+        failedSuites := failedSuites + 1.
+        failures := failures copyWith: ('AutoSynthMain CRASHED: ', e messageText).
+        ('CRASH: AutoSynthMain: ', e messageText) println].
+
     [totalFailed := totalFailed + AarLearningIntegrationMain start. ranSuites := ranSuites + 1]
       on: Exception do: [:e |
         failedSuites := failedSuites + 1.

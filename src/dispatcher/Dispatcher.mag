@@ -113,8 +113,135 @@ Dispatcher subclass: Object
     (tick \\ 30) = 0 ifTrue: [
       [self housekeep] on: Exception do: [:e |
         ('Dispatcher tick step error (housekeep): ', e messageText) println
+      ].
+      "Doctrine auto-synthesis (C2 loop-closure): when enough new case (AAR)
+       tuples have accumulated in a scope, enqueue a Strategist task to
+       re-orient doctrine — no manual `pp doctrine synthesize` needed. Its OWN
+       on:Exception wrapper keeps it strictly off-critical-path: it can never
+       gate or flip any tick step."
+      [self maybeAutoSynthesize] on: Exception do: [:e |
+        ('Dispatcher tick step error (maybeAutoSynthesize): ', e messageText) println
       ]
     ]
+  ]
+
+  "--- Doctrine Auto-Synthesis (C2 loop-closure) ---"
+
+  method: autoSynthEnabled [
+    "Kill-switch. DOCTRINE_AUTOSYNTH defaults to ENABLED; only the literal
+     '0' or 'false' disables it. Guarded for nil/empty."
+    | v |
+    v := System env: 'DOCTRINE_AUTOSYNTH'.
+    (v isNil or: [v isEmpty]) ifTrue: [^true].
+    ^(v = '0' or: [v = 'false']) not
+  ]
+
+  method: autoSynthThreshold [
+    "New cases per scope required to trigger a synthesis. Default 8. Guarded
+     for nil/empty/unparseable env."
+    | v |
+    v := System env: 'DOCTRINE_AUTOSYNTH_THRESHOLD'.
+    (v isNil or: [v isEmpty]) ifTrue: [^8].
+    ^[v asInteger] on: Exception do: [:e | 8]
+  ]
+
+  method: autoSynthCooldownSecs [
+    "Minimum seconds between synthesis dispatches per scope. Default 3600.
+     Guarded for nil/empty/unparseable env."
+    | v |
+    v := System env: 'DOCTRINE_AUTOSYNTH_COOLDOWN_SECS'.
+    (v isNil or: [v isEmpty]) ifTrue: [^3600].
+    ^[v asInteger] on: Exception do: [:e | 3600]
+  ]
+
+  method: maybeAutoSynthesize [
+    "Off-critical-path sweep (driven from the Dispatcher tick, ~every 5min):
+     bucket the 'case' (AAR) tuples by scope and, for any scope that has
+     accumulated >= threshold NEW cases (created_at past that scope's
+     synthesis watermark) AND is past its cooldown AND has no in-flight
+     strategist, enqueue a Strategist task to re-synthesise doctrine.
+
+     V1 design notes:
+       - The watermark is a per-scope signal ('doctrine-synth-watermark')
+         carrying {last_synth_epoch}. A missing watermark means epoch 0, so
+         every case counts as new on the first pass.
+       - The watermark is advanced on DISPATCH, not on strategist completion.
+         A strategist that fails just means those lessons wait for the next
+         threshold batch — we never block the loop on a synthesis outcome.
+       - Single-shot threshold trigger; smarter cadence/predicates deferred.
+
+     Each scope is processed in its OWN on:Exception so one malformed case
+     tuple can neither abort the sweep nor escape into the tick loop."
+    | enabled threshold cooldown now cases countsByScope totalByScope |
+    enabled := self autoSynthEnabled.
+    enabled ifFalse: [^self].
+    threshold := self autoSynthThreshold.
+    cooldown := self autoSynthCooldownSecs.
+    now := DateTime now epochSeconds.
+
+    cases := bbs scanAll: 'case'.
+    "Bucket: per-scope count of NEW cases (created_at > watermark epoch) and
+     per-scope total case count (stamped into the advanced watermark)."
+    countsByScope := Dictionary new.
+    totalByScope := Dictionary new.
+
+    "First pass groups raw case tuples by scope; the watermark lookup happens
+     in the second pass so each scope reads its watermark exactly once."
+    cases do: [:c |
+      [
+        | scope |
+        scope := c at: 'scope' ifAbsent: [nil].
+        scope notNil ifTrue: [
+          totalByScope at: scope put: ((totalByScope at: scope ifAbsent: [0]) + 1).
+          "Collect created_at values per scope for the new-count computation."
+          (countsByScope at: scope ifAbsent: [nil]) isNil ifTrue: [
+            countsByScope at: scope put: (Array new: 0)
+          ].
+          countsByScope at: scope put: ((countsByScope at: scope) copyWith: (c at: 'payload' ifAbsent: [Dictionary new]))
+        ]
+      ] on: Exception do: [:e |
+        bbs logEngine: 'warn' component: 'doctrine' scope: 'system' message: ('auto-synth case bucket skip: ', e messageText)
+      ]
+    ].
+
+    "Second pass: per scope, read watermark, count new cases, decide & fire."
+    countsByScope keysAndValuesDo: [:scope :payloads |
+      [
+        | wmTuple lastEpoch newCount total |
+        wmTuple := bbs rdp: 'signal' scope: scope identity: 'doctrine-synth-watermark'.
+        lastEpoch := 0.
+        wmTuple notNil ifTrue: [
+          lastEpoch := (wmTuple at: 'payload' ifAbsent: [Dictionary new]) at: 'last_synth_epoch' ifAbsent: [0]
+        ].
+        newCount := 0.
+        payloads do: [:p |
+          | createdAt |
+          createdAt := p at: 'created_at' ifAbsent: [0].
+          (createdAt > lastEpoch) ifTrue: [newCount := newCount + 1]
+        ].
+        total := totalByScope at: scope ifAbsent: [0].
+        ((newCount >= threshold) and: [(now - lastEpoch) >= cooldown]) ifTrue: [
+          "dispatchStrategist: is itself idempotent (one in-flight strategist
+           per scope), so it ALSO guards against a duplicate fire here."
+          workflowEngine dispatchStrategist: scope.
+          self advanceSynthWatermark: scope epoch: now total: total.
+          ('[doctrine] auto-synth fired for scope ', scope, ' (newCount=', newCount printString, ' >= threshold=', threshold printString, ')') println
+        ]
+      ] on: Exception do: [:e |
+        bbs logEngine: 'warn' component: 'doctrine' scope: scope message: ('auto-synth scope skip: ', e messageText)
+      ]
+    ]
+  ]
+
+  method: advanceSynthWatermark: scope epoch: epoch total: total [
+    "Upsert the per-scope synthesis watermark to {last_synth_epoch, last_count}.
+     Concurrency-safe replace-by-key via BBS>>upsertSignal:. Advancing on
+     dispatch (not completion) is intentional for V1 (see maybeAutoSynthesize)."
+    | wm |
+    wm := Dictionary new.
+    wm at: 'last_synth_epoch' put: epoch.
+    wm at: 'last_count' put: total.
+    bbs upsertSignal: scope identity: 'doctrine-synth-watermark' payload: wm
   ]
 
   "--- Reaper (D6.2 / D6.3) ---"

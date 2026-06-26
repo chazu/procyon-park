@@ -8,6 +8,21 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Automatic doctrine synthesis (C2 loop-closure). The Dispatcher now re-orients
+  the doctrine layer on its own: every ~5min (`Dispatcher>>maybeAutoSynthesize`,
+  alongside housekeeping) it buckets `case` (AAR) tuples by scope and, for any
+  scope that has accumulated at least a threshold of NEW cases (past a per-scope
+  `doctrine-synth-watermark` signal) and is past its cooldown, enqueues a
+  Strategist task via the new `WorkflowEngine>>dispatchStrategist:` — no manual
+  `pp doctrine synthesize` poke required. It is idempotent (one in-flight
+  strategist per scope), per-scope, cooldown-gated, and strictly
+  off-critical-path (its own `on:Exception` wrapper means it can never gate a
+  tick step). Configurable via env (read once per sweep, all guarded):
+  `DOCTRINE_AUTOSYNTH` (default enabled; `0`/`false` is the kill-switch),
+  `DOCTRINE_AUTOSYNTH_THRESHOLD` (default 8), `DOCTRINE_AUTOSYNTH_COOLDOWN_SECS`
+  (default 3600). The synthesis prompt now has a single source of truth
+  (`Strategist class>>synthesisDescriptionForScope:`), shared by both the manual
+  CLI path and the automatic dispatch so the two cannot drift.
 - End-to-end / dispatch-level integration test for the `pp doctrine` CLI
   (`test/test_doctrine_cli_e2e.sh`, wired into `test/run_integration.sh`). It
   builds `pp` under a scratch HOME, starts a live server, and drives every

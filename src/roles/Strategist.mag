@@ -68,6 +68,15 @@ doctrine, and dismiss. You never change the repository or git history.'
     )
   ]
 
+  classMethod: synthesisDescriptionForScope: scope [
+    "The canonical Strategist synthesis task description, parameterised by scope.
+     SINGLE SOURCE of the synthesis prompt: both the manual path
+     (DoctrineCLI>>cmdSynthesize:) and the automatic path
+     (WorkflowEngine>>dispatchStrategist:, driven by the Dispatcher tick) build
+     the task description from here so the two can never drift."
+    ^('Synthesize doctrine from recent case (AAR) tuples in scope ', scope, '. Read payload.lessons and payload.aar across MANY cases (pp read case ', scope, '), dedupe against existing doctrine (pp doctrine list), cluster recurring/generalizable lessons into distinct principles, and propose each via: pp doctrine propose "<principle>" --rationale "<why>" --applies <global|repo> --repo ', scope, ' --tags <t1,t2> --confidence <0..1> --key <slug>. Use --applies global for cross-cutting lessons and --applies repo for ones specific to this repo (the --repo flag resolves "repo" to a concrete scope so the doctrine actually reaches consumers). Add a role:<implementer|reviewer|planner|scout|universal> tag so the lesson is routed to the right role. Propose PROPOSED doctrine only; do not promote.')
+  ]
+
   classMethod: hardCategories [ ^#('case') ]
   classMethod: softCategories [ ^#('doctrine') ]
   classMethod: contextBudget [ ^40 ]
