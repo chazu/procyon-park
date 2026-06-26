@@ -121,6 +121,14 @@ Dispatcher subclass: Object
        gate or flip any tick step."
       [self maybeAutoSynthesize] on: Exception do: [:e |
         ('Dispatcher tick step error (maybeAutoSynthesize): ', e messageText) println
+      ].
+      "Doctrine feedback review-flag sweep: surface consistently net-disliked
+       ACTIVE doctrine to a HUMAN (warn notification) for review/retire — it
+       NEVER auto-retires. Idempotent (a 'doctrine-feedback-flagged:<id>' signal
+       suppresses re-notification unless the net drops further). Its OWN
+       on:Exception wrapper keeps it strictly off-critical-path."
+      [self maybeFlagDislikedDoctrine] on: Exception do: [:e |
+        ('Dispatcher tick step error (maybeFlagDislikedDoctrine): ', e messageText) println
       ]
     ]
   ]
@@ -242,6 +250,150 @@ Dispatcher subclass: Object
     wm at: 'last_synth_epoch' put: epoch.
     wm at: 'last_count' put: total.
     bbs upsertSignal: scope identity: 'doctrine-synth-watermark' payload: wm
+  ]
+
+  "--- Doctrine Feedback Review-Flag Sweep (human-gated, never auto-retires) ---"
+
+  method: feedbackFlagEnabled [
+    "Kill-switch. DOCTRINE_FEEDBACK_FLAG defaults to ENABLED; only the literal
+     '0' or 'false' disables it. Guarded for nil/empty."
+    | v |
+    v := System env: 'DOCTRINE_FEEDBACK_FLAG'.
+    (v isNil or: [v isEmpty]) ifTrue: [^true].
+    ^(v = '0' or: [v = 'false']) not
+  ]
+
+  method: feedbackRetireNet [
+    "Net vote score (up - down) at or below which an ACTIVE doctrine is flagged
+     for human review. Default -3. Guarded for nil/empty/unparseable env."
+    | v |
+    v := System env: 'DOCTRINE_FEEDBACK_RETIRE_NET'.
+    (v isNil or: [v isEmpty]) ifTrue: [^-3].
+    ^[v asInteger] on: Exception do: [:e | -3]
+  ]
+
+  method: feedbackMinVotes [
+    "Minimum total votes (up + down) before a doctrine can be flagged — a guard
+     against flagging on a single early downvote. Default 3. Guarded for
+     nil/empty/unparseable env."
+    | v |
+    v := System env: 'DOCTRINE_FEEDBACK_MIN_VOTES'.
+    (v isNil or: [v isEmpty]) ifTrue: [^3].
+    ^[v asInteger] on: Exception do: [:e | 3]
+  ]
+
+  method: tallyFeedback: tuples forDoctrine: doctrineId [
+    "PURE: count up/down votes for doctrineId across feedback tuples. NULL/shape
+     tolerant — nil list, missing/non-dict payloads, and unknown verdicts are
+     skipped. Returns {up, down, net, total}. Mirrors DoctrineCLI's pure tally."
+    | up down d |
+    up := 0. down := 0.
+    tuples isNil ifFalse: [
+      tuples do: [:t |
+        | tp v |
+        tp := (t isKindOf: Dictionary) ifTrue: [t at: 'payload' ifAbsent: [nil]] ifFalse: [nil].
+        (tp isKindOf: Dictionary) ifTrue: [
+          (tp at: 'doctrine_id' ifAbsent: [nil]) = doctrineId ifTrue: [
+            v := tp at: 'verdict' ifAbsent: [''].
+            v = 'up'   ifTrue: [up := up + 1].
+            v = 'down' ifTrue: [down := down + 1]
+          ]
+        ]
+      ]
+    ].
+    d := Dictionary new.
+    d at: 'up'    put: up.
+    d at: 'down'  put: down.
+    d at: 'net'   put: up - down.
+    d at: 'total' put: up + down.
+    ^d
+  ]
+
+  method: maybeFlagDislikedDoctrine [
+    "Off-critical-path sweep (driven from the Dispatcher tick, ~every 5min):
+     for each ACTIVE doctrine, tally its votes at the doctrine's CANONICAL
+     doctrine_scope and, when net <= retireNet AND total >= minVotes, emit ONE
+     human-facing warn notification recommending review/retire.
+
+     NEVER auto-retires — this is FLAG-ONLY (human-gated): the human runs
+     `pp doctrine retire`/`reject`. IDEMPOTENT: a 'doctrine-feedback-flagged:<id>'
+     signal (carrying the net at flag time) suppresses re-notification on every
+     subsequent sweep; it re-notifies ONLY if the net has dropped FURTHER than
+     the last flag (the doctrine got even more disliked).
+
+     Each doctrine is processed in its OWN on:Exception so one malformed doctrine
+     or feedback tuple can neither abort the sweep nor escape into the tick loop.
+     Feedback scans are cached per doctrine_scope so each scope is scanned once."
+    | enabled retireNet minVotes doctrines feedbackByScope |
+    enabled := self feedbackFlagEnabled.
+    enabled ifFalse: [^self].
+    retireNet := self feedbackRetireNet.
+    minVotes := self feedbackMinVotes.
+
+    doctrines := bbs scanAll: 'doctrine'.
+    feedbackByScope := Dictionary new.
+    doctrines do: [:d |
+      [
+        | p maturity id dscope feedback tally net total |
+        p := d at: 'payload' ifAbsent: [nil].
+        (p isKindOf: Dictionary) ifTrue: [
+          maturity := p at: 'maturity' ifAbsent: [''].
+          "ACTIVE-only: proposed/retired/rejected doctrine is never flagged."
+          maturity = 'active' ifTrue: [
+            id := d at: 'identity'.
+            dscope := p at: 'doctrine_scope' ifAbsent: ['global'].
+            (dscope isNil or: [dscope isEmpty]) ifTrue: [dscope := 'global'].
+            (feedbackByScope at: dscope ifAbsent: [nil]) isNil ifTrue: [
+              feedbackByScope at: dscope put: (bbs scan: 'doctrine-feedback' scope: dscope)
+            ].
+            tally := self tallyFeedback: (feedbackByScope at: dscope) forDoctrine: id.
+            net := tally at: 'net'.
+            total := tally at: 'total'.
+            ((net <= retireNet) and: [total >= minVotes]) ifTrue: [
+              self flagDislikedDoctrine: id scope: dscope net: net total: total payload: p
+            ]
+          ]
+        ]
+      ] on: Exception do: [:e |
+        bbs logEngine: 'warn' component: 'doctrine' scope: 'system'
+          message: ('feedback-flag doctrine skip: ', e messageText)
+      ]
+    ]
+  ]
+
+  method: flagDislikedDoctrine: id scope: dscope net: net total: total payload: p [
+    "Emit ONE human-facing warn notification recommending review/retire of a
+     net-disliked ACTIVE doctrine. IDEMPOTENT: keyed on a per-scope signal
+     'doctrine-feedback-flagged:<id>' carrying the net at flag time. If already
+     flagged, re-notify ONLY when the current net is STRICTLY below the prior
+     flagged net (the doctrine has become even more disliked). NEVER retires."
+    | markerId marker prevNet key |
+    markerId := 'doctrine-feedback-flagged:', id.
+    marker := bbs rdp: 'signal' scope: dscope identity: markerId.
+    marker notNil ifTrue: [
+      prevNet := (marker at: 'payload' ifAbsent: [Dictionary new]) at: 'net' ifAbsent: [0].
+      "Already flagged — suppress unless the net has dropped further."
+      (net < prevNet) ifFalse: [^self]
+    ].
+
+    key := p at: 'key' ifAbsent: [''].
+    (key isNil or: [key isEmpty]) ifTrue: [key := id].
+    bbs notify: ('Doctrine "', key, '" (', id, ', scope ', dscope,
+                 ') is net-disliked (net=', net printString, ', votes=', total printString,
+                 '). Review and consider retiring: pp doctrine retire ', id)
+      scope: dscope severity: 'warn'.
+    self markDoctrineFlagged: id scope: dscope net: net total: total
+  ]
+
+  method: markDoctrineFlagged: id scope: dscope net: net total: total [
+    "Upsert the idempotency marker for a flagged doctrine. Replace-by-key via
+     BBS>>upsertSignal: so a re-flag (further net drop) overwrites the prior net."
+    | marker |
+    marker := Dictionary new.
+    marker at: 'net' put: net.
+    marker at: 'total' put: total.
+    marker at: 'flagged_at' put: DateTime now epochSeconds.
+    bbs upsertSignal: dscope identity: ('doctrine-feedback-flagged:', id) payload: marker
   ]
 
   "--- Reaper (D6.2 / D6.3) ---"

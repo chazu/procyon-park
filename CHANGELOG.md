@@ -8,6 +8,23 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Doctrine vote surfacing + review-flag sweep — humans can now see per-doctrine
+  vote tallies and are alerted when active doctrine is consistently disliked.
+  `pp doctrine show <id>` renders a `votes: up N / down M / net K` line and
+  `pp doctrine list` shows a compact `+N/-M` vote column per entry, both tallied
+  at the doctrine's canonical `doctrine_scope` (`DoctrineCLI>>showVoteTally:`,
+  `formatVoteColumn:`, `formatVoteTallyLine:`). A new off-critical-path Dispatcher
+  sweep (`maybeFlagDislikedDoctrine`, ~every 5min, env-gated, own exception
+  wrapper) FLAGS — never auto-retires — any ACTIVE doctrine whose net vote score
+  is `<= DOCTRINE_FEEDBACK_RETIRE_NET` (default -3) with at least
+  `DOCTRINE_FEEDBACK_MIN_VOTES` (default 3) total votes, emitting ONE human-facing
+  `warn` notification recommending `pp doctrine retire`. It is idempotent (a
+  `doctrine-feedback-flagged:<id>` marker signal carrying the net at flag time
+  suppresses re-notification unless the net drops further) and disabled by
+  `DOCTRINE_FEEDBACK_FLAG=0`. Retire/reject stays human-gated. (new
+  `TestDoctrineFlag` suite covering show/list rendering, the flag threshold,
+  idempotency, min-votes/active-only gating, the kill-switch, and non-fatal
+  malformed-tuple handling.)
 - Doctrine voting invitation in agent prompts — doctrine-consuming roles
   (planner/implementer/reviewer/scout/fixer) now see each injected doctrine
   entry's `dctr-` id rendered prominently ("cite this id to vote") plus an

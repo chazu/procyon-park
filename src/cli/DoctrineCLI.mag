@@ -173,7 +173,15 @@ DoctrineCLI subclass: Object
       (matFilter notNil and: [(mat = matFilter) not]) ifTrue: [ok := false].
       (tagFilter notNil and: [(tags includes: tagFilter) not]) ifTrue: [ok := false].
       ok ifTrue: [
-        ((t at: 'identity'), '  [', mat, ']  (', (p at: 'doctrine_scope' ifAbsent: ['global']), ')  ', (p at: 'principle' ifAbsent: [''])) println.
+        | dscope voteCol |
+        dscope := p at: 'doctrine_scope' ifAbsent: ['global'].
+        (dscope isNil or: [dscope isEmpty]) ifTrue: [dscope := 'global'].
+        "Compact vote column (e.g. +3/-1) — surfaces the human/agent verdict at a
+         glance. Tally is at the doctrine's CANONICAL doctrine_scope so global
+         votes cast from any repo are counted together. Network/parse-tolerant:
+         feedbackTallyFor: degrades to zeros on any failure, never breaks the list."
+        voteCol := self formatVoteColumn: (self feedbackTallyFor: (t at: 'identity') scope: dscope).
+        ((t at: 'identity'), '  [', mat, ']  ', voteCol, '  (', dscope, ')  ', (p at: 'principle' ifAbsent: [''])) println.
         shown := shown + 1
       ]
     ].
@@ -193,6 +201,10 @@ DoctrineCLI subclass: Object
     ('key:        ', (p at: 'key' ifAbsent: [''])) println.
     ('maturity:   ', (p at: 'maturity' ifAbsent: ['?'])) println.
     ('scope:      ', (p at: 'doctrine_scope' ifAbsent: ['global'])) println.
+    "Vote tally (up / down / net) — surface the accumulated human/agent verdict.
+     Tallied at the doctrine's CANONICAL doctrine_scope so votes cast from any
+     repo on a global doctrine converge. Network/parse-tolerant (zeros on fail)."
+    self showVoteTally: tuple payload: p.
     ('tags:       ', (self joinArray: (p at: 'tags' ifAbsent: [Array new: 0]) with: ',')) println.
     ('confidence: ', (p at: 'confidence' ifAbsent: ['']) printString) println.
     ('principle:  ', (p at: 'principle' ifAbsent: [''])) println.
@@ -431,6 +443,27 @@ DoctrineCLI subclass: Object
      votes cast from any repo are counted together, never split. Scans the
      'doctrine-feedback' category in that scope and counts by verdict."
     ^self tallyFeedbackTuples: (self scanFeedback: aScope) forDoctrine: doctrineId
+  ]
+
+  method: formatVoteColumn: tally [
+    "Compact vote column for list views, e.g. '+3/-1' (up/down). PURE."
+    ^'+', (tally at: 'up') printString, '/-', (tally at: 'down') printString
+  ]
+
+  method: formatVoteTallyLine: tally [
+    "Full vote tally line for show views: 'up N / down M / net K'. PURE."
+    ^'up ', (tally at: 'up') printString, ' / down ', (tally at: 'down') printString,
+      ' / net ', (tally at: 'net') printString
+  ]
+
+  method: showVoteTally: tuple payload: p [
+    "Render the vote tally line for a doctrine, computing it at the doctrine's
+     canonical doctrine_scope. Tolerant of a missing/empty scope (-> 'global')."
+    | dscope tally |
+    dscope := p at: 'doctrine_scope' ifAbsent: ['global'].
+    (dscope isNil or: [dscope isEmpty]) ifTrue: [dscope := 'global'].
+    tally := self feedbackTallyFor: (tuple at: 'identity') scope: dscope.
+    ('votes:      ', (self formatVoteTallyLine: tally)) println
   ]
 
   method: cmdFeedback: args [

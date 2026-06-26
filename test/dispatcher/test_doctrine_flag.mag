@@ -1,0 +1,349 @@
+"Tests for the doctrine feedback SURFACING layer:
+   (1) DoctrineCLI show/list render vote tallies (formatVoteTallyLine: /
+       formatVoteColumn:), computed at the doctrine's canonical doctrine_scope.
+   (2) Dispatcher>>maybeFlagDislikedDoctrine — the off-critical-path sweep that
+       FLAGS (never auto-retires) consistently net-disliked ACTIVE doctrine for
+       human review via a warn notification, idempotently.
+
+ Invariants under test:
+   DF1  show renders 'votes: up N / down M / net K'; list renders a '+N/-M' column.
+   DF2  Sweep flags an ACTIVE doctrine with net <= -3 AND total >= 3 -> exactly one
+        warn notification + a 'doctrine-feedback-flagged:<id>' marker signal.
+   DF3  Idempotent: a second sweep does NOT re-notify (no new notification) unless
+        the net drops further; a further downvote -> exactly one MORE notification.
+   DF4  Below minVotes (total < 3) -> NO flag even if net <= -3.
+   DF5  Active-only: proposed/retired doctrine is never flagged.
+   DF6  Disabled via config -> never flags.
+   DF7  Non-fatal: a malformed feedback (or doctrine) tuple cannot abort the sweep.
+   DF8  NEVER auto-retires: the flagged doctrine's maturity stays 'active'.
+
+ Real BBS (BBS withDataDir:) is used so the full scan + notify + upsertSignal path
+ runs end-to-end against an in-memory tuplespace. Config is overridden via a
+ Dispatcher subclass so the suite is hermetic (no ambient env dependency)."
+
+"--- Deterministic-config Dispatcher (mirrors AutoSynthTestDispatcher) ---"
+FlagTestDispatcher subclass: Dispatcher
+  instanceVars: cfgEnabled cfgRetireNet cfgMinVotes
+
+  method: cfgEnabled: e retireNet: rn minVotes: mv [
+    cfgEnabled := e.
+    cfgRetireNet := rn.
+    cfgMinVotes := mv
+  ]
+
+  method: feedbackFlagEnabled [ ^cfgEnabled ]
+  method: feedbackRetireNet [ ^cfgRetireNet ]
+  method: feedbackMinVotes [ ^cfgMinVotes ]
+
+"--- A DoctrineCLI subclass whose read seams are backed by an in-memory BBS, so
+ feedbackTallyFor: / the show/list formatters run END-TO-END without a server. ---"
+FlagTestCLI subclass: DoctrineCLI
+  instanceVars: tbbs
+
+  classMethod: onBbs: aBbs [
+    | c |
+    c := self new.
+    c bindBbs: aBbs.
+    ^c
+  ]
+
+  method: bindBbs: aBbs [ tbbs := aBbs ]
+
+  method: rdpDoctrine: id [
+    ^tbbs rdp: 'doctrine' scope: 'global' identity: id
+  ]
+
+  method: scanFeedback: aScope [
+    ^tbbs scan: 'doctrine-feedback' scope: aScope
+  ]
+
+"--- Runner ---"
+DflagRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Doctrine Feedback Flag Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+DflagHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: now [ ^DateTime now epochSeconds ]
+
+  classMethod: seedDoctrine: bbs id: id scope: dscope key: key maturity: maturity [
+    "Seed a doctrine at storage scope 'global' (mirrors routing/feedback tests)
+     whose payload doctrine_scope is dscope — the canonical feedback scope."
+    | p |
+    p := Dictionary new.
+    p at: 'key' put: key.
+    p at: 'doctrine_scope' put: dscope.
+    p at: 'maturity' put: maturity.
+    bbs out: 'doctrine' scope: 'global' identity: id payload: p
+  ]
+
+  classMethod: seedVotes: bbs doctrine: id scope: dscope up: nUp down: nDown [
+    "Append nUp 'up' + nDown 'down' feedback tuples for doctrine id at dscope."
+    1 to: nUp do: [:i |
+      | p |
+      p := Dictionary new.
+      p at: 'doctrine_id' put: id.
+      p at: 'verdict' put: 'up'.
+      bbs out: 'doctrine-feedback' scope: dscope identity: ('dfb-', id, '-u', i printString) payload: p
+    ].
+    1 to: nDown do: [:i |
+      | p |
+      p := Dictionary new.
+      p at: 'doctrine_id' put: id.
+      p at: 'verdict' put: 'down'.
+      bbs out: 'doctrine-feedback' scope: dscope identity: ('dfb-', id, '-d', i printString) payload: p
+    ]
+  ]
+
+  classMethod: notificationsIn: bbs scope: scope [
+    ^bbs scan: 'notification' scope: scope
+  ]
+
+  classMethod: flagMarkerIn: bbs scope: scope doctrine: id [
+    ^bbs rdp: 'signal' scope: scope identity: ('doctrine-feedback-flagged:', id)
+  ]
+
+  classMethod: dispatcherOn: bbs enabled: e retireNet: rn minVotes: mv [
+    | d |
+    d := FlagTestDispatcher on: bbs harnessFactory: nil.
+    d cfgEnabled: e retireNet: rn minVotes: mv.
+    ^d
+  ]
+
+"=== Tests ==="
+TestDoctrineFlag subclass: Object
+
+  classMethod: run: t [
+    self testShowListRenderTallies: t.
+    self testSweepFlagsDislikedActive: t.
+    self testIdempotentNoReflagUnlessWorse: t.
+    self testBelowMinVotesNoFlag: t.
+    self testActiveOnly: t.
+    self testDisabledNeverFlags: t.
+    self testNonFatalMalformedTuple: t
+  ]
+
+  classMethod: testShowListRenderTallies: t [
+    "DF1: show/list formatters render the tally; tally computed at canonical scope."
+    | bbs cli tally |
+    '--- DF1: show/list render vote tallies ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    DflagHelper seedDoctrine: bbs id: 'dctr-show' scope: 'global' key: 'k-show' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-show' scope: 'global' up: 3 down: 1.
+    cli := FlagTestCLI onBbs: bbs.
+
+    tally := cli feedbackTallyFor: 'dctr-show' scope: 'global'.
+    t assertEqual: (cli formatVoteColumn: tally) to: '+3/-1'
+      message: 'DF1: list vote column is +3/-1'.
+    t assertEqual: (cli formatVoteTallyLine: tally) to: 'up 3 / down 1 / net 2'
+      message: 'DF1: show tally line renders up/down/net'.
+
+    "Empty/no-feedback doctrine renders zeros, not a crash."
+    t assertEqual: (cli formatVoteColumn: (cli feedbackTallyFor: 'dctr-none' scope: 'global'))
+      to: '+0/-0'
+      message: 'DF1: no-feedback doctrine renders +0/-0'
+  ]
+
+  classMethod: testSweepFlagsDislikedActive: t [
+    "DF2: net <= -3 AND total >= 3 on an ACTIVE doctrine -> one warn notification
+     + a flag marker. DF8: maturity stays 'active' (never auto-retired)."
+    | bbs disp notes marker dctr |
+    '--- DF2/DF8: sweep flags net-disliked active doctrine, never retires ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    "net = 1 - 4 = -3, total = 5."
+    DflagHelper seedDoctrine: bbs id: 'dctr-bad' scope: 'global' key: 'k-bad' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-bad' scope: 'global' up: 1 down: 4.
+    disp := DflagHelper dispatcherOn: bbs enabled: true retireNet: -3 minVotes: 3.
+    disp maybeFlagDislikedDoctrine.
+
+    notes := DflagHelper notificationsIn: bbs scope: 'global'.
+    t assertEqual: notes size to: 1
+      message: 'DF2: exactly one notification emitted for the disliked doctrine'.
+    notes size = 1 ifTrue: [
+      | np |
+      np := (notes at: 1) at: 'payload'.
+      t assertEqual: (np at: 'severity' ifAbsent: [nil]) to: 'warn'
+        message: 'DF2: notification severity is warn'.
+      t assert: ((np at: 'message' ifAbsent: ['']) includes: 'dctr-bad')
+        message: 'DF2: notification message names the doctrine id'.
+      t assert: ((np at: 'message' ifAbsent: ['']) includes: 'retire')
+        message: 'DF2: notification recommends retire (human-gated)'
+    ].
+    marker := DflagHelper flagMarkerIn: bbs scope: 'global' doctrine: 'dctr-bad'.
+    t assert: marker notNil
+      message: 'DF2: idempotency marker signal was written'.
+    marker notNil ifTrue: [
+      t assertEqual: ((marker at: 'payload') at: 'net' ifAbsent: [nil]) to: -3
+        message: 'DF2: marker carries the net at flag time'
+    ].
+
+    "DF8: the doctrine must NOT have been retired — flag-only, human-gated."
+    dctr := bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-bad'.
+    t assertEqual: ((dctr at: 'payload') at: 'maturity' ifAbsent: [nil]) to: 'active'
+      message: 'DF8: doctrine maturity stays active (never auto-retired)'
+  ]
+
+  classMethod: testIdempotentNoReflagUnlessWorse: t [
+    "DF3: a second sweep does NOT re-notify; a further downvote (net drops) does."
+    | bbs disp |
+    '--- DF3: idempotent — re-notify only when net drops further ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    DflagHelper seedDoctrine: bbs id: 'dctr-idem' scope: 'global' key: 'k-idem' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-idem' scope: 'global' up: 1 down: 4.
+    disp := DflagHelper dispatcherOn: bbs enabled: true retireNet: -3 minVotes: 3.
+
+    disp maybeFlagDislikedDoctrine.
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 1
+      message: 'DF3: first sweep notifies once'.
+    "Second + third sweep with unchanged votes -> NO new notification."
+    disp maybeFlagDislikedDoctrine.
+    disp maybeFlagDislikedDoctrine.
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 1
+      message: 'DF3: repeated sweeps do NOT re-notify (idempotent)'.
+
+    "Net drops further (one more downvote: net -3 -> -4) -> exactly one more notify."
+    DflagHelper seedVotes: bbs doctrine: 'dctr-idem' scope: 'global' up: 0 down: 1.
+    disp maybeFlagDislikedDoctrine.
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 2
+      message: 'DF3: a further net drop re-notifies exactly once more'.
+    "And no re-notify again at the new (worse) floor."
+    disp maybeFlagDislikedDoctrine.
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 2
+      message: 'DF3: stable again at the worsened net (no extra notify)'
+  ]
+
+  classMethod: testBelowMinVotesNoFlag: t [
+    "DF4: net <= -3 but total < minVotes -> NO flag."
+    | bbs disp |
+    '--- DF4: below minVotes -> no flag ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    "net = 0 - 2 = -2? No — make net <= -3 but total small is impossible with
+     down-only at total<3. Use minVotes=5 so total=4 (net -4) is below it."
+    DflagHelper seedDoctrine: bbs id: 'dctr-few' scope: 'global' key: 'k-few' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-few' scope: 'global' up: 0 down: 4.
+    disp := DflagHelper dispatcherOn: bbs enabled: true retireNet: -3 minVotes: 5.
+    disp maybeFlagDislikedDoctrine.
+
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 0
+      message: 'DF4: total(4) < minVotes(5) -> no notification'.
+    t assert: (DflagHelper flagMarkerIn: bbs scope: 'global' doctrine: 'dctr-few') isNil
+      message: 'DF4: no flag marker written below minVotes'
+  ]
+
+  classMethod: testActiveOnly: t [
+    "DF5: proposed/retired doctrine is never flagged even when net-disliked."
+    | bbs disp |
+    '--- DF5: active-only (proposed/retired ignored) ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    DflagHelper seedDoctrine: bbs id: 'dctr-prop' scope: 'global' key: 'k-prop' maturity: 'proposed'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-prop' scope: 'global' up: 0 down: 5.
+    DflagHelper seedDoctrine: bbs id: 'dctr-ret' scope: 'global' key: 'k-ret' maturity: 'retired'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-ret' scope: 'global' up: 0 down: 5.
+    disp := DflagHelper dispatcherOn: bbs enabled: true retireNet: -3 minVotes: 3.
+    disp maybeFlagDislikedDoctrine.
+
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 0
+      message: 'DF5: neither proposed nor retired doctrine is flagged'
+  ]
+
+  classMethod: testDisabledNeverFlags: t [
+    "DF6: disabled config never flags, even with a strongly net-disliked active."
+    | bbs disp |
+    '--- DF6: disabled config never flags ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    DflagHelper seedDoctrine: bbs id: 'dctr-off' scope: 'global' key: 'k-off' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-off' scope: 'global' up: 0 down: 10.
+    disp := DflagHelper dispatcherOn: bbs enabled: false retireNet: -3 minVotes: 3.
+    disp maybeFlagDislikedDoctrine.
+
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 0
+      message: 'DF6: no notification when disabled'.
+    t assert: (DflagHelper flagMarkerIn: bbs scope: 'global' doctrine: 'dctr-off') isNil
+      message: 'DF6: no marker written when disabled'
+  ]
+
+  classMethod: testNonFatalMalformedTuple: t [
+    "DF7: a malformed feedback/doctrine tuple cannot abort the sweep — a valid
+     net-disliked doctrine elsewhere is still flagged."
+    | bbs disp threw |
+    '--- DF7: malformed tuple does not abort the sweep ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    "A doctrine whose payload is a String, not a Dictionary."
+    bbs out: 'doctrine' scope: 'global' identity: 'dctr-garbage' payload: 'not-a-dict'.
+    "A feedback tuple whose payload is a String (read inside the tally)."
+    bbs out: 'doctrine-feedback' scope: 'global' identity: 'dfb-garbage' payload: 'not-a-dict'.
+    "A valid, net-disliked active doctrine that SHOULD still flag."
+    DflagHelper seedDoctrine: bbs id: 'dctr-ok' scope: 'global' key: 'k-ok' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-ok' scope: 'global' up: 1 down: 5.
+    disp := DflagHelper dispatcherOn: bbs enabled: true retireNet: -3 minVotes: 3.
+
+    threw := false.
+    [disp maybeFlagDislikedDoctrine] on: Exception do: [:e | threw := true].
+    t assert: threw not
+      message: 'DF7: malformed tuple did not escape the sweep'.
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 1
+      message: 'DF7: valid disliked doctrine still flagged despite malformed tuples'
+  ]
+
+"=== Main ==="
+DoctrineFlagMain subclass: Object
+  classMethod: start [
+    | t |
+    t := DflagRunner new.
+    [TestDoctrineFlag run: t] on: Exception do: [:e |
+      ('TestDoctrineFlag CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDoctrineFlag crashed'
+    ].
+    t report.
+    ^t failed
+  ]
