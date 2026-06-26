@@ -375,7 +375,7 @@ MultiplayerTestMain subclass: Object
 CombinedTestMain subclass: Object
 
   classMethod: run [
-    | wfFailed mpFailed ccFailed arFailed dcFailed gmFailed drFailed cxFailed fbFailed |
+    | wfFailed mpFailed ccFailed arFailed dcFailed gmFailed drFailed cxFailed fbFailed diFailed |
     wfFailed := 0.
     mpFailed := 0.
     ccFailed := 0.
@@ -385,6 +385,7 @@ CombinedTestMain subclass: Object
     drFailed := 0.
     cxFailed := 0.
     fbFailed := 0.
+    diFailed := 0.
 
     '============================================================' println.
     '=== Running TestWorkflowRefactorMain ===' println.
@@ -443,6 +444,12 @@ CombinedTestMain subclass: Object
         fbFailed := 1].
     fbFailed isNil ifTrue: [fbFailed := 0].
 
+    [diFailed := DoctrineInjectionMain run]
+      on: Exception do: [:e |
+        ('DoctrineInjectionMain CRASHED: ', e messageText) println.
+        diFailed := 1].
+    diFailed isNil ifTrue: [diFailed := 0].
+
     '' println.
     '============================================================' println.
     '=== Combined Test Summary ===' println.
@@ -457,7 +464,8 @@ CombinedTestMain subclass: Object
     ('Doctrine-routing failures:  ', drFailed printString) println.
     ('Doctrine-crystallize fails: ', cxFailed printString) println.
     ('Doctrine-feedback fails:    ', fbFailed printString) println.
-    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed + gmFailed + drFailed + cxFailed + fbFailed) = 0
+    ('Doctrine-injection fails:   ', diFailed printString) println.
+    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed + gmFailed + drFailed + cxFailed + fbFailed + diFailed) = 0
       ifTrue:  ['COMBINED: ALL TESTS PASSED' println]
       ifFalse: ['COMBINED: SOME TESTS FAILED' println]
   ]

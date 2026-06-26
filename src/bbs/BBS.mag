@@ -504,6 +504,56 @@ BBS subclass: Object
     ]
   ]
 
+  "--- Doctrine Injection Attribution ---"
+
+  method: injectedDoctrineForWorkflow: wfInstance scope: scope [
+    "Return the UNION of doctrine_refs ({id, doctrine_scope}) across every
+     'doctrine-injection' record in <scope> whose payload.workflow_instance =
+     wfInstance. The outcome sweep consumes this to attribute a workflow's
+     outcome back to the doctrine that was injected into its tasks.
+
+     De-duplicated by (id|doctrine_scope) so a doctrine injected into several of
+     the workflow's tasks appears exactly once.
+
+     NULL/EMPTY TOLERANT by construction: a nil/blank/non-string wfInstance, a
+     failing or empty scan, no records, a non-Dictionary payload, a missing or
+     non-Array doctrine_refs, and non-Dictionary refs all degrade to an empty
+     Array — never a crash."
+    | out seen records |
+    out := Array new: 0.
+    (wfInstance isNil or: [(wfInstance isString) not or: [wfInstance isEmpty]])
+      ifTrue: [^out].
+    records := [self scan: 'doctrine-injection' scope: scope]
+      on: Exception do: [:e | Array new: 0].
+    records isNil ifTrue: [^out].
+    seen := Set new.
+    records do: [:rec |
+      | p wf refs |
+      p := (rec isKindOf: Dictionary) ifTrue: [rec at: 'payload' ifAbsent: [nil]] ifFalse: [nil].
+      (p isKindOf: Dictionary) ifTrue: [
+        wf := p at: 'workflow_instance' ifAbsent: [''].
+        wf = wfInstance ifTrue: [
+          refs := p at: 'doctrine_refs' ifAbsent: [nil].
+          (refs isKindOf: Array) ifTrue: [
+            refs do: [:r |
+              (r isKindOf: Dictionary) ifTrue: [
+                | id ds key |
+                id := r at: 'id' ifAbsent: [''].
+                ds := r at: 'doctrine_scope' ifAbsent: ['global'].
+                key := id, '|', ds.
+                (seen includes: key) ifFalse: [
+                  seen add: key.
+                  out := out copyWith: r
+                ]
+              ]
+            ]
+          ]
+        ]
+      ]
+    ].
+    ^out
+  ]
+
   "--- Work-Item Parent/Child Derivation ---"
 
   method: childrenOfParent: parentId in: tuples [
@@ -935,8 +985,15 @@ BBS subclass: Object
      'doctrine-feedback' is the same shape: linear + durable, NOT pinned. It is
      append-only — each agent vote on a doctrine is a fresh dfb-<hex> tuple, so
      concurrent votes never race/clobber a shared aggregate. Durable so votes
-     survive a server restart and a later tally counts the full history."
-    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem' 'identity' 'case' 'doctrine' 'doctrine-feedback') includes: category
+     survive a server restart and a later tally counts the full history.
+
+     'doctrine-injection' is the same shape again: linear + durable, NOT pinned.
+     One record per task (keyed by taskId, upserted via inp:+out: on context
+     re-assembly) capturing which doctrine (id + canonical doctrine_scope) was
+     injected into that task, so a later outcome sweep can attribute the task's
+     result back to the doctrine that was in play. Durable so the attribution
+     survives a server restart."
+    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem' 'identity' 'case' 'doctrine' 'doctrine-feedback' 'doctrine-injection') includes: category
   ]
 
   method: persistAfterChange [

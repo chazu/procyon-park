@@ -1,0 +1,391 @@
+"Tests for the 'doctrine-injection' tuple category and its capture path.
+
+ doctrine-injection records WHICH doctrine (id + canonical doctrine_scope) was
+ injected into WHICH task, so a later outcome sweep can attribute a workflow's
+ result back to the doctrine that was in play. See docs/design-doctrine-layer.md.
+
+ Storage discipline under test: doctrine-injection is LINEAR + DURABLE, mirroring
+ 'doctrine'/'doctrine-feedback' — it is in Categories>>valid and
+ BBS>>isDurableCategory:, but deliberately NOT in Categories>>pinned. Records are
+ written via out: directly and UPSERTED keyed by taskId (inp:+out:) on each
+ context re-assembly so there is exactly one record per task.
+
+ Invariants under test:
+   DI1  Category membership: valid, NOT pinned, validate: does not raise,
+        isDurableCategory: true (mirrors doctrine-feedback).
+   DI2  Round-trip through the ACTIVE BBS store + a direct ganso/SQLite store +
+        durability across a fresh reload from disk.
+   DI3  assembleContext: for a consumesDoctrine: role (implementer) writes an
+        injection record listing the selected doctrine ids + their canonical
+        doctrine_scopes, and the role/task/workflow provenance fields.
+   DI4  A NON-consuming role (strategist) writes NO injection record.
+   DI5  Re-assembly UPSERTS: a second assembleContext: for the same taskId
+        REPLACES the prior record (exactly one record per task).
+   DI6  injectedDoctrineForWorkflow: unions doctrine_refs across multiple task
+        records of one workflow, de-duped, and excludes other workflows; it is
+        null/empty tolerant.
+   DI7  The write is NON-FATAL: a forced BBS failure on the injection write does
+        NOT break assembleContext: output (the doctrine still reaches the agent).
+
+ Standalone runner at bottom (DoctrineInjectionMain run)."
+
+DInjRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Doctrine Injection Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+DInjHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedDoctrine: bbs identity: ident scope: dscope principle: principle [
+    "Seed a single ACTIVE doctrine entry. Storage scope is always 'global' (the
+     scan-all path) — applicability is by payload doctrine_scope."
+    | p |
+    p := Dictionary new.
+    p at: 'principle' put: principle.
+    p at: 'rationale' put: 'test rationale'.
+    p at: 'maturity' put: 'active'.
+    p at: 'doctrine_scope' put: dscope.
+    p at: 'tags' put: (Array new: 0).
+    bbs out: 'doctrine' scope: 'global' identity: ident payload: p
+  ]
+
+  classMethod: ref: id scope: ds [
+    | r |
+    r := Dictionary new.
+    r at: 'id' put: id.
+    r at: 'doctrine_scope' put: ds.
+    ^r
+  ]
+
+  classMethod: injPayload: wf task: task role: role refs: refs [
+    | p |
+    p := Dictionary new.
+    p at: 'workflow_instance' put: wf.
+    p at: 'task_id' put: task.
+    p at: 'role' put: role.
+    p at: 'doctrine_refs' put: refs.
+    p at: 'injected_at' put: 1700000000.
+    ^p
+  ]
+
+  classMethod: refsHasId: id in: refs [
+    refs do: [:r | ((r at: 'id' ifAbsent: ['']) = id) ifTrue: [^true]].
+    ^false
+  ]
+
+  classMethod: scopeForId: id in: refs [
+    refs do: [:r | ((r at: 'id' ifAbsent: ['']) = id) ifTrue: [^r at: 'doctrine_scope' ifAbsent: [nil]]].
+    ^nil
+  ]
+
+"--- A BBS that fails ONLY the doctrine-injection write, to prove the capture
+ path is non-fatal. Every other write/read goes straight to super. ---"
+FailingInjectionBBS subclass: BBS
+
+  method: out: category scope: scope identity: identity payload: payload [
+    category = 'doctrine-injection'
+      ifTrue: [Error signal: 'forced doctrine-injection write failure'].
+    ^super out: category scope: scope identity: identity payload: payload
+  ]
+
+"=== TestDoctrineInjection ==="
+TestDoctrineInjection subclass: Object
+
+  classMethod: run: t [
+    self testCategoryMembership: t.
+    self testRoundTrip: t.
+    self testAssembleContextWritesRecord: t.
+    self testNonConsumerWritesNone: t.
+    self testReassemblyUpserts: t.
+    self testInjectedDoctrineForWorkflow: t.
+    self testWriteIsNonFatal: t
+  ]
+
+  classMethod: testCategoryMembership: t [
+    | raised |
+    '--- DI1: doctrine-injection category membership ---' println.
+
+    t assert: (Categories isValid: 'doctrine-injection')
+      message: 'DI1: Categories isValid: doctrine-injection is true'.
+    t assert: (Categories valid includes: 'doctrine-injection')
+      message: 'DI1: Categories valid includes doctrine-injection'.
+
+    t assert: (Categories isPinned: 'doctrine-injection') not
+      message: 'DI1: Categories isPinned: doctrine-injection is FALSE (linear+durable)'.
+    t assert: (Categories pinned includes: 'doctrine-injection') not
+      message: 'DI1: Categories pinned does NOT include doctrine-injection'.
+
+    raised := false.
+    [Categories validate: 'doctrine-injection']
+      on: Exception do: [:e | raised := true].
+    t assert: raised not
+      message: 'DI1: Categories validate: doctrine-injection does not raise'.
+
+    t assert: (BBS new isDurableCategory: 'doctrine-injection')
+      message: 'DI1: BBS isDurableCategory: doctrine-injection is true'.
+    t assert: (BBS new isDurableCategory: 'doctrine-feedback')
+      message: 'DI1: BBS isDurableCategory: doctrine-feedback is true (mirror sanity)'
+  ]
+
+  classMethod: testRoundTrip: t [
+    "DI2: out: -> rdp: -> scanAll: round-trip, a direct ganso/SQLite store, and
+     durability across a fresh reload from disk."
+    | tempDir bbs payload refs round reloaded store d ganso |
+    '--- DI2: round-trip through active store + ganso + reload ---' println.
+    tempDir := DInjHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+
+    refs := Array new: 0.
+    refs := refs copyWith: (DInjHelper ref: 'dctr-aaa' scope: 'global').
+    refs := refs copyWith: (DInjHelper ref: 'dctr-bbb' scope: 'pp-repo:src/io').
+    payload := DInjHelper injPayload: 'wf-1' task: 'task-1' role: 'implementer' refs: refs.
+    bbs out: 'doctrine-injection' scope: 'pp-repo' identity: 'task-1' payload: payload.
+
+    round := bbs rdp: 'doctrine-injection' scope: 'pp-repo' identity: 'task-1'.
+    t assert: round notNil
+      message: 'DI2: rdp: finds the injection record written via out:'.
+    round notNil ifTrue: [
+      | rp rr |
+      rp := round at: 'payload'.
+      rr := rp at: 'doctrine_refs' ifAbsent: [#()].
+      t assertEqual: (rp at: 'workflow_instance' ifAbsent: [nil]) to: 'wf-1'
+        message: 'DI2: workflow_instance preserved'.
+      t assertEqual: rr size to: 2
+        message: 'DI2: both doctrine_refs preserved (nested array of dicts)'.
+      t assertEqual: (DInjHelper scopeForId: 'dctr-bbb' in: rr) to: 'pp-repo:src/io'
+        message: 'DI2: ref doctrine_scope preserved (nested dict)'].
+
+    t assertEqual: ((bbs scanAll: 'doctrine-injection') select: [:d2 |
+        (d2 at: 'identity' ifAbsent: ['']) = 'task-1']) size
+      to: 1
+      message: 'DI2: scanAll: surfaces exactly one task-1 record'.
+
+    "Durability: flush + fresh load from the same data dir (simulated restart)."
+    bbs flushIfDirty.
+    reloaded := BBS withDataDir: tempDir.
+    round := reloaded rdp: 'doctrine-injection' scope: 'pp-repo' identity: 'task-1'.
+    t assert: round notNil
+      message: 'DI2: injection record survives a fresh BBS load from disk (durable)'.
+
+    "Direct ganso/SQLite round-trip (deterministic every run)."
+    store := GansoStore openAt: (DInjHelper makeTempDir), '/tuples.db'.
+    d := Tuple linear: 'doctrine-injection' scope: 'pp-repo' identity: 'task-g'
+      payload: (DInjHelper injPayload: 'wf-g' task: 'task-g' role: 'reviewer'
+                  refs: (Array with: (DInjHelper ref: 'dctr-ggg' scope: 'global'))) id: 1.
+    store putTuple: d.
+    ganso := store rdp: 'doctrine-injection' scope: 'pp-repo' identity: 'task-g'.
+    t assert: ganso notNil
+      message: 'DI2: ganso rdp: finds the doctrine-injection tuple'
+  ]
+
+  classMethod: testAssembleContextWritesRecord: t [
+    "DI3: assembleContext: for an implementer writes a record listing the
+     selected doctrine ids + their canonical doctrine_scopes + provenance."
+    | bbs role ctx rec rp refs |
+    '--- DI3: assembleContext writes an injection record ---' println.
+    bbs := BBS withDataDir: DInjHelper makeTempDir.
+    DInjHelper seedDoctrine: bbs identity: 'd-global' scope: 'global'
+      principle: 'A global lesson for every repo.'.
+    DInjHelper seedDoctrine: bbs identity: 'd-repo' scope: 'pp-repo'
+      principle: 'A this-repo lesson.'.
+
+    role := Implementer new.
+    ctx := role assembleContext: bbs scope: 'pp-repo' taskId: 'task-ac'
+      workflowInstance: 'wf-ac'.
+
+    rec := bbs rdp: 'doctrine-injection' scope: 'pp-repo' identity: 'task-ac'.
+    t assert: rec notNil
+      message: 'DI3: an injection record exists for the consuming role''s task'.
+    rec notNil ifTrue: [
+      rp := rec at: 'payload'.
+      refs := rp at: 'doctrine_refs' ifAbsent: [#()].
+      t assertEqual: (rp at: 'task_id' ifAbsent: [nil]) to: 'task-ac'
+        message: 'DI3: record task_id is the task'.
+      t assertEqual: (rp at: 'workflow_instance' ifAbsent: [nil]) to: 'wf-ac'
+        message: 'DI3: record workflow_instance is the workflow'.
+      t assertEqual: (rp at: 'role' ifAbsent: [nil]) to: 'implementer'
+        message: 'DI3: record role is the consuming role'.
+      t assert: ((rp at: 'injected_at' ifAbsent: [nil]) notNil)
+        message: 'DI3: record carries an injected_at timestamp'.
+      t assert: (DInjHelper refsHasId: 'd-global' in: refs)
+        message: 'DI3: the global doctrine id is recorded'.
+      t assert: (DInjHelper refsHasId: 'd-repo' in: refs)
+        message: 'DI3: the this-repo doctrine id is recorded'.
+      t assertEqual: (DInjHelper scopeForId: 'd-global' in: refs) to: 'global'
+        message: 'DI3: global doctrine recorded at its canonical doctrine_scope'.
+      t assertEqual: (DInjHelper scopeForId: 'd-repo' in: refs) to: 'pp-repo'
+        message: 'DI3: this-repo doctrine recorded at its canonical doctrine_scope'].
+
+    "Sanity: the doctrine actually reached the assembled context too."
+    t assert: (self ctx: ctx hasIdentity: 'd-global')
+      message: 'DI3: assembled context still includes the injected doctrine'
+  ]
+
+  classMethod: testNonConsumerWritesNone: t [
+    "DI4: a non-consuming role (strategist) writes NO injection record."
+    | bbs role rec |
+    '--- DI4: a non-consuming role writes no record ---' println.
+    bbs := BBS withDataDir: DInjHelper makeTempDir.
+    DInjHelper seedDoctrine: bbs identity: 'd1' scope: 'global'
+      principle: 'A lesson.'.
+
+    t assert: (Strategist new consumesDoctrine: 'strategist') not
+      message: 'DI4: strategist does not consume doctrine (gate sanity)'.
+
+    role := Strategist new.
+    role assembleContext: bbs scope: 'pp-repo' taskId: 'task-s' workflowInstance: 'wf-s'.
+    rec := bbs rdp: 'doctrine-injection' scope: 'pp-repo' identity: 'task-s'.
+    t assert: rec isNil
+      message: 'DI4: no injection record is written for a non-consuming role'
+  ]
+
+  classMethod: testReassemblyUpserts: t [
+    "DI5: re-assembling the same task REPLACES its record (one per task)."
+    | bbs role n |
+    '--- DI5: re-assembly upserts (one record per task) ---' println.
+    bbs := BBS withDataDir: DInjHelper makeTempDir.
+    DInjHelper seedDoctrine: bbs identity: 'd-up' scope: 'global'
+      principle: 'A lesson.'.
+    role := Implementer new.
+    role assembleContext: bbs scope: 'pp-repo' taskId: 'task-up' workflowInstance: 'wf-up'.
+    role assembleContext: bbs scope: 'pp-repo' taskId: 'task-up' workflowInstance: 'wf-up'.
+    n := ((bbs scanAll: 'doctrine-injection') select: [:d |
+        (d at: 'identity' ifAbsent: ['']) = 'task-up']) size.
+    t assertEqual: n to: 1
+      message: 'DI5: exactly one record after two assemblies of the same task'
+  ]
+
+  classMethod: testInjectedDoctrineForWorkflow: t [
+    "DI6: union of doctrine_refs across all task records of one workflow, deduped,
+     other workflows excluded, null/empty tolerant."
+    | bbs refsA refsB refsOther out |
+    '--- DI6: injectedDoctrineForWorkflow unions refs per workflow ---' println.
+    bbs := BBS withDataDir: DInjHelper makeTempDir.
+
+    "wf-1, task-a: d1(global), d2(pp-repo)."
+    refsA := Array new: 0.
+    refsA := refsA copyWith: (DInjHelper ref: 'd1' scope: 'global').
+    refsA := refsA copyWith: (DInjHelper ref: 'd2' scope: 'pp-repo').
+    bbs out: 'doctrine-injection' scope: 'pp-repo' identity: 'task-a'
+      payload: (DInjHelper injPayload: 'wf-1' task: 'task-a' role: 'implementer' refs: refsA).
+
+    "wf-1, task-b: d2(pp-repo) [dup of task-a], d3(global)."
+    refsB := Array new: 0.
+    refsB := refsB copyWith: (DInjHelper ref: 'd2' scope: 'pp-repo').
+    refsB := refsB copyWith: (DInjHelper ref: 'd3' scope: 'global').
+    bbs out: 'doctrine-injection' scope: 'pp-repo' identity: 'task-b'
+      payload: (DInjHelper injPayload: 'wf-1' task: 'task-b' role: 'reviewer' refs: refsB).
+
+    "wf-2, task-c: d9 — different workflow, must be excluded."
+    refsOther := Array with: (DInjHelper ref: 'd9' scope: 'global').
+    bbs out: 'doctrine-injection' scope: 'pp-repo' identity: 'task-c'
+      payload: (DInjHelper injPayload: 'wf-2' task: 'task-c' role: 'implementer' refs: refsOther).
+
+    out := bbs injectedDoctrineForWorkflow: 'wf-1' scope: 'pp-repo'.
+    t assertEqual: out size to: 3
+      message: 'DI6: union of {d1,d2,d3} deduped across the two wf-1 records'.
+    t assert: (DInjHelper refsHasId: 'd1' in: out)
+      message: 'DI6: d1 present in union'.
+    t assert: (DInjHelper refsHasId: 'd2' in: out)
+      message: 'DI6: d2 present in union (de-duplicated)'.
+    t assert: (DInjHelper refsHasId: 'd3' in: out)
+      message: 'DI6: d3 present in union'.
+    t assert: (DInjHelper refsHasId: 'd9' in: out) not
+      message: 'DI6: d9 (a different workflow) is excluded'.
+
+    "Null/empty tolerance."
+    t assertEqual: (bbs injectedDoctrineForWorkflow: '' scope: 'pp-repo') size to: 0
+      message: 'DI6: empty workflow instance yields an empty union'.
+    t assertEqual: (bbs injectedDoctrineForWorkflow: 'wf-nope' scope: 'pp-repo') size to: 0
+      message: 'DI6: an unknown workflow yields an empty union'
+  ]
+
+  classMethod: testWriteIsNonFatal: t [
+    "DI7: a forced BBS failure on the injection write does NOT break
+     assembleContext: — the doctrine still reaches the agent context."
+    | bbs role ctx rec |
+    '--- DI7: injection write is non-fatal ---' println.
+    bbs := FailingInjectionBBS withDataDir: DInjHelper makeTempDir.
+    DInjHelper seedDoctrine: bbs identity: 'd-nf' scope: 'global'
+      principle: 'A lesson that must still reach the agent.'.
+
+    role := Implementer new.
+    "This MUST NOT raise even though the injection write throws."
+    ctx := role assembleContext: bbs scope: 'pp-repo' taskId: 'task-nf'
+      workflowInstance: 'wf-nf'.
+    t assert: (self ctx: ctx hasIdentity: 'd-nf')
+      message: 'DI7: assembleContext still injects the doctrine despite the write failure'.
+
+    rec := bbs rdp: 'doctrine-injection' scope: 'pp-repo' identity: 'task-nf'.
+    t assert: rec isNil
+      message: 'DI7: the forced-failed write left no record (proves it was swallowed)'
+  ]
+
+  classMethod: ctx: ctx hasIdentity: ident [
+    ctx do: [:tup | ((tup at: 'identity' ifAbsent: ['']) = ident) ifTrue: [^true]].
+    ^false
+  ]
+
+"=== Main ==="
+DoctrineInjectionMain subclass: Object
+  classMethod: run [
+    | t |
+    t := DInjRunner new.
+    [TestDoctrineInjection run: t] on: Exception do: [:e |
+      ('TestDoctrineInjection CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDoctrineInjection crashed'
+    ].
+    t report.
+    ^t failed
+  ]

@@ -7,7 +7,7 @@ Categories subclass: Object
        'task' 'template' 'workflow' 'token' 'rule' 'ingestion'
        'event' 'obstacle' 'session' 'artifact' 'link' 'notification'
        'workitem' 'identity' 'worker' 'watch' 'invite' 'case' 'doctrine'
-       'doctrine-feedback')
+       'doctrine-feedback' 'doctrine-injection')
   ]
 
   classMethod: isValid: aString [
@@ -24,12 +24,14 @@ Categories subclass: Object
   classMethod: pinned [
     "Categories that are always persistent (never consumed by in:).
 
-     NOTE: 'doctrine' and 'doctrine-feedback' are intentionally absent — they
-     are linear + durable (see BBS>>isDurableCategory:), written via out:
-     directly, NOT via the generic pinned put path (whose tuples are invisible
-     to rdp:-based existence checks). 'doctrine-feedback' is append-only: each
-     vote is a fresh dfb-<hex> tuple, never a read-modify-write of a shared
-     aggregate. See docs/design-doctrine-layer.md."
+     NOTE: 'doctrine', 'doctrine-feedback' and 'doctrine-injection' are
+     intentionally absent — they are linear + durable (see
+     BBS>>isDurableCategory:), written via out: directly, NOT via the generic
+     pinned put path (whose tuples are invisible to rdp:-based existence
+     checks). 'doctrine-feedback' is append-only: each vote is a fresh dfb-<hex>
+     tuple, never a read-modify-write of a shared aggregate. 'doctrine-injection'
+     records which doctrine was injected into a task (keyed by taskId, upserted
+     via inp:+out: on re-assembly). See docs/design-doctrine-layer.md."
     ^#('fact' 'convention' 'template' 'rule' 'ingestion' 'artifact' 'link' 'decision' 'identity' 'case')
   ]
 

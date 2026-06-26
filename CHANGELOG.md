@@ -8,6 +8,22 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Doctrine-injection attribution capture — every doctrine-consuming task now
+  records WHICH doctrine (id + canonical `doctrine_scope`) was injected into it,
+  so a later outcome sweep can attribute the task's result back to the doctrine
+  that was in play. A new linear+durable `doctrine-injection` tuple category
+  (`Categories>>valid`, `BBS>>isDurableCategory:`; deliberately NOT pinned)
+  holds one record per task, UPSERTED keyed by `taskId` (consume-then-write on
+  re-assembly). `Role>>assembleContext:` writes the record BEST-EFFORT right
+  after `activeDoctrineFor:` selects the doctrine — wrapped in `on:Exception` so
+  context assembly NEVER fails if the record cannot be written (mirrors
+  `dispatchArchivist:`/`writeCaseSkeleton:`). Each ref carries the doctrine's
+  canonical `doctrine_scope` (the payload scope, not BBS storage scope). A new
+  `BBS>>injectedDoctrineForWorkflow:scope:` helper returns the de-duplicated
+  UNION of `doctrine_refs` across all of a workflow's task records (null/empty
+  tolerant) for the outcome sweep to consume. This story ONLY captures
+  injection — outcome scoring and flagging are later stories. (new
+  `TestDoctrineInjection` suite.)
 - Vote-weighted doctrine relevance ranking — practitioner votes now bias which
   scarce doctrine slots reach an agent's Orient context. The deterministic ranker
   (`Role>>rankDoctrine:role:scope:query:cap:netVotes:`) adds a BOUNDED, saturating

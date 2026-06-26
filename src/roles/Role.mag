@@ -296,7 +296,7 @@ The doctrine above was selected to guide THIS task. If — and only if — you f
      active-only gate and scope-union, then targets by role-tag and caps the
      number of entries for relevance so agent context does not bloat."
     (self consumesDoctrine: name) ifTrue: [
-      | taskTuple queryText |
+      | taskTuple queryText injected |
       "Thread the task's free text into doctrine ranking so the (capped) slots
        go to doctrine relevant to THIS task, not an arbitrary slice. When no
        task description is available (nil tuple / empty field) the query is ''
@@ -307,10 +307,62 @@ The doctrine above was selected to guide THIS task. If — and only if — you f
         ifTrue: [(taskTuple at: 'payload' ifAbsent: [Dictionary new])
                    at: 'description' ifAbsent: ['']]
         ifFalse: [''].
-      result := result, (self activeDoctrineFor: bbs scope: scope role: name query: queryText)
+      injected := self activeDoctrineFor: bbs scope: scope role: name query: queryText.
+      result := result, injected.
+      "Best-effort, NON-FATAL: record exactly which doctrine was injected into
+       THIS task so a later outcome sweep can attribute the task's result back to
+       the doctrine that was in play. Wrapped so a write failure NEVER breaks
+       context assembly (mirrors dispatchArchivist:/writeCaseSkeleton:)."
+      self recordDoctrineInjection: bbs scope: scope taskId: taskId
+        workflowInstance: wfInstance injected: injected
     ].
 
     ^result
+  ]
+
+  method: recordDoctrineInjection: bbs scope: scope taskId: taskId workflowInstance: wfInstance injected: injected [
+    "Persist (best-effort) one 'doctrine-injection' record capturing which
+     doctrine (id + canonical doctrine_scope) was injected into <taskId>, so an
+     outcome sweep can attribute the task's result back to the doctrine that was
+     in play. Category is linear + durable (see BBS>>isDurableCategory:).
+
+     UPSERT keyed by taskId: one record per task. Re-assembly REPLACES the prior
+     record — out: is append-only, so an inp: consumes any existing record at
+     this key before the fresh out: writes the current snapshot.
+
+     BEST-EFFORT / NON-FATAL: the ENTIRE body is wrapped in on:Exception so a
+     gatherer/BBS failure can NEVER propagate into context assembly. A broken
+     injection record must not break priming an agent.
+
+     SCOPE: each ref carries the doctrine's CANONICAL doctrine_scope (payload
+     doctrine_scope, NOT the BBS storage scope) so the outcome sweep updates
+     stats at the canonical scope a global doctrine's votes converge to."
+    [
+      | refs payload |
+      refs := Array new: 0.
+      (injected isNil) ifFalse: [
+        injected do: [:dtuple |
+          | dp ds ref |
+          dp := dtuple at: 'payload' ifAbsent: [Dictionary new].
+          ds := dp at: 'doctrine_scope' ifAbsent: ['global'].
+          (ds isNil or: [(ds isString) not or: [ds isEmpty]]) ifTrue: [ds := 'global'].
+          ref := Dictionary new.
+          ref at: 'id' put: (dtuple at: 'identity' ifAbsent: ['']).
+          ref at: 'doctrine_scope' put: ds.
+          refs := refs copyWith: ref
+        ]
+      ].
+      payload := Dictionary new.
+      payload at: 'workflow_instance' put: wfInstance.
+      payload at: 'task_id' put: taskId.
+      payload at: 'role' put: name.
+      payload at: 'doctrine_refs' put: refs.
+      payload at: 'injected_at' put: DateTime now epochSeconds.
+      "UPSERT: drain any prior record for this task, then write the fresh one.
+       Both inp: and out: are the linear+durable path for this category."
+      bbs inp: 'doctrine-injection' scope: scope identity: taskId.
+      bbs out: 'doctrine-injection' scope: scope identity: taskId payload: payload
+    ] on: Exception do: [:e | nil]
   ]
 
   method: consumesDoctrine: roleName [
