@@ -8,6 +8,18 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Mission artifact + `pp mission` CLI — a durable, high-level Auftragstaktik
+  intent artifact. New `mission` tuple category (linear + durable, NOT pinned;
+  written/mutated via `out:`/`update:`). `pp mission start "<brief>" [--repo R]`
+  mints a fresh `msn-<hex>` mission (status `researching`) and kicks the
+  `mission-brief` workflow, passing the brief as the `description` param and the
+  mission id so the workflow's agents write their intent/plan back into the
+  mission tuple; the launched workflow instance is recorded on the mission. If
+  the `mission-brief` template is not yet installed, `start` warns gracefully and
+  still creates the mission. `pp mission list [--repo R] [--status S]`,
+  `pp mission show <id>`, `pp mission approve <id>`, and
+  `pp mission reject <id> [--reason R]` round out the surface; approve/reject are
+  gated on `awaiting-approval` status (any other status is refused).
 - Doctrine divergence backstop (the "lie-detector") — a new off-critical-path
   sweep (`Dispatcher>>maybeFlagDoctrineDivergence`, sibling of
   `maybeFlagDislikedDoctrine`, on the every-30-tick branch with its own

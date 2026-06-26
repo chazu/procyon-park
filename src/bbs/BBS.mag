@@ -1028,8 +1028,14 @@ BBS subclass: Object
      re-assembly) capturing which doctrine (id + canonical doctrine_scope) was
      injected into that task, so a later outcome sweep can attribute the task's
      result back to the doctrine that was in play. Durable so the attribution
-     survives a server restart."
-    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem' 'identity' 'case' 'doctrine' 'doctrine-feedback' 'doctrine-injection') includes: category
+     survives a server restart.
+
+     'mission' is the same shape (linear + durable, NOT pinned): a high-level
+     mission brief artifact (the Auftragstaktik intent → human-reviewed plan
+     gate). It is read/mutated via out:/update: (status flips researching →
+     awaiting-approval → approved/rejected) so rdp:-based reads stay valid, and
+     it must survive a restart so a mission outlives the server bouncing."
+    ^#('fact' 'convention' 'decision' 'rule' 'signal' 'artifact' 'link' 'ingestion' 'workflow' 'task' 'token' 'workitem' 'identity' 'case' 'doctrine' 'doctrine-feedback' 'doctrine-injection' 'mission') includes: category
   ]
 
   method: persistAfterChange [

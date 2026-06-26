@@ -1,0 +1,409 @@
+"Tests for the 'mission' tuple category + the `pp mission` CLI surface.
+
+ A mission is the high-level Auftragstaktik intent artifact (brief -> intent ->
+ human-reviewed plan gate). Storage discipline under test: mission is LINEAR +
+ DURABLE, mirroring 'doctrine'/'case' — in Categories>>valid and
+ BBS>>isDurableCategory:, but deliberately NOT in Categories>>pinned (the generic
+ pinned put path writes tuples invisible to rdp:-based reads). Entries are
+ written/mutated via out:/update: (upsert) directly.
+
+ Invariants under test:
+   MS1  Category membership: valid + durable + NOT pinned; round-trips through
+        the active store (out: -> rdp:/scan:) and survives a reload from disk;
+        direct ganso/SQLite round-trip too.
+   MS2  `start` creates a mission tuple with status 'researching' + the brief.
+   MS3  `start` records workflow_instance on the mission when the workflow launch
+        succeeds.
+   MS4  `show` renders brief/intent/status/plan (helper rendering + no crash).
+   MS5  `approve` flips awaiting-approval -> approved.
+   MS6  `reject` flips awaiting-approval -> rejected and records the reason.
+   MS7  approve/reject on a NON-awaiting mission is refused (status unchanged).
+   MS8  `list` filters by --status.
+
+ Standalone runner at bottom (MissionCliMain run)."
+
+MsnRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Mission CLI Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- A MissionCLI subclass whose IO seams (mission reads/writes, workflow
+ launch) are backed by an in-memory BBS, so cmdStart:/cmdShow:/cmdApprove:/
+ cmdReject:/cmdList: run END-TO-END without a server. Only the seams are
+ stubbed — the logic under test is the real MissionCLI. ---"
+TestMissionCLI subclass: MissionCLI
+  instanceVars: tbbs putLog stubWfId
+
+  classMethod: onBbs: aBbs [
+    | c |
+    c := self new.
+    c bindBbs: aBbs.
+    ^c
+  ]
+
+  method: bindBbs: aBbs [
+    tbbs := aBbs.
+    putLog := Array new: 0.
+    stubWfId := nil
+  ]
+
+  method: stubWfId: w [ stubWfId := w ]
+  method: putCount [ ^putLog size ]
+  method: tbbs [ ^tbbs ]
+
+  "--- seams ---"
+  method: defaultScope [ ^'default' ]
+
+  method: scanMissions [
+    ^tbbs scan: 'mission' scope: 'default'
+  ]
+
+  method: rdpMission: id [
+    ^tbbs rdp: 'mission' scope: 'default' identity: id
+  ]
+
+  method: putMission: id payload: payload [
+    "Mirror the server's /api/bbs/put UPSERT: consume any existing tuple at this
+     key, then write the replacement (so a read-modify-write status flip keeps
+     exactly one tuple, never duplicates)."
+    putLog := putLog copyWith: id.
+    tbbs inp: 'mission' scope: 'default' identity: id.
+    tbbs out: 'mission' scope: 'default' identity: id payload: payload.
+    ^nil
+  ]
+
+  method: launchMissionBrief: brief missionId: id [
+    "Stub the workflow launch — return the configured fake instance id (or nil,
+     simulating the template-absent / graceful-skip path)."
+    ^stubWfId
+  ]
+
+"--- Helpers ---"
+MsnHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: samplePayload [
+    "A full mission payload per the data model."
+    | p |
+    p := Dictionary new.
+    p at: 'brief'  put: 'Ship the mission artifact + pp mission CLI.'.
+    p at: 'intent' put: 'Add a durable mission category and a CLI to manage it.'.
+    p at: 'plan'   put: 'W1 artifact, W2 workflow, W3 UI.'.
+    p at: 'status' put: 'awaiting-approval'.
+    p at: 'workflow_instance' put: 'wf-msn-1'.
+    p at: 'created_at' put: 1700000000.
+    ^p
+  ]
+
+  classMethod: seedMission: bbs id: id status: status brief: brief [
+    "Seed a mission at storage scope 'default' with the given status + brief."
+    | p |
+    p := Dictionary new.
+    p at: 'brief' put: brief.
+    p at: 'intent' put: nil.
+    p at: 'plan' put: nil.
+    p at: 'status' put: status.
+    p at: 'workflow_instance' put: nil.
+    p at: 'created_at' put: 1700000000.
+    bbs out: 'mission' scope: 'default' identity: id payload: p
+  ]
+
+"=== TestMissionCli ==="
+TestMissionCli subclass: Object
+
+  classMethod: run: t [
+    self testCategoryMembership: t.
+    self testActiveStoreRoundTrip: t.
+    self testGansoStoreRoundTrip: t.
+    self testStartCreatesMission: t.
+    self testStartRecordsWorkflowInstance: t.
+    self testShowRenders: t.
+    self testApprove: t.
+    self testRejectWithReason: t.
+    self testApproveRejectRefusedWhenNotAwaiting: t.
+    self testListFiltersByStatus: t
+  ]
+
+  classMethod: testCategoryMembership: t [
+    | raised |
+    '--- MS1: mission category membership ---' println.
+    t assert: (Categories isValid: 'mission')
+      message: 'MS1: Categories isValid: mission is true'.
+    t assert: (Categories valid includes: 'mission')
+      message: 'MS1: Categories valid includes mission'.
+    t assert: (Categories isPinned: 'mission') not
+      message: 'MS1: Categories isPinned: mission is FALSE (linear)'.
+    t assert: (Categories pinned includes: 'mission') not
+      message: 'MS1: Categories pinned does NOT include mission'.
+    raised := false.
+    [Categories validate: 'mission'] on: Exception do: [:e | raised := true].
+    t assert: raised not
+      message: 'MS1: Categories validate: mission does not raise'.
+    t assert: (BBS new isDurableCategory: 'mission')
+      message: 'MS1: BBS isDurableCategory: mission is true'
+  ]
+
+  classMethod: testActiveStoreRoundTrip: t [
+    "MS1: round-trip the full payload through the active store + reload."
+    | tempDir bbs round reloaded |
+    '--- MS1: full-payload round-trip through the active BBS store ---' println.
+    tempDir := MsnHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    bbs out: 'mission' scope: 'default' identity: 'msn-a1'
+      payload: MsnHelper samplePayload.
+
+    round := bbs rdp: 'mission' scope: 'default' identity: 'msn-a1'.
+    t assert: round notNil
+      message: 'MS1: rdp: finds the mission tuple written via out:'.
+    round notNil ifTrue: [
+      t assertEqual: ((round at: 'payload') at: 'brief' ifAbsent: [nil])
+        to: 'Ship the mission artifact + pp mission CLI.'
+        message: 'MS1: brief preserved'.
+      t assertEqual: ((round at: 'payload') at: 'status' ifAbsent: [nil])
+        to: 'awaiting-approval' message: 'MS1: status preserved'].
+
+    t assertEqual: ((bbs scanAll: 'mission') select: [:d |
+        (d at: 'identity' ifAbsent: ['']) = 'msn-a1']) size
+      to: 1 message: 'MS1: scanAll: surfaces exactly one msn-a1 tuple'.
+
+    "Status flip via update: (replace-by-key on the durable category)."
+    bbs update: 'mission' scope: 'default' identity: 'msn-a1' do: [:p |
+      p at: 'status' put: 'approved'].
+    round := bbs rdp: 'mission' scope: 'default' identity: 'msn-a1'.
+    t assertEqual: ((round at: 'payload') at: 'status' ifAbsent: [nil]) to: 'approved'
+      message: 'MS1: update: flipped status awaiting-approval -> approved'.
+
+    "Durability: flush + fresh load from the same data dir (simulated restart)."
+    bbs flushIfDirty.
+    reloaded := BBS withDataDir: tempDir.
+    round := reloaded rdp: 'mission' scope: 'default' identity: 'msn-a1'.
+    t assert: round notNil
+      message: 'MS1: mission tuple survives a fresh BBS load from disk (durable)'.
+    round notNil ifTrue: [
+      t assertEqual: ((round at: 'payload') at: 'status' ifAbsent: [nil]) to: 'approved'
+        message: 'MS1: reloaded mission retains status=approved']
+  ]
+
+  classMethod: testGansoStoreRoundTrip: t [
+    "MS1 (ganso half): deterministic ganso/SQLite coverage every run."
+    | tempDir store d round all |
+    '--- MS1: direct ganso/SQLite round-trip ---' println.
+    tempDir := MsnHelper makeTempDir.
+    store := GansoStore openAt: tempDir, '/tuples.db'.
+    d := Tuple linear: 'mission' scope: 'default' identity: 'msn-g1'
+      payload: MsnHelper samplePayload id: 1.
+    store putTuple: d.
+    round := store rdp: 'mission' scope: 'default' identity: 'msn-g1'.
+    t assert: round notNil
+      message: 'MS1: ganso rdp: finds the mission tuple'.
+    all := store scanAll: 'mission'.
+    t assertEqual: all size to: 1
+      message: 'MS1: ganso scanAll: mission returns exactly one tuple'
+  ]
+
+  classMethod: testStartCreatesMission: t [
+    "MS2: start creates a mission tuple with status researching + the brief."
+    | bbs cli missions m |
+    '--- MS2: start creates a researching mission ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    cli := TestMissionCLI onBbs: bbs.
+    "stubWfId nil => simulates the graceful template-absent path (no workflow)."
+    cli runWith: #('mission' 'start' 'Build the mission CLI').
+
+    missions := bbs scan: 'mission' scope: 'default'.
+    t assertEqual: missions size to: 1
+      message: 'MS2: exactly one mission tuple created'.
+    m := missions at: 1.
+    t assert: ((m at: 'identity' ifAbsent: ['']) startsWith: 'msn-')
+      message: 'MS2: mission id has msn- prefix'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'researching'
+      message: 'MS2: status is researching'.
+    t assertEqual: ((m at: 'payload') at: 'brief' ifAbsent: [nil]) to: 'Build the mission CLI'
+      message: 'MS2: brief preserved on the mission'.
+    t assert: ((m at: 'payload') at: 'workflow_instance' ifAbsent: ['sentinel']) isNil
+      message: 'MS2: workflow_instance is nil when no workflow launched'
+  ]
+
+  classMethod: testStartRecordsWorkflowInstance: t [
+    "MS3: when the workflow launch succeeds, workflow_instance is recorded."
+    | bbs cli missions m |
+    '--- MS3: start records workflow_instance on success ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    cli := TestMissionCLI onBbs: bbs.
+    cli stubWfId: 'wf-mission-7'.
+    cli runWith: #('mission' 'start' 'Kick a workflow').
+
+    missions := bbs scan: 'mission' scope: 'default'.
+    t assertEqual: missions size to: 1
+      message: 'MS3: still exactly one mission tuple (upsert, no duplicate)'.
+    m := missions at: 1.
+    t assertEqual: ((m at: 'payload') at: 'workflow_instance' ifAbsent: [nil]) to: 'wf-mission-7'
+      message: 'MS3: workflow_instance recorded from the launch'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'researching'
+      message: 'MS3: status still researching after launch'
+  ]
+
+  classMethod: testShowRenders: t [
+    "MS4: show renders brief/intent/status/plan via the helpers, no crash."
+    | bbs cli crashed |
+    '--- MS4: show renders brief/intent/status/plan ---' println.
+    "Helper rendering is the testable surface (cmdShow prints to stdout)."
+    cli := TestMissionCLI onBbs: (BBS withDataDir: MsnHelper makeTempDir).
+    t assertEqual: (cli orNone: nil) to: '(none)'
+      message: 'MS4: orNone: nil -> (none)'.
+    t assertEqual: (cli orNone: '') to: '(none)'
+      message: 'MS4: orNone: empty string -> (none)'.
+    t assertEqual: (cli orNone: 'a plan') to: 'a plan'
+      message: 'MS4: orNone: present string -> verbatim'.
+
+    "cmdShow on a fully-populated mission must not crash."
+    bbs := cli tbbs.
+    bbs out: 'mission' scope: 'default' identity: 'msn-show'
+      payload: MsnHelper samplePayload.
+    crashed := false.
+    [cli cmdShow: #('mission' 'show' 'msn-show')]
+      on: Exception do: [:e | crashed := true].
+    t assert: crashed not
+      message: 'MS4: cmdShow on a populated mission does not crash'
+  ]
+
+  classMethod: testApprove: t [
+    "MS5: approve flips awaiting-approval -> approved."
+    | bbs cli m |
+    '--- MS5: approve awaiting-approval -> approved ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    MsnHelper seedMission: bbs id: 'msn-ap' status: 'awaiting-approval' brief: 'b'.
+    cli := TestMissionCLI onBbs: bbs.
+    cli runWith: #('mission' 'approve' 'msn-ap').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-ap'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'approved'
+      message: 'MS5: status flipped to approved'
+  ]
+
+  classMethod: testRejectWithReason: t [
+    "MS6: reject flips awaiting-approval -> rejected and records the reason."
+    | bbs cli m |
+    '--- MS6: reject -> rejected + reason ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    MsnHelper seedMission: bbs id: 'msn-rj' status: 'awaiting-approval' brief: 'b'.
+    cli := TestMissionCLI onBbs: bbs.
+    cli runWith: #('mission' 'reject' 'msn-rj' '--reason' 'scope too broad').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-rj'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'rejected'
+      message: 'MS6: status flipped to rejected'.
+    t assertEqual: ((m at: 'payload') at: 'reason' ifAbsent: [nil]) to: 'scope too broad'
+      message: 'MS6: reason recorded on the mission'
+  ]
+
+  classMethod: testApproveRejectRefusedWhenNotAwaiting: t [
+    "MS7: approve/reject on a NON-awaiting mission is refused (status unchanged)."
+    | bbs cli m |
+    '--- MS7: approve/reject refused when not awaiting-approval ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    MsnHelper seedMission: bbs id: 'msn-res' status: 'researching' brief: 'b'.
+    cli := TestMissionCLI onBbs: bbs.
+
+    cli runWith: #('mission' 'approve' 'msn-res').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-res'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'researching'
+      message: 'MS7: approve refused — researching mission stays researching'.
+
+    cli runWith: #('mission' 'reject' 'msn-res' '--reason' 'no').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-res'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'researching'
+      message: 'MS7: reject refused — researching mission stays researching'.
+    t assert: ((m at: 'payload') at: 'reason' ifAbsent: ['sentinel']) = 'sentinel'
+      message: 'MS7: refused reject did NOT record a reason'
+  ]
+
+  classMethod: testListFiltersByStatus: t [
+    "MS8: list filters by --status. (Exercise scanMissions + filtering via the
+     real cmdList: path; assert no crash and that the filter predicate matches
+     the seeded statuses.)"
+    | bbs cli approved researching crashed |
+    '--- MS8: list filters by --status ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    MsnHelper seedMission: bbs id: 'msn-l1' status: 'approved' brief: 'one'.
+    MsnHelper seedMission: bbs id: 'msn-l2' status: 'researching' brief: 'two'.
+    MsnHelper seedMission: bbs id: 'msn-l3' status: 'approved' brief: 'three'.
+    cli := TestMissionCLI onBbs: bbs.
+
+    "Verify the scan seam surfaces all three, and filtering by status partitions."
+    t assertEqual: cli scanMissions size to: 3
+      message: 'MS8: scanMissions surfaces all three seeded missions'.
+    approved := cli scanMissions select: [:m |
+      ((m at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: ['']) = 'approved'].
+    researching := cli scanMissions select: [:m |
+      ((m at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: ['']) = 'researching'].
+    t assertEqual: approved size to: 2
+      message: 'MS8: two approved missions'.
+    t assertEqual: researching size to: 1
+      message: 'MS8: one researching mission'.
+
+    "The real cmdList: --status path must not crash."
+    crashed := false.
+    [cli cmdList: #('mission' 'list' '--status' 'approved')]
+      on: Exception do: [:e | crashed := true].
+    t assert: crashed not
+      message: 'MS8: cmdList: --status approved does not crash'
+  ]
+
+"=== Main ==="
+MissionCliMain subclass: Object
+  classMethod: run [
+    | t |
+    t := MsnRunner new.
+    [TestMissionCli run: t] on: Exception do: [:e |
+      ('TestMissionCli CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionCli crashed'
+    ].
+    t report.
+    ^t failed
+  ]

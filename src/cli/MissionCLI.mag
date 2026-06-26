@@ -1,0 +1,320 @@
+"MissionCLI — manage missions: the high-level Auftragstaktik intent artifact.
+
+ A mission captures an operator's brief, the researched intent, and a
+ human-reviewed plan. It matures through a status lifecycle:
+   researching -> awaiting-approval -> approved | rejected
+ `pp mission start` kicks the 'mission-brief' workflow (added in W2), which
+ researches the brief and writes the intent/plan back into THIS mission tuple;
+ a human then approves or rejects the resulting plan.
+
+ Built entirely on the generic BBS endpoints — no mission-specific server routes:
+   reads  : POST /api/scan, /api/rdp  (unsigned, non-consuming)
+   writes : POST /api/bbs/put          (ed25519-signed via CLIBase)
+
+ Mission is LINEAR + DURABLE (Categories>>isDurableCategory:), never pinned —
+ writes pass modality:'linear' so entries stay visible to rdp:. Each mission
+ gets a fresh unique identity (msn-<hex>). Status flips are read-modify-write
+ via the signed put path (upsert keyed by identity), mirroring doctrine."
+
+MissionCLI subclass: Object
+  instanceVars: baseUrl scope
+
+  classMethod: new [
+    ^super new initialize
+  ]
+
+  method: initialize [
+    baseUrl := System env: 'PP_URL'.
+    (baseUrl isNil or: [baseUrl isEmpty]) ifTrue: [baseUrl := 'http://localhost:7777'].
+    scope := System env: 'PP_SCOPE'.
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := nil]
+  ]
+
+  method: defaultScope [
+    ^scope isNil ifTrue: ['default'] ifFalse: [scope]
+  ]
+
+  "--- argument parsing ------------------------------------------------"
+
+  method: flagValue: flag in: args [
+    "Return the value following <flag> in args, or nil."
+    | i |
+    i := 1.
+    [i < args size] whileTrue: [
+      (args at: i) = flag ifTrue: [^args at: i + 1].
+      i := i + 1
+    ].
+    ^nil
+  ]
+
+  method: applyScopeFlagFrom: args [
+    "Resolve the BBS storage scope from --repo/--scope, mutating `scope`."
+    | r |
+    r := self flagValue: '--repo' in: args.
+    r isNil ifTrue: [r := self flagValue: '--scope' in: args].
+    r notNil ifTrue: [scope := r]
+  ]
+
+  method: runWith: args [
+    "Dispatch pp mission subcommands."
+    | sub |
+    args size < 2 ifTrue: [^self printUsage].
+    sub := args at: 2.
+    sub = 'start'   ifTrue: [^self cmdStart: args].
+    sub = 'list'    ifTrue: [^self cmdList: args].
+    sub = 'show'    ifTrue: [^self cmdShow: args].
+    sub = 'approve' ifTrue: [^self cmdApprove: args].
+    sub = 'reject'  ifTrue: [^self cmdReject: args].
+    (sub = 'help' or: [sub = '--help']) ifTrue: [^self printUsage].
+    ('Unknown mission command: ', sub) println.
+    self printUsage
+  ]
+
+  "--- reads (unsigned, non-consuming) --------------------------------"
+
+  method: scanMissions [
+    "Return an Array of mission tuples in the resolved scope (best-effort)."
+    | sc response result |
+    sc := self defaultScope.
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"mission","scope":"', sc, '"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^Array new: 0].
+      result := Json decode: response.
+      ^result at: 'tuples' ifAbsent: [Array new: 0]
+    ] on: Exception do: [:e | ^Array new: 0]
+  ]
+
+  method: rdpMission: id [
+    "Return one mission tuple by identity, or nil."
+    | response result |
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/rdp -H "Content-Type: application/json" -d ''{"category":"mission","scope":"', self defaultScope, '","identity":"', id, '"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^nil].
+      result := Json decode: response.
+      ^result at: 'tuple' ifAbsent: [nil]
+    ] on: Exception do: [:e | ^nil]
+  ]
+
+  method: rdpTemplate: tid scope: aScope [
+    "Return one template tuple by identity in aScope, or nil (best-effort)."
+    | response result |
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/rdp -H "Content-Type: application/json" -d ''{"category":"template","scope":"', aScope, '","identity":"', tid, '"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^nil].
+      result := Json decode: response.
+      ^result at: 'tuple' ifAbsent: [nil]
+    ] on: Exception do: [:e | ^nil]
+  ]
+
+  "--- writes (signed) -------------------------------------------------"
+
+  method: putMission: id payload: payload [
+    "Signed upsert of a mission tuple as linear (durable, rdp-visible)."
+    | body |
+    body := Dictionary new.
+    body at: 'category' put: 'mission'.
+    body at: 'scope' put: self defaultScope.
+    body at: 'identity' put: id.
+    body at: 'modality' put: 'linear'.
+    body at: 'payload' put: payload.
+    ^CLIBase signedPost: '/api/bbs/put' body: body baseUrl: baseUrl
+  ]
+
+  "--- workflow launch -------------------------------------------------"
+
+  method: missionTemplatePresent [
+    "True when the 'mission-brief' workflow template exists (system scope,
+     falling back to the mission's repo scope). Network/parse-tolerant — on any
+     failure returns false so `start` degrades to a graceful warning rather than
+     a crash. Overridable test seam."
+    | t |
+    t := self rdpTemplate: 'mission-brief' scope: 'system'.
+    t isNil ifTrue: [t := self rdpTemplate: 'mission-brief' scope: self defaultScope].
+    ^t notNil
+  ]
+
+  method: startWorkflowBrief: brief missionId: id [
+    "Signed POST /api/workflow/start for the 'mission-brief' template, passing
+     the brief as the `description` param AND the `mission` id (so the workflow's
+     agents write their intent/plan back into THIS mission tuple). Returns the
+     new workflow instance id, or nil on failure. Overridable test seam."
+    | params body response result |
+    params := Dictionary new.
+    params at: 'description' put: brief.
+    params at: 'mission' put: id.
+    params at: 'repo' put: self defaultScope.
+    body := Dictionary new.
+    body at: 'template' put: 'mission-brief'.
+    body at: 'scope' put: self defaultScope.
+    body at: 'params' put: params.
+    response := CLIBase signedPost: '/api/workflow/start' body: body baseUrl: baseUrl.
+    (response isNil or: [(response isKindOf: String) not or: [response isEmpty]]) ifTrue: [^nil].
+    result := nil.
+    [result := Json decode: response] on: Exception do: [:e | ^nil].
+    (result isKindOf: Dictionary) ifFalse: [^nil].
+    ^result at: 'workflow_id' ifAbsent: [nil]
+  ]
+
+  method: launchMissionBrief: brief missionId: id [
+    "Kick the 'mission-brief' workflow for this mission. Returns the workflow
+     instance id, or nil. If the template is not present (e.g. before the W2
+     workflow lands) warn gracefully and return nil rather than crashing."
+    self missionTemplatePresent ifFalse: [
+      'Note: the ''mission-brief'' workflow template is not present yet — created the' println.
+      '      mission but did NOT launch a workflow. Re-run once the template is installed.' println.
+      ^nil
+    ].
+    ^self startWorkflowBrief: brief missionId: id
+  ]
+
+  "--- commands --------------------------------------------------------"
+
+  method: cmdStart: args [
+    "pp mission start <brief> [--repo R]"
+    | brief id payload wfId |
+    args size < 3 ifTrue: [
+      'Usage: pp mission start "<brief>" [--repo R]' println.
+      ^self
+    ].
+    brief := args at: 3.
+    self applyScopeFlagFrom: args.
+
+    id := 'msn-', ((ClaimId generate) at: 'hex').
+    payload := Dictionary new.
+    payload at: 'brief' put: brief.
+    payload at: 'intent' put: nil.
+    payload at: 'plan' put: nil.
+    payload at: 'status' put: 'researching'.
+    payload at: 'workflow_instance' put: nil.
+    payload at: 'created_at' put: DateTime now epochSeconds.
+    self putMission: id payload: payload.
+
+    "Launch the mission-brief workflow (graceful if the template is absent)."
+    wfId := self launchMissionBrief: brief missionId: id.
+    wfId notNil ifTrue: [
+      "Record the workflow instance on the mission (read-modify-write)."
+      payload at: 'workflow_instance' put: wfId.
+      self putMission: id payload: payload
+    ].
+
+    ('mission ', id, ' created (status researching, scope ', self defaultScope, ')') println.
+    wfId notNil ifTrue: [('  workflow: ', wfId) println].
+    ('  watch the dashboard: pp dashboard   (or: pp mission show ', id, ')') println
+  ]
+
+  method: cmdList: args [
+    "pp mission list [--repo R] [--status S]"
+    | statusFilter missions shown |
+    self applyScopeFlagFrom: args.
+    statusFilter := self flagValue: '--status' in: args.
+    missions := self scanMissions.
+    shown := 0.
+    missions do: [:m |
+      | p st brief ok |
+      p := m at: 'payload' ifAbsent: [Dictionary new].
+      st := p at: 'status' ifAbsent: ['?'].
+      ok := true.
+      (statusFilter notNil and: [(st = statusFilter) not]) ifTrue: [ok := false].
+      ok ifTrue: [
+        brief := self oneLine: (p at: 'brief' ifAbsent: ['']).
+        ((m at: 'identity' ifAbsent: ['?']), '  [', st, ']  ', brief) println.
+        shown := shown + 1
+      ]
+    ].
+    shown = 0 ifTrue: ['(no missions match)' println]
+  ]
+
+  method: cmdShow: args [
+    "pp mission show <id> [--repo R]"
+    | id m p |
+    args size < 3 ifTrue: ['Usage: pp mission show <id> [--repo R]' println. ^self].
+    id := args at: 3.
+    self applyScopeFlagFrom: args.
+    m := self rdpMission: id.
+    m isNil ifTrue: ['Not found.' println. ^self].
+    p := m at: 'payload' ifAbsent: [Dictionary new].
+    ('id:      ', (m at: 'identity' ifAbsent: [id])) println.
+    ('status:  ', (p at: 'status' ifAbsent: ['?'])) println.
+    ('brief:   ', (self orNone: (p at: 'brief' ifAbsent: [nil]))) println.
+    ('intent:  ', (self orNone: (p at: 'intent' ifAbsent: [nil]))) println.
+    ('plan:    ', (self orNone: (p at: 'plan' ifAbsent: [nil]))) println.
+    (p at: 'reason' ifAbsent: [nil]) notNil ifTrue: [
+      ('reason:  ', (p at: 'reason')) println
+    ]
+  ]
+
+  method: cmdApprove: args [
+    "pp mission approve <id> [--repo R] — awaiting-approval -> approved."
+    ^self setStatusFor: args to: 'approved' reason: nil action: 'approve'
+  ]
+
+  method: cmdReject: args [
+    "pp mission reject <id> [--reason R] [--repo R] — awaiting-approval -> rejected."
+    | reason |
+    reason := self flagValue: '--reason' in: args.
+    ^self setStatusFor: args to: 'rejected' reason: reason action: 'reject'
+  ]
+
+  method: setStatusFor: args to: newStatus reason: reason action: action [
+    "Guarded read-modify-write of a mission's status. ONLY missions awaiting
+     approval may be approved/rejected — any other status is refused with a
+     warning (the plan gate must not be flipped before the workflow has produced
+     a plan, nor re-decided after the fact)."
+    | id m p cur |
+    args size < 3 ifTrue: [
+      ('Usage: pp mission ', action, ' <id>',
+        (action = 'reject' ifTrue: [' [--reason R]'] ifFalse: [''])) println.
+      ^self
+    ].
+    id := args at: 3.
+    self applyScopeFlagFrom: args.
+    m := self rdpMission: id.
+    m isNil ifTrue: [('Not found: ', id) println. ^self].
+    p := m at: 'payload' ifAbsent: [Dictionary new].
+    cur := p at: 'status' ifAbsent: ['?'].
+    cur = 'awaiting-approval' ifFalse: [
+      ('Refused: mission ', id, ' is ', cur, ' — only awaiting-approval missions can be ', newStatus, '.') println.
+      ^self
+    ].
+    p at: 'status' put: newStatus.
+    reason notNil ifTrue: [p at: 'reason' put: reason].
+    p at: 'updated_at' put: DateTime now epochSeconds.
+    self putMission: id payload: p.
+    (id, ' -> ', newStatus, (reason notNil ifTrue: [' (', reason, ')'] ifFalse: [''])) println
+  ]
+
+  "--- helpers ---------------------------------------------------------"
+
+  method: oneLine: s [
+    "Collapse a (possibly multi-line) brief to a single truncated line."
+    | str cut |
+    str := s isNil ifTrue: [''] ifFalse: [s].
+    (str isKindOf: String) ifFalse: [str := str printString].
+    cut := str indexOf: String lf.
+    cut > 0 ifTrue: [str := str copyFrom: 1 to: cut - 1].
+    str size > 70 ifTrue: [str := (str copyFrom: 1 to: 67), '...'].
+    ^str
+  ]
+
+  method: orNone: aVal [
+    "Render a payload field for `show`: nil/empty -> '(none)'; a String verbatim;
+     anything else via printString (a plan may be a structured value)."
+    aVal isNil ifTrue: [^'(none)'].
+    (aVal isKindOf: String) ifTrue: [
+      aVal isEmpty ifTrue: [^'(none)'].
+      ^aVal
+    ].
+    ^aVal printString
+  ]
+
+  method: printUsage [
+    'pp mission — manage missions (high-level Auftragstaktik intent artifacts)' println.
+    '' println.
+    'Commands:' println.
+    '  start "<brief>" [--repo R]      Create a mission and kick the mission-brief workflow' println.
+    '  list [--repo R] [--status S]    List missions (id, status, one-line brief)' println.
+    '  show <id> [--repo R]            Show brief, intent, status, and plan' println.
+    '  approve <id> [--repo R]         awaiting-approval -> approved' println.
+    '  reject <id> [--reason R] [--repo R]   awaiting-approval -> rejected (+ reason)' println.
+    ^self
+  ]

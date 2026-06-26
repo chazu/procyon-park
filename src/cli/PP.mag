@@ -56,6 +56,7 @@ PP subclass: CLIBase
     cmd = 'usage'     ifTrue: [^SystemCommands new runCommand: cmd args: args].
     cmd = 'workitem'  ifTrue: [^WorkItemCLI new runWith: args].
     cmd = 'doctrine'  ifTrue: [^DoctrineCLI new runWith: args].
+    cmd = 'mission'   ifTrue: [^MissionCLI new runWith: args].
     cmd = 'bbs'       ifTrue: [^CliBBS new runWith: args].
     cmd = 'repo'      ifTrue: [^Repo new runWith: args].
     cmd = 'worktree'  ifTrue: [
@@ -463,6 +464,7 @@ PP subclass: CLIBase
     '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
     '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
     '  audit    (--actor <n> | --worker <id> | --workflow <id>) Roll up provenance by actor/worker/workflow' println.
+    '  mission  <start|list|show|approve|reject> [args] Manage durable mission artifacts' println.
     '  dashboard                                        Open web dashboard in browser' println.
     '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
     '  session  [<taskId>]                              View Claude Code session logs' println.

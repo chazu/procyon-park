@@ -7,7 +7,7 @@ Categories subclass: Object
        'task' 'template' 'workflow' 'token' 'rule' 'ingestion'
        'event' 'obstacle' 'session' 'artifact' 'link' 'notification'
        'workitem' 'identity' 'worker' 'watch' 'invite' 'case' 'doctrine'
-       'doctrine-feedback' 'doctrine-injection')
+       'doctrine-feedback' 'doctrine-injection' 'mission')
   ]
 
   classMethod: isValid: aString [
