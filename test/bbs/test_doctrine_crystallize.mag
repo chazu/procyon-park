@@ -98,7 +98,83 @@ TestDoctrineCrystallize subclass: Object
     self testMissingTupleReturnsNil: t.
     self testResolveNullTolerant: t.
     self testRenderHelpers: t.
-    self testGansoRoundTrip: t
+    self testGansoRoundTrip: t.
+    self testCliCrystallizeHelpers: t
+  ]
+
+  classMethod: testCliCrystallizeHelpers: t [
+    "CX8: the CLI crystallize verb (pp doctrine crystallize <id> --as workitem)
+     builds a work item carrying the doctrine principle + rationale + a back-ref,
+     records a crystallized_into {workitem,...} link, applies a 'template-change'
+     label only when asked, and NEVER changes the doctrine's maturity."
+    | cli payload desc descTpl labels labelsTpl links title |
+    '--- CX8: CLI crystallize helpers (description / labels / link / maturity) ---' println.
+    cli := DoctrineCLI new.
+
+    "An ACTIVE doctrine: crystallizing must leave maturity untouched."
+    payload := Dictionary new.
+    payload at: 'key' put: 'guard-decoded-dict'.
+    payload at: 'principle' put: 'Validate the parse succeeded before dict access.'.
+    payload at: 'rationale' put: 'Two stories died at create-worktree on a bad body.'.
+    payload at: 'maturity' put: 'active'.
+    payload at: 'crystallized_into' put: (Array new: 0).
+
+    "CX8a: description embeds principle + rationale + back-ref to the doctrine id."
+    desc := cli crystallizeDescriptionFor: payload doctrineId: 'dctr-abc'
+      linkScope: 'myrepo' templateChange: false.
+    t assert: (desc includes: 'Validate the parse succeeded before dict access.')
+      message: 'CX8a: description embeds the doctrine principle'.
+    t assert: (desc includes: 'Two stories died at create-worktree on a bad body.')
+      message: 'CX8a: description embeds the doctrine rationale'.
+    t assert: (desc includes: 'dctr-abc')
+      message: 'CX8a: description back-references the doctrine id'.
+    t assert: (desc includes: 'doctrine:myrepo:dctr-abc')
+      message: 'CX8a: description carries the scope-qualified back-reference'.
+
+    "CX8b: --template-change is reflected in the description flavor text."
+    descTpl := cli crystallizeDescriptionFor: payload doctrineId: 'dctr-abc'
+      linkScope: 'myrepo' templateChange: true.
+    t assert: (descTpl includes: 'TEMPLATE CHANGE')
+      message: 'CX8b: --template-change description notes a CUE/TTP change'.
+
+    "CX8c: labels — always doctrine-crystallization; template-change only on demand."
+    labels := cli crystallizeLabels: false.
+    t assert: (labels includes: 'doctrine-crystallization')
+      message: 'CX8c: doctrine-crystallization label always applied'.
+    t assert: ((labels includes: 'template-change') not)
+      message: 'CX8c: no template-change label without the flag'.
+    labelsTpl := cli crystallizeLabels: true.
+    t assert: (labelsTpl includes: 'template-change')
+      message: 'CX8c: --template-change applies the template-change label'.
+
+    "CX8d: title falls back to the doctrine key when no --title is given."
+    title := cli crystallizeWorkitemTitleFrom: payload doctrineId: 'dctr-abc' explicit: nil.
+    t assert: (title includes: 'guard-decoded-dict')
+      message: 'CX8d: derived title carries the doctrine key'.
+    t assertEqual: (cli crystallizeWorkitemTitleFrom: payload doctrineId: 'dctr-abc' explicit: 'My Title')
+      to: 'My Title'
+      message: 'CX8d: explicit --title overrides the derived title'.
+
+    "CX8e: appendWorkitemLink adds exactly one {workitem,scope,identity} link..."
+    cli appendWorkitemLink: payload scope: 'myrepo' identity: 'wi-crystal-1'.
+    links := DoctrineWriter linksOf: payload.
+    t assertEqual: links size to: 1
+      message: 'CX8e: one crystallized_into link after crystallize'.
+    t assertEqual: ((links at: 1) at: 'category' ifAbsent: [nil]) to: 'workitem'
+      message: 'CX8e: link category is workitem'.
+    t assertEqual: ((links at: 1) at: 'identity' ifAbsent: [nil]) to: 'wi-crystal-1'
+      message: 'CX8e: link identity is the spawned work item'.
+    t assertEqual: ((links at: 1) at: 'scope' ifAbsent: [nil]) to: 'myrepo'
+      message: 'CX8e: link scope is the work item scope'.
+
+    "CX8f: the doctrine's maturity/binding status is UNCHANGED by crystallize."
+    t assertEqual: (payload at: 'maturity' ifAbsent: [nil]) to: 'active'
+      message: 'CX8f: doctrine maturity stays active (binding status unchanged)'.
+
+    "CX8g: append is idempotent — re-crystallizing the same work item is a no-op."
+    cli appendWorkitemLink: payload scope: 'myrepo' identity: 'wi-crystal-1'.
+    t assertEqual: (DoctrineWriter linksOf: payload) size to: 1
+      message: 'CX8g: appendWorkitemLink is idempotent (no duplicate link)'
   ]
 
   classMethod: testAppendDurableAndIdempotent: t [

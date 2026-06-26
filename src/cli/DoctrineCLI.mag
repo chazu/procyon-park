@@ -41,6 +41,7 @@ DoctrineCLI subclass: Object
     sub = 'show'    ifTrue: [^self cmdShow: args].
     sub = 'propose' ifTrue: [^self cmdPropose: args].
     sub = 'synthesize' ifTrue: [^self cmdSynthesize: args].
+    sub = 'crystallize' ifTrue: [^self cmdCrystallize: args].
     sub = 'export' ifTrue: [^self cmdExport: args].
     sub = 'promote' ifTrue: [^self cmdSetMaturity: args to: 'active'].
     sub = 'retire'  ifTrue: [^self cmdSetMaturity: args to: 'retired'].
@@ -269,6 +270,161 @@ DoctrineCLI subclass: Object
     ('Strategist task enqueued: ', taskId, ' (scope ', self defaultScope, ') — watch: pp read doctrine ', self defaultScope) println
   ]
 
+  "--- crystallize: the loop-closing forward edge -----------------------
+
+   doctrine --crystallized_into--> workitem. A doctrine entry that exposes a
+   gap (or proposes a procedural/TTP/template change) spawns a derivative work
+   item. This is the edge that CLOSES the OODA loop: a doctrine-detected gap
+   re-enters the work queue, gets executed, generates new cases, and those
+   cases feed the next synthesis pass.
+
+   CHEAP + SAFE + REVERSIBLE: spawning a work item changes NOTHING about the
+   doctrine's binding status — the doctrine stays exactly as mature/active/
+   advisory as it was. The only mutation to the doctrine is an idempotent
+   crystallized_into link (the forward provenance edge). To reverse, simply
+   cancel the work item (pp workitem delete). No qualification gate is needed
+   because no binding status changes."
+
+  method: crystallizeWorkitemTitleFrom: payload doctrineId: id explicit: explicitTitle [
+    "Resolve the spawned work item's title. An explicit --title wins; otherwise
+     derive from the doctrine key (preferred, human-readable slug) or principle,
+     prefixed so the lineage is obvious in a backlog listing."
+    | key principle base |
+    (explicitTitle notNil and: [explicitTitle isEmpty not]) ifTrue: [^explicitTitle].
+    key := (payload at: 'key' ifAbsent: ['']).
+    principle := (payload at: 'principle' ifAbsent: ['']).
+    base := (key notNil and: [key isEmpty not]) ifTrue: [key] ifFalse: [principle].
+    (base isNil or: [base isEmpty]) ifTrue: [base := id].
+    ^'Crystallize doctrine: ', base
+  ]
+
+  method: crystallizeDescriptionFor: payload doctrineId: id linkScope: linkScope templateChange: templateChange [
+    "Build the spawned work item's description. It EMBEDS the doctrine principle
+     + rationale + a back-reference to the doctrine id, so the lineage is fully
+     bidirectional (workitem -> doctrine -> cases) and an implementer can act on
+     the work without re-reading the doctrine tuple."
+    | principle rationale d |
+    principle := payload at: 'principle' ifAbsent: [''].
+    rationale := payload at: 'rationale' ifAbsent: [''].
+    d := 'Crystallized from doctrine ', id, ' (the forward OODA-loop edge: a',
+      ' doctrine-detected gap re-enters the work queue).', String lf, String lf.
+    d := d, 'Principle:', String lf, principle, String lf, String lf.
+    d := d, 'Rationale:', String lf, rationale, String lf, String lf.
+    d := d, 'Back-reference: doctrine:', linkScope, ':', id, String lf.
+    d := d, '(Lineage: workitem -> doctrine -> cases. This work item is cheap and',
+      ' reversible — cancel it with `pp workitem delete` to undo. Spawning it does',
+      ' NOT change the doctrine''s maturity or binding status.)', String lf.
+    templateChange ifTrue: [
+      d := d, String lf,
+        'TEMPLATE CHANGE: this proposes a CUE template / procedural (TTP) change.',
+        ' We do NOT auto-edit CUE templates — a human authors the CUE; this work',
+        ' item merely proposes and tracks the change.', String lf].
+    ^d
+  ]
+
+  method: crystallizeLabels: templateChange [
+    "Labels for the spawned work item. Always tagged 'doctrine-crystallization'
+     so the loop-closing provenance is filterable; 'template-change' is an extra
+     flavor label when --template-change is passed."
+    | labels |
+    labels := Array new: 0.
+    labels := labels copyWith: 'doctrine-crystallization'.
+    templateChange ifTrue: [labels := labels copyWith: 'template-change'].
+    ^labels
+  ]
+
+  method: appendWorkitemLink: payload scope: linkScope identity: wiId [
+    "Idempotently append a crystallized_into {workitem, scope, identity} link to
+     a doctrine payload, reusing DoctrineWriter>>linksOf: (story:forward-
+     provenance) for NULL-TOLERANT reads. Mutates and returns the payload.
+
+     CRITICAL: this touches ONLY crystallized_into (+ updated_at when a new link
+     is actually added). It NEVER mutates maturity / promoted_at — crystallizing
+     emits derivative work without changing the doctrine's binding status."
+    | links exists |
+    links := DoctrineWriter linksOf: payload.
+    exists := false.
+    links do: [:l |
+      ((l isKindOf: Dictionary)
+        and: [(l at: 'category' ifAbsent: [nil]) = 'workitem'
+        and: [(l at: 'scope'    ifAbsent: [nil]) = linkScope
+        and: [(l at: 'identity' ifAbsent: [nil]) = wiId]]])
+          ifTrue: [exists := true]].
+    exists ifFalse: [
+      | link |
+      link := Dictionary new.
+      link at: 'category' put: 'workitem'.
+      link at: 'scope'    put: linkScope.
+      link at: 'identity' put: wiId.
+      links := links copyWith: link.
+      payload at: 'crystallized_into' put: links.
+      payload at: 'updated_at' put: DateTime now epochSeconds].
+    ^payload
+  ]
+
+  method: cmdCrystallize: args [
+    "pp doctrine crystallize <id> --as workitem [--title T] [--type story|epic]
+                                  [--repo R] [--template-change]
+     Spawn a derivative work item from a doctrine entry and record the forward
+     crystallized_into link on the doctrine. Reuses the workitem-create path
+     (WorkItemCLI). Does NOT change the doctrine's maturity / binding status."
+    | id as type explicitTitle templateChange tuple payload linkScope
+      title desc labels wiId wiArgs |
+    args size < 3 ifTrue: [
+      'Usage: pp doctrine crystallize <id> --as workitem [--title T] [--type story|epic] [--repo R] [--template-change]' println.
+      ^self
+    ].
+    id := args at: 3.
+    as := self flagValue: '--as' in: args.
+    as isNil ifTrue: [as := 'workitem'].
+    as = 'workitem' ifFalse: [
+      ('Error: unsupported crystallization target --as ', as, '. Only --as workitem is supported.') println.
+      ^self
+    ].
+    self applyScopeFlagFrom: args.
+    type := self flagValue: '--type' in: args.
+    type isNil ifTrue: [type := 'story'].
+    (type = 'story' or: [type = 'epic']) ifFalse: [
+      ('Error: --type must be story or epic (got ', type, ').') println.
+      ^self
+    ].
+    explicitTitle := self flagValue: '--title' in: args.
+    templateChange := args includes: '--template-change'.
+
+    tuple := self rdpDoctrine: id.
+    tuple isNil ifTrue: [('Not found: ', id) println. ^self].
+    payload := tuple at: 'payload'.
+    linkScope := self defaultScope.
+
+    "Build the spawned work item from the doctrine."
+    title := self crystallizeWorkitemTitleFrom: payload doctrineId: id explicit: explicitTitle.
+    desc := self crystallizeDescriptionFor: payload doctrineId: id linkScope: linkScope templateChange: templateChange.
+    labels := self crystallizeLabels: templateChange.
+    wiId := 'wi-crystal-', ((ClaimId generate) at: 'hex').
+
+    "Reuse the existing workitem-create plumbing (POST /api/workitem/create)."
+    wiArgs := Array new: 0.
+    wiArgs := wiArgs copyWith: 'workitem'.
+    wiArgs := wiArgs copyWith: 'create'.
+    wiArgs := wiArgs copyWith: wiId.
+    wiArgs := wiArgs copyWith: '--title'.   wiArgs := wiArgs copyWith: title.
+    wiArgs := wiArgs copyWith: '--type'.    wiArgs := wiArgs copyWith: type.
+    wiArgs := wiArgs copyWith: '--repo'.    wiArgs := wiArgs copyWith: linkScope.
+    wiArgs := wiArgs copyWith: '--description'. wiArgs := wiArgs copyWith: desc.
+    wiArgs := wiArgs copyWith: '--label'.   wiArgs := wiArgs copyWith: (self joinArray: labels with: ',').
+    WorkItemCLI new runWith: wiArgs.
+
+    "Record the forward crystallized_into edge on the doctrine. Read-modify-write
+     via the signed put path (same as maturity transitions), but appending ONLY
+     the link — maturity / binding status is left untouched."
+    self appendWorkitemLink: payload scope: linkScope identity: wiId.
+    self putDoctrine: id payload: payload.
+
+    ('crystallized doctrine ', id, ' -> workitem ', wiId, ' (', type, ', scope ', linkScope, ')',
+      (templateChange ifTrue: [' [template-change]'] ifFalse: [''])) println.
+    ('  reversible: pp workitem delete ', wiId, ' --repo ', linkScope, ' (doctrine binding status unchanged)') println
+  ]
+
   method: cmdSetMaturity: args to: newMaturity [
     "pp doctrine promote|retire|reject <id> [--repo R] — read-modify-write maturity.
      Promote one + retire/reject duplicates is the human-merge discipline (the
@@ -317,6 +473,12 @@ DoctrineCLI subclass: Object
     '  propose "<principle>" [--rationale R] [--applies global|repo|repo:path]' println.
     '                        [--tags t1,t2] [--confidence C] [--key name]' println.
     '  synthesize [--repo R]                        Enqueue a Strategist to propose doctrine from cases' println.
+    '  crystallize <id> --as workitem [--title T] [--type story|epic] [--repo R] [--template-change]' println.
+    '                        Spawn a derivative work item from doctrine (the loop-closing forward edge):' println.
+    '                        embeds the principle + rationale + a back-ref to <id>, and records the' println.
+    '                        crystallized_into link. CHEAP + REVERSIBLE (cancel the work item to undo);' println.
+    '                        does NOT change the doctrine''s maturity/binding status. --template-change adds' println.
+    '                        a ''template-change'' label — a human writes the CUE, this work item proposes it.' println.
     '  export                                       (stub) export active doctrine to pudl — not yet implemented' println.
     '  promote <id>                                  maturity -> active' println.
     '  retire  <id>                                  maturity -> retired' println.
