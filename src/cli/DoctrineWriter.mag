@@ -20,39 +20,80 @@
 
 DoctrineWriter subclass: Object
 
+  classMethod: appendLink: payload category: linkCategory scope: linkScope identity: linkIdentity [
+    "PURE payload-level helper: idempotently append a crystallized_into link
+     {category,scope,identity} to a doctrine payload. Returns true if a NEW link
+     was added (and bumps updated_at), false if the link already existed.
+     NULL-TOLERANT about a missing or non-array field. Shared by the engine-side
+     crystallize: path AND the signed-HTTP DoctrineCLI read-modify-write path so
+     the forward-provenance logic lives in exactly one place."
+    | links exists link |
+    links := payload at: 'crystallized_into' ifAbsent: [nil].
+    (links isNil or: [(links isKindOf: Array) not]) ifTrue: [links := Array new: 0].
+    exists := false.
+    links do: [:l |
+      ((l isKindOf: Dictionary)
+        and: [(l at: 'category' ifAbsent: [nil]) = linkCategory
+        and: [(l at: 'scope'    ifAbsent: [nil]) = linkScope
+        and: [(l at: 'identity' ifAbsent: [nil]) = linkIdentity]]])
+          ifTrue: [exists := true]].
+    exists ifTrue: [^false].
+    link := Dictionary new.
+    link at: 'category' put: linkCategory.
+    link at: 'scope'    put: linkScope.
+    link at: 'identity' put: linkIdentity.
+    links := links copyWith: link.
+    payload at: 'crystallized_into' put: links.
+    payload at: 'updated_at' put: DateTime now epochSeconds.
+    ^true
+  ]
+
+  classMethod: removeLink: payload category: linkCategory scope: linkScope identity: linkIdentity [
+    "PURE payload-level helper: remove the matching {category,scope,identity}
+     crystallized_into link from a doctrine payload. Returns true if a link was
+     removed (and bumps updated_at), false if none matched. The decrystallize
+     (binding -> advisory) counterpart of appendLink:. NULL-TOLERANT."
+    | links kept removed |
+    links := payload at: 'crystallized_into' ifAbsent: [nil].
+    (links isNil or: [(links isKindOf: Array) not]) ifTrue: [^false].
+    kept := Array new: 0.
+    removed := false.
+    links do: [:l |
+      | match |
+      match := (l isKindOf: Dictionary)
+        and: [(l at: 'category' ifAbsent: [nil]) = linkCategory
+        and: [(l at: 'scope'    ifAbsent: [nil]) = linkScope
+        and: [(l at: 'identity' ifAbsent: [nil]) = linkIdentity]]].
+      match ifTrue: [removed := true] ifFalse: [kept := kept copyWith: l]].
+    removed ifTrue: [
+      payload at: 'crystallized_into' put: kept.
+      payload at: 'updated_at' put: DateTime now epochSeconds].
+    ^removed
+  ]
+
   classMethod: crystallize: bbs scope: scope identity: identity into: linkCategory linkScope: linkScope linkIdentity: linkIdentity [
     "Idempotently append a crystallized_into link {category,scope,identity} to a
      doctrine tuple, addressed by its unique identity, via BBS>>update:
      (replace-by-key on the durable category — same mechanism maturity
-     transitions use).
+     transitions use). Delegates the link logic to the pure appendLink: helper.
 
      Idempotent: a link whose {category,scope,identity} already exists is never
-     duplicated. The tuple's updated_at is bumped ONLY when a new link is added,
-     so a no-op crystallize leaves the tuple byte-identical.
+     duplicated. The tuple's updated_at is bumped ONLY when a new link is added.
 
      Returns the new tuple id, or nil if no doctrine tuple was found at
      (scope, identity) — callers must tolerate nil."
     ^bbs update: 'doctrine' scope: scope identity: identity do: [:p |
-      | links exists link |
-      links := p at: 'crystallized_into' ifAbsent: [nil].
-      "NULL-TOLERANT: a legacy tuple may lack the field, or carry a non-array
-       value — coerce to an empty array rather than crash."
-      (links isNil or: [(links isKindOf: Array) not]) ifTrue: [links := Array new: 0].
-      exists := false.
-      links do: [:l |
-        ((l isKindOf: Dictionary)
-          and: [(l at: 'category' ifAbsent: [nil]) = linkCategory
-          and: [(l at: 'scope'    ifAbsent: [nil]) = linkScope
-          and: [(l at: 'identity' ifAbsent: [nil]) = linkIdentity]]])
-            ifTrue: [exists := true]].
-      exists ifFalse: [
-        link := Dictionary new.
-        link at: 'category' put: linkCategory.
-        link at: 'scope'    put: linkScope.
-        link at: 'identity' put: linkIdentity.
-        links := links copyWith: link.
-        p at: 'crystallized_into' put: links.
-        p at: 'updated_at' put: DateTime now epochSeconds]]
+      DoctrineWriter appendLink: p category: linkCategory scope: linkScope identity: linkIdentity]
+  ]
+
+  classMethod: uncrystallize: bbs scope: scope identity: identity from: linkCategory linkScope: linkScope linkIdentity: linkIdentity [
+    "Engine-side reversal: clear the matching crystallized_into link from a
+     doctrine tuple via BBS>>update:, restoring it toward purely-advisory.
+     Delegates to the pure removeLink: helper. Returns the new tuple id, or nil
+     if no doctrine tuple was found — callers must tolerate nil. The doctrine's
+     maturity is never touched (it stays active); only the forward edge is cut."
+    ^bbs update: 'doctrine' scope: scope identity: identity do: [:p |
+      DoctrineWriter removeLink: p category: linkCategory scope: linkScope identity: linkIdentity]
   ]
 
   classMethod: linksOf: payload [

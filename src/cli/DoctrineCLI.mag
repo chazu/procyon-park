@@ -45,6 +45,8 @@ DoctrineCLI subclass: Object
     sub = 'promote' ifTrue: [^self cmdSetMaturity: args to: 'active'].
     sub = 'retire'  ifTrue: [^self cmdSetMaturity: args to: 'retired'].
     sub = 'reject'  ifTrue: [^self cmdSetMaturity: args to: 'rejected'].
+    sub = 'crystallize'   ifTrue: [^self cmdCrystallize: args].
+    sub = 'decrystallize' ifTrue: [^self cmdDecrystallize: args].
     (sub = 'help' or: [sub = '--help']) ifTrue: [^self printUsage].
     ('Unknown doctrine command: ', sub) println.
     self printUsage
@@ -288,6 +290,270 @@ DoctrineCLI subclass: Object
     (id, ' -> ', newMaturity) println
   ]
 
+  "--- crystallize: the RARE, human-only advisory -> binding transition -----
+
+   A convention is BINDING (every agent obeys, execution-time, no judgment);
+   doctrine is ADVISORY (situational). `crystallize` converts wisdom into law and
+   is the ONLY verb that changes binding status. It is gated on a strict
+   four-clause QUALIFICATION TEST and is human-only — never auto-fired, never
+   Strategist-proposed. The friction is by design: a convention cannot be
+   selectively ignored, so a wrong one taxes EVERY agent on EVERY task."
+
+  method: hasFlag: flag in: args [
+    "True if `flag` appears anywhere in args (boolean flag, no value).
+     Unlike flagValue: this scans the FULL range incl. the last element."
+    | i |
+    i := 1.
+    [i <= args size] whileTrue: [
+      (args at: i) = flag ifTrue: [^true].
+      i := i + 1
+    ].
+    ^false
+  ]
+
+  method: qualificationClauses [
+    "The four-clause QUALIFICATION TEST (JP-1's 'requires judgment' clause
+     removed). A doctrine qualifies for convention-hood ONLY if ALL FOUR hold.
+     Each clause carries the flag that affirms it non-interactively, a terse
+     title, and the longer explanation printed as friction."
+    | clauses c |
+    clauses := Array new: 0.
+
+    c := Dictionary new.
+    c at: 'flag'  put: '--affirm-unconditional'.
+    c at: 'title' put: 'UNCONDITIONAL'.
+    c at: 'text'  put: 'No situational branching. Contextual doctrine (scope/tag conditionality that affects WHETHER it applies, e.g. desert vs arctic) can NEVER be a convention. Conventions do not branch on situation.'.
+    clauses := clauses copyWith: c.
+
+    c := Dictionary new.
+    c at: 'flag'  put: '--affirm-no-false-positive'.
+    c at: 'title' put: 'ZERO FALSE-POSITIVE COST'.
+    c at: 'text'  put: 'A convention cannot be selectively ignored; one that is wrong 10% of the time taxes every agent on every task. Obeying it when it does not strictly apply must cause no harm.'.
+    clauses := clauses copyWith: c.
+
+    c := Dictionary new.
+    c at: 'flag'  put: '--affirm-mechanical'.
+    c at: 'title' put: 'MECHANICALLY OBEYABLE'.
+    c at: 'text'  put: 'An agent can comply without weighing tradeoffs. If application needs judgment, that judgment is exactly what a convention cannot carry.'.
+    clauses := clauses copyWith: c.
+
+    c := Dictionary new.
+    c at: 'flag'  put: '--affirm-evidence'.
+    c at: 'title' put: 'HIGH EVIDENCE'.
+    c at: 'text'  put: 'Confidence near 1.0, multiple provenance cases, no contradicting cases.'.
+    clauses := clauses copyWith: c.
+
+    ^clauses
+  ]
+
+  method: missingAffirmations: args [
+    "Return an Array of clauses whose affirm flag is NOT present in args."
+    | missing |
+    missing := Array new: 0.
+    self qualificationClauses do: [:c |
+      (self hasFlag: (c at: 'flag') in: args) ifFalse: [missing := missing copyWith: c]
+    ].
+    ^missing
+  ]
+
+  method: allAffirmed: args [
+    "True only when ALL FOUR qualification clauses are affirmed via their flags."
+    ^(self missingAffirmations: args) isEmpty
+  ]
+
+  method: printQualificationTest: doctrinePayload [
+    "Print the four clauses (always — friction by design) for the operator to
+     verify before affirming."
+    | n |
+    '' println.
+    '=== CONVENTION CRYSTALLIZATION — QUALIFICATION TEST (human-only) ===' println.
+    'Converting advisory doctrine into a BINDING convention. A convention is obeyed' println.
+    'by EVERY agent on EVERY task with NO judgment. ALL FOUR clauses must hold:' println.
+    '' println.
+    n := 0.
+    self qualificationClauses do: [:c |
+      n := n + 1.
+      ('  (', n printString, ') ', (c at: 'title'), '   [affirm with ', (c at: 'flag'), ']') println.
+      ('       ', (c at: 'text')) println.
+      '' println
+    ]
+  ]
+
+  method: printMissingAffirmations: args [
+    "Explain the refusal and exactly which flags are missing."
+    | missing |
+    missing := self missingAffirmations: args.
+    'REFUSED: not all qualification clauses were affirmed (friction is by design).' println.
+    'Each clause must be affirmed explicitly. Missing:' println.
+    missing do: [:c |
+      ('  - ', (c at: 'title'), ': re-run with ', (c at: 'flag')) println
+    ].
+    'Verify EVERY clause holds, then re-run with all four flags, e.g.:' println.
+    '  pp doctrine crystallize <id> --as convention \' println.
+    '    --affirm-unconditional --affirm-no-false-positive --affirm-mechanical --affirm-evidence' println
+  ]
+
+  method: conventionPayloadFrom: doctrinePayload doctrineId: dctrId [
+    "Distill a BINDING convention payload from an advisory doctrine. The terse
+     binding statement lives in payload.detail — the field the Role consumer
+     renders into execution-time context (Role.mag:124) — and is the doctrine's
+     principle. The doctrine keeps the 'why' (rationale). A crystallized_from
+     back-link records lineage for reversal and provenance display."
+    | p from |
+    p := Dictionary new.
+    p at: 'detail' put: (doctrinePayload at: 'principle' ifAbsent: ['']).
+    p at: 'key' put: (doctrinePayload at: 'key' ifAbsent: ['']).
+    p at: 'binding' put: true.
+    p at: 'source' put: 'crystallized'.
+    from := Dictionary new.
+    from at: 'category' put: 'doctrine'.
+    from at: 'scope'    put: self defaultScope.
+    from at: 'identity' put: dctrId.
+    p at: 'crystallized_from' put: from.
+    p at: 'created_at' put: DateTime now epochSeconds.
+    ^p
+  ]
+
+  method: putConvention: id scope: convScope payload: payload [
+    "Write a BINDING convention via the PINNED put path — the SAME path existing
+     conventions use (convention is in Categories>>pinned; Main>>seedConventions:
+     writes them via outPinned:). Pinned so it is surfaced by
+     `bbs scanAll: convention` (Role.mag:191); a LINEAR write would be invisible
+     to the execution-time consumer and 'binding' would be a no-op. From this
+     HTTP CLI we mirror that path by setting pinned:true on /api/bbs/put, whose
+     handler routes pinned writes through bbs outPinned: (Server>>handleBBSPut:)."
+    | body |
+    body := Dictionary new.
+    body at: 'category' put: 'convention'.
+    body at: 'scope' put: convScope.
+    body at: 'identity' put: id.
+    body at: 'pinned' put: true.
+    body at: 'payload' put: payload.
+    ^CLIBase signedPost: '/api/bbs/put' body: body baseUrl: baseUrl
+  ]
+
+  method: rmConvention: id scope: convScope [
+    "Remove a binding convention by composite key via the pinned-rm path."
+    | body |
+    body := Dictionary new.
+    body at: 'category' put: 'convention'.
+    body at: 'scope' put: convScope.
+    body at: 'identity' put: id.
+    ^CLIBase signedPost: '/api/bbs/rm' body: body baseUrl: baseUrl
+  ]
+
+  method: linkScopeFor: payload convention: convId [
+    "Resolve the storage scope recorded in the crystallized_into link for
+     convention `convId`, or nil if no such link exists. Lets decrystallize
+     remove the convention at the scope it was written to, even if the operator's
+     current --scope differs from the crystallize-time scope."
+    | found |
+    found := nil.
+    (DoctrineWriter linksOf: payload) do: [:l |
+      ((l isKindOf: Dictionary)
+        and: [(l at: 'category' ifAbsent: [nil]) = 'convention'
+        and: [(l at: 'identity' ifAbsent: [nil]) = convId]])
+          ifTrue: [found := l at: 'scope' ifAbsent: [nil]]
+    ].
+    ^found
+  ]
+
+  method: cmdCrystallize: args [
+    "pp doctrine crystallize <id> --as convention
+         --affirm-unconditional --affirm-no-false-positive
+         --affirm-mechanical --affirm-evidence [--repo R]
+
+     HUMAN-ONLY. The RARE advisory -> binding transition. Refuses unless ALL FOUR
+     qualification clauses are affirmed. On pass: writes a pinned convention
+     distilled from the doctrine (visible to scanAll: convention) and records the
+     forward crystallized_into link doctrine -> convention. The doctrine is NOT
+     deleted or re-matured — it stays the rationale/lineage source (maturity
+     untouched). This verb never auto-fires and is never Strategist-proposed."
+    | id asTarget tuple p convId convPayload |
+    args size < 3 ifTrue: [
+      'Usage: pp doctrine crystallize <id> --as convention \' println.
+      '         --affirm-unconditional --affirm-no-false-positive --affirm-mechanical --affirm-evidence' println.
+      ^self
+    ].
+    id := args at: 3.
+    self applyScopeFlagFrom: args.
+    asTarget := self flagValue: '--as' in: args.
+    asTarget isNil ifTrue: [asTarget := 'convention'].
+    asTarget = 'convention' ifFalse: [
+      ('Only --as convention is supported (got: ', asTarget, '). Convention is the only binding category.') println.
+      ^self
+    ].
+    tuple := self rdpDoctrine: id.
+    tuple isNil ifTrue: [('Not found: ', id) println. ^self].
+    p := tuple at: 'payload'.
+
+    "Precondition: only ACTIVE doctrine — matured wisdom — may become law."
+    (p at: 'maturity' ifAbsent: ['']) = 'active' ifFalse: [
+      ('Refusing: doctrine ', id, ' is not active (maturity=', (p at: 'maturity' ifAbsent: ['?']), ').') println.
+      ('Only ACTIVE doctrine may crystallize into binding law. Promote it first: pp doctrine promote ', id) println.
+      ^self
+    ].
+
+    "Print the four clauses (friction), then gate on full affirmation."
+    self printQualificationTest: p.
+    (self allAffirmed: args) ifFalse: [
+      self printMissingAffirmations: args.
+      ^self
+    ].
+
+    "PASS. Distill + write the pinned (binding) convention."
+    convId := 'conv-', ((ClaimId generate) at: 'hex').
+    convPayload := self conventionPayloadFrom: p doctrineId: id.
+    self putConvention: convId scope: self defaultScope payload: convPayload.
+
+    "Record the forward provenance edge on the doctrine (read-modify-write). The
+     doctrine stays active; only crystallized_into grows."
+    (DoctrineWriter appendLink: p category: 'convention' scope: self defaultScope identity: convId)
+      ifTrue: [self putDoctrine: id payload: p].
+
+    ('crystallized doctrine ', id, ' -> convention ', convId, ' (BINDING, pinned).') println.
+    ('  detail: ', (convPayload at: 'detail')) println.
+    'The doctrine remains active as the rationale/lineage source.' println.
+    ('Reverse with: pp doctrine decrystallize ', id, ' --convention ', convId) println
+  ]
+
+  method: cmdDecrystallize: args [
+    "pp doctrine decrystallize <id> --convention <convId> [--repo R]
+
+     REVERSIBILITY: retire/remove the spawned convention AND clear the matching
+     crystallized_into link, restoring the doctrine to purely-advisory. The
+     doctrine itself is untouched (maturity stays active); only the binding
+     artifact and its forward link are removed."
+    | id convId tuple p rmScope removed |
+    args size < 3 ifTrue: [
+      'Usage: pp doctrine decrystallize <id> --convention <convId>' println.
+      ^self
+    ].
+    id := args at: 3.
+    self applyScopeFlagFrom: args.
+    convId := self flagValue: '--convention' in: args.
+    convId isNil ifTrue: [
+      'Usage: pp doctrine decrystallize <id> --convention <convId>' println.
+      ^self
+    ].
+    tuple := self rdpDoctrine: id.
+    tuple isNil ifTrue: [('Not found: ', id) println. ^self].
+    p := tuple at: 'payload'.
+
+    "Remove the binding convention at the scope recorded in its forward link
+     (falling back to the resolved scope if the link is absent)."
+    rmScope := self linkScopeFor: p convention: convId.
+    rmScope isNil ifTrue: [rmScope := self defaultScope].
+    self rmConvention: convId scope: rmScope.
+
+    "Clear the forward link (read-modify-write). Tolerate an already-absent link."
+    removed := DoctrineWriter removeLink: p category: 'convention' scope: rmScope identity: convId.
+    removed ifTrue: [self putDoctrine: id payload: p].
+
+    ('decrystallized: retired convention ', convId, '; doctrine ', id, ' is purely advisory again.') println.
+    removed ifFalse: ['(note: no matching crystallized_into link was present.)' println]
+  ]
+
   method: cmdExport: args [
     "pp doctrine export — STUB. Export promoted ('active') doctrine to pudl as a
      downstream sink. Deliberately NOT implemented: there is zero pp->pudl
@@ -321,5 +587,9 @@ DoctrineCLI subclass: Object
     '  promote <id>                                  maturity -> active' println.
     '  retire  <id>                                  maturity -> retired' println.
     '  reject  <id>                                  maturity -> rejected' println.
+    '  crystallize <id> --as convention             HUMAN-ONLY: advisory -> BINDING convention' println.
+    '       --affirm-unconditional --affirm-no-false-positive' println.
+    '       --affirm-mechanical --affirm-evidence    (all four required; friction by design)' println.
+    '  decrystallize <id> --convention <convId>     reverse: retire convention + clear link' println.
     ^self
   ]
