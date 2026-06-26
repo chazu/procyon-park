@@ -23,7 +23,7 @@
 
 "--- Deterministic-config Dispatcher (mirrors AutoSynthTestDispatcher) ---"
 FlagTestDispatcher subclass: Dispatcher
-  instanceVars: cfgEnabled cfgRetireNet cfgMinVotes
+  instanceVars: cfgEnabled cfgRetireNet cfgMinVotes dvgEnabled dvgPos dvgNeg dvgMinN dvgLow dvgHigh
 
   method: cfgEnabled: e retireNet: rn minVotes: mv [
     cfgEnabled := e.
@@ -34,6 +34,23 @@ FlagTestDispatcher subclass: Dispatcher
   method: feedbackFlagEnabled [ ^cfgEnabled ]
   method: feedbackRetireNet [ ^cfgRetireNet ]
   method: feedbackMinVotes [ ^cfgMinVotes ]
+
+  "--- Deterministic divergence-backstop config (mirrors the feedback cfg) ---"
+  method: dvgEnabled: e pos: pv neg: nv minN: mn low: lo high: hi [
+    dvgEnabled := e.
+    dvgPos := pv.
+    dvgNeg := nv.
+    dvgMinN := mn.
+    dvgLow := lo.
+    dvgHigh := hi
+  ]
+
+  method: divergenceBackstopEnabled [ ^dvgEnabled ]
+  method: divergencePosVotes [ ^dvgPos ]
+  method: divergenceNegVotes [ ^dvgNeg ]
+  method: divergenceMinN [ ^dvgMinN ]
+  method: divergenceLowOutcome [ ^dvgLow ]
+  method: divergenceHighOutcome [ ^dvgHigh ]
 
 "--- A DoctrineCLI subclass whose read seams are backed by an in-memory BBS, so
  feedbackTallyFor: / the show/list formatters run END-TO-END without a server. ---"
@@ -55,6 +72,15 @@ FlagTestCLI subclass: DoctrineCLI
 
   method: scanFeedback: aScope [
     ^tbbs scan: 'doctrine-feedback' scope: aScope
+  ]
+
+  "Signal reads (outcome stats + divergence marker) backed by the in-memory BBS."
+  method: rdpSignal: identity scope: aScope [
+    ^tbbs rdp: 'signal' scope: aScope identity: identity
+  ]
+
+  method: outcomeStatsFor: doctrineId scope: aScope [
+    ^tbbs outcomeStatsFor: doctrineId scope: aScope
   ]
 
 "--- Runner ---"
@@ -153,10 +179,45 @@ DflagHelper subclass: Object
     ^bbs rdp: 'signal' scope: scope identity: ('doctrine-feedback-flagged:', id)
   ]
 
+  classMethod: divMarkerIn: bbs scope: scope doctrine: id [
+    ^bbs rdp: 'signal' scope: scope identity: ('doctrine-divergence-flagged:', id)
+  ]
+
   classMethod: dispatcherOn: bbs enabled: e retireNet: rn minVotes: mv [
     | d |
     d := FlagTestDispatcher on: bbs harnessFactory: nil.
     d cfgEnabled: e retireNet: rn minVotes: mv.
+    ^d
+  ]
+
+  classMethod: seedOutcome: bbs doctrine: id scope: dscope n: n ewma: ewma nSuccess: ns [
+    "Seed the per-doctrine outcome-stats signal at the canonical doctrine_scope.
+     ewma is integer MILLI-units [0,1000] (mirrors the real fold)."
+    | p |
+    p := Dictionary new.
+    p at: 'n' put: n.
+    p at: 'ewma_score' put: ewma.
+    p at: 'n_success' put: ns.
+    bbs upsertSignal: dscope identity: ('doctrine-outcome-stats:', id) payload: p
+  ]
+
+  classMethod: divMarkerPayloadClass: class [
+    "A minimal divergence-marker payload carrying just the class — for testing the
+     CLI divergence-note formatter without running the dispatcher sweep."
+    | p |
+    p := Dictionary new.
+    p at: 'class' put: class.
+    p at: 'net' put: 5.
+    p at: 'ewma_score' put: 300.
+    ^p
+  ]
+
+  classMethod: divergenceDispatcherOn: bbs enabled: e pos: pv neg: nv minN: mn low: lo high: hi [
+    | d |
+    d := FlagTestDispatcher on: bbs harnessFactory: nil.
+    "Feedback sweep is irrelevant here but its config must be set; disable it."
+    d cfgEnabled: false retireNet: -3 minVotes: 3.
+    d dvgEnabled: e pos: pv neg: nv minN: mn low: lo high: hi.
     ^d
   ]
 
@@ -170,7 +231,17 @@ TestDoctrineFlag subclass: Object
     self testBelowMinVotesNoFlag: t.
     self testActiveOnly: t.
     self testDisabledNeverFlags: t.
-    self testNonFatalMalformedTuple: t
+    self testNonFatalMalformedTuple: t.
+    "--- Divergence backstop (the 'lie-detector') ---"
+    self testDivergenceSuspectFlags: t.
+    self testDivergenceUnderAppreciatedFlags: t.
+    self testDivergenceAgreementNoFlag: t.
+    self testDivergenceInsufficientEvidenceNoFlag: t.
+    self testDivergenceIdempotent: t.
+    self testDivergenceActiveOnly: t.
+    self testDivergenceDisabledNeverFlags: t.
+    self testDivergenceNonFatal: t.
+    self testShowRendersOutcomeAndDivergence: t
   ]
 
   classMethod: testShowListRenderTallies: t [
@@ -333,6 +404,232 @@ TestDoctrineFlag subclass: Object
       message: 'DF7: malformed tuple did not escape the sweep'.
     t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 1
       message: 'DF7: valid disliked doctrine still flagged despite malformed tuples'
+  ]
+
+  classMethod: testDivergenceSuspectFlags: t [
+    "DV1: net loved (>=pos) BUT outcomes underperforming (ewma<=low), enough N
+     on BOTH sides -> ONE warn flag 'loved but underperforming'; never retires."
+    | bbs disp notes marker dctr |
+    '--- DV1: SUSPECT (loved but underperforming) flags ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    DflagHelper seedDoctrine: bbs id: 'dctr-syc' scope: 'global' key: 'k-syc' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-syc' scope: 'global' up: 5 down: 0.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-syc' scope: 'global' n: 6 ewma: 300 nSuccess: 2.
+    disp := DflagHelper divergenceDispatcherOn: bbs enabled: true pos: 3 neg: -3 minN: 5 low: 400 high: 750.
+    disp maybeFlagDoctrineDivergence.
+
+    notes := DflagHelper notificationsIn: bbs scope: 'global'.
+    t assertEqual: notes size to: 1
+      message: 'DV1: exactly one notification for the suspect doctrine'.
+    notes size = 1 ifTrue: [
+      | np msg |
+      np := (notes at: 1) at: 'payload'.
+      msg := np at: 'message' ifAbsent: [''].
+      t assertEqual: (np at: 'severity' ifAbsent: [nil]) to: 'warn'
+        message: 'DV1: notification severity is warn'.
+      t assert: (msg includes: 'dctr-syc')
+        message: 'DV1: message names the doctrine id'.
+      t assert: (msg includes: 'loved but underperforming')
+        message: 'DV1: message states the SUSPECT class'
+    ].
+    marker := DflagHelper divMarkerIn: bbs scope: 'global' doctrine: 'dctr-syc'.
+    t assert: marker notNil message: 'DV1: divergence marker written'.
+    marker notNil ifTrue: [
+      t assertEqual: ((marker at: 'payload') at: 'class' ifAbsent: [nil]) to: 'suspect'
+        message: 'DV1: marker carries class=suspect'
+    ].
+    "Flag-only: maturity stays active."
+    dctr := bbs rdp: 'doctrine' scope: 'global' identity: 'dctr-syc'.
+    t assertEqual: ((dctr at: 'payload') at: 'maturity' ifAbsent: [nil]) to: 'active'
+      message: 'DV1: doctrine maturity stays active (never auto-acted)'
+  ]
+
+  classMethod: testDivergenceUnderAppreciatedFlags: t [
+    "DV2: net disliked (<=neg) BUT outcomes effective (ewma>=high) -> ONE warn
+     flag 'disliked but effective'."
+    | bbs disp notes marker |
+    '--- DV2: UNDER-APPRECIATED (disliked but effective) flags ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    DflagHelper seedDoctrine: bbs id: 'dctr-und' scope: 'global' key: 'k-und' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-und' scope: 'global' up: 0 down: 5.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-und' scope: 'global' n: 6 ewma: 820 nSuccess: 5.
+    disp := DflagHelper divergenceDispatcherOn: bbs enabled: true pos: 3 neg: -3 minN: 5 low: 400 high: 750.
+    disp maybeFlagDoctrineDivergence.
+
+    notes := DflagHelper notificationsIn: bbs scope: 'global'.
+    t assertEqual: notes size to: 1
+      message: 'DV2: exactly one notification for the under-appreciated doctrine'.
+    notes size = 1 ifTrue: [
+      | mp msg |
+      mp := (notes at: 1) at: 'payload'.
+      msg := mp at: 'message' ifAbsent: [''].
+      t assert: (msg includes: 'disliked but effective')
+        message: 'DV2: message states the UNDER-APPRECIATED class'
+    ].
+    marker := DflagHelper divMarkerIn: bbs scope: 'global' doctrine: 'dctr-und'.
+    t assert: (marker notNil and: [((marker at: 'payload') at: 'class' ifAbsent: [nil]) = 'under-appreciated'])
+      message: 'DV2: marker carries class=under-appreciated'
+  ]
+
+  classMethod: testDivergenceAgreementNoFlag: t [
+    "DV3: votes and outcomes AGREE (loved+effective, disliked+underperforming)
+     -> NO flag. Agreement is silent."
+    | bbs disp |
+    '--- DV3: agreement is silent (no flag) ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    "Loved AND effective."
+    DflagHelper seedDoctrine: bbs id: 'dctr-good' scope: 'global' key: 'k-good' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-good' scope: 'global' up: 5 down: 0.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-good' scope: 'global' n: 6 ewma: 850 nSuccess: 6.
+    "Disliked AND underperforming."
+    DflagHelper seedDoctrine: bbs id: 'dctr-bad2' scope: 'global' key: 'k-bad2' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-bad2' scope: 'global' up: 0 down: 5.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-bad2' scope: 'global' n: 6 ewma: 200 nSuccess: 1.
+    disp := DflagHelper divergenceDispatcherOn: bbs enabled: true pos: 3 neg: -3 minN: 5 low: 400 high: 750.
+    disp maybeFlagDoctrineDivergence.
+
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 0
+      message: 'DV3: aligned votes/outcomes produce no notification'
+  ]
+
+  classMethod: testDivergenceInsufficientEvidenceNoFlag: t [
+    "DV4: below min outcome n OR below the vote threshold -> NO flag, even when the
+     other side looks divergent."
+    | bbs disp |
+    '--- DV4: insufficient evidence on either side -> no flag ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    "Suspect-shaped votes + low ewma, but n(3) < minN(5)."
+    DflagHelper seedDoctrine: bbs id: 'dctr-thinN' scope: 'global' key: 'k-thinN' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-thinN' scope: 'global' up: 5 down: 0.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-thinN' scope: 'global' n: 3 ewma: 300 nSuccess: 1.
+    "Low ewma + enough n, but net(2) < posVotes(3)."
+    DflagHelper seedDoctrine: bbs id: 'dctr-thinV' scope: 'global' key: 'k-thinV' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-thinV' scope: 'global' up: 2 down: 0.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-thinV' scope: 'global' n: 8 ewma: 300 nSuccess: 2.
+    disp := DflagHelper divergenceDispatcherOn: bbs enabled: true pos: 3 neg: -3 minN: 5 low: 400 high: 750.
+    disp maybeFlagDoctrineDivergence.
+
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 0
+      message: 'DV4: thin evidence on either side -> no notification'.
+    t assert: (DflagHelper divMarkerIn: bbs scope: 'global' doctrine: 'dctr-thinN') isNil
+      message: 'DV4: no marker when outcome n below minN'.
+    t assert: (DflagHelper divMarkerIn: bbs scope: 'global' doctrine: 'dctr-thinV') isNil
+      message: 'DV4: no marker when net below posVotes'
+  ]
+
+  classMethod: testDivergenceIdempotent: t [
+    "DV5: a second sweep does NOT re-notify; only a WORSENING divergence does."
+    | bbs disp |
+    '--- DV5: idempotent — re-notify only when divergence worsens ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    DflagHelper seedDoctrine: bbs id: 'dctr-idv' scope: 'global' key: 'k-idv' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-idv' scope: 'global' up: 5 down: 0.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-idv' scope: 'global' n: 6 ewma: 300 nSuccess: 2.
+    disp := DflagHelper divergenceDispatcherOn: bbs enabled: true pos: 3 neg: -3 minN: 5 low: 400 high: 750.
+
+    disp maybeFlagDoctrineDivergence.
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 1
+      message: 'DV5: first sweep notifies once'.
+    "Unchanged -> no re-notify."
+    disp maybeFlagDoctrineDivergence.
+    disp maybeFlagDoctrineDivergence.
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 1
+      message: 'DV5: repeated sweeps do not re-notify (idempotent)'.
+    "Outcome worsens (ewma 300 -> 150) -> one more notify."
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-idv' scope: 'global' n: 8 ewma: 150 nSuccess: 2.
+    disp maybeFlagDoctrineDivergence.
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 2
+      message: 'DV5: a worsened divergence re-notifies once more'.
+    disp maybeFlagDoctrineDivergence.
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 2
+      message: 'DV5: stable again at the worsened divergence (no extra notify)'
+  ]
+
+  classMethod: testDivergenceActiveOnly: t [
+    "DV6: proposed/retired doctrine is never flagged even when divergent."
+    | bbs disp |
+    '--- DV6: active-only (proposed/retired ignored) ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    DflagHelper seedDoctrine: bbs id: 'dctr-pv' scope: 'global' key: 'k-pv' maturity: 'proposed'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-pv' scope: 'global' up: 5 down: 0.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-pv' scope: 'global' n: 6 ewma: 300 nSuccess: 1.
+    disp := DflagHelper divergenceDispatcherOn: bbs enabled: true pos: 3 neg: -3 minN: 5 low: 400 high: 750.
+    disp maybeFlagDoctrineDivergence.
+
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 0
+      message: 'DV6: proposed doctrine is not flagged'
+  ]
+
+  classMethod: testDivergenceDisabledNeverFlags: t [
+    "DV7: disabled backstop never flags, even on a stark divergence."
+    | bbs disp |
+    '--- DV7: disabled backstop never flags ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    DflagHelper seedDoctrine: bbs id: 'dctr-dis' scope: 'global' key: 'k-dis' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-dis' scope: 'global' up: 10 down: 0.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-dis' scope: 'global' n: 9 ewma: 100 nSuccess: 0.
+    disp := DflagHelper divergenceDispatcherOn: bbs enabled: false pos: 3 neg: -3 minN: 5 low: 400 high: 750.
+    disp maybeFlagDoctrineDivergence.
+
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 0
+      message: 'DV7: no notification when disabled'.
+    t assert: (DflagHelper divMarkerIn: bbs scope: 'global' doctrine: 'dctr-dis') isNil
+      message: 'DV7: no marker written when disabled'
+  ]
+
+  classMethod: testDivergenceNonFatal: t [
+    "DV8: a malformed doctrine/feedback tuple cannot abort the divergence sweep —
+     a valid divergent doctrine elsewhere is still flagged."
+    | bbs disp threw |
+    '--- DV8: malformed tuple does not abort the divergence sweep ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    bbs out: 'doctrine' scope: 'global' identity: 'dctr-garb' payload: 'not-a-dict'.
+    bbs out: 'doctrine-feedback' scope: 'global' identity: 'dfb-garb' payload: 'not-a-dict'.
+    DflagHelper seedDoctrine: bbs id: 'dctr-okv' scope: 'global' key: 'k-okv' maturity: 'active'.
+    DflagHelper seedVotes: bbs doctrine: 'dctr-okv' scope: 'global' up: 5 down: 0.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-okv' scope: 'global' n: 6 ewma: 300 nSuccess: 2.
+    disp := DflagHelper divergenceDispatcherOn: bbs enabled: true pos: 3 neg: -3 minN: 5 low: 400 high: 750.
+
+    threw := false.
+    [disp maybeFlagDoctrineDivergence] on: Exception do: [:e | threw := true].
+    t assert: threw not
+      message: 'DV8: malformed tuple did not escape the sweep'.
+    t assertEqual: (DflagHelper notificationsIn: bbs scope: 'global') size to: 1
+      message: 'DV8: valid divergent doctrine still flagged despite malformed tuples'
+  ]
+
+  classMethod: testShowRendersOutcomeAndDivergence: t [
+    "DV9: show renders the outcome-stats line and the one-line divergence note —
+     agreement when unflagged, the flagged class when a marker exists."
+    | bbs cli stats noteAgree marker noteFlagged |
+    '--- DV9: show renders outcome stats + divergence note ---' println.
+    bbs := BBS withDataDir: DflagHelper makeTempDir.
+    DflagHelper seedDoctrine: bbs id: 'dctr-sh' scope: 'global' key: 'k-sh' maturity: 'active'.
+    DflagHelper seedOutcome: bbs doctrine: 'dctr-sh' scope: 'global' n: 6 ewma: 300 nSuccess: 3.
+    cli := FlagTestCLI onBbs: bbs.
+
+    "Outcome stats line surfaces n + ewma/1000 + success/1000."
+    stats := cli outcomeStatsFor: 'dctr-sh' scope: 'global'.
+    t assertEqual: (stats at: 'n') to: 6
+      message: 'DV9: outcomeStatsFor reads n from the signal'.
+    t assertEqual: (cli formatOutcomeStatsLine: stats) to: 'n 6 / ewma 300/1000 / success 500/1000'
+      message: 'DV9: outcome-stats line renders n / ewma/1000 / success/1000'.
+
+    "Unflagged -> agreement note."
+    noteAgree := cli formatDivergenceNote: nil.
+    t assert: (noteAgree includes: 'agreement')
+      message: 'DV9: unflagged doctrine renders an agreement note'.
+
+    "Seed a SUSPECT divergence marker -> the note names the class as FLAGGED."
+    bbs upsertSignal: 'global' identity: 'doctrine-divergence-flagged:dctr-sh'
+      payload: (DflagHelper divMarkerPayloadClass: 'suspect').
+    marker := cli divergenceMarkerFor: 'dctr-sh' scope: 'global'.
+    t assert: marker notNil message: 'DV9: divergence marker is read back'.
+    noteFlagged := cli formatDivergenceNote: marker.
+    t assert: (noteFlagged includes: 'SUSPECT')
+      message: 'DV9: flagged doctrine renders the SUSPECT class note'.
+    t assert: (noteFlagged includes: 'FLAGGED')
+      message: 'DV9: divergence note marks it FLAGGED for review'
   ]
 
 "=== Main ==="

@@ -8,6 +8,30 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Doctrine divergence backstop (the "lie-detector") — a new off-critical-path
+  sweep (`Dispatcher>>maybeFlagDoctrineDivergence`, sibling of
+  `maybeFlagDislikedDoctrine`, on the every-30-tick branch with its own
+  `on:Exception`) cross-checks each ACTIVE doctrine's HUMAN votes against its
+  MEASURED outcomes at the doctrine's CANONICAL `doctrine_scope` and FLAGS two
+  divergence classes for human review: SUSPECT (`net >= posVotes` AND
+  `ewma_score <= lowOutcome`) — "loved but underperforming (possible
+  sycophancy)" — and UNDER-APPRECIATED (`net <= negVotes` AND
+  `ewma_score >= highOutcome`) — "disliked but effective". It requires minimum
+  evidence on BOTH sides (a triggering net AND outcome `n >= minN`) before
+  judging, emits ONE `warn` notification per class recommending review, and is
+  IDEMPOTENT via a `doctrine-divergence-flagged:<id>` signal that re-notifies
+  only when the divergence WORSENS or the class FLIPS. It is FLAG-ONLY: it NEVER
+  auto-retires or auto-adjusts — the correlational signal is treated as
+  suggestive, a human adjudicates. `pp doctrine show <id>` now displays the
+  outcome stats (`n`, `ewma/1000`, `success/1000`) next to the existing vote
+  tally plus a one-line divergence note (agreement vs SUSPECT vs
+  UNDER-APPRECIATED). Configurable + guarded via env: `DOCTRINE_OUTCOME_BACKSTOP`
+  (default enabled; `0`/`false` disables), `DOCTRINE_OUTCOME_MIN_N` (default 5),
+  `DOCTRINE_DIVERGENCE_POS_VOTES` (default 3), `DOCTRINE_DIVERGENCE_NEG_VOTES`
+  (default -3), `DOCTRINE_OUTCOME_LOW` (default 0.4) and `DOCTRINE_OUTCOME_HIGH`
+  (default 0.75) — outcome thresholds accept a fraction (`0.4`) or a bare
+  milli-integer (`400`). (extends `TestDoctrineFlag`, wired into
+  `CombinedTestMain`.)
 - Per-doctrine outcome attribution — every terminated workflow now contributes a
   single OUTCOME scalar to the outcome stats of each doctrine that was injected
   into it, closing the Observe→Orient loop opened by doctrine-injection capture.

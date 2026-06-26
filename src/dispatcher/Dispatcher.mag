@@ -136,6 +136,17 @@ Dispatcher subclass: Object
        on:Exception wrapper keeps it strictly off-critical-path."
       [self maybeFlagDislikedDoctrine] on: Exception do: [:e |
         ('Dispatcher tick step error (maybeFlagDislikedDoctrine): ', e messageText) println
+      ].
+      "Doctrine divergence backstop (the 'lie-detector'): cross-checks each
+       ACTIVE doctrine's HUMAN votes against its MEASURED outcomes and FLAGS
+       (warn notification) the two divergence classes — loved-but-underperforming
+       (possible sycophancy) and disliked-but-effective. FLAG-ONLY: it NEVER
+       auto-retires or auto-adjusts (a human adjudicates the correlational
+       signal). Idempotent (a 'doctrine-divergence-flagged:<id>' signal suppresses
+       re-notification unless the divergence worsens or flips class). Its OWN
+       on:Exception wrapper keeps it strictly off-critical-path."
+      [self maybeFlagDoctrineDivergence] on: Exception do: [:e |
+        ('Dispatcher tick step error (maybeFlagDoctrineDivergence): ', e messageText) println
       ]
     ]
   ]
@@ -401,6 +412,216 @@ Dispatcher subclass: Object
     marker at: 'total' put: total.
     marker at: 'flagged_at' put: DateTime now epochSeconds.
     bbs upsertSignal: dscope identity: ('doctrine-feedback-flagged:', id) payload: marker
+  ]
+
+  "--- Doctrine Divergence Backstop (the 'lie-detector') ------------------
+
+   Votes are what agents SAY about a doctrine; outcomes are what HAPPENED when it
+   was applied. When the two DIVERGE with enough evidence on BOTH sides, a human
+   should look — flag-only, never auto-acted, because the correlational outcome
+   signal is suggestive, not authoritative.
+
+   Two divergence classes (mirroring the disliked-doctrine sweep's shape):
+     SUSPECT           net >= posVotes  AND  ewma_score <= lowOutcome
+                       => 'loved but underperforming (possible sycophancy)'.
+     UNDER-APPRECIATED net <= negVotes  AND  ewma_score >= highOutcome
+                       => 'disliked but effective'.
+
+   ewma_score / lowOutcome / highOutcome are integer MILLI-units [0,1000] (the
+   representation BBS>>outcomeStatsFor:scope: returns — no floats). The vote-side
+   evidence floor IS the pos/neg net thresholds (reaching net>=posVotes requires
+   at least posVotes up-votes); the outcome-side floor is minN (min outcome n)."
+
+  method: divergenceBackstopEnabled [
+    "Kill-switch. DOCTRINE_OUTCOME_BACKSTOP defaults to ENABLED; only the literal
+     '0' or 'false' disables it. Guarded for nil/empty."
+    | v |
+    v := System env: 'DOCTRINE_OUTCOME_BACKSTOP'.
+    (v isNil or: [v isEmpty]) ifTrue: [^true].
+    ^(v = '0' or: [v = 'false']) not
+  ]
+
+  method: divergenceMinN [
+    "Minimum outcome sample size (n) before the outcome side is trusted enough to
+     judge divergence. Default 5. Guarded for nil/empty/unparseable env."
+    | v |
+    v := System env: 'DOCTRINE_OUTCOME_MIN_N'.
+    (v isNil or: [v isEmpty]) ifTrue: [^5].
+    ^[v asInteger] on: Exception do: [:e | 5]
+  ]
+
+  method: divergencePosVotes [
+    "Net vote score at or above which a doctrine counts as 'loved' (the SUSPECT
+     vote-side trigger and its min-vote evidence floor). Default 3. Guarded."
+    | v |
+    v := System env: 'DOCTRINE_DIVERGENCE_POS_VOTES'.
+    (v isNil or: [v isEmpty]) ifTrue: [^3].
+    ^[v asInteger] on: Exception do: [:e | 3]
+  ]
+
+  method: divergenceNegVotes [
+    "Net vote score at or below which a doctrine counts as 'disliked' (the
+     UNDER-APPRECIATED vote-side trigger and its min-vote floor). Default -3."
+    | v |
+    v := System env: 'DOCTRINE_DIVERGENCE_NEG_VOTES'.
+    (v isNil or: [v isEmpty]) ifTrue: [^-3].
+    ^[v asInteger] on: Exception do: [:e | -3]
+  ]
+
+  method: divergenceLowOutcome [
+    "ewma_score (milli, [0,1000]) at or below which outcomes count as
+     UNDERPERFORMING. Default 400 (i.e. 0.4). Env accepts a fraction ('0.4') or a
+     bare milli integer ('400'); guarded for nil/empty/unparseable."
+    ^self parseMilliThreshold: (System env: 'DOCTRINE_OUTCOME_LOW') default: 400
+  ]
+
+  method: divergenceHighOutcome [
+    "ewma_score (milli, [0,1000]) at or above which outcomes count as EFFECTIVE.
+     Default 750 (i.e. 0.75). Env accepts a fraction ('0.75') or a bare milli
+     integer ('750'); guarded for nil/empty/unparseable."
+    ^self parseMilliThreshold: (System env: 'DOCTRINE_OUTCOME_HIGH') default: 750
+  ]
+
+  method: parseMilliThreshold: v default: d [
+    "Parse an outcome-threshold env value into integer MILLI-units [0,1000]
+     (matching ewma_score). Accepts a fraction like '0.4'/'0.75'/'.75' (-> 400/
+     750) OR a bare milli integer like '400'. Nil/empty/unparseable -> d (which
+     is ALREADY in milli). Pure, float-free, exception-guarded."
+    (v isNil or: [v isEmpty]) ifTrue: [^d].
+    ^[
+      (v indexOf: '.') > 0
+        ifTrue: [
+          | parts intPart fracPart |
+          parts := v split: '.'.
+          intPart := parts at: 1 ifAbsent: ['0'].
+          (intPart isNil or: [intPart isEmpty]) ifTrue: [intPart := '0'].
+          fracPart := parts at: 2 ifAbsent: ['0'].
+          (fracPart isNil or: [fracPart isEmpty]) ifTrue: [fracPart := '0'].
+          "Normalise the fraction to exactly 3 digits (milli precision)."
+          fracPart size > 3 ifTrue: [fracPart := fracPart copyFrom: 1 to: 3].
+          [fracPart size < 3] whileTrue: [fracPart := fracPart, '0'].
+          (intPart asInteger * 1000) + fracPart asInteger
+        ]
+        ifFalse: [v asInteger]
+    ] on: Exception do: [:e | d]
+  ]
+
+  method: maybeFlagDoctrineDivergence [
+    "Off-critical-path sweep (driven from the Dispatcher tick, ~every 5min): for
+     each ACTIVE doctrine, read BOTH its vote tally AND its outcome stats at the
+     doctrine's CANONICAL doctrine_scope. Require min evidence on BOTH sides
+     (a triggering net AND outcome n >= minN) before judging, then FLAG the two
+     divergence classes with ONE idempotent human warn notification each.
+
+     NEVER auto-retires/auto-adjusts — FLAG-ONLY (a human adjudicates). Each
+     doctrine is processed in its OWN on:Exception so one malformed doctrine or
+     tuple can neither abort the sweep nor escape into the tick loop. Feedback
+     scans are cached per doctrine_scope so each scope is scanned once."
+    | enabled posVotes negVotes minN lowOut highOut doctrines feedbackByScope |
+    enabled := self divergenceBackstopEnabled.
+    enabled ifFalse: [^self].
+    posVotes := self divergencePosVotes.
+    negVotes := self divergenceNegVotes.
+    minN := self divergenceMinN.
+    lowOut := self divergenceLowOutcome.
+    highOut := self divergenceHighOutcome.
+
+    doctrines := bbs scanAll: 'doctrine'.
+    feedbackByScope := Dictionary new.
+    doctrines do: [:d |
+      [
+        | p maturity id dscope tally net total stats n ewma class |
+        p := d at: 'payload' ifAbsent: [nil].
+        (p isKindOf: Dictionary) ifTrue: [
+          maturity := p at: 'maturity' ifAbsent: [''].
+          "ACTIVE-only: proposed/retired/rejected doctrine is never flagged."
+          maturity = 'active' ifTrue: [
+            id := d at: 'identity'.
+            dscope := p at: 'doctrine_scope' ifAbsent: ['global'].
+            (dscope isNil or: [dscope isEmpty]) ifTrue: [dscope := 'global'].
+            (feedbackByScope at: dscope ifAbsent: [nil]) isNil ifTrue: [
+              feedbackByScope at: dscope put: (bbs scan: 'doctrine-feedback' scope: dscope)
+            ].
+            tally := self tallyFeedback: (feedbackByScope at: dscope) forDoctrine: id.
+            net := tally at: 'net'.
+            total := tally at: 'total'.
+            stats := bbs outcomeStatsFor: id scope: dscope.
+            n := stats at: 'n'.
+            ewma := stats at: 'ewma_score'.
+            "Min evidence on the OUTCOME side; the vote side is gated by the
+             pos/neg net thresholds inside each class test below."
+            (n >= minN) ifTrue: [
+              class := nil.
+              ((net >= posVotes) and: [ewma <= lowOut]) ifTrue: [class := 'suspect'].
+              ((net <= negVotes) and: [ewma >= highOut]) ifTrue: [class := 'under-appreciated'].
+              class notNil ifTrue: [
+                self flagDoctrineDivergence: id scope: dscope class: class
+                  net: net total: total n: n ewma: ewma payload: p
+              ]
+            ]
+          ]
+        ]
+      ] on: Exception do: [:e |
+        bbs logEngine: 'warn' component: 'doctrine' scope: 'system'
+          message: ('divergence-flag doctrine skip: ', e messageText)
+      ]
+    ]
+  ]
+
+  method: flagDoctrineDivergence: id scope: dscope class: class net: net total: total n: n ewma: ewma payload: p [
+    "Emit ONE human-facing warn notification recommending REVIEW (never action)
+     of a vote/outcome-divergent ACTIVE doctrine. IDEMPOTENT: keyed on a per-scope
+     'doctrine-divergence-flagged:<id>' signal carrying the class + values at flag
+     time. If already flagged, re-notify ONLY when the divergence WORSENS (same
+     class, the gap widened) or the class FLIPS. NEVER retires/adjusts."
+    | markerId marker worsened key classLabel |
+    markerId := 'doctrine-divergence-flagged:', id.
+    marker := bbs rdp: 'signal' scope: dscope identity: markerId.
+    marker notNil ifTrue: [
+      | mp prevClass prevNet prevEwma |
+      mp := marker at: 'payload' ifAbsent: [Dictionary new].
+      prevClass := mp at: 'class' ifAbsent: [''].
+      prevNet := mp at: 'net' ifAbsent: [0].
+      prevEwma := mp at: 'ewma_score' ifAbsent: [0].
+      (prevClass = class)
+        ifTrue: [
+          "Same class — worsened when the divergence gap widened. SUSPECT widens
+           when net rises (more loved) or ewma falls (more underperforming);
+           UNDER-APPRECIATED widens when net falls or ewma rises."
+          class = 'suspect'
+            ifTrue: [worsened := (net > prevNet) or: [ewma < prevEwma]]
+            ifFalse: [worsened := (net < prevNet) or: [ewma > prevEwma]]
+        ]
+        ifFalse: [worsened := true].
+      worsened ifFalse: [^self]
+    ].
+
+    key := p at: 'key' ifAbsent: [''].
+    (key isNil or: [key isEmpty]) ifTrue: [key := id].
+    classLabel := class = 'suspect'
+      ifTrue: ['loved but underperforming (possible sycophancy)']
+      ifFalse: ['disliked but effective'].
+    bbs notify: ('Doctrine "', key, '" (', id, ', scope ', dscope,
+                 ') shows vote/outcome DIVERGENCE — ', classLabel,
+                 ': net=', net printString, ', votes=', total printString,
+                 ', outcome n=', n printString, ', ewma=', ewma printString, '/1000.',
+                 ' Review (flag-only, never auto-acted): pp doctrine show ', id)
+      scope: dscope severity: 'warn'.
+    self markDoctrineDivergence: id scope: dscope class: class net: net total: total n: n ewma: ewma
+  ]
+
+  method: markDoctrineDivergence: id scope: dscope class: class net: net total: total n: n ewma: ewma [
+    "Upsert the idempotency marker for a flagged divergence. Replace-by-key via
+     BBS>>upsertSignal: so a re-flag (worsened/flipped) overwrites the prior."
+    | marker |
+    marker := Dictionary new.
+    marker at: 'class' put: class.
+    marker at: 'net' put: net.
+    marker at: 'total' put: total.
+    marker at: 'n' put: n.
+    marker at: 'ewma_score' put: ewma.
+    marker at: 'flagged_at' put: DateTime now epochSeconds.
+    bbs upsertSignal: dscope identity: ('doctrine-divergence-flagged:', id) payload: marker
   ]
 
   "--- Reaper (D6.2 / D6.3) ---"

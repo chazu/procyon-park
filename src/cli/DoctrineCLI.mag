@@ -205,6 +205,13 @@ DoctrineCLI subclass: Object
      Tallied at the doctrine's CANONICAL doctrine_scope so votes cast from any
      repo on a global doctrine converge. Network/parse-tolerant (zeros on fail)."
     self showVoteTally: tuple payload: p.
+    "Outcome stats (n, ewma, success_rate) next to the votes — the MEASURED side
+     of the doctrine, read at its CANONICAL doctrine_scope. Plus a one-line
+     divergence note (agreement vs SUSPECT vs UNDER-APPRECIATED) when the
+     divergence backstop has flagged it. Both are read-tolerant (zeros / no-flag
+     on any failure) so show never crashes on a missing signal."
+    self showOutcomeStats: tuple payload: p.
+    self showDivergenceNote: tuple payload: p.
     ('tags:       ', (self joinArray: (p at: 'tags' ifAbsent: [Array new: 0]) with: ',')) println.
     ('confidence: ', (p at: 'confidence' ifAbsent: ['']) printString) println.
     ('principle:  ', (p at: 'principle' ifAbsent: [''])) println.
@@ -464,6 +471,95 @@ DoctrineCLI subclass: Object
     (dscope isNil or: [dscope isEmpty]) ifTrue: [dscope := 'global'].
     tally := self feedbackTallyFor: (tuple at: 'identity') scope: dscope.
     ('votes:      ', (self formatVoteTallyLine: tally)) println
+  ]
+
+  method: canonicalScopeOf: p [
+    "The doctrine's CANONICAL doctrine_scope (votes/outcomes converge here).
+     Tolerant of a missing/empty scope (-> 'global')."
+    | dscope |
+    dscope := p at: 'doctrine_scope' ifAbsent: ['global'].
+    (dscope isNil or: [dscope isEmpty]) ifTrue: [dscope := 'global'].
+    ^dscope
+  ]
+
+  method: rdpSignal: identity scope: aScope [
+    "Return one signal tuple by identity in aScope, or nil (unsigned rdp:,
+     network/parse-tolerant). Used to read outcome-stats + divergence markers."
+    | response result |
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/rdp -H "Content-Type: application/json" -d ''{"category":"signal","scope":"', aScope, '","identity":"', identity, '"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^nil].
+      result := Json decode: response.
+      ^result at: 'tuple' ifAbsent: [nil]
+    ] on: Exception do: [:e | ^nil]
+  ]
+
+  method: outcomeStatsFor: doctrineId scope: aScope [
+    "Read the per-doctrine outcome-stats signal ('doctrine-outcome-stats:<id>')
+     and return {n, ewma_score, success_rate} in integer MILLI-units [0,1000].
+     Mirrors BBS>>outcomeStatsFor:scope: for the CLI (HTTP) read path; degrades
+     to zeros on a missing/garbage signal — never a crash."
+    | out sig p n ewma nSuccess |
+    out := Dictionary new.
+    out at: 'n' put: 0.
+    out at: 'ewma_score' put: 0.
+    out at: 'success_rate' put: 0.
+    sig := self rdpSignal: ('doctrine-outcome-stats:', doctrineId) scope: aScope.
+    sig isNil ifTrue: [^out].
+    p := sig at: 'payload' ifAbsent: [nil].
+    (p isKindOf: Dictionary) ifFalse: [^out].
+    n := p at: 'n' ifAbsent: [0]. n isNil ifTrue: [n := 0].
+    ewma := p at: 'ewma_score' ifAbsent: [0]. ewma isNil ifTrue: [ewma := 0].
+    nSuccess := p at: 'n_success' ifAbsent: [0]. nSuccess isNil ifTrue: [nSuccess := 0].
+    out at: 'n' put: n.
+    out at: 'ewma_score' put: ewma.
+    out at: 'success_rate' put: (n > 0 ifTrue: [(nSuccess * 1000) // n] ifFalse: [0]).
+    ^out
+  ]
+
+  method: divergenceMarkerFor: doctrineId scope: aScope [
+    "Read the divergence-flag marker signal ('doctrine-divergence-flagged:<id>')
+     written by the Dispatcher's backstop, or nil if the doctrine is unflagged."
+    ^self rdpSignal: ('doctrine-divergence-flagged:', doctrineId) scope: aScope
+  ]
+
+  method: formatOutcomeStatsLine: stats [
+    "Full outcome-stats line for show views. ewma/success are integer MILLI-units
+     [0,1000] (no floats) — rendered as 'N/1000'. PURE."
+    ^'n ', (stats at: 'n' ifAbsent: [0]) printString,
+      ' / ewma ', (stats at: 'ewma_score' ifAbsent: [0]) printString, '/1000',
+      ' / success ', (stats at: 'success_rate' ifAbsent: [0]) printString, '/1000'
+  ]
+
+  method: showOutcomeStats: tuple payload: p [
+    "Render the outcome-stats line at the doctrine's canonical scope."
+    | dscope stats |
+    dscope := self canonicalScopeOf: p.
+    stats := self outcomeStatsFor: (tuple at: 'identity') scope: dscope.
+    ('outcomes:   ', (self formatOutcomeStatsLine: stats)) println
+  ]
+
+  method: formatDivergenceNote: marker [
+    "One-line vote/outcome divergence note for show views. PURE: given the
+     divergence-flag marker tuple (or nil) -> 'agreement' when unflagged, else the
+     flagged class label (SUSPECT / UNDER-APPRECIATED)."
+    | mp class |
+    marker isNil ifTrue: [^'agreement (votes and outcomes aligned; not flagged)'].
+    mp := marker at: 'payload' ifAbsent: [Dictionary new].
+    class := mp at: 'class' ifAbsent: ['?'].
+    class = 'suspect' ifTrue: [
+      ^'SUSPECT — loved but underperforming (possible sycophancy) [FLAGGED for review]'].
+    class = 'under-appreciated' ifTrue: [
+      ^'UNDER-APPRECIATED — disliked but effective [FLAGGED for review]'].
+    ^'divergent [FLAGGED for review]'
+  ]
+
+  method: showDivergenceNote: tuple payload: p [
+    "Render the one-line divergence note at the doctrine's canonical scope."
+    | dscope marker |
+    dscope := self canonicalScopeOf: p.
+    marker := self divergenceMarkerFor: (tuple at: 'identity') scope: dscope.
+    ('divergence: ', (self formatDivergenceNote: marker)) println
   ]
 
   method: cmdFeedback: args [
