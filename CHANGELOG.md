@@ -8,6 +8,15 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Doctrine voting invitation in agent prompts — doctrine-consuming roles
+  (planner/implementer/reviewer/scout/fixer) now see each injected doctrine
+  entry's `dctr-` id rendered prominently ("cite this id to vote") plus an
+  OPT-IN, SPARSE invitation to `pp doctrine feedback <id> --up|--down --reason`.
+  The invitation is deliberately framed as optional and uncommon — abstention is
+  the norm — so agents vote only on strong signal rather than rubber-stamping a
+  mandatory rate-all. Roles where `consumesDoctrine:` is false (e.g. strategist,
+  foreman) do not receive the invitation. (`Role>>renderDoctrineEntry:payload:`,
+  `Role>>doctrineVotingInstruction`; new `TestDoctrineVotingPrompt` suite.)
 - Doctrine feedback capture + tally — the race-free layer for agent votes on
   doctrine. New `doctrine-feedback` tuple category (linear + durable, NOT pinned;
   added to `Categories>>valid` and `BBS>>isDurableCategory:`) and

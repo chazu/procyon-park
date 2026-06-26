@@ -780,6 +780,121 @@ TestDoctrineCrystallizeSuppression subclass: Object
       message: 'DCS5: ordering is deterministic with suppression active'
   ]
 
+"=== TestDoctrineVotingPrompt ===
+ The agent-facing rendering side of the Orient layer: injected doctrine entries
+ must surface their dctr- id prominently (so an agent can name one in a vote),
+ and consumesDoctrine: roles must receive an OPT-IN, SPARSE invitation to vote.
+ Non-consumers must NOT receive the invitation.
+
+ Invariants under test:
+   DVP1  primeFor: for an execution role renders each injected doctrine entry's
+         dctr- id in the prompt (prominently, not buried in a JSON dump).
+   DVP2  A consumesDoctrine: role (implementer) receives the voting instruction
+         with both the --up and --down pp doctrine feedback forms.
+   DVP3  A non-consumer (strategist) does NOT receive the voting instruction,
+         even when doctrine tuples are passed in (id rendering still happens).
+   DVP4  The instruction frames voting as OPTIONAL and UNCOMMON — key phrasing is
+         asserted so a future edit cannot silently turn it into a mandatory
+         rate-all that manufactures sycophantic noise."
+TestDoctrineVotingPrompt subclass: Object
+
+  classMethod: run: t [
+    self testIdsRendered: t.
+    self testConsumerGetsInvitation: t.
+    self testNonConsumerNoInvitation: t.
+    self testInvitationIsOptionalAndSparse: t
+  ]
+
+  classMethod: doctrineTuple: ident principle: principle [
+    "A doctrine context tuple shaped as assembleContext: would inject it."
+    | p tup |
+    p := Dictionary new.
+    p at: 'principle' put: principle.
+    p at: 'rationale' put: 'a short rationale for ', ident.
+    p at: 'maturity' put: 'active'.
+    tup := Dictionary new.
+    tup at: 'category' put: 'doctrine'.
+    tup at: 'identity' put: ident.
+    tup at: 'payload' put: p.
+    ^tup
+  ]
+
+  classMethod: promptFor: role tuples: tuples [
+    ^role primeFor: 'implement the widget' context: tuples
+  ]
+
+  classMethod: testIdsRendered: t [
+    "DVP1: each injected doctrine id appears in the rendered prompt."
+    | tuples prompt |
+    '--- DVP1: doctrine ids are rendered in the prompt ---' println.
+    tuples := Array new: 0.
+    tuples := tuples copyWith: (self doctrineTuple: 'dctr-aaa111'
+      principle: 'Guard Dictionary access at the IO boundary.').
+    tuples := tuples copyWith: (self doctrineTuple: 'dctr-bbb222'
+      principle: 'Mint a fresh unique identity per append-only write.').
+    prompt := self promptFor: Implementer new tuples: tuples.
+    t assert: (prompt includes: 'dctr-aaa111')
+      message: 'DVP1: first doctrine id is rendered'.
+    t assert: (prompt includes: 'dctr-bbb222')
+      message: 'DVP1: second doctrine id is rendered'.
+    t assert: (prompt includes: 'cite this id to vote')
+      message: 'DVP1: id is surfaced prominently as votable'
+  ]
+
+  classMethod: testConsumerGetsInvitation: t [
+    "DVP2: a consumesDoctrine: role gets the up/down voting instruction."
+    | tuples prompt |
+    '--- DVP2: consumer role receives the voting invitation ---' println.
+    tuples := Array with: (self doctrineTuple: 'dctr-ccc333'
+      principle: 'Hoist a shared constant to one canonical accessor.').
+    prompt := self promptFor: Implementer new tuples: tuples.
+    t assert: (prompt includes: 'pp doctrine feedback')
+      message: 'DVP2: voting command is present for the implementer'.
+    t assert: (prompt includes: '--up')
+      message: 'DVP2: upvote form is present'.
+    t assert: (prompt includes: '--down --reason')
+      message: 'DVP2: downvote form with reason is present'
+  ]
+
+  classMethod: testNonConsumerNoInvitation: t [
+    "DVP3: a non-consumer (strategist) does NOT get the voting instruction,
+     even though the doctrine id still renders."
+    | tuples prompt |
+    '--- DVP3: non-consumer does NOT receive the voting invitation ---' println.
+    tuples := Array with: (self doctrineTuple: 'dctr-ddd444'
+      principle: 'Validate planning artifacts before dispatch.').
+    prompt := self promptFor: Strategist new tuples: tuples.
+    t assert: (prompt includes: 'pp doctrine feedback') not
+      message: 'DVP3: strategist does NOT see the voting command'.
+    t assert: (prompt includes: 'dctr-ddd444')
+      message: 'DVP3: id rendering still happens for the strategist'.
+    "Sanity: the gate keys on consumesDoctrine: name."
+    t assert: (Strategist new consumesDoctrine: 'strategist') not
+      message: 'DVP3: strategist is not a doctrine consumer'.
+    t assert: (Implementer new consumesDoctrine: 'implementer')
+      message: 'DVP3: implementer is a doctrine consumer'
+  ]
+
+  classMethod: testInvitationIsOptionalAndSparse: t [
+    "DVP4: the invitation must read as optional/uncommon — guard the key phrasing
+     so a future edit cannot quietly make it a mandatory rate-all."
+    | instr |
+    '--- DVP4: invitation is framed as optional + sparse ---' println.
+    instr := Role new doctrineVotingInstruction.
+    t assert: (instr includes: 'optional')
+      message: 'DVP4: instruction is labelled optional'.
+    t assert: (instr includes: 'If — and only if — you feel STRONGLY')
+      message: 'DVP4: vote only on strong feeling'.
+    t assert: (instr includes: 'abstention is the norm')
+      message: 'DVP4: abstention is stated to be the norm'.
+    t assert: (instr includes: 'Most sessions you will NOT vote')
+      message: 'DVP4: most sessions yield no vote (not a rate-all)'.
+    t assert: (instr includes: 'never rubber-stamp')
+      message: 'DVP4: never rubber-stamp'.
+    t assert: (instr includes: 'A downvote needs a one-line reason')
+      message: 'DVP4: a downvote requires a reason'
+  ]
+
 "=== Main ==="
 DoctrineRoutingMain subclass: Object
   classMethod: run [
@@ -796,6 +911,10 @@ DoctrineRoutingMain subclass: Object
     [TestDoctrineCrystallizeSuppression run: t] on: Exception do: [:e |
       ('TestDoctrineCrystallizeSuppression CRASHED: ', e messageText) println.
       t assert: false message: 'TestDoctrineCrystallizeSuppression crashed'
+    ].
+    [TestDoctrineVotingPrompt run: t] on: Exception do: [:e |
+      ('TestDoctrineVotingPrompt CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDoctrineVotingPrompt crashed'
     ].
     t report.
     ^t failed

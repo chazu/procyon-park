@@ -115,14 +115,14 @@ Violations will be detected and reverted.
 ## Context from the Knowledge Base
 '.
     contextTuples do: [:t |
-      | cat ident payload |
-      cat := t at: 'category' ifAbsent: ['?'].
-      ident := t at: 'identity' ifAbsent: ['?'].
-      payload := t at: 'payload' ifAbsent: [Dictionary new].
-      prompt := prompt, '
-### [', cat, '] ', ident, '
-', (payload at: 'detail' ifAbsent: [Json encode: payload]), '
-'
+      prompt := prompt, (self renderContextTuple: t)
+    ].
+
+    "Doctrine voting invitation — ONLY for roles that consume doctrine. The
+     doctrine entries above carry their dctr- ids prominently so the agent can
+     name one in a vote. The invitation is deliberately opt-in and sparse."
+    (self consumesDoctrine: name) ifTrue: [
+      prompt := prompt, self doctrineVotingInstruction
     ].
 
     prompt := prompt, '
@@ -151,6 +151,58 @@ Violations will be detected and reverted.
 '
     ].
     ^ref
+  ]
+
+  method: renderContextTuple: t [
+    "Render one context tuple as a prompt section. Doctrine entries get a
+     compact, vote-ready rendering (the dctr- id is surfaced prominently so the
+     agent can name it in a feedback vote); all other categories keep the
+     generic detail/JSON rendering."
+    | cat ident payload |
+    cat := t at: 'category' ifAbsent: ['?'].
+    ident := t at: 'identity' ifAbsent: ['?'].
+    payload := t at: 'payload' ifAbsent: [Dictionary new].
+    cat = 'doctrine' ifTrue: [^self renderDoctrineEntry: ident payload: payload].
+    ^'
+### [', cat, '] ', ident, '
+', (payload at: 'detail' ifAbsent: [Json encode: payload]), '
+'
+  ]
+
+  method: renderDoctrineEntry: ident payload: payload [
+    "Compact, vote-ready rendering of a single injected doctrine entry. The
+     dctr- id (ident) is rendered PROMINENTLY on its own line — the agent cites
+     exactly that id to register a vote — followed by the principle and a short
+     rationale. Kept tight on purpose so doctrine does not crowd the role's
+     actual working context."
+    | principle rationale block |
+    principle := payload at: 'principle' ifAbsent: [''].
+    rationale := payload at: 'rationale' ifAbsent: [''].
+    principle isString ifFalse: [principle := ''].
+    rationale isString ifFalse: [rationale := ''].
+    block := '
+### [doctrine] ', ident, '
+**doctrine id: ', ident, '**  (cite this id to vote)
+', principle.
+    rationale isEmpty ifFalse: [
+      block := block, '
+_why:_ ', rationale
+    ].
+    ^block, '
+'
+  ]
+
+  method: doctrineVotingInstruction [
+    "Opt-in, SPARSE invitation to vote on the injected doctrine. Deliberately
+     framed as OPTIONAL and UNCOMMON: a mandatory rate-all would manufacture
+     sycophantic noise. Abstention is the norm — agents should vote only on a
+     strong signal, and a downvote must carry a one-line reason. Shown ONLY to
+     roles for which consumesDoctrine: is true (see primeFor:)."
+    ^'
+
+## Doctrine Feedback (optional)
+The doctrine above was selected to guide THIS task. If — and only if — you feel STRONGLY about a specific entry, register it with: pp doctrine feedback <id> --up   (it clearly helped)   OR   pp doctrine feedback <id> --down --reason "<why>"   (it was wrong, misleading, or did not apply here). Most sessions you will NOT vote, and that is correct — abstention is the norm. Vote only on strong signal; never rubber-stamp. A downvote needs a one-line reason.
+'
   ]
 
   method: systemPromptHeader [
