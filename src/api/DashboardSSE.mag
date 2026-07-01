@@ -13,8 +13,9 @@
  reads only from that cache (no disk I/O)."
 
 DashboardSSE subclass: Object
-  instanceVars: bbs sseSubscribers tokenCache tokenCacheMtimes
+  instanceVars: bbs sseSubscribers tokenCache tokenCacheMtimes tokenCacheOffsets
                 watchSetCache watchSetCacheExpiry
+                snapshotCache snapshotCacheRev
 
   classMethod: on: aBBS [
     ^super new initBBS: aBBS
@@ -25,6 +26,14 @@ DashboardSSE subclass: Object
     sseSubscribers := #().
     tokenCache := Dictionary new.
     tokenCacheMtimes := Dictionary new.
+    "Per-tid byte offset already consumed from the session .jsonl, so a growing
+     file for a running task is TAILED (only appended bytes parsed) instead of
+     re-read whole every tick. See refreshTokenCache."
+    tokenCacheOffsets := Dictionary new.
+    "Snapshot cache: computeSnapshot runs ~9 scanAll per call. Recompute only
+     when the BBS change counter advanced since the last snapshot (see #tick)."
+    snapshotCache := nil.
+    snapshotCacheRev := -1.
     "§6 watch-set TTL cache: every SSE tick walks the snapshot watches
      array once per subscriber. Two browsers belonging to the same user
      resolve identical results — cache by identity for 2 s so the
@@ -109,22 +118,35 @@ DashboardSSE subclass: Object
      identity-independent HTML, then walk every subscriber and enqueue.
      Identity-dependent rendering (notifications filtered by watches) is
      still per-subscriber but reuses the cached scans from the snapshot."
-    | live snapshot |
+    | live snapshot rev |
     sseSubscribers isEmpty ifTrue: [^self].
     "Refresh token totals inline now that tokenCacheLoop is gone. The
      mtime cache makes a no-op refresh cheap; both this and the broadcast
      are gated on subscribers, so an idle server with no dashboard open
-     does zero work here."
+     does zero work here. A token-total change invalidates the snapshot
+     cache below (tailTokensFor: sets snapshotCacheRev := -1)."
     [self refreshTokenCache] on: Exception do: [:e |
       ('SSE token cache refresh failed: ', e messageText) println
     ].
-    "computeSnapshot pre-renders every panel against live BBS tuples; a single
-     malformed payload that throws here used to take down the broadcast fork
-     entirely. Skip this tick on failure and let the next one try again."
-    snapshot := [self computeSnapshot] on: Exception do: [:e |
-      ('SSE snapshot failed (skipping tick): ', e messageText) println.
-      nil
-    ].
+    "Snapshot cache: computeSnapshot runs ~9 scanAll + pre-renders every panel.
+     When neither the BBS (changeCount) nor the token totals have changed since
+     the last snapshot, reuse it verbatim — an idle-but-connected dashboard then
+     does ~zero allocation per tick instead of rebuilding everything every 5 s.
+     A single malformed payload that throws here used to take down the broadcast
+     fork; on failure we skip the tick and try again next time."
+    rev := bbs changeCount.
+    (snapshotCache notNil and: [snapshotCacheRev = rev])
+      ifTrue: [snapshot := snapshotCache]
+      ifFalse: [
+        snapshot := [self computeSnapshot] on: Exception do: [:e |
+          ('SSE snapshot failed (skipping tick): ', e messageText) println.
+          nil
+        ].
+        snapshot notNil ifTrue: [
+          snapshotCache := snapshot.
+          snapshotCacheRev := rev
+        ]
+      ].
     snapshot isNil ifTrue: [^self].
     live := GrowableArray new.
     sseSubscribers do: [:entry |
@@ -896,7 +918,7 @@ DashboardSSE subclass: Object
     sessionsDir := home, '/.pp/sessions'.
     tasks := bbs scanAll: 'task'.
     tasks do: [:t |
-      | tid filePath curMtime cachedMtime totals |
+      | tid filePath curMtime cachedMtime |
       tid := t at: 'identity' ifAbsent: [''].
       tid isEmpty ifFalse: [
         filePath := sessionsDir, '/', tid, '.jsonl'.
@@ -904,11 +926,7 @@ DashboardSSE subclass: Object
           curMtime := File modificationTime: filePath.
           cachedMtime := tokenCacheMtimes at: tid ifAbsent: [nil].
           (curMtime notNil and: [cachedMtime = curMtime]) ifFalse: [
-            totals := Dictionary new.
-            totals at: 'input' put: 0.
-            totals at: 'output' put: 0.
-            self accumulateTokensFrom: filePath into: totals.
-            tokenCache at: tid put: totals.
+            self tailTokensFor: tid path: filePath.
             curMtime notNil ifTrue: [tokenCacheMtimes at: tid put: curMtime]
           ]
         ]
@@ -916,15 +934,50 @@ DashboardSSE subclass: Object
     ]
   ]
 
-  method: accumulateTokensFrom: filePath into: result [
-    "Stream a session JSONL file; for every entry with a usage block (either
-     top-level or nested under message), add its input_tokens + output_tokens
-     into the running totals. Silently tolerates malformed lines / IO errors
-     so a single bad session cannot break the dashboard."
-    | contents lines |
+  method: tailTokensFor: tid path: filePath [
+    "Tail the session file from the last consumed byte offset, adding token
+     usage from newly-appended COMPLETE lines into the cached totals. The
+     File readFrom:offset: primitive returns { completeContent, newByteOffset }
+     trimmed to the last newline, so offsets are byte-correct and no partial
+     line is ever parsed. This replaces the old whole-file re-read that made a
+     running task's growing .jsonl the dominant per-tick allocation."
+    | curSize prevOffset totals res content newOffset |
+    curSize := File size: filePath.
+    prevOffset := tokenCacheOffsets at: tid ifAbsent: [0].
+    "Rotated/truncated file → restart from the top."
+    (curSize < prevOffset) ifTrue: [
+      prevOffset := 0.
+      tokenCache removeKey: tid ifAbsent: [nil]
+    ].
+    totals := tokenCache at: tid ifAbsent: [nil].
+    totals isNil ifTrue: [
+      totals := Dictionary new.
+      totals at: 'input' put: 0.
+      totals at: 'output' put: 0
+    ].
+    res := File readFrom: filePath offset: prevOffset.
+    "res is { content<String>, newOffset<Int> }; tolerate a Failure / odd shape."
+    (res isKindOf: Array) ifFalse: [^self].
+    content := res at: 1.
+    newOffset := res at: 2.
+    (content notNil and: [content isEmpty not]) ifTrue: [
+      self accumulateTokensFromString: content into: totals.
+      "Token totals feed the pre-rendered snapshot HTML — force a recompute."
+      snapshotCacheRev := -1
+    ].
+    tokenCache at: tid put: totals.
+    newOffset notNil ifTrue: [tokenCacheOffsets at: tid put: newOffset]
+  ]
+
+  method: accumulateTokensFromString: text into: result [
+    "Parse the given text as JSONL (already trimmed to whole lines by the tail
+     primitive); for every entry with a usage block (top-level or nested under
+     message), add its input_tokens + output_tokens into the running totals.
+     Silently tolerates malformed lines so one bad session can't break the
+     dashboard."
+    | lines |
     [
-      contents := File readFileContents: filePath.
-      lines := contents split: Character lf.
+      lines := text split: Character lf.
       lines do: [:line |
         line isEmpty ifFalse: [
           [self accumulateLine: line into: result] on: Exception do: [:e | ]

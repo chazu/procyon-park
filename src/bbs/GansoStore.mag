@@ -13,7 +13,7 @@
 
 GansoStore subclass: Object
 
-  instanceVars: db path
+  instanceVars: db path writeCount
 
   classMethod: openAt: aPath [
     | s |
@@ -24,6 +24,7 @@ GansoStore subclass: Object
 
   method: initAt: aPath [
     path := aPath.
+    writeCount := 0.
     db := GansoDatabase primOpen: aPath.
     self ensureSchema
   ]
@@ -47,7 +48,27 @@ GansoStore subclass: Object
     db primExec: 'CREATE INDEX IF NOT EXISTS ix_cat ON tuples(category)' args: noArgs.
     db primExec: 'CREATE INDEX IF NOT EXISTS ix_wf ON tuples(wf_inst)' args: noArgs.
     db primExec: 'CREATE INDEX IF NOT EXISTS ix_parent ON tuples(parent)' args: noArgs.
-    db primExec: 'CREATE INDEX IF NOT EXISTS ix_expires ON tuples(expires_at)' args: noArgs
+    db primExec: 'CREATE INDEX IF NOT EXISTS ix_expires ON tuples(expires_at)' args: noArgs.
+    "WAL hygiene on the writer connection. ganso's defaults leave the WAL to
+     grow to ~40MB (wal_autocheckpoint=10000 pages) and never truncate it (no
+     journal_size_limit) — observed 41MB WAL against a 2.9MB DB. Checkpoint more
+     often and cap the on-disk WAL so it collapses back into the main file.
+     cache_size caps this connection's page cache at 8MB (was 32MB)."
+    db primExec: 'PRAGMA wal_autocheckpoint=1000' args: noArgs.
+    db primExec: 'PRAGMA journal_size_limit=4194304' args: noArgs.
+    db primExec: 'PRAGMA cache_size=-8000' args: noArgs
+  ]
+
+  method: maybeMaintain [
+    "Periodic WAL maintenance, driven off the write path so no background timer
+     is needed. Every 256 writes, force a TRUNCATE checkpoint so the WAL is
+     collapsed into the main DB and shrunk on disk. Best-effort: a failure here
+     (e.g. a reader momentarily blocking a truncate) must never break a write."
+    writeCount := (writeCount ifNil: [0]) + 1.
+    (writeCount \\ 256) = 0 ifTrue: [
+      [db primExec: 'PRAGMA wal_checkpoint(TRUNCATE)' args: (Array new: 0)]
+        on: Exception do: [:e | ]
+    ]
   ]
 
   "--- Tuple <-> row helpers ---"
@@ -220,6 +241,7 @@ GansoStore subclass: Object
     id notNil
       ifTrue: [db primExec: 'INSERT INTO tuples(id, data) VALUES(?, ?)' args: args]
       ifFalse: [db primExec: 'INSERT INTO tuples(data) VALUES(?)' args: args].
+    self maybeMaintain.
     ^aDict
   ]
 

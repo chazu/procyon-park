@@ -24,6 +24,19 @@ Semantic Versioning.
   The `127.` check was also tightened to require a dotted-quad (a spoofed
   `Host: 127.evil.com` is now rejected).
 
+### Changed
+- **`pp serve` memory footprint cut ~88%** under an open dashboard (RSS ~977 MB
+  peak → ~115 MB, flat instead of a sawtooth). The per-tick dashboard work that
+  drove the growth is eliminated: the SSE loop now caches its snapshot and skips
+  the ~9 category scans + HTML re-render unless the BBS actually changed
+  (`BBS>>changeCount`) or a token total moved; per-task token totals are read by
+  *tailing* each running session `.jsonl` from a byte offset instead of
+  re-reading the whole (growing) file every 5 s. The supervisor now launches
+  with `GOMEMLIMIT`/`GOGC`/`madvdontneed` so the Go heap is capped and freed
+  memory is returned to the OS. The SQLite WAL is kept small
+  (`wal_checkpoint(TRUNCATE)` + `journal_size_limit`), collapsing a 41 MB WAL to
+  ~4 MB, and the ganso reader pool/watcher were tightened.
+
 ### Added
 - Opt-in dashboard host allowlist for the approve/reject/cancel controls. Set
   `PP_ALLOW_DASHBOARD_HOSTS="host:port,host:port"` (env) or `[security]

@@ -34,6 +34,15 @@ BURST_WINDOW="${PP_SUPERVISOR_BURST_WINDOW:-60}"
 LOG_DIR="${PP_SUPERVISOR_LOG_DIR:-$HOME/.pp/logs}"
 PP_BIN="${PP_BIN:-$(command -v pp || true)}"
 
+# --- Memory guardrails (see docs: pp serve RSS runaway 2026-07-01) -------------
+# The Go runtime is otherwise untuned: GOGC=100 lets the heap double before GC,
+# no soft cap, and freed pages are not returned to the OS — so per-tick dashboard
+# churn ratchets RSS to a high plateau. These convert that into a bounded,
+# OS-returning sawtooth. All overridable from the environment.
+export GOMEMLIMIT="${GOMEMLIMIT:-768MiB}"   # soft cap: Go GC gets aggressive near it
+export GOGC="${GOGC:-50}"                    # collect at +50% heap growth (was 100)
+export GODEBUG="${GODEBUG:-madvdontneed=1}"  # return freed pages to OS promptly (Linux)
+
 if [[ -z "$PP_BIN" || ! -x "$PP_BIN" ]]; then
   echo "pp-supervisor: pp binary not found (set PP_BIN or add pp to PATH)" >&2
   exit 2

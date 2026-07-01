@@ -8,7 +8,7 @@
  persistent tuples."
 
 BBS subclass: Object
-  instanceVars: space nextId mutex upsertMutex startedAt index byId byKey byCatIdent byCategory dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener saveToDiskHook gansoStore
+  instanceVars: space nextId mutex upsertMutex startedAt index byId byKey byCatIdent byCategory dataDir historyPath dirty flushMutex flushInProgress historySize notificationListener saveToDiskHook gansoStore changeSeq
 
   classMethod: new [
     ^super new initialize
@@ -60,6 +60,10 @@ BBS subclass: Object
 
     historyPath := dataDir, '/history.jsonl'.
     dirty := false.
+    "Monotonic write counter — bumped on every mutation via appendHistory:.
+     A cheap change signal for consumers (e.g. DashboardSSE snapshot cache) to
+     skip recompute when nothing changed."
+    changeSeq := 0.
     flushMutex := Mutex new.
     flushInProgress := false.
     historySize := nil.  "lazy-init: stat once on first append; tracked in memory thereafter"
@@ -1107,10 +1111,18 @@ BBS subclass: Object
 
   "--- Audit History ---"
 
+  method: changeCount [
+    "Monotonic count of mutations since boot. Consumers cache expensive derived
+     state keyed on this value and recompute only when it advances."
+    ^changeSeq ifNil: [0]
+  ]
+
   method: appendHistory: operation tuple: dict [
     "Append a compact JSONL audit entry to the history log.
      Rotates when file exceeds 10MB."
     | entry jsonLine line |
+    "Every audited mutation advances the change counter (see #changeCount)."
+    changeSeq := (changeSeq ifNil: [0]) + 1.
     self rotateHistoryIfNeeded.
     entry := Dictionary new.
     entry at: 'ts' put: DateTime now epochSeconds.
