@@ -548,7 +548,7 @@ DashboardSSE subclass: Object
      context. Each mission is rendered inside its OWN exception guard so a single
      malformed tuple is SKIPPED — the panel still renders. The panel-level
      safeRender wrap in computeSnapshot is a second backstop."
-    | s missions awaiting others archived workitems |
+    | s missions awaiting others done archived workitems |
     missions := snap at: 'missions' ifAbsent: [#()].
     "Reuse the already-cached workitem scan (computeSnapshot ran it once this
      tick) to render each non-archived mission's epic/story tree — ZERO new
@@ -557,7 +557,13 @@ DashboardSSE subclass: Object
     s := '<div id="dashboard-missions"><h2>Missions</h2>'.
     awaiting := Array new: 0.
     others := Array new: 0.
+    done := Array new: 0.
     archived := Array new: 0.
+    "Partition by status: awaiting-approval is foregrounded; the two TERMINAL
+     states (done, archived) are filed into their own collapsed sections so a
+     completed/retired mission never clutters the active 'Other missions' list;
+     everything else (researching/approved/in-progress/rejected) is active
+     context. Nested ifTrue:/ifFalse: (Maggie has no case)."
     missions do: [:m |
       [
         | p st |
@@ -567,7 +573,9 @@ DashboardSSE subclass: Object
           ifTrue: [awaiting := awaiting copyWith: m]
           ifFalse: [st = 'archived'
             ifTrue: [archived := archived copyWith: m]
-            ifFalse: [others := others copyWith: m]]
+            ifFalse: [st = 'done'
+              ifTrue: [done := done copyWith: m]
+              ifFalse: [others := others copyWith: m]]]
       ] on: Exception do: [:e |
         ('SSE mission partition skipped a malformed tuple: ', e messageText) println
       ]
@@ -579,12 +587,13 @@ DashboardSSE subclass: Object
      and collapses any expanded mission plan the operator is reading."
     awaiting := self sortMissions: awaiting.
     others := self sortMissions: others.
+    done := self sortMissions: done.
     archived := self sortMissions: archived.
-    "Empty-state guard MUST test all THREE buckets (nested and:, never chained —
+    "Empty-state guard MUST test ALL buckets (nested and:, never chained —
      `a and: [b] and: [c]` parses as the and:and: selector -> doesNotUnderstand).
-     Without the archived test, an archived-only scope renders 'No missions yet'
-     and the Archived section never appears."
-    (awaiting isEmpty and: [others isEmpty and: [archived isEmpty]]) ifTrue: [
+     Without every test, a done-only or archived-only scope renders 'No missions
+     yet' and that section never appears."
+    (awaiting isEmpty and: [others isEmpty and: [done isEmpty and: [archived isEmpty]]]) ifTrue: [
       ^s, '<div class="empty-state">No missions yet.</div></div>'
     ].
     awaiting isEmpty ifFalse: [
@@ -606,6 +615,19 @@ DashboardSSE subclass: Object
             ('SSE mission card skipped (malformed tuple): ', e messageText) println. ''])
       ].
       s := s, '</div>'
+    ].
+    "Completed (done) missions are terminal: rendered inside a collapsed
+     <details> so they are out of the active list, but with their (all-done)
+     epic/story tree available on expand. Distinct from Archived (retired)."
+    done isEmpty ifFalse: [
+      s := s, '<details class="mission-group mission-group--done"><summary><h3>Completed</h3></summary>'.
+      done do: [:m |
+        s := s, ([(self renderMissionCard: m awaiting: false),
+            (self renderMissionTree: m workitems: workitems)]
+          on: Exception do: [:e |
+            ('SSE mission card skipped (malformed tuple): ', e messageText) println. ''])
+      ].
+      s := s, '</details>'
     ].
     "Archived missions are retired: rendered LAST inside a collapsed <details>
      so they are out of the way but the tuple is still visible (never deleted)."

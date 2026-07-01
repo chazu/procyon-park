@@ -8,6 +8,10 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Fixed
+- Dashboard Missions panel: **`done` (completed) missions no longer show in the
+  active "Other missions" list.** Like archived missions, they are now filed into
+  their own collapsed **Completed** section (with their all-done epic/story tree
+  available on expand). The empty-state guard also accounts for a done-only scope.
 - Dashboard **approve/reject/cancel** now work from the browser at all. The
   loopback gate read the request authority via `req header: 'Host'`, which
   **always returned empty** — Go promotes the incoming `Host` header to

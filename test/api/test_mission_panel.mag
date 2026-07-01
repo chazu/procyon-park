@@ -570,6 +570,61 @@ TestMissionTreeRender subclass: Object
       message: 'MP13: archived mission emits no tree (epic title not rendered)'
   ]
 
+"=== MP15: done (completed) missions filed into a Completed section, not Other ==="
+TestMissionPanelDone subclass: Object
+  classMethod: run: t [
+    | tempDir bbs sse html othersIdx doneIdx |
+    '--- MP15: done partitioned into a Completed section, not Other ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "An in-flight (approved) mission lands in Other; a done one must NOT — it is
+     terminal and belongs in the collapsed Completed section."
+    MsnPanelHelper seedMission: bbs id: 'msn-active' status: 'approved'
+      brief: 'Still in flight' plan: '# p'.
+    MsnPanelHelper seedMission: bbs id: 'msn-fin' status: 'done'
+      brief: 'All wrapped up' plan: '# p'.
+
+    sse := DashboardSSE on: bbs.
+    html := (sse computeSnapshot) at: 'missionsHtml'.
+
+    t assert: (MsnPanelHelper contains: html sub: 'mission-group--done')
+      message: 'MP15: Completed section rendered'.
+    t assert: (MsnPanelHelper contains: html sub: '>Completed<')
+      message: 'MP15: Completed heading present'.
+    t assert: (MsnPanelHelper contains: html sub: 'msn-fin')
+      message: 'MP15: done mission still rendered'.
+    "The done card must live INSIDE the Completed section, past its boundary —
+     NOT in the active Other-missions group."
+    othersIdx := html indexOf: 'Other missions'.
+    doneIdx := html indexOf: 'mission-group--done'.
+    t assert: (doneIdx > othersIdx)
+      message: 'MP15: Completed section rendered after the Other-missions group'.
+    t assert: ((html indexOf: 'msn-fin') > doneIdx)
+      message: 'MP15: done mission card is inside the Completed section, not Other'.
+    "The active approved mission is still in Other (before the Completed boundary)."
+    t assert: ((html indexOf: 'msn-active') < doneIdx)
+      message: 'MP15: the approved (active) mission stays in Other missions'
+  ]
+
+"=== MP16: a done-only scope still renders (empty-state guard covers done) ==="
+TestMissionPanelDoneOnly subclass: Object
+  classMethod: run: t [
+    | tempDir bbs sse html |
+    '--- MP16: done-only scope is not the empty state ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    MsnPanelHelper seedMission: bbs id: 'msn-donly' status: 'done'
+      brief: 'The only mission' plan: '# p'.
+
+    sse := DashboardSSE on: bbs.
+    html := (sse computeSnapshot) at: 'missionsHtml'.
+
+    t assert: (MsnPanelHelper contains: html sub: 'No missions yet') not
+      message: 'MP16: done-only scope is NOT the empty state'.
+    t assert: (MsnPanelHelper contains: html sub: 'mission-group--done')
+      message: 'MP16: the Completed section renders for a done-only scope'
+  ]
+
 "=== Main ==="
 MissionPanelMain subclass: Object
   classMethod: run [
@@ -611,6 +666,12 @@ MissionPanelMain subclass: Object
     [TestMissionRun run: t] on: Exception do: [:e |
       ('TestMissionRun CRASHED: ', e messageText) println.
       t assert: false message: 'TestMissionRun crashed'].
+    [TestMissionPanelDone run: t] on: Exception do: [:e |
+      ('TestMissionPanelDone CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionPanelDone crashed'].
+    [TestMissionPanelDoneOnly run: t] on: Exception do: [:e |
+      ('TestMissionPanelDoneOnly CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionPanelDoneOnly crashed'].
     [TestMissionTreeRender run: t] on: Exception do: [:e |
       ('TestMissionTreeRender CRASHED: ', e messageText) println.
       t assert: false message: 'TestMissionTreeRender crashed'].
