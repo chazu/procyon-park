@@ -12,8 +12,12 @@
          rejected missions spawn NOTHING.
    MR-d  Non-fatal: a malformed mission tuple in the scan does not abort the
          sweep or escape; a valid approved mission alongside it still fires.
-   MR-e  Provenance: the spawned epic is discoverable purely by its mission_id
-         stamp (the blast-radius query `pp mission nuke` relies on).
+   MR-e  Decompose: an approved mission carrying payload.breakdown materializes
+         one story per entry under the epic — deterministic ids, parent=epic,
+         mission_id stamped, wave carried, depends_on (1-based idx) mapped to
+         sibling story ids.
+   MR-f  Idempotent with breakdown: re-sweep never duplicates stories.
+   MR-g  Back-compat: an approved mission with NO breakdown -> epic only.
 
  Real BBS (BBS withDataDir:) is used so the full scan + upsertPinned + update:
  path runs end-to-end against a ganso/SQLite tuplespace, exercising the new
@@ -90,11 +94,50 @@ MRHelper subclass: Object
     bbs out: 'mission' scope: scope identity: id payload: p
   ]
 
-  classMethod: epicsForMission: bbs mission: id [
+  classMethod: seedMissionWithBreakdown: bbs scope: scope identity: id breakdown: bd [
+    "Write an approved mission carrying a structured payload.breakdown."
+    | p |
+    p := Dictionary new.
+    p at: 'brief' put: ('brief for ', id).
+    p at: 'plan' put: 'the plan'.
+    p at: 'status' put: 'approved'.
+    p at: 'breakdown' put: bd.
+    p at: 'created_at' put: DateTime now epochSeconds.
+    bbs out: 'mission' scope: scope identity: id payload: p
+  ]
+
+  classMethod: itemsForMission: bbs mission: id [
     "All 'workitem' tuples whose payload.mission_id = id (the blast-radius query)."
     ^(bbs scanAll: 'workitem') select: [:t |
       ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'mission_id' ifAbsent: [nil]) = id
     ]
+  ]
+
+  classMethod: storiesForMission: bbs mission: id [
+    "Mission work-items of type 'story' (excludes the epic)."
+    ^(self itemsForMission: bbs mission: id) select: [:t |
+      ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'type' ifAbsent: [nil]) = 'story'
+    ]
+  ]
+
+  classMethod: itemById: bbs id: wid [
+    "One workitem tuple by identity, or nil."
+    | hit |
+    hit := nil.
+    (bbs scanAll: 'workitem') do: [:t |
+      (t at: 'identity' ifAbsent: [nil]) = wid ifTrue: [hit := t]
+    ].
+    ^hit
+  ]
+
+  classMethod: mkStory: title wave: wave dependsOn: deps [
+    "Build one breakdown entry Dictionary (no dict literals in Maggie)."
+    | e |
+    e := Dictionary new.
+    e at: 'title' put: title.
+    e at: 'wave' put: wave.
+    e at: 'depends_on' put: deps.
+    ^e
   ]
 
   classMethod: missionEpicId: bbs scope: scope identity: id [
@@ -112,7 +155,10 @@ TestMissionReconcile subclass: Object
     self testApprovedSpawnsOneEpic: t.
     self testIdempotentSweeps: t.
     self testOnlyApprovedReconciles: t.
-    self testNonFatalMalformedMission: t
+    self testNonFatalMalformedMission: t.
+    self testBreakdownMaterializesStories: t.
+    self testBreakdownIdempotent: t.
+    self testNoBreakdownEpicOnly: t
   ]
 
   classMethod: testApprovedSpawnsOneEpic: t [
@@ -124,7 +170,7 @@ TestMissionReconcile subclass: Object
     disp := Dispatcher on: bbs harnessFactory: nil.
     disp maybeReconcileMissions.
 
-    epics := MRHelper epicsForMission: bbs mission: 'msn-1'.
+    epics := MRHelper itemsForMission: bbs mission: 'msn-1'.
     t assertEqual: epics size to: 1 message: 'MR-a: exactly one epic for the mission'.
     epics size = 1 ifTrue: [
       | p |
@@ -150,7 +196,7 @@ TestMissionReconcile subclass: Object
     disp maybeReconcileMissions.
     disp maybeReconcileMissions.
 
-    t assertEqual: (MRHelper epicsForMission: bbs mission: 'msn-2') size to: 1
+    t assertEqual: (MRHelper itemsForMission: bbs mission: 'msn-2') size to: 1
       message: 'MR-b: still exactly one epic after three sweeps'
   ]
 
@@ -165,11 +211,11 @@ TestMissionReconcile subclass: Object
     disp := Dispatcher on: bbs harnessFactory: nil.
     disp maybeReconcileMissions.
 
-    t assertEqual: (MRHelper epicsForMission: bbs mission: 'msn-r') size to: 0
+    t assertEqual: (MRHelper itemsForMission: bbs mission: 'msn-r') size to: 0
       message: 'MR-c: researching does not reconcile'.
-    t assertEqual: (MRHelper epicsForMission: bbs mission: 'msn-w') size to: 0
+    t assertEqual: (MRHelper itemsForMission: bbs mission: 'msn-w') size to: 0
       message: 'MR-c: awaiting-approval does not reconcile'.
-    t assertEqual: (MRHelper epicsForMission: bbs mission: 'msn-x') size to: 0
+    t assertEqual: (MRHelper itemsForMission: bbs mission: 'msn-x') size to: 0
       message: 'MR-c: rejected does not reconcile'.
     t assert: (MRHelper missionEpicId: bbs scope: 'repoA' identity: 'msn-w') isNil
       message: 'MR-c: awaiting-approval mission keeps epic_id nil'
@@ -189,8 +235,84 @@ TestMissionReconcile subclass: Object
     [disp maybeReconcileMissions] on: Exception do: [:e | threw := true].
 
     t assert: threw not message: 'MR-d: malformed mission did not escape the sweep'.
-    t assertEqual: (MRHelper epicsForMission: bbs mission: 'msn-ok') size to: 1
+    t assertEqual: (MRHelper itemsForMission: bbs mission: 'msn-ok') size to: 1
       message: 'MR-d: valid approved mission still fired despite malformed neighbour'
+  ]
+
+  classMethod: testBreakdownMaterializesStories: t [
+    | tempDir bbs disp bd s1 s2 s3 stories st1 st3 |
+    '--- MR-e: approved mission with breakdown materializes a story tree ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    s1 := MRHelper mkStory: 'Story one' wave: 1 dependsOn: (Array new: 0).
+    s2 := MRHelper mkStory: 'Story two' wave: 1 dependsOn: (Array new: 0).
+    s3 := MRHelper mkStory: 'Story three' wave: 2 dependsOn: ((Array new: 0) copyWith: 1).
+    bd := (((Array new: 0) copyWith: s1) copyWith: s2) copyWith: s3.
+    MRHelper seedMissionWithBreakdown: bbs scope: 'repoA' identity: 'msn-bd' breakdown: bd.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeReconcileMissions.
+
+    t assertEqual: (MRHelper itemsForMission: bbs mission: 'msn-bd') size to: 4
+      message: 'MR-e: epic + 3 stories materialized'.
+    stories := MRHelper storiesForMission: bbs mission: 'msn-bd'.
+    t assertEqual: stories size to: 3 message: 'MR-e: exactly 3 stories'.
+
+    st1 := MRHelper itemById: bbs id: 'story-msn-bd-1'.
+    t assert: st1 notNil message: 'MR-e: deterministic story id story-msn-bd-1'.
+    st1 notNil ifTrue: [
+      | p |
+      p := st1 at: 'payload'.
+      t assertEqual: (p at: 'type' ifAbsent: [nil]) to: 'story' message: 'MR-e: story type'.
+      t assertEqual: (p at: 'parent' ifAbsent: [nil]) to: 'epic-msn-bd' message: 'MR-e: parent=epic-msn-bd'.
+      t assertEqual: (p at: 'mission_id' ifAbsent: [nil]) to: 'msn-bd' message: 'MR-e: story mission_id stamped'.
+      t assertEqual: (p at: 'wave' ifAbsent: [nil]) to: 1 message: 'MR-e: wave carried'.
+      t assertEqual: (p at: 'status' ifAbsent: [nil]) to: 'ready' message: 'MR-e: story status=ready'
+    ].
+    st3 := MRHelper itemById: bbs id: 'story-msn-bd-3'.
+    t assert: st3 notNil message: 'MR-e: story-msn-bd-3 exists'.
+    st3 notNil ifTrue: [
+      | p deps |
+      p := st3 at: 'payload'.
+      t assertEqual: (p at: 'wave' ifAbsent: [nil]) to: 2 message: 'MR-e: story 3 wave=2'.
+      deps := p at: 'depends_on' ifAbsent: [Array new: 0].
+      t assertEqual: deps size to: 1 message: 'MR-e: story 3 has one dep'.
+      t assert: (deps includes: 'story-msn-bd-1')
+        message: 'MR-e: depends_on index 1 mapped to sibling story id'
+    ]
+  ]
+
+  classMethod: testBreakdownIdempotent: t [
+    | tempDir bbs disp bd s1 s2 |
+    '--- MR-f: re-sweep with breakdown does not duplicate stories ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    s1 := MRHelper mkStory: 'A' wave: 1 dependsOn: (Array new: 0).
+    s2 := MRHelper mkStory: 'B' wave: 1 dependsOn: (Array new: 0).
+    bd := ((Array new: 0) copyWith: s1) copyWith: s2.
+    MRHelper seedMissionWithBreakdown: bbs scope: 'repoA' identity: 'msn-bd2' breakdown: bd.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeReconcileMissions.
+    disp maybeReconcileMissions.
+
+    t assertEqual: (MRHelper storiesForMission: bbs mission: 'msn-bd2') size to: 2
+      message: 'MR-f: still exactly 2 stories after re-sweep'.
+    t assertEqual: (MRHelper itemsForMission: bbs mission: 'msn-bd2') size to: 3
+      message: 'MR-f: epic + 2 stories, no duplicates'
+  ]
+
+  classMethod: testNoBreakdownEpicOnly: t [
+    | tempDir bbs disp |
+    '--- MR-g: approved mission WITHOUT breakdown -> epic only (back-compat) ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    MRHelper seedMission: bbs scope: 'repoA' identity: 'msn-nb' status: 'approved'.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeReconcileMissions.
+
+    t assertEqual: (MRHelper storiesForMission: bbs mission: 'msn-nb') size to: 0
+      message: 'MR-g: no stories when breakdown is absent'.
+    t assertEqual: (MRHelper itemsForMission: bbs mission: 'msn-nb') size to: 1
+      message: 'MR-g: just the epic'
   ]
 
 "=== Main ==="

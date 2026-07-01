@@ -148,7 +148,8 @@ transitions: [
 			  ## Research Synthesis — what the research + review established; fold in the
 			                          reviewer's gaps/corrections, not just the raw findings.
 			  ## Proposed Approach — the recommended path at a HIGH LEVEL.
-			  ## Work Breakdown    — epics / themes only (NOT concrete work items or stories).
+			  ## Work Breakdown    — the themes; a bulleted human-readable summary of the
+			                          stories you will emit as structured data below.
 			  ## Risks             — what could go wrong + mitigations.
 			  ## Definition of Done — when the mission is complete.
 
@@ -159,11 +160,37 @@ transitions: [
 			(set-plan is a read-modify-write that writes payload.plan and sets
 			 status='awaiting-approval' in one step.)
 
+			THEN emit the STRUCTURED WORK BREAKDOWN — the machine-readable decomposition
+			the human approves and the dispatcher materializes into a story tree on
+			approve. Decompose the Proposed Approach into a handful (typically 2–8) of
+			concrete, independently-shippable stories:
+
+			    pp mission set-breakdown {{mission}} '<json-array>' --repo {{repo}}
+
+			<json-array> is a JSON array; each element is one story:
+			    [
+			      {
+			        "title":       "<short imperative title>",
+			        "description": "<what it delivers + acceptance criteria>",
+			        "wave":        1,          // execution wave; same-wave stories may run in parallel
+			        "depends_on":  [],         // 1-based indices of SIBLING stories that must finish first
+			        "template":    "story",    // workflow template (default "story")
+			        "estimate":    "small"     // small|medium|large (optional)
+			      }
+			    ]
+			Rules: keep stories vertical (each delivers observable value); use `wave` to
+			stage them and `depends_on` (by 1-based position in THIS array) only for hard
+			ordering; do NOT invent an epic entry — the epic is created automatically and
+			every story is parented to it. Order the array so dependencies precede
+			dependents. This structured breakdown, not the markdown prose, is what
+			becomes real work items — make it faithful to the plan.
+
 			OPTIONALLY also write the same plan to docs/plans/<mission>-plan.md and
 			commit it, so the plan lands in git history when the worktree is merged.
 
 			Do NOT wait for approval — approval is a separate human action. Once the
-			plan is stored and the status is awaiting-approval, your task is complete.
+			plan AND breakdown are stored and the status is awaiting-approval, your task
+			is complete.
 			"""
 		preconditions: [
 			{

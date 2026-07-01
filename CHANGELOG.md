@@ -38,6 +38,17 @@ Semantic Versioning.
   ~4 MB, and the ganso reader pool/watcher were tightened.
 
 ### Added
+- Mission **decompose** — approving a mission now materializes a *story tree*,
+  not just a placeholder epic. A mission can carry a structured
+  `payload.breakdown` (`[{title, description, wave, depends_on, template,
+  estimate}]`); on approve the dispatcher reconciliation materializes one story
+  per entry under the epic, each stamped `mission_id` and parented to it, with
+  `wave` carried through and `depends_on` (1-based indices into the breakdown)
+  mapped to sibling story ids. Deterministic story ids (`story-<mission>-<n>`)
+  keep it idempotent; a mission with no breakdown still yields just the epic.
+  New `pp mission set-breakdown <id> '<json>'` writes the breakdown (used by the
+  `mission-brief` planner, which now emits it alongside the plan), and
+  `pp mission show` reports the item count.
 - Mission **Decide→Act bridge (Phase B v1)** — approving a mission now *spawns
   and owns* work instead of dead-ending. On the next dispatcher housekeeping
   pass, any `approved` mission with no epic yet has a single epic work-item

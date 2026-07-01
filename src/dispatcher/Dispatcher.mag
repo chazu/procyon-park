@@ -683,7 +683,7 @@ Dispatcher subclass: Object
      the two, the mission is still 'approved' with epic_id=nil, so the next
      sweep re-runs — and the deterministic epic id makes that re-run a no-op
      upsert, never a duplicate. Stamping first could orphan the guard."
-    | epicId ep |
+    | epicId ep breakdown storyCount |
     epicId := 'epic-', mid.
     ep := Dictionary new.
     ep at: 'title' put: (self missionEpicTitle: mp).
@@ -701,6 +701,17 @@ Dispatcher subclass: Object
     ep at: 'created_at' put: DateTime now epochSeconds.
     ep at: 'updated_at' put: DateTime now epochSeconds.
     bbs upsertPinned: 'workitem' scope: scope identity: epicId payload: ep.
+    "Materialize child stories from the human-reviewed payload.breakdown (D2), if
+     present, BEFORE stamping epic_id — so a crash mid-tree leaves the mission
+     'approved' with epic_id=nil and the next sweep re-runs the whole (idempotent,
+     deterministic-id) materialization. A mission with no breakdown just gets the
+     epic (back-compat with the v1 tracer bullet)."
+    storyCount := 0.
+    breakdown := mp at: 'breakdown' ifAbsent: [nil].
+    (breakdown notNil and: [(breakdown isKindOf: Array) and: [breakdown isEmpty not]]) ifTrue: [
+      self materializeStoriesFrom: breakdown epic: epicId mission: mid scope: scope.
+      storyCount := breakdown size
+    ].
     "Stamp epic_id only. Status stays 'approved' — that closes the reconciliation
      guard (epic_id is now non-nil) so we never spawn twice, and it keeps the
      mission archivable/nukeable (both allow 'approved'). The in-progress/done
@@ -709,7 +720,93 @@ Dispatcher subclass: Object
       p at: 'epic_id' put: epicId.
       p at: 'updated_at' put: DateTime now epochSeconds
     ].
-    ('[mission] reconciled ', mid, ' -> epic ', epicId, ' (scope ', scope, ')') println
+    ('[mission] reconciled ', mid, ' -> epic ', epicId, ' (+', storyCount printString,
+      ' stories, scope ', scope, ')') println
+  ]
+
+  method: materializeStoriesFrom: breakdown epic: epicId mission: mid scope: scope [
+    "Materialize one story work-item per breakdown entry under the epic. Each
+     story is stamped mission_id (so `pp mission nuke` reclaims it) and parented
+     to the epic. Story ids are deterministic (story-<mid>-<pos>, 1-based) so a
+     re-run upserts in place — never a duplicate. Every entry is guarded
+     independently: a malformed entry is skipped + logged, never aborting the
+     rest (or the epic_id stamp, which would wedge the sweep in a retry loop)."
+    | idx |
+    idx := 0.
+    breakdown do: [:entry |
+      idx := idx + 1.
+      [self materializeStory: entry index: idx epic: epicId mission: mid scope: scope]
+        on: Exception do: [:e |
+          bbs logEngine: 'warn' component: 'mission' scope: scope message: ('story materialize skip [', mid, ' #', idx printString, ']: ', e messageText)
+        ]
+    ]
+  ]
+
+  method: materializeStory: entry index: idx epic: epicId mission: mid scope: scope [
+    "Build + upsert a single story from one breakdown entry. depends_on entries
+     are 1-based indices into the sibling breakdown, mapped to concrete story ids
+     so a later dispatch slice sees a real dependency edge. estimate is carried
+     only when present (avoids writing an invalid empty enum)."
+    | storyId sp estimate |
+    storyId := 'story-', mid, '-', idx printString.
+    sp := Dictionary new.
+    sp at: 'title' put: (entry at: 'title' ifAbsent: ['Story ', idx printString]).
+    sp at: 'description' put: (entry at: 'description' ifAbsent: ['']).
+    sp at: 'status' put: 'ready'.
+    sp at: 'type' put: 'story'.
+    sp at: 'parent' put: epicId.
+    sp at: 'template' put: (entry at: 'template' ifAbsent: ['story']).
+    sp at: 'wave' put: (self missionWaveOf: (entry at: 'wave' ifAbsent: [1])).
+    sp at: 'depends_on' put: (self missionDepsOf: (entry at: 'depends_on' ifAbsent: [nil]) mission: mid).
+    sp at: 'labels' put: (Array new: 0).
+    sp at: 'comments' put: (Array new: 0).
+    sp at: 'mission_id' put: mid.
+    estimate := entry at: 'estimate' ifAbsent: [nil].
+    (estimate notNil and: [(estimate isKindOf: String) and: [estimate isEmpty not]]) ifTrue: [
+      sp at: 'estimate' put: estimate
+    ].
+    sp at: 'created_by' put: 'mission-reconcile'.
+    sp at: 'created_at' put: DateTime now epochSeconds.
+    sp at: 'updated_at' put: DateTime now epochSeconds.
+    bbs upsertPinned: 'workitem' scope: scope identity: storyId payload: sp
+  ]
+
+  method: missionWaveOf: v [
+    "Coerce a breakdown wave value (Integer or numeric String) to a positive
+     Integer, defaulting to 1 on anything unusable."
+    | n |
+    n := self missionAsIntOrNil: v.
+    ^(n notNil and: [n > 0]) ifTrue: [n] ifFalse: [1]
+  ]
+
+  method: missionDepsOf: deps mission: mid [
+    "Translate a breakdown entry's depends_on — a list of 1-based indices into
+     the sibling breakdown — into concrete story ids (story-<mid>-<n>).
+     Non-integer / non-positive entries are dropped; nil/absent -> empty array."
+    | out |
+    out := Array new: 0.
+    (deps isNil or: [(deps isKindOf: Array) not]) ifTrue: [^out].
+    deps do: [:d |
+      | n |
+      n := self missionAsIntOrNil: d.
+      (n notNil and: [n > 0]) ifTrue: [out := out copyWith: ('story-', mid, '-', n printString)]
+    ].
+    ^out
+  ]
+
+  method: missionAsIntOrNil: v [
+    "Coerce a JSON-decoded scalar to an Integer, or nil. `Json decode` yields a
+     SmallInteger for `2` and a Float for `2.0` — and SmallInteger is NOT a
+     subclass of Integer in this VM (SmallInteger subclass: Object), so an
+     isKindOf: Integer test silently fails and drops every wave/dep. Match the
+     concrete classes instead: SmallInteger/BigInteger verbatim, Float truncated,
+     numeric String parsed."
+    v isNil ifTrue: [^nil].
+    (v isKindOf: SmallInteger) ifTrue: [^v].
+    (v isKindOf: BigInteger) ifTrue: [^v].
+    (v isKindOf: Float) ifTrue: [^v truncated].
+    (v isKindOf: String) ifTrue: [[^v asInteger] on: Exception do: [:e | ^nil]].
+    ^nil
   ]
 
   method: missionEpicTitle: mp [

@@ -68,6 +68,7 @@ MissionCLI subclass: Object
     sub = 'show'       ifTrue: [^self cmdShow: args].
     sub = 'set-intent' ifTrue: [^self cmdSetIntent: args].
     sub = 'set-plan'   ifTrue: [^self cmdSetPlan: args].
+    sub = 'set-breakdown' ifTrue: [^self cmdSetBreakdown: args].
     sub = 'approve'    ifTrue: [^self cmdApprove: args].
     sub = 'reject'     ifTrue: [^self cmdReject: args].
     sub = 'archive'    ifTrue: [^self cmdArchive: args].
@@ -245,6 +246,9 @@ MissionCLI subclass: Object
     ('brief:   ', (self orNone: (p at: 'brief' ifAbsent: [nil]))) println.
     ('intent:  ', (self orNone: (p at: 'intent' ifAbsent: [nil]))) println.
     ('plan:    ', (self orNone: (p at: 'plan' ifAbsent: [nil]))) println.
+    ((p at: 'breakdown' ifAbsent: [nil]) notNil and: [(p at: 'breakdown') isKindOf: Array]) ifTrue: [
+      ('breakdown: ', (p at: 'breakdown') size printString, ' item(s)') println
+    ].
     (p at: 'epic_id' ifAbsent: [nil]) notNil ifTrue: [
       ('epic:    ', (p at: 'epic_id')) println
     ].
@@ -299,6 +303,40 @@ MissionCLI subclass: Object
     p at: 'updated_at' put: DateTime now epochSeconds.
     self putMission: id payload: p.
     (id, ' plan written, status -> awaiting-approval') println
+  ]
+
+  method: cmdSetBreakdown: args [
+    "pp mission set-breakdown <id> <json-array> [--repo R]
+     Read-modify-write of payload.breakdown — the STRUCTURED work-item breakdown
+     the human reviews at the approval gate and the dispatcher materializes into
+     a story tree on approve (D2). <json-array> is a JSON array of objects:
+       [{title, description, wave, depends_on:[<1-based idx>...], template, estimate}]
+     depends_on entries are 1-based indices into THIS array (a story's
+     dependencies on its siblings). Used by the mission-brief workflow's
+     synthesize-plan (planner) task, alongside set-plan. Preserves brief/intent/
+     plan/status — it does NOT flip the gate."
+    | id raw parsed m p |
+    args size < 4 ifTrue: [
+      'Usage: pp mission set-breakdown <id> ''[{"title":"...","wave":1,"depends_on":[]}]'' [--repo R]' println.
+      ^self
+    ].
+    id := args at: 3.
+    raw := args at: 4.
+    self applyScopeFlagFrom: args.
+    parsed := nil.
+    [parsed := Json decode: raw] on: Exception do: [:e |
+      ('Refused: breakdown is not valid JSON: ', e messageText) println. ^self
+    ].
+    (parsed isKindOf: Array) ifFalse: [
+      'Refused: breakdown must be a JSON ARRAY of {title,wave,depends_on,...} objects.' println. ^self
+    ].
+    m := self rdpMission: id.
+    m isNil ifTrue: [('Not found: ', id) println. ^self].
+    p := m at: 'payload' ifAbsent: [Dictionary new].
+    p at: 'breakdown' put: parsed.
+    p at: 'updated_at' put: DateTime now epochSeconds.
+    self putMission: id payload: p.
+    (id, ' breakdown updated (', parsed size printString, ' item(s))') println
   ]
 
   method: cmdApprove: args [
@@ -506,6 +544,7 @@ MissionCLI subclass: Object
     '  show <id> [--repo R]            Show brief, intent, status, and plan' println.
     '  set-intent <id> "<md>" [--repo R]   Write structured intent (workflow agents)' println.
     '  set-plan <id> "<md>" [--repo R]     Write plan + flip to awaiting-approval (workflow agents)' println.
+    '  set-breakdown <id> "<json>" [--repo R]  Write structured work-item breakdown (materialized on approve)' println.
     '  approve <id> [--repo R]         awaiting-approval -> approved' println.
     '  reject <id> [--reason R] [--repo R]   awaiting-approval -> rejected (+ reason)' println.
     '  archive <id> [--reason R] [--repo R]  approved|rejected|researching -> archived (terminal)' println.
