@@ -408,6 +408,11 @@ ApiServer subclass: Object
      approve/reject — the local dashboard/CLI 'Execute' control. See
      handleMissionRunRoute:."
     httpServer route: '/api/mission/run' method: 'POST' handler: [:req | self handleMissionRunRoute: req].
+    "Mission teardown workflow-cancel (used by `pp mission nuke`). LOOPBACK-GATED
+     — the single local operator satisfies cancel authority, so this bypasses the
+     per-actor D6.15 check (which an unsigned/anonymous local request cannot
+     otherwise clear). See handleMissionCancelWorkflowRoute:."
+    httpServer route: '/api/mission/cancel-workflow' method: 'POST' handler: [:req | self handleMissionCancelWorkflowRoute: req].
     "Hard-delete (irreversible tuple removal). Signed route — same auth path
      as update/run. See handleWorkitemDelete:."
     self signedRouteOnly: '/api/workitem/delete' do: [:req :actorCtx | self handleWorkitemDelete: req actor: actorCtx].
@@ -2592,6 +2597,35 @@ ApiServer subclass: Object
     identity := req queryParam: 'identity'.
     (identity isNil or: [identity isEmpty]) ifTrue: [^self errorResponse: 400 message: 'identity required'].
     ^self handleMissionRunScope: scope identity: identity
+  ]
+
+  method: handleMissionCancelWorkflowRoute: req [
+    "POST /api/mission/cancel-workflow ?scope=&workflow_id=&reason=
+     Operator teardown helper for `pp mission nuke`: cancel a workflow and
+     (recursively) its children via the engine. UNSIGNED but LOOPBACK-GATED —
+     the local single operator IS the authority, so this deliberately bypasses
+     the per-actor D6.15 cancel check that an anonymous local request cannot
+     clear. Non-loopback callers get 403."
+    | host scope wfId reason count resp |
+    host := req host.
+    (self isLoopbackHost: host) ifFalse: [
+      ^self errorResponse: 403 message: 'mission workflow cancel is restricted to the local dashboard (loopback only)'
+    ].
+    scope := req queryParam: 'scope'.
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default'].
+    wfId := req queryParam: 'workflow_id'.
+    (wfId isNil or: [wfId isEmpty]) ifTrue: [^self errorResponse: 400 message: 'workflow_id required'].
+    reason := req queryParam: 'reason'.
+    (reason isNil or: [reason isEmpty]) ifTrue: [reason := 'mission nuke'].
+    dispatcher isNil ifTrue: [^self errorResponse: 500 message: 'No dispatcher configured'].
+    count := 0.
+    [count := dispatcher workflowEngine cancelWorkflow: wfId scope: scope reason: reason actor: 'mission-nuke']
+      on: Exception do: [:e | ^self errorResponse: 400 message: e messageText].
+    resp := Dictionary new.
+    resp at: 'status' put: 'ok'.
+    resp at: 'workflow' put: wfId.
+    resp at: 'cancelled' put: count.
+    ^self okResponse: resp
   ]
 
   method: handleMissionRunScope: scope identity: identity [

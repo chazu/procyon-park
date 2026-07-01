@@ -408,7 +408,7 @@ MissionCLI subclass: Object
      with the `scope` ivar is not visible inside the `items do:` teardown block
      below in this VM — the block would read the nil ivar and delete with a nil
      scope. Same collision that silently broke workitemsForMission."
-    | id confirm m mp msnScope items wfs |
+    | id confirm m mp msnScope items wfs cancelled |
     args size < 3 ifTrue: ['Usage: pp mission nuke <id> [--repo R] [--confirm]' println. ^self].
     id := args at: 3.
     self applyScopeFlagFrom: args.
@@ -450,8 +450,10 @@ MissionCLI subclass: Object
     "--- real teardown (--confirm) ---"
     "Cancel running workflows FIRST (cancel cascades to their children), so the
      dispatcher stops advancing them before their work-items vanish."
+    cancelled := 0.
     wfs do: [:w |
-      self cancelMissionWorkflow: (w at: 'identity' ifAbsent: [nil]) scope: msnScope
+      (self cancelMissionWorkflow: (w at: 'identity' ifAbsent: [nil]) scope: msnScope)
+        ifTrue: [cancelled := cancelled + 1]
     ].
     items do: [:t |
       self deleteWorkitem: (t at: 'identity' ifAbsent: [nil]) scope: msnScope
@@ -465,8 +467,9 @@ MissionCLI subclass: Object
     mp at: 'nuked_at' put: DateTime now epochSeconds.
     mp at: 'updated_at' put: DateTime now epochSeconds.
     self putMission: id payload: mp.
-    ('Nuked mission ', id, ': ', wfs size printString, ' workflow(s) cancelled, ',
-      items size printString, ' work-item(s) deleted, mission archived.') println
+    ('Nuked mission ', id, ': ', cancelled printString, '/', wfs size printString,
+      ' workflow(s) cancelled, ', items size printString,
+      ' work-item(s) deleted, mission archived.') println
   ]
 
   method: runningWorkflowsForMission: missionId scope: sc [
@@ -497,18 +500,24 @@ MissionCLI subclass: Object
   ]
 
   method: cancelMissionWorkflow: wfId scope: sc [
-    "Signed cancel of one workflow (the server cancels its children recursively).
-     No-op on a nil id. Best-effort — a failed cancel is reported but does not
-     abort the rest of the teardown. Param is `sc` to avoid the scope-ivar/block
-     collision."
-    | body |
-    wfId isNil ifTrue: [^self].
-    body := Dictionary new.
-    body at: 'workflow_id' put: wfId.
-    body at: 'scope' put: sc.
-    body at: 'reason' put: 'mission nuke'.
-    [CLIBase signedPost: '/api/workflow/cancel' body: body baseUrl: baseUrl]
-      on: Exception do: [:e | ('  (cancel failed for ', wfId, ': ', e messageText, ')') println]
+    "Cancel one workflow (the server cancels its children recursively) via the
+     LOOPBACK-gated /api/mission/cancel-workflow — NOT the signed
+     /api/workflow/cancel, whose per-actor D6.15 check an anonymous local request
+     (signatures unenforced) cannot clear. Returns true iff the server confirmed
+     the cancel; false (with a printed reason) otherwise. Params `sc`/`wfId`, not
+     `scope`, to dodge the ivar/block-shadow trap."
+    | response result |
+    wfId isNil ifTrue: [^false].
+    [
+      response := Shell capture: 'curl -s -X POST ''', baseUrl, '/api/mission/cancel-workflow?scope=', sc, '&workflow_id=', wfId, '&reason=mission-nuke'''.
+      (response isNil or: [response isEmpty]) ifTrue: [('  (cancel failed for ', wfId, ': no response)') println. ^false].
+      result := Json decode: response.
+      (result at: 'error' ifAbsent: [nil]) notNil ifTrue: [
+        ('  (cancel failed for ', wfId, ': ', (result at: 'error'), ')') println. ^false
+      ].
+      ((result at: 'status' ifAbsent: [nil]) = 'ok') ifTrue: [^true].
+      ('  (cancel failed for ', wfId, ': ', response, ')') println. ^false
+    ] on: Exception do: [:e | ('  (cancel failed for ', wfId, ': ', e messageText, ')') println. ^false]
   ]
 
   method: workitemsForMission: missionId scope: sc [
