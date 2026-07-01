@@ -8,6 +8,13 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Fixed
+- Dashboard **approve/reject/cancel** now work from the browser at all. The
+  loopback gate read the request authority via `req header: 'Host'`, which
+  **always returned empty** — Go promotes the incoming `Host` header to
+  `Request.Host` and strips it from the header map — so the gate `403`'d *every*
+  browser request regardless of host (only the signed CLI path worked). The gate
+  now reads `req host` (new `HttpRequest>>host` VM primitive). This is what makes
+  the loopback-equivalence matching below actually take effect.
 - Dashboard **approve/reject/cancel** no longer misfire with a `403 "loopback
   only"` when you reach the dashboard on the serving machine via a
   loopback-equivalent authority. The gate (shared by mission approve/reject and

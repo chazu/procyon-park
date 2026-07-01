@@ -2499,7 +2499,7 @@ ApiServer subclass: Object
      hard-deleted (history/relationships preserved); the cancelled card just
      drops off the active Kanban board on the next SSE tick."
     | host scope identity |
-    host := req header: 'Host'.
+    host := req host.
     (self isLoopbackHost: host) ifFalse: [
       ^self errorResponse: 403 message: 'work item cancel is restricted to the local dashboard (loopback only)'
     ].
@@ -2531,7 +2531,7 @@ ApiServer subclass: Object
      rule mirrors the `pp mission approve/reject` CLI (W1): ONLY awaiting-approval
      missions may be decided; any other status is refused (409, unchanged)."
     | host scope identity reason |
-    host := req header: 'Host'.
+    host := req host.
     (self isLoopbackHost: host) ifFalse: [
       ^self errorResponse: 403 message: 'mission approval is restricted to the local dashboard (loopback only)'
     ].
