@@ -8,6 +8,15 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- Mission archival — a terminal `archived` mission status (symmetric with
+  doctrine `maturity:retired`). New `pp mission archive <id> [--reason R]
+  [--repo R]` retires a mission from `approved`, `rejected`, or `researching`
+  into `archived` via the signed BBS put; `awaiting-approval` missions are
+  refused (a pending plan gate must be decided first). `archived` is terminal —
+  approve/reject continue to refuse it. The tuple is preserved (no delete), and
+  `pp mission list --status archived` lists archived missions. The dashboard
+  Missions panel now hides archived missions from the default view, collecting
+  them in a collapsed **Archived** section instead of the "Other missions" group.
 - Missions dashboard panel — the web dashboard now surfaces missions, with
   `awaiting-approval` ones FOREGROUNDED in their own group. Each mission renders
   a one-line brief plus its plan markdown (rendered to HTML, every line escaped)

@@ -526,11 +526,12 @@ DashboardSSE subclass: Object
      context. Each mission is rendered inside its OWN exception guard so a single
      malformed tuple is SKIPPED — the panel still renders. The panel-level
      safeRender wrap in computeSnapshot is a second backstop."
-    | s missions awaiting others |
+    | s missions awaiting others archived |
     missions := snap at: 'missions' ifAbsent: [#()].
     s := '<div id="dashboard-missions"><h2>Missions</h2>'.
     awaiting := Array new: 0.
     others := Array new: 0.
+    archived := Array new: 0.
     missions do: [:m |
       [
         | p st |
@@ -538,7 +539,9 @@ DashboardSSE subclass: Object
         st := p at: 'status' ifAbsent: ['?'].
         st = 'awaiting-approval'
           ifTrue: [awaiting := awaiting copyWith: m]
-          ifFalse: [others := others copyWith: m]
+          ifFalse: [st = 'archived'
+            ifTrue: [archived := archived copyWith: m]
+            ifFalse: [others := others copyWith: m]]
       ] on: Exception do: [:e |
         ('SSE mission partition skipped a malformed tuple: ', e messageText) println
       ]
@@ -550,7 +553,12 @@ DashboardSSE subclass: Object
      and collapses any expanded mission plan the operator is reading."
     awaiting := self sortMissions: awaiting.
     others := self sortMissions: others.
-    (awaiting isEmpty and: [others isEmpty]) ifTrue: [
+    archived := self sortMissions: archived.
+    "Empty-state guard MUST test all THREE buckets (nested and:, never chained —
+     `a and: [b] and: [c]` parses as the and:and: selector -> doesNotUnderstand).
+     Without the archived test, an archived-only scope renders 'No missions yet'
+     and the Archived section never appears."
+    (awaiting isEmpty and: [others isEmpty and: [archived isEmpty]]) ifTrue: [
       ^s, '<div class="empty-state">No missions yet.</div></div>'
     ].
     awaiting isEmpty ifFalse: [
@@ -570,6 +578,17 @@ DashboardSSE subclass: Object
             ('SSE mission card skipped (malformed tuple): ', e messageText) println. ''])
       ].
       s := s, '</div>'
+    ].
+    "Archived missions are retired: rendered LAST inside a collapsed <details>
+     so they are out of the way but the tuple is still visible (never deleted)."
+    archived isEmpty ifFalse: [
+      s := s, '<details class="mission-group mission-group--archived"><summary><h3>Archived</h3></summary>'.
+      archived do: [:m |
+        s := s, ([self renderMissionCard: m awaiting: false]
+          on: Exception do: [:e |
+            ('SSE mission card skipped (malformed tuple): ', e messageText) println. ''])
+      ].
+      s := s, '</details>'
     ].
     ^s, '</div>'
   ]

@@ -330,6 +330,60 @@ TestMissionPanelStableOrder subclass: Object
       message: 'MP9: cards ordered by identity ascending (a < b < c)'
   ]
 
+"=== MP10: archived missions partitioned out of 'Other missions' ==="
+TestMissionPanelArchived subclass: Object
+  classMethod: run: t [
+    | tempDir bbs sse html othersIdx archIdx |
+    '--- MP10: archived partitioned into an Archived section, not Other ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "A decided (approved) mission lands in Other; an archived one must NOT."
+    MsnPanelHelper seedMission: bbs id: 'msn-other' status: 'approved'
+      brief: 'A decided mission' plan: '# p'.
+    MsnPanelHelper seedMission: bbs id: 'msn-arch' status: 'archived'
+      brief: 'A retired mission' plan: '# p'.
+
+    sse := DashboardSSE on: bbs.
+    html := (sse computeSnapshot) at: 'missionsHtml'.
+
+    t assert: (MsnPanelHelper contains: html sub: 'Other missions')
+      message: 'MP10: Other missions group present (the approved mission)'.
+    t assert: (MsnPanelHelper contains: html sub: 'mission-group--archived')
+      message: 'MP10: Archived section rendered'.
+    t assert: (MsnPanelHelper contains: html sub: 'msn-arch')
+      message: 'MP10: archived mission is still rendered (tuple preserved)'.
+    "The archived card must appear AFTER the Other-missions group, i.e. NOT
+     inside it — assert the archived id renders past the Archived <details>."
+    othersIdx := html indexOf: 'Other missions'.
+    archIdx := html indexOf: 'mission-group--archived'.
+    t assert: (archIdx > othersIdx)
+      message: 'MP10: Archived section rendered after the Other-missions group'.
+    "And the archived id lives past the Archived boundary, not in Other."
+    t assert: ((html indexOf: 'msn-arch') > archIdx)
+      message: 'MP10: archived mission card is inside the Archived section'
+  ]
+
+"=== MP11: an archived-only scope still renders (empty-state guard) ==="
+TestMissionPanelArchivedOnly subclass: Object
+  classMethod: run: t [
+    | tempDir bbs sse html |
+    '--- MP11: archived-only scope still renders (not No missions yet) ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    MsnPanelHelper seedMission: bbs id: 'msn-onlyarch' status: 'archived'
+      brief: 'The only mission' plan: '# p'.
+
+    sse := DashboardSSE on: bbs.
+    html := (sse computeSnapshot) at: 'missionsHtml'.
+
+    t assert: (MsnPanelHelper contains: html sub: 'No missions yet') not
+      message: 'MP11: archived-only scope is NOT the empty state'.
+    t assert: (MsnPanelHelper contains: html sub: 'mission-group--archived')
+      message: 'MP11: the Archived section renders for an archived-only scope'.
+    t assert: (MsnPanelHelper contains: html sub: 'msn-onlyarch')
+      message: 'MP11: the archived mission card renders'
+  ]
+
 "=== Main ==="
 MissionPanelMain subclass: Object
   classMethod: run [
@@ -362,6 +416,12 @@ MissionPanelMain subclass: Object
     [TestMissionPanelStableOrder run: t] on: Exception do: [:e |
       ('TestMissionPanelStableOrder CRASHED: ', e messageText) println.
       t assert: false message: 'TestMissionPanelStableOrder crashed'].
+    [TestMissionPanelArchived run: t] on: Exception do: [:e |
+      ('TestMissionPanelArchived CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionPanelArchived crashed'].
+    [TestMissionPanelArchivedOnly run: t] on: Exception do: [:e |
+      ('TestMissionPanelArchivedOnly CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionPanelArchivedOnly crashed'].
     t report.
     ^t failed
   ]

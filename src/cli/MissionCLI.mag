@@ -2,7 +2,10 @@
 
  A mission captures an operator's brief, the researched intent, and a
  human-reviewed plan. It matures through a status lifecycle:
-   researching -> awaiting-approval -> approved | rejected
+   researching -> awaiting-approval -> approved | rejected -> archived
+ `archived` is TERMINAL (symmetric with doctrine maturity:retired) — reached via
+ `pp mission archive` from approved/rejected/researching (never from
+ awaiting-approval). The tuple is preserved (no delete).
  `pp mission start` kicks the 'mission-brief' workflow (added in W2), which
  researches the brief and writes the intent/plan back into THIS mission tuple;
  a human then approves or rejects the resulting plan.
@@ -67,6 +70,7 @@ MissionCLI subclass: Object
     sub = 'set-plan'   ifTrue: [^self cmdSetPlan: args].
     sub = 'approve'    ifTrue: [^self cmdApprove: args].
     sub = 'reject'     ifTrue: [^self cmdReject: args].
+    sub = 'archive'    ifTrue: [^self cmdArchive: args].
     (sub = 'help' or: [sub = '--help']) ifTrue: [^self printUsage].
     ('Unknown mission command: ', sub) println.
     self printUsage
@@ -295,25 +299,39 @@ MissionCLI subclass: Object
 
   method: cmdApprove: args [
     "pp mission approve <id> [--repo R] — awaiting-approval -> approved."
-    ^self setStatusFor: args to: 'approved' reason: nil action: 'approve'
+    ^self setStatusFor: args to: 'approved' reason: nil action: 'approve' allowedFrom: #('awaiting-approval')
   ]
 
   method: cmdReject: args [
     "pp mission reject <id> [--reason R] [--repo R] — awaiting-approval -> rejected."
     | reason |
     reason := self flagValue: '--reason' in: args.
-    ^self setStatusFor: args to: 'rejected' reason: reason action: 'reject'
+    ^self setStatusFor: args to: 'rejected' reason: reason action: 'reject' allowedFrom: #('awaiting-approval')
   ]
 
-  method: setStatusFor: args to: newStatus reason: reason action: action [
-    "Guarded read-modify-write of a mission's status. ONLY missions awaiting
-     approval may be approved/rejected — any other status is refused with a
-     warning (the plan gate must not be flipped before the workflow has produced
-     a plan, nor re-decided after the fact)."
+  method: cmdArchive: args [
+    "pp mission archive <id> [--reason R] [--repo R] — retire a decided/researching
+     mission into the terminal `archived` status (symmetric with doctrine
+     maturity:retired). Archivable from approved/rejected/researching; NOT from
+     awaiting-approval (a pending plan gate must be decided before it is retired).
+     The tuple is preserved (no delete) — missions are linear + durable."
+    | reason |
+    reason := self flagValue: '--reason' in: args.
+    ^self setStatusFor: args to: 'archived' reason: reason action: 'archive'
+      allowedFrom: #('approved' 'rejected' 'researching')
+  ]
+
+  method: setStatusFor: args to: newStatus reason: reason action: action allowedFrom: allowedFrom [
+    "Guarded read-modify-write of a mission's status. The transition is refused
+     unless the mission's CURRENT status is a member of `allowedFrom` — the single
+     signed-write path shared by approve/reject (allowedFrom {awaiting-approval})
+     and archive (allowedFrom {approved, rejected, researching}). The guard keeps
+     the plan gate from being flipped before a plan exists, and keeps `archived`
+     terminal (approve/reject never list it in allowedFrom)."
     | id m p cur |
     args size < 3 ifTrue: [
       ('Usage: pp mission ', action, ' <id>',
-        (action = 'reject' ifTrue: [' [--reason R]'] ifFalse: [''])) println.
+        ((action = 'reject' or: [action = 'archive']) ifTrue: [' [--reason R]'] ifFalse: [''])) println.
       ^self
     ].
     id := args at: 3.
@@ -322,8 +340,9 @@ MissionCLI subclass: Object
     m isNil ifTrue: [('Not found: ', id) println. ^self].
     p := m at: 'payload' ifAbsent: [Dictionary new].
     cur := p at: 'status' ifAbsent: ['?'].
-    cur = 'awaiting-approval' ifFalse: [
-      ('Refused: mission ', id, ' is ', cur, ' — only awaiting-approval missions can be ', newStatus, '.') println.
+    (allowedFrom includes: cur) ifFalse: [
+      ('Refused: mission ', id, ' is ', cur, ' — only ',
+        (self joinStatuses: allowedFrom), ' missions can be ', newStatus, '.') println.
       ^self
     ].
     p at: 'status' put: newStatus.
@@ -331,6 +350,18 @@ MissionCLI subclass: Object
     p at: 'updated_at' put: DateTime now epochSeconds.
     self putMission: id payload: p.
     (id, ' -> ', newStatus, (reason notNil ifTrue: [' (', reason, ')'] ifFalse: [''])) println
+  ]
+
+  method: joinStatuses: statuses [
+    "Human-readable 'a/b/c' join of an allowed-from status set for refusal
+     messages — names exactly which statuses permit the requested transition."
+    | s first |
+    s := ''.
+    first := true.
+    statuses do: [:st |
+      first ifTrue: [s := st. first := false] ifFalse: [s := s, '/', st]
+    ].
+    ^s
   ]
 
   "--- helpers ---------------------------------------------------------"
@@ -368,5 +399,8 @@ MissionCLI subclass: Object
     '  set-plan <id> "<md>" [--repo R]     Write plan + flip to awaiting-approval (workflow agents)' println.
     '  approve <id> [--repo R]         awaiting-approval -> approved' println.
     '  reject <id> [--reason R] [--repo R]   awaiting-approval -> rejected (+ reason)' println.
+    '  archive <id> [--reason R] [--repo R]  approved|rejected|researching -> archived (terminal)' println.
+    '' println.
+    'Lifecycle: researching -> awaiting-approval -> approved | rejected -> archived' println.
     ^self
   ]

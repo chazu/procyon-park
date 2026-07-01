@@ -168,6 +168,9 @@ TestMissionCli subclass: Object
     self testApprove: t.
     self testRejectWithReason: t.
     self testApproveRejectRefusedWhenNotAwaiting: t.
+    self testArchiveFromDecidedAndResearching: t.
+    self testArchiveRefusedWhenAwaiting: t.
+    self testArchiveIsTerminal: t.
     self testListFiltersByStatus: t.
     self testSetIntentWritesIntent: t.
     self testSetPlanWritesPlanAndAwaitingApproval: t.
@@ -364,6 +367,68 @@ TestMissionCli subclass: Object
       message: 'MS7: reject refused — researching mission stays researching'.
     t assert: ((m at: 'payload') at: 'reason' ifAbsent: ['sentinel']) = 'sentinel'
       message: 'MS7: refused reject did NOT record a reason'
+  ]
+
+  classMethod: testArchiveFromDecidedAndResearching: t [
+    "MS12: archive SUCCEEDS from approved/rejected/researching (the retire path)."
+    | bbs cli m |
+    '--- MS12: archive from approved/rejected/researching -> archived ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    MsnHelper seedMission: bbs id: 'msn-arA' status: 'approved' brief: 'a'.
+    MsnHelper seedMission: bbs id: 'msn-arB' status: 'rejected' brief: 'b'.
+    MsnHelper seedMission: bbs id: 'msn-arC' status: 'researching' brief: 'c'.
+    cli := TestMissionCLI onBbs: bbs.
+
+    cli runWith: #('mission' 'archive' 'msn-arA').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-arA'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'archived'
+      message: 'MS12: approved mission archives -> archived'.
+
+    cli runWith: #('mission' 'archive' 'msn-arB' '--reason' 'stale').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-arB'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'archived'
+      message: 'MS12: rejected mission archives -> archived'.
+    t assertEqual: ((m at: 'payload') at: 'reason' ifAbsent: [nil]) to: 'stale'
+      message: 'MS12: archive records the --reason'.
+
+    cli runWith: #('mission' 'archive' 'msn-arC').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-arC'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'archived'
+      message: 'MS12: researching mission archives -> archived'
+  ]
+
+  classMethod: testArchiveRefusedWhenAwaiting: t [
+    "MS13: archive on an awaiting-approval mission is refused (status unchanged) —
+     a pending plan gate must be decided before it can be retired."
+    | bbs cli m |
+    '--- MS13: archive refused when awaiting-approval ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    MsnHelper seedMission: bbs id: 'msn-arw' status: 'awaiting-approval' brief: 'b'.
+    cli := TestMissionCLI onBbs: bbs.
+    cli runWith: #('mission' 'archive' 'msn-arw').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-arw'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'awaiting-approval'
+      message: 'MS13: archive refused — awaiting-approval mission stays awaiting-approval'
+  ]
+
+  classMethod: testArchiveIsTerminal: t [
+    "MS14: archived is TERMINAL — approve/reject continue to refuse it (the
+     generalized guard never lists archived in approve/reject allowedFrom)."
+    | bbs cli m |
+    '--- MS14: archived is terminal (approve/reject refuse it) ---' println.
+    bbs := BBS withDataDir: MsnHelper makeTempDir.
+    MsnHelper seedMission: bbs id: 'msn-term' status: 'archived' brief: 'b'.
+    cli := TestMissionCLI onBbs: bbs.
+
+    cli runWith: #('mission' 'approve' 'msn-term').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-term'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'archived'
+      message: 'MS14: approve refused — archived mission stays archived'.
+
+    cli runWith: #('mission' 'reject' 'msn-term' '--reason' 'no').
+    m := bbs rdp: 'mission' scope: 'default' identity: 'msn-term'.
+    t assertEqual: ((m at: 'payload') at: 'status' ifAbsent: [nil]) to: 'archived'
+      message: 'MS14: reject refused — archived mission stays archived'
   ]
 
   classMethod: testListFiltersByStatus: t [
