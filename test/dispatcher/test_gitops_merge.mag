@@ -14,6 +14,11 @@
         changes, which are never clobbered) and false for a dirty TRACKED tree.
    GM5  A conflicting merge raises, and leaves the target ref AND the primary
         tree untouched (no partial clobber, no mid-merge state).
+   GM6  syncMainIntoFeature merges a non-overlapping main advance cleanly into the
+        feature branch and tears its worktree down (pre-land fast-forward setup).
+   GM7  syncMainIntoFeature reports 'conflict' on an overlapping main advance and
+        LEAVES the resolve worktree mid-merge (unmerged paths) for a resolver,
+        without touching the primary tree or advancing the feature ref.
 
  Standalone runner at bottom (GitOpsMergeMain run)."
 
@@ -81,7 +86,7 @@ GitOpsMergeHelper subclass: Object
 TestGitOpsMerge subclass: Object
 
   classMethod: run: t [
-    | r r2 r3 |
+    | r r2 r3 r6 wt6 r7 wt7 status6 status7 |
 
     "--- GM1 + GM3: fast-forward impl -> feature, primary tree untouched ---"
     r := '/tmp/pp-gitops-test-ff'.
@@ -144,7 +149,58 @@ TestGitOpsMerge subclass: Object
         message: 'GM5: primary tree clean after conflict (no mid-merge state)'.
       t assertEqual: (GitOpsMergeHelper ephemeralCountIn: r3) to: '0'
         message: 'GM5: no ephemeral worktree leaked after conflict'
-    ]
+    ].
+
+    "--- GM6: syncMainIntoFeature clean (main advanced, no overlap) ---
+     Feature forks from main, both advance on DIFFERENT files. Syncing main into
+     feature must merge cleanly, leave feature containing BOTH files, and tear the
+     sync worktree down — making the eventual feature->main a fast-forward."
+    r6 := '/tmp/pp-gitops-test-sync-clean'.
+    wt6 := '/tmp/pp-gitops-test-sync-clean-wt/resolve'.
+    Shell run: 'rm -rf "', r6, '" "', wt6, '"; mkdir -p "', r6, '" && cd "', r6, '" && git init -q && git commit -q --allow-empty -m init && git checkout -q -b feature/s6 && echo work > w.txt && git add w.txt && git commit -q -m "feature work" && git checkout -q main && echo mainfile > m.txt && git add m.txt && git commit -q -m "main advances" && git checkout -q main'.
+    [
+      status6 := GitOps syncMainIntoFeature: 'feature/s6' worktree: wt6 main: 'main' in: r6.
+      t assertEqual: status6 to: 'clean'
+        message: 'GM6: syncMainIntoFeature returns clean for a non-overlapping main advance'.
+      t assert: ((Shell capture: 'git -C "', r6, '" cat-file -e feature/s6:m.txt 2>&1; echo $?') trimSeparators = '0')
+        message: 'GM6: feature now contains the file that landed on main'.
+      t assert: ((Shell capture: 'git -C "', r6, '" cat-file -e feature/s6:w.txt 2>&1; echo $?') trimSeparators = '0')
+        message: 'GM6: feature still contains its own work'.
+      t assertEqual: (GitOpsMergeHelper branchOf: r6) to: 'main'
+        message: 'GM6: primary tree still on main (never switched)'.
+      t assert: (GitOps isCleanTree: r6)
+        message: 'GM6: primary tree clean after sync'.
+      t assertEqual: ((Shell capture: 'git -C "', r6, '" worktree list | grep -c resolve') trimSeparators) to: '0'
+        message: 'GM6: sync worktree torn down after a clean sync'
+    ] on: Exception do: [:e |
+      t assert: false message: 'GM6: syncMainIntoFeature raised unexpectedly — ', e messageText
+    ].
+
+    "--- GM7: syncMainIntoFeature conflict (same file diverged) ---
+     Feature and main both edit the SAME file divergently. Syncing must report
+     'conflict', LEAVE the worktree checked out on feature with the merge in
+     progress (unmerged paths) for a resolver, and never touch the primary tree or
+     advance the feature ref."
+    r7 := '/tmp/pp-gitops-test-sync-conflict'.
+    wt7 := '/tmp/pp-gitops-test-sync-conflict-wt/resolve'.
+    Shell run: 'rm -rf "', r7, '" "', wt7, '"; mkdir -p "', r7, '" && cd "', r7, '" && git init -q && echo base > c.txt && git add c.txt && git commit -q -m init && git checkout -q -b feature/s7 && echo featureside > c.txt && git commit -q -am "feature edits c" && git checkout -q main && echo mainside > c.txt && git commit -q -am "main edits c" && git checkout -q main'.
+    [
+      status7 := GitOps syncMainIntoFeature: 'feature/s7' worktree: wt7 main: 'main' in: r7.
+      t assertEqual: status7 to: 'conflict'
+        message: 'GM7: syncMainIntoFeature returns conflict for an overlapping main advance'.
+      t assert: (GitOps hasUnmergedPaths: wt7)
+        message: 'GM7: resolve worktree left with unmerged paths for the resolver'.
+      t assertEqual: (GitOpsMergeHelper tipSubjectOf: 'feature/s7' in: r7) to: 'feature edits c'
+        message: 'GM7: feature ref unchanged (merge not committed) after conflict'.
+      t assertEqual: (GitOpsMergeHelper branchOf: r7) to: 'main'
+        message: 'GM7: primary tree still on main after conflict sync'.
+      t assert: (GitOps isCleanTree: r7)
+        message: 'GM7: primary tree clean after conflict sync (no mid-merge in primary)'
+    ] on: Exception do: [:e |
+      t assert: false message: 'GM7: syncMainIntoFeature raised unexpectedly — ', e messageText
+    ].
+    "Tear down the conflicted worktree GM7 deliberately left behind."
+    GitOps pruneEphemeralWorktree: wt7 in: r7
   ]
 
 "=== Main ==="

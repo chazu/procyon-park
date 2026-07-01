@@ -7,6 +7,18 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+- **Full-pipeline landings now self-heal when `main` moves underneath a run.**
+  Before merging a feature branch to `main`, the pipeline first syncs `main`
+  *into* the feature branch in a dedicated, tree-safe worktree. A non-overlapping
+  advance lands automatically as a fast-forward. An overlapping (conflicting)
+  advance no longer stops the run for a human: a new **resolver** agent is
+  dispatched into a worktree with the merge in progress, resolves the conflict on
+  the branch, commits, and the pipeline re-syncs and lands. After a bounded number
+  of resolver passes it still fails cleanly for human intervention, so the safety
+  net is preserved. This fixes the mission-pipeline conflict where spec tests
+  landing on `main` mid-run clashed with the impl branch rewriting the same file.
+
 ### Fixed
 - Dashboard Missions panel: **`done` (completed) missions no longer show in the
   active "Other missions" list.** Like archived missions, they are now filed into

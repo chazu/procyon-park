@@ -22,6 +22,7 @@ WorkflowEngine subclass: Object
     actions := Dictionary new.
     actions at: 'create-worktree' put: (CreateWorktreeAction on: self).
     actions at: 'merge-worktree' put: (MergeWorktreeAction on: self).
+    actions at: 'sync-worktree' put: (SyncWorktreeAction on: self).
     actions at: 'discard-worktree' put: (DiscardWorktreeAction on: self).
     actions at: 'spawn-workflow' put: (SpawnWorkflowAction on: self).
     actions at: 'dispatch-waves' put: (DispatchWavesAction on: self).
@@ -477,7 +478,7 @@ WorkflowEngine subclass: Object
     ].
 
     role notNil ifTrue: [
-      | repo transitionTimeout workitemId |
+      | repo transitionTimeout workitemId workdirSignalName |
       taskPayload := Dictionary new.
       taskPayload at: 'role' put: role.
       taskPayload at: 'status' put: 'pending'.
@@ -522,8 +523,12 @@ WorkflowEngine subclass: Object
       workdir notNil ifTrue: [
         taskPayload at: 'workdir' put: (self resolveParams: workdir with: params)
       ].
-      "Override with worktree signal if one exists for this workflow instance"
-      worktreeInfo := bbs rdp: 'signal' scope: instanceId identity: 'worktree'.
+      "Override with a worktree signal if one exists for this workflow instance.
+       A transition may name an ALTERNATE workdir signal (e.g. the resolver reads
+       'resolve_worktree' so it lands in the conflict worktree, not the impl one);
+       absent the override this is the standard 'worktree' signal."
+      workdirSignalName := transition at: 'workdir_signal' ifAbsent: ['worktree'].
+      worktreeInfo := bbs rdp: 'signal' scope: instanceId identity: workdirSignalName.
       worktreeInfo notNil ifTrue: [
         taskPayload at: 'workdir' put: ((worktreeInfo at: 'payload') at: 'workdir').
         taskPayload at: 'repo' put: ((worktreeInfo at: 'payload') at: 'repo_path')

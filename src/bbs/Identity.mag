@@ -56,6 +56,13 @@ Identity subclass: Object
     ^'verdict:', instanceId
   ]
 
+  classMethod: landSync: instanceId [
+    "Signal recording the result of syncing main into the feature branch before
+     the feature->main land (status: clean | conflict). Gates the land vs
+     resolve-conflict branch in the full-pipeline template."
+    ^'land-sync:', instanceId
+  ]
+
   classMethod: worker: aName [
     "Canonical identity string for a worker tuple."
     ^'worker:', aName

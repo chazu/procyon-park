@@ -16,6 +16,7 @@ HarnessFactory subclass: Object
     roles at: 'doc-reviewer' put: DocReviewer new.
     roles at: 'tester' put: Tester new.
     roles at: 'fixer' put: Fixer new.
+    roles at: 'resolver' put: Resolver new.
     roles at: 'foreman' put: Foreman new.
     roles at: 'archivist' put: Archivist new.
     roles at: 'strategist' put: Strategist new

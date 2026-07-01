@@ -1,0 +1,225 @@
+"Integration tests for SyncWorktreeAction — the pre-land step that merges main
+ into the feature branch so feature->main is a clean fast-forward, and routes to a
+ resolver (instead of failing) when main conflicts.
+
+ Invariants under test (real ganso BBS + real git repos):
+   SW1  Clean sync: a non-overlapping main advance merges into the feature branch;
+        the action emits land-sync {status:'clean'} in the WORKFLOW scope so the
+        template's `land` precondition fires.
+   SW2  Conflict sync: an overlapping main advance emits land-sync
+        {status:'conflict', attempts:1}, publishes a resolve_worktree signal (in
+        the instance scope) pointing at a worktree left mid-merge for the resolver,
+        and does NOT fail the workflow.
+   SW3  Cap: once the resolver attempts exceed the cap, a further conflict fails
+        the workflow (human intervention) rather than looping forever.
+
+ Standalone runner at bottom (SyncWorktreeMain run)."
+
+SWRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== SyncWorktreeAction Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+SWHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedWorkflow: bbs scope: scope instance: instanceId [
+    "Minimal running workflow tuple so engine scopeForInstance:/statusOf: resolve."
+    | p |
+    p := Dictionary new.
+    p at: 'status' put: 'running'.
+    p at: 'template' put: 'full-pipeline'.
+    bbs out: 'workflow' scope: scope identity: instanceId payload: p
+  ]
+
+  classMethod: seedWorktreeSignal: bbs instance: instanceId repo: repoPath feature: featureBranch [
+    "Worktree signal the pipeline case reads: empty impl branch, feature ref carries
+     the work (implBranch empty => the parent pipeline owns the feature->main land)."
+    | p |
+    p := Dictionary new.
+    p at: 'repo_path' put: repoPath.
+    p at: 'feature_branch' put: featureBranch.
+    p at: 'branch' put: ''.
+    p at: 'workdir' put: ''.
+    p at: 'standalone' put: 'false'.
+    bbs upsertSignal: instanceId identity: 'worktree' payload: p
+  ]
+
+  classMethod: initRepoClean: r feature: fb [
+    "main forks feature, both advance on DIFFERENT files -> mergeable."
+    Shell run: 'rm -rf "', r, '"; mkdir -p "', r, '" && cd "', r, '" && git init -q && git commit -q --allow-empty -m init && git checkout -q -b "', fb, '" && echo work > w.txt && git add w.txt && git commit -q -m "feature work" && git checkout -q main && echo mainfile > m.txt && git add m.txt && git commit -q -m "main advances" && git checkout -q main'
+  ]
+
+  classMethod: initRepoConflict: r feature: fb [
+    "main forks feature, both edit the SAME file divergently -> conflict."
+    Shell run: 'rm -rf "', r, '"; mkdir -p "', r, '" && cd "', r, '" && git init -q && echo base > c.txt && git add c.txt && git commit -q -m init && git checkout -q -b "', fb, '" && echo featureside > c.txt && git commit -q -am "feature edits c" && git checkout -q main && echo mainside > c.txt && git commit -q -am "main edits c" && git checkout -q main'
+  ]
+
+"--- Tests ---"
+TestSyncWorktree subclass: Object
+
+  classMethod: run: t [
+    self testCleanSync: t.
+    self testConflictSync: t.
+    self testCapFailsWorkflow: t
+  ]
+
+  classMethod: testCleanSync: t [
+    | tempDir bbs engine r fb inst landSig |
+    '--- SW1: clean sync emits land-sync clean ---' println.
+    tempDir := SWHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    engine := WorkflowEngine on: bbs.
+    r := tempDir, '/repo-clean'.
+    fb := 'feature/sw1'.
+    inst := 'wf-sw1'.
+    SWHelper initRepoClean: r feature: fb.
+    SWHelper seedWorkflow: bbs scope: 'repoS' instance: inst.
+    SWHelper seedWorktreeSignal: bbs instance: inst repo: r feature: fb.
+
+    (SyncWorktreeAction on: engine) execute: (Dictionary new) instance: inst params: (Dictionary new).
+
+    landSig := bbs rdp: 'signal' scope: 'repoS' identity: (Identity landSync: inst).
+    t assert: landSig notNil message: 'SW1: land-sync signal written'.
+    landSig notNil ifTrue: [
+      t assertEqual: ((landSig at: 'payload') at: 'status' ifAbsent: [nil]) to: 'clean'
+        message: 'SW1: status is clean for a non-overlapping main advance'
+    ].
+    t assert: ((Shell capture: 'git -C "', r, '" cat-file -e ', fb, ':m.txt 2>&1; echo $?') trimSeparators = '0')
+      message: 'SW1: feature branch now contains main''s file (synced)'.
+    t assertEqual: (engine statusOf: (bbs findByCategory: 'workflow' identity: inst)) to: 'running'
+      message: 'SW1: workflow left running (not failed) on a clean sync'
+  ]
+
+  classMethod: testConflictSync: t [
+    | tempDir bbs engine r fb inst landSig resolveSig resolveDir home |
+    '--- SW2: conflict sync emits land-sync conflict + resolve worktree ---' println.
+    tempDir := SWHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    engine := WorkflowEngine on: bbs.
+    r := tempDir, '/repo-conflict'.
+    fb := 'feature/sw2'.
+    inst := 'wf-swtest-conflict'.
+    SWHelper initRepoConflict: r feature: fb.
+    SWHelper seedWorkflow: bbs scope: 'repoS' instance: inst.
+    SWHelper seedWorktreeSignal: bbs instance: inst repo: r feature: fb.
+
+    (SyncWorktreeAction on: engine) execute: (Dictionary new) instance: inst params: (Dictionary new).
+
+    landSig := bbs rdp: 'signal' scope: 'repoS' identity: (Identity landSync: inst).
+    t assert: landSig notNil message: 'SW2: land-sync signal written'.
+    landSig notNil ifTrue: [
+      t assertEqual: ((landSig at: 'payload') at: 'status' ifAbsent: [nil]) to: 'conflict'
+        message: 'SW2: status is conflict for an overlapping main advance'.
+      t assertEqual: ((landSig at: 'payload') at: 'attempts' ifAbsent: [nil]) to: 1
+        message: 'SW2: first conflict records attempts=1'
+    ].
+    resolveSig := bbs rdp: 'signal' scope: inst identity: 'resolve_worktree'.
+    t assert: resolveSig notNil message: 'SW2: resolve_worktree signal published for the resolver'.
+    resolveSig notNil ifTrue: [
+      resolveDir := (resolveSig at: 'payload') at: 'workdir' ifAbsent: [nil].
+      t assert: (GitOps hasUnmergedPaths: resolveDir)
+        message: 'SW2: resolve worktree left mid-merge (unmerged paths) for the resolver'.
+      "Clean up the resolve worktree the action created under the real HOME."
+      GitOps pruneEphemeralWorktree: resolveDir in: r
+    ].
+    t assertEqual: (engine statusOf: (bbs findByCategory: 'workflow' identity: inst)) to: 'running'
+      message: 'SW2: workflow NOT failed on a resolvable conflict'.
+    home := System env: 'HOME'.
+    (home notNil and: [home isEmpty not]) ifTrue: [
+      Shell run: 'rm -rf "', home, '/.pp/worktrees/', inst, '"'
+    ]
+  ]
+
+  classMethod: testCapFailsWorkflow: t [
+    | tempDir bbs engine r fb inst priorLand home |
+    '--- SW3: exceeding the resolver cap fails the workflow ---' println.
+    tempDir := SWHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    engine := WorkflowEngine on: bbs.
+    r := tempDir, '/repo-cap'.
+    fb := 'feature/sw3'.
+    inst := 'wf-swtest-cap'.
+    SWHelper initRepoConflict: r feature: fb.
+    SWHelper seedWorkflow: bbs scope: 'repoS' instance: inst.
+    SWHelper seedWorktreeSignal: bbs instance: inst repo: r feature: fb.
+    "Pre-seed attempts already at the cap so the next conflict trips it."
+    priorLand := Dictionary new.
+    priorLand at: 'status' put: 'conflict'.
+    priorLand at: 'attempts' put: SyncWorktreeAction resolveAttemptCap.
+    bbs upsertSignal: 'repoS' identity: (Identity landSync: inst) payload: priorLand.
+
+    (SyncWorktreeAction on: engine) execute: (Dictionary new) instance: inst params: (Dictionary new).
+
+    t assertEqual: (engine statusOf: (bbs findByCategory: 'workflow' identity: inst)) to: 'failed'
+      message: 'SW3: workflow fails once resolver attempts exceed the cap'.
+    "Clean up any resolve worktree left under the real HOME."
+    home := System env: 'HOME'.
+    (home notNil and: [home isEmpty not]) ifTrue: [
+      Shell run: 'rm -rf "', home, '/.pp/worktrees/', inst, '"'
+    ]
+  ]
+
+"--- Main ---"
+SyncWorktreeMain subclass: Object
+  classMethod: run [
+    | t |
+    t := SWRunner new.
+    [TestSyncWorktree run: t] on: Exception do: [:e |
+      ('TestSyncWorktree CRASHED: ', e messageText) println.
+      t assert: false message: 'TestSyncWorktree crashed'
+    ].
+    t report.
+    ^t failed
+  ]

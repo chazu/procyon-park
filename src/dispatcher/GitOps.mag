@@ -244,3 +244,63 @@ GitOps subclass: Object
         ]
     ]
   ]
+
+  classMethod: hasUnmergedPaths: worktreeDir [
+    "True if the given worktree has unmerged (conflicted) paths — used to tell a
+     genuine merge conflict apart from other git failures. Plain capture: (no
+     watchdog): ls-files is instant, and capture:timeout: soft-fails to ''."
+    | output |
+    output := Shell capture: 'git -C "', worktreeDir, '" ls-files --unmerged'.
+    output isNil ifTrue: [^false].
+    ^output trimSeparators isEmpty not
+  ]
+
+  classMethod: syncMainIntoFeature: featureBranch worktree: dir main: mainBranch in: repoPath [
+    "Bring <mainBranch> into <featureBranch> so the eventual feature->main land is
+     a clean fast-forward. Runs in a DEDICATED persistent worktree at <dir> and
+     NEVER switches or dirties the primary working tree.
+
+     Returns:
+       'clean'    — main merged cleanly; featureBranch now contains main and the
+                    worktree has been torn down.
+       'conflict' — the merge conflicted; the worktree at <dir> is LEFT checked
+                    out on featureBranch with the merge IN PROGRESS (conflict
+                    markers present), ready for a resolver agent to fix + commit.
+
+     Signals Error only on an unexpected git failure (not on a real conflict).
+     featureBranch must not be checked out in another worktree — in the
+     full-pipeline it lives only as a ref while impl work happens elsewhere."
+    | conflicted |
+    "Clear any stale worktree dir from a prior sync/resolve attempt (idempotent)."
+    self pruneEphemeralWorktree: dir in: repoPath.
+
+    "Check out featureBranch in a fresh persistent worktree."
+    Shell runChecked: 'mkdir -p "$(dirname "', dir, '")" && git -C "', repoPath, '" worktree add "', dir, '" "', featureBranch, '"'
+      timeout: self defaultTimeoutWrite.
+
+    "Merge main inside the worktree. --no-edit auto-commits on success (advancing
+     featureBranch); on conflict git exits nonzero and leaves the merge staged
+     with conflict markers."
+    conflicted := false.
+    [Shell runChecked: 'git -C "', dir, '" merge "', mainBranch, '" --no-edit'
+       timeout: self defaultTimeoutWrite]
+      on: Exception do: [:e | conflicted := true].
+
+    conflicted ifFalse: [
+      "Clean (or already-up-to-date) — feature now contains main. Tear down."
+      self pruneEphemeralWorktree: dir in: repoPath.
+      ^'clean'
+    ].
+
+    "Distinguish a genuine conflict from an unexpected git error. Only real
+     conflicts (unmerged paths) are handed to a resolver; anything else aborts
+     and re-signals so the workflow fails loudly rather than dispatching a
+     resolver into a broken state."
+    (self hasUnmergedPaths: dir) ifFalse: [
+      [Shell runChecked: 'git -C "', dir, '" merge --abort' timeout: self defaultTimeoutFast]
+        on: Exception do: [:ignored | nil].
+      self pruneEphemeralWorktree: dir in: repoPath.
+      Error signal: 'sync ', mainBranch, ' into ', featureBranch, ' failed (no unmerged paths — not a conflict)'
+    ].
+    ^'conflict'
+  ]

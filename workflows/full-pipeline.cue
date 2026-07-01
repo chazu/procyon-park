@@ -123,10 +123,58 @@ transitions: [
 		out: ["reviewing", "testing"]
 	},
 	{
-		id:  "integrate"
-		in:  ["merging"]
-		out: ["merged"]
-		_worktree_bookend.merge
+		id:     "sync"
+		in:     ["merging"]
+		out:    ["syncing"]
+		action: "sync-worktree"
+	},
+	{
+		id:     "re_sync"
+		in:     ["resolved"]
+		out:    ["syncing"]
+		action: "sync-worktree"
+	},
+	{
+		id:     "land"
+		in:     ["syncing"]
+		out:    ["merged"]
+		action: "merge-worktree"
+		preconditions: [
+			{
+				category:   "signal"
+				identity:   "land-sync:{{instance}}"
+				constraint: "{status: \"clean\"}"
+			},
+		]
+	},
+	{
+		id:  "resolve_needed"
+		in:  ["syncing"]
+		out: ["resolving"]
+		preconditions: [
+			{
+				category:   "signal"
+				identity:   "land-sync:{{instance}}"
+				constraint: "{status: \"conflict\"}"
+			},
+		]
+	},
+	{
+		id:   "resolve"
+		in:   ["resolving"]
+		out:  ["resolved"]
+		role: "resolver"
+		// The resolver works the dedicated resolve worktree (git merge main in
+		// progress), NOT the impl worktree — workdir_signal repoints it.
+		workdir_signal: "resolve_worktree"
+		description: """
+			Resolve the merge conflict between main and the feature branch for: {{description}}
+
+			Your worktree has `git merge main` IN PROGRESS with conflict markers.
+			Resolve every conflicted file so it keeps BOTH this branch's work and the
+			changes that landed on main, then conclude the merge with `git commit
+			--no-edit`. Do NOT run `git merge --abort`. Do not add new features.
+			"""
 	},
 	{
 		id:  "notify"

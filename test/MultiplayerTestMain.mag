@@ -381,13 +381,14 @@ MultiplayerTestMain subclass: Object
 CombinedTestMain subclass: Object
 
   classMethod: run [
-    | wfFailed mpFailed ccFailed arFailed dcFailed gmFailed drFailed cxFailed fbFailed diFailed doFailed msnFailed mpnFailed |
+    | wfFailed mpFailed ccFailed arFailed dcFailed gmFailed swFailed drFailed cxFailed fbFailed diFailed doFailed msnFailed mpnFailed |
     wfFailed := 0.
     mpFailed := 0.
     ccFailed := 0.
     arFailed := 0.
     dcFailed := 0.
     gmFailed := 0.
+    swFailed := 0.
     drFailed := 0.
     cxFailed := 0.
     fbFailed := 0.
@@ -434,6 +435,12 @@ CombinedTestMain subclass: Object
         ('GitOpsMergeMain CRASHED: ', e messageText) println.
         gmFailed := 1].
     gmFailed isNil ifTrue: [gmFailed := 0].
+
+    [swFailed := SyncWorktreeMain run]
+      on: Exception do: [:e |
+        ('SyncWorktreeMain CRASHED: ', e messageText) println.
+        swFailed := 1].
+    swFailed isNil ifTrue: [swFailed := 0].
 
     [drFailed := DoctrineRoutingMain run]
       on: Exception do: [:e |
@@ -488,6 +495,7 @@ CombinedTestMain subclass: Object
     ('Archivist-role failures:    ', arFailed printString) println.
     ('Doctrine-category failures: ', dcFailed printString) println.
     ('GitOps-merge failures:      ', gmFailed printString) println.
+    ('Sync-worktree failures:     ', swFailed printString) println.
     ('Doctrine-routing failures:  ', drFailed printString) println.
     ('Doctrine-crystallize fails: ', cxFailed printString) println.
     ('Doctrine-feedback fails:    ', fbFailed printString) println.
@@ -495,7 +503,7 @@ CombinedTestMain subclass: Object
     ('Doctrine-outcome fails:     ', doFailed printString) println.
     ('Mission-CLI failures:       ', msnFailed printString) println.
     ('Mission-panel failures:     ', mpnFailed printString) println.
-    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed + gmFailed + drFailed + cxFailed + fbFailed + diFailed + doFailed + msnFailed + mpnFailed) = 0
+    (wfFailed + mpFailed + ccFailed + arFailed + dcFailed + gmFailed + swFailed + drFailed + cxFailed + fbFailed + diFailed + doFailed + msnFailed + mpnFailed) = 0
       ifTrue:  ['COMBINED: ALL TESTS PASSED' println]
       ifFalse: ['COMBINED: SOME TESTS FAILED' println]
   ]

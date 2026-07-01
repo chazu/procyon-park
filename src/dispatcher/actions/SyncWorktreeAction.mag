@@ -1,0 +1,93 @@
+"SyncWorktree action — merges main into the feature branch before the final
+ feature->main land, so the land is a clean fast-forward. On conflict it leaves a
+ resolve worktree for a resolver agent and gates the workflow onto the
+ resolve-conflict branch instead of failing.
+
+ Emits the `land-sync:<instance>` signal (in the WORKFLOW scope, so the template's
+ preconditions can read it):
+   {status: 'clean'}    — feature now contains main; the `land` transition fires.
+   {status: 'conflict'} — merge conflicted; the `resolve_needed` transition fires
+                          and a resolver agent works the resolve worktree.
+
+ On the (attempts > cap) case it fails the workflow for human intervention —
+ preserving the pre-existing safety net rather than looping forever."
+
+SyncWorktreeAction subclass: WorkflowAction
+
+  classMethod: resolveAttemptCap [
+    "How many resolver passes to allow before giving up and failing the workflow
+     for human intervention. Merges are far more deterministic than review
+     cycles, so a small cap is plenty; a stuck resolver should surface fast."
+    ^2
+  ]
+
+  method: execute: transition instance: instanceId params: params [
+    | scope info payload repoPath featureBranch home resolveDir status priorSignal attempts landPayload obsPayload resolvePayload |
+
+    scope := engine scopeForInstance: instanceId.
+
+    "Read the worktree signal for the feature branch + repo path."
+    info := bbs rdp: 'signal' scope: instanceId identity: 'worktree'.
+    info isNil ifTrue: [
+      engine failWorkflow: instanceId scope: scope reason: 'sync-worktree: no worktree signal'.
+      ^self
+    ].
+    payload := info at: 'payload'.
+    repoPath := payload at: 'repo_path'.
+    featureBranch := payload at: 'feature_branch'.
+
+    home := System env: 'HOME'.
+    (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
+    resolveDir := home, '/.pp/worktrees/', instanceId, '/resolve'.
+
+    "Sync main into the feature branch in a dedicated worktree (tree-safe)."
+    status := [
+      GitOps syncMainIntoFeature: featureBranch worktree: resolveDir main: 'main' in: repoPath
+    ] on: Exception do: [:e |
+      bbs logEngine: 'error' component: 'sync-worktree' scope: scope message: ('Sync main into ', featureBranch, ' failed: ', e messageText).
+      engine failWorkflow: instanceId scope: scope reason: ('Sync main into ', featureBranch, ' failed: ', e messageText).
+      ^self
+    ].
+
+    status = 'clean' ifTrue: [
+      landPayload := Dictionary new.
+      landPayload at: 'status' put: 'clean'.
+      bbs upsertSignal: scope identity: (Identity landSync: instanceId) payload: landPayload.
+      bbs logEngine: 'info' component: 'sync-worktree' scope: scope message: ('Synced main into ', featureBranch, ' cleanly — ready to land').
+      ^self
+    ].
+
+    "Conflict path. Count attempts so a stuck resolver can't loop forever."
+    priorSignal := bbs rdp: 'signal' scope: scope identity: (Identity landSync: instanceId).
+    attempts := priorSignal isNil
+      ifTrue: [0]
+      ifFalse: [(priorSignal at: 'payload') at: 'attempts' ifAbsent: [0]].
+    attempts := attempts + 1.
+
+    attempts > self class resolveAttemptCap ifTrue: [
+      obsPayload := Dictionary new.
+      obsPayload at: 'detail' put: ('Feature->main land blocked: main conflicts with ', featureBranch, ' and ', self class resolveAttemptCap printString, ' resolver pass(es) did not clear it — human intervention required').
+      bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
+      engine failWorkflow: instanceId scope: scope reason: ('Feature->main land blocked: unresolved conflict with main after ', self class resolveAttemptCap printString, ' resolver pass(es) — human intervention required').
+      ^self
+    ].
+
+    "Publish the resolve worktree so the resolver task lands its workdir there
+     (via the transition's workdir_signal), WITHOUT disturbing the primary
+     worktree signal. Scoped to the instance, matching how the engine reads it."
+    resolvePayload := Dictionary new.
+    resolvePayload at: 'workdir' put: resolveDir.
+    resolvePayload at: 'repo_path' put: repoPath.
+    resolvePayload at: 'feature_branch' put: featureBranch.
+    bbs upsertSignal: instanceId identity: 'resolve_worktree' payload: resolvePayload.
+
+    landPayload := Dictionary new.
+    landPayload at: 'status' put: 'conflict'.
+    landPayload at: 'attempts' put: attempts.
+    bbs upsertSignal: scope identity: (Identity landSync: instanceId) payload: landPayload.
+
+    obsPayload := Dictionary new.
+    obsPayload at: 'detail' put: ('main conflicts with ', featureBranch, ' — dispatching resolver (pass ', attempts printString, ') to merge main and resolve in ', resolveDir).
+    bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
+    bbs logEngine: 'info' component: 'sync-worktree' scope: scope message: ('main conflicts with ', featureBranch, ' — resolver pass ', attempts printString, ' in ', resolveDir)
+  ]
