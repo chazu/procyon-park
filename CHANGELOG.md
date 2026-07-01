@@ -227,6 +227,20 @@ Semantic Versioning.
   as the convention's rationale/lineage record.
 
 ### Fixed
+- Missions dashboard panel no longer resets scroll or collapses an open plan on
+  routine SSE refreshes. The dashboard applies each SSE patch as a wholesale
+  element replace (`target.outerHTML = …`), so re-sending the Missions panel
+  every ~5 s tick yanked a reader out of a long, expanded `awaiting-approval`
+  plan and jumped the view to the top. Three changes fix it: (1) missions now
+  render in a deterministic identity order (`DashboardSSE>>sortMissions:`) so BBS
+  `scanAll` bucket-ordering churn cannot change the HTML tick-to-tick;
+  (2) per-subscriber change-detection (`sendElements:to:key:`) skips re-patching
+  the panel when its HTML is byte-identical to the last one sent to that client
+  (a freshly-connected client still gets the panel on its first tick); and (3) on
+  a *legitimate* update the dashboard now captures the expanded `<details>` state
+  and page scroll before the replace and restores them after, so the operator is
+  never forced to re-expand the plan or re-find their place. Auto-foregrounding of
+  awaiting-approval missions and the approve/reject controls are unchanged.
 - `files_changed` in workflow cases no longer always reads 0. No code ever
   produced a `files_changed` observation, so `CaseBuilder` always fell back to
   its default of 0 and undercounted real merged work. `MergeWorktreeAction` now

@@ -1456,6 +1456,30 @@
     let es = null;
     const conn = document.getElementById('conn');
 
+    // A <details> is keyed by its owning mission-card id + its class so that
+    // multiple expanders within one card (and cards across a re-render) map
+    // back to the same slot. Used to carry the operator's expanded state
+    // across the wholesale outerHTML replace below.
+    function detailsKey(d) {
+      const card = d.closest('[data-mission-id]');
+      const mid = card ? (card.getAttribute('data-mission-id') || '') : '';
+      return mid + '|' + (d.className || '');
+    }
+    function captureOpenDetails(container) {
+      const open = new Set();
+      container.querySelectorAll('details[open]').forEach(d => {
+        const k = detailsKey(d);
+        if (k) open.add(k);
+      });
+      return open;
+    }
+    function restoreOpenDetails(container, openKeys) {
+      if (!openKeys || openKeys.size === 0) return;
+      container.querySelectorAll('details').forEach(d => {
+        if (openKeys.has(detailsKey(d))) d.open = true;
+      });
+    }
+
     function handlePatchElements(e) {
       const lines = e.data.split('\n');
       let html = '';
@@ -1469,7 +1493,22 @@
       if (root && root.id) {
         const target = document.getElementById(root.id);
         if (target) {
+          // The Missions panel may contain a plan <details> the operator has
+          // expanded and scrolled into. A wholesale outerHTML replace resets
+          // page scroll and collapses every <details>. The server already
+          // suppresses re-sending an unchanged panel, but on a LEGITIMATE
+          // update we still capture the expanded state + scroll here and
+          // restore them after the patch so the reader is never yanked to the
+          // top or forced to re-expand the plan.
+          const isMissions = root.id === 'dashboard-missions';
+          const openKeys = isMissions ? captureOpenDetails(target) : null;
+          const scrollY  = isMissions ? window.scrollY : 0;
           target.outerHTML = root.outerHTML;
+          if (isMissions) {
+            const fresh = document.getElementById(root.id);
+            if (fresh) restoreOpenDetails(fresh, openKeys);
+            if (window.scrollY !== scrollY) window.scrollTo(window.scrollX, scrollY);
+          }
           if (root.id === 'dashboard-notifications') refreshNotifFilters();
           if (root.id === 'dashboard-workitems') refreshBoardFilters();
         }

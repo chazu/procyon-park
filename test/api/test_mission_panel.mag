@@ -303,6 +303,33 @@ TestMissionLoopbackGate subclass: Object
     t assert: (server isLoopbackHost: '192.168.1.5:7777') not message: 'MP8: LAN IP rejected'
   ]
 
+"=== MP9: deterministic identity order so unchanged HTML is byte-stable ==="
+TestMissionPanelStableOrder subclass: Object
+  classMethod: run: t [
+    | tempDir bbs sse html1 html2 ia ib ic |
+    '--- MP9: missions render in a stable identity order ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "Seed in NON-sorted id order; the panel must still render them sorted so
+     scanAll bucket-ordering churn cannot change the HTML tick-to-tick."
+    MsnPanelHelper seedMission: bbs id: 'msn-c' status: 'awaiting-approval' brief: 'c' plan: '# p'.
+    MsnPanelHelper seedMission: bbs id: 'msn-a' status: 'awaiting-approval' brief: 'a' plan: '# p'.
+    MsnPanelHelper seedMission: bbs id: 'msn-b' status: 'awaiting-approval' brief: 'b' plan: '# p'.
+
+    sse := DashboardSSE on: bbs.
+    html1 := (sse computeSnapshot) at: 'missionsHtml'.
+    html2 := (sse computeSnapshot) at: 'missionsHtml'.
+
+    t assertEqual: html1 to: html2
+      message: 'MP9: two consecutive renders of unchanged state are byte-identical'.
+
+    ia := html1 indexOf: 'data-mission-id="msn-a"'.
+    ib := html1 indexOf: 'data-mission-id="msn-b"'.
+    ic := html1 indexOf: 'data-mission-id="msn-c"'.
+    t assert: (ia > 0 and: [ib > ia and: [ic > ib]])
+      message: 'MP9: cards ordered by identity ascending (a < b < c)'
+  ]
+
 "=== Main ==="
 MissionPanelMain subclass: Object
   classMethod: run [
@@ -332,6 +359,9 @@ MissionPanelMain subclass: Object
     [TestMissionLoopbackGate run: t] on: Exception do: [:e |
       ('TestMissionLoopbackGate CRASHED: ', e messageText) println.
       t assert: false message: 'TestMissionLoopbackGate crashed'].
+    [TestMissionPanelStableOrder run: t] on: Exception do: [:e |
+      ('TestMissionPanelStableOrder CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionPanelStableOrder crashed'].
     t report.
     ^t failed
   ]

@@ -65,6 +65,10 @@ DashboardSSE subclass: Object
     entry at: 'identity' put: id.
     entry at: 'subscribedAt' put: DateTime now epochSeconds.
     entry at: 'queue' put: queue.
+    "Per-subscriber last-sent HTML by panel key, consumed by
+     sendElements:to:key: for change-detection (skip re-patching unchanged
+     panels so scroll + open <details> survive routine ticks)."
+    entry at: 'sent' put: Dictionary new.
     sseSubscribers := sseSubscribers copyWith: entry.
     ('SSE dashboard client connected as ', id,
       ', total: ', sseSubscribers size printString) println.
@@ -203,8 +207,27 @@ DashboardSSE subclass: Object
     self sendElements: (snap at: 'workitemsHtml') to: entry.
     self sendElements: (snap at: 'scopeViolationsHtml') to: entry.
     self sendElements: (snap at: 'presenceHtml') to: entry.
-    self sendElements: (snap at: 'missionsHtml') to: entry.
+    self sendElements: (snap at: 'missionsHtml') to: entry key: 'missions'.
     self sendNotifsTo: entry snapshot: snap
+  ]
+
+  method: sendElements: html to: entry key: key [
+    "Change-detected send: skip enqueuing when the pre-rendered HTML for <key>
+     is byte-identical to what was last sent to THIS subscriber. The dashboard
+     client applies each patch as a wholesale element replace
+     (target.outerHTML = ...), which resets the page scroll and collapses any
+     open <details>. Re-patching an unchanged panel every tick therefore yanks
+     a reader out of a long, expanded mission plan. The cache is per-subscriber
+     so a freshly-connected client (empty cache) still receives the panel on
+     its first tick; only cache after a successful enqueue so an overflow-drop
+     (which triggers a client reconnect + resync) is not masked."
+    | sent prev |
+    sent := entry at: 'sent' ifAbsent: [nil].
+    sent isNil ifTrue: [sent := Dictionary new. entry at: 'sent' put: sent].
+    prev := sent at: key ifAbsent: [nil].
+    (prev notNil and: [prev = html]) ifTrue: [^true].
+    (self sendElements: html to: entry) ifTrue: [sent at: key put: html. ^true].
+    ^false
   ]
 
   method: sendElements: html to: entry [
@@ -520,6 +543,13 @@ DashboardSSE subclass: Object
         ('SSE mission partition skipped a malformed tuple: ', e messageText) println
       ]
     ].
+    "Deterministic total order so BBS scanAll bucket-ordering churn cannot
+     change the rendered HTML from one tick to the next. Without a stable
+     order the panel HTML differs every tick, defeating change-detection and
+     forcing a wholesale client-side outerHTML replace — which resets scroll
+     and collapses any expanded mission plan the operator is reading."
+    awaiting := self sortMissions: awaiting.
+    others := self sortMissions: others.
     (awaiting isEmpty and: [others isEmpty]) ifTrue: [
       ^s, '<div class="empty-state">No missions yet.</div></div>'
     ].
@@ -542,6 +572,21 @@ DashboardSSE subclass: Object
       s := s, '</div>'
     ].
     ^s, '</div>'
+  ]
+
+  method: sortMissions: arr [
+    "Sort missions by identity ascending — a stable, deterministic total order.
+     Mutates and returns the array. Used so the pre-rendered Missions HTML is
+     byte-identical tick-to-tick when nothing has changed, which lets the
+     per-subscriber change-detection in sendElements:to:key: skip re-patching
+     an unchanged panel (preserving scroll + open <details>)."
+    arr sort: [:a :b |
+      | ia ib |
+      ia := a at: 'identity' ifAbsent: [''].
+      ib := b at: 'identity' ifAbsent: [''].
+      ia < ib ifTrue: [-1] ifFalse: [ia > ib ifTrue: [1] ifFalse: [0]]
+    ].
+    ^arr
   ]
 
   method: renderMissionCard: m awaiting: isAwaiting [
