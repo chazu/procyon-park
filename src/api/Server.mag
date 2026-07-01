@@ -403,6 +403,11 @@ ApiServer subclass: Object
      `pp mission approve/reject` CLI (W1). See handleMissionDecisionRoute:to:."
     httpServer route: '/api/mission/approve' method: 'POST' handler: [:req | self handleMissionDecisionRoute: req to: 'approved'].
     httpServer route: '/api/mission/reject' method: 'POST' handler: [:req | self handleMissionDecisionRoute: req to: 'rejected'].
+    "Mission Execute (D5 second trigger): dispatch an approved+decomposed
+     mission's epic via full-pipeline. UNSIGNED but LOOPBACK-GATED like
+     approve/reject — the local dashboard/CLI 'Execute' control. See
+     handleMissionRunRoute:."
+    httpServer route: '/api/mission/run' method: 'POST' handler: [:req | self handleMissionRunRoute: req].
     "Hard-delete (irreversible tuple removal). Signed route — same auth path
      as update/run. See handleWorkitemDelete:."
     self signedRouteOnly: '/api/workitem/delete' do: [:req :actorCtx | self handleWorkitemDelete: req actor: actorCtx].
@@ -2570,6 +2575,77 @@ ApiServer subclass: Object
     resp at: 'status' put: 'ok'.
     resp at: 'mission' put: identity.
     resp at: 'new_status' put: newStatus.
+    ^self okResponse: resp
+  ]
+
+  method: handleMissionRunRoute: req [
+    "POST /api/mission/run ?scope=&identity=
+     Execute an approved+decomposed mission — the D5 second trigger. UNSIGNED but
+     LOOPBACK-GATED (mirrors approve/reject): non-loopback callers get 403."
+    | host scope identity |
+    host := req host.
+    (self isLoopbackHost: host) ifFalse: [
+      ^self errorResponse: 403 message: 'mission execution is restricted to the local dashboard (loopback only)'
+    ].
+    scope := req queryParam: 'scope'.
+    (scope isNil or: [scope isEmpty]) ifTrue: [scope := 'default'].
+    identity := req queryParam: 'identity'.
+    (identity isNil or: [identity isEmpty]) ifTrue: [^self errorResponse: 400 message: 'identity required'].
+    ^self handleMissionRunScope: scope identity: identity
+  ]
+
+  method: handleMissionRunScope: scope identity: identity [
+    "Testable core of the mission Execute (D5). Guards then dispatches:
+       404 mission not found,
+       409 mission not 'approved' (unchanged) — only approved missions run,
+       409 mission approved but epic_id not yet materialized (wait for reconcile),
+       409 the referenced epic is missing,
+       429 if the pending-task queue is saturated (nothing started),
+       200 {status:ok, mission, workflow, new_status:'in-progress'} on success.
+     On success it starts a full-pipeline workflow on the mission's epic (which
+     dispatch-waves the child stories), sets the epic in-progress, and rolls the
+     mission to 'in-progress' — the first-dispatch rollup transition (D6)."
+    | mission p status epicId epicItem bp wfParams instanceId resp |
+    mission := bbs rdp: 'mission' scope: scope identity: identity.
+    mission isNil ifTrue: [^self errorResponse: 404 message: 'mission not found'].
+    p := mission at: 'payload' ifAbsent: [Dictionary new].
+    status := p at: 'status' ifAbsent: ['?'].
+    status = 'approved' ifFalse: [
+      ^self errorResponse: 409 message: 'mission is ', status, ' — only approved missions can be run'
+    ].
+    epicId := p at: 'epic_id' ifAbsent: [nil].
+    (epicId isNil or: [(epicId isKindOf: String) and: [epicId isEmpty]]) ifTrue: [
+      ^self errorResponse: 409 message: 'mission approved but not yet decomposed — its epic has not been materialized (wait for reconciliation)'
+    ].
+    dispatcher isNil ifTrue: [^self errorResponse: 500 message: 'No dispatcher configured'].
+    epicItem := bbs findInIndex: 'workitem' scope: scope identity: epicId.
+    epicItem isNil ifTrue: [^self errorResponse: 409 message: 'mission epic ', epicId, ' not found in scope ', scope].
+    bp := self queueBackpressureResponse.
+    bp notNil ifTrue: [^bp].
+    "Start execution: full-pipeline over the epic. Mirror handleWorkitemRun —
+     set the epic in-progress, then instantiate. Pass `mission` so the workflow
+     is linked back to the mission."
+    self updateWorkitemStatus: epicId scope: scope status: 'in-progress'.
+    wfParams := Dictionary new.
+    wfParams at: 'workitem' put: epicId.
+    wfParams at: 'description' put: ((epicItem at: 'payload') at: 'title' ifAbsent: [epicId]).
+    wfParams at: 'mission' put: identity.
+    wfParams at: 'repo' put: scope.
+    instanceId := nil.
+    [instanceId := dispatcher instantiateWorkflow: 'full-pipeline' scope: scope params: wfParams launchedBy: 'mission-run' overrideAffinity: nil]
+      on: Exception do: [:e | ^self errorResponse: 400 message: e messageText].
+    "Roll the mission to in-progress and stamp the run provenance."
+    bbs update: 'mission' scope: scope identity: identity do: [:mp |
+      mp at: 'status' put: 'in-progress'.
+      mp at: 'run_workflow' put: instanceId.
+      mp at: 'executed_at' put: DateTime now epochSeconds.
+      mp at: 'updated_at' put: DateTime now epochSeconds
+    ].
+    resp := Dictionary new.
+    resp at: 'status' put: 'ok'.
+    resp at: 'mission' put: identity.
+    resp at: 'workflow' put: instanceId.
+    resp at: 'new_status' put: 'in-progress'.
     ^self okResponse: resp
   ]
 

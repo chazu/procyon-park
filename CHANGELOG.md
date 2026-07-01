@@ -38,6 +38,15 @@ Semantic Versioning.
   ~4 MB, and the ganso reader pool/watcher were tightened.
 
 ### Added
+- Mission **Execute** (the D5 second trigger) — after a mission is approved and
+  decomposed, a light explicit action starts the work: `pp mission run <id>`
+  (CLI) or an **Execute** button on the dashboard mission card. It dispatches the
+  mission's epic via `full-pipeline` (which dispatch-waves the child stories,
+  honoring wave order and `depends_on`) and rolls the mission to `in-progress`.
+  Only an approved mission whose epic has been materialized may run; a
+  rubber-stamp approval never auto-starts agents. Served by the loopback-gated
+  `/api/mission/run` (same posture as approve/reject). Missions now surface the
+  `in-progress` status.
 - Mission **decompose** — approving a mission now materializes a *story tree*,
   not just a placeholder epic. A mission can carry a structured
   `payload.breakdown` (`[{title, description, wave, depends_on, template,

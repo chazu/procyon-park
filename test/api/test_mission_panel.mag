@@ -101,6 +101,18 @@ MsnPanelHelper subclass: Object
     bbs out: 'mission' scope: 'default' identity: id payload: p
   ]
 
+  classMethod: seedMissionWithEpic: bbs id: id epic: epicId [
+    "An approved mission whose epic has been materialized (epic_id stamped) —
+     i.e. runnable / Execute-eligible."
+    | p |
+    p := Dictionary new.
+    p at: 'brief' put: 'ready mission'.
+    p at: 'status' put: 'approved'.
+    p at: 'epic_id' put: epicId.
+    p at: 'created_at' put: 1700000000.
+    bbs out: 'mission' scope: 'default' identity: id payload: p
+  ]
+
   classMethod: contains: haystack sub: needle [
     ^(haystack indexOf: needle) > 0
   ]
@@ -413,6 +425,48 @@ TestMissionPanelArchivedOnly subclass: Object
       message: 'MP11: the archived mission card renders'
   ]
 
+"=== MP12: mission Execute (run) guards + Execute control render ==="
+TestMissionRun subclass: Object
+  classMethod: run: t [
+    "Guards for handleMissionRunScope: + the Execute button render rule. The
+     happy path (200 + full-pipeline dispatch) needs a template registry and is
+     covered by the live e2e, not here."
+    | tempDir bbs server resp html |
+    '--- MP12: mission run guards + Execute control ---' println.
+    tempDir := MsnPanelHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    server := MsnPanelHelper newServer: bbs.
+
+    "Missing mission -> 404."
+    resp := server handleMissionRunScope: 'default' identity: 'msn-ghost'.
+    t assertEqual: resp status to: 404 message: 'MP12: run missing mission -> 404'.
+
+    "Non-approved (awaiting-approval) -> 409, unchanged."
+    MsnPanelHelper seedMission: bbs id: 'msn-wait' status: 'awaiting-approval' brief: 'b' plan: '# p'.
+    resp := server handleMissionRunScope: 'default' identity: 'msn-wait'.
+    t assertEqual: resp status to: 409 message: 'MP12: run non-approved -> 409'.
+    t assertEqual: (((bbs rdp: 'mission' scope: 'default' identity: 'msn-wait') at: 'payload') at: 'status' ifAbsent: [nil])
+      to: 'awaiting-approval' message: 'MP12: non-approved mission unchanged'.
+
+    "Approved but NO epic_id (not yet decomposed) -> 409, unchanged, nothing dispatched."
+    MsnPanelHelper seedMission: bbs id: 'msn-noepic' status: 'approved' brief: 'b' plan: '# p'.
+    resp := server handleMissionRunScope: 'default' identity: 'msn-noepic'.
+    t assertEqual: resp status to: 409 message: 'MP12: run approved-without-epic -> 409'.
+    t assertEqual: (((bbs rdp: 'mission' scope: 'default' identity: 'msn-noepic') at: 'payload') at: 'status' ifAbsent: [nil])
+      to: 'approved' message: 'MP12: approved-without-epic mission unchanged'.
+    t assertEqual: (bbs scanAll: 'workflow') size to: 0
+      message: 'MP12: no workflow started on a guard failure'.
+
+    "Render: an approved mission WITH an epic_id shows the Execute control; the
+     approved one WITHOUT an epic does not."
+    MsnPanelHelper seedMissionWithEpic: bbs id: 'msn-ready' epic: 'epic-msn-ready'.
+    html := ((DashboardSSE on: bbs) computeSnapshot) at: 'missionsHtml'.
+    t assert: (MsnPanelHelper contains: html sub: 'class="mission-execute" data-mission-id="msn-ready"')
+      message: 'MP12: approved+epic mission renders an Execute button'.
+    t assertEqual: (MsnPanelHelper count: 'class="mission-execute"' in: html) to: 1
+      message: 'MP12: exactly one Execute button (only the epic-materialized mission)'
+  ]
+
 "=== Main ==="
 MissionPanelMain subclass: Object
   classMethod: run [
@@ -451,6 +505,9 @@ MissionPanelMain subclass: Object
     [TestMissionPanelArchivedOnly run: t] on: Exception do: [:e |
       ('TestMissionPanelArchivedOnly CRASHED: ', e messageText) println.
       t assert: false message: 'TestMissionPanelArchivedOnly crashed'].
+    [TestMissionRun run: t] on: Exception do: [:e |
+      ('TestMissionRun CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionRun crashed'].
     t report.
     ^t failed
   ]

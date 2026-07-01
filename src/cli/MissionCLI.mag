@@ -72,6 +72,7 @@ MissionCLI subclass: Object
     sub = 'approve'    ifTrue: [^self cmdApprove: args].
     sub = 'reject'     ifTrue: [^self cmdReject: args].
     sub = 'archive'    ifTrue: [^self cmdArchive: args].
+    sub = 'run'        ifTrue: [^self cmdRun: args].
     sub = 'nuke'       ifTrue: [^self cmdNuke: args].
     (sub = 'help' or: [sub = '--help']) ifTrue: [^self printUsage].
     ('Unknown mission command: ', sub) println.
@@ -363,6 +364,34 @@ MissionCLI subclass: Object
       allowedFrom: #('approved' 'rejected' 'researching')
   ]
 
+  method: cmdRun: args [
+    "pp mission run <id> [--repo R] — execute an approved, decomposed mission.
+     The D5 second trigger: dispatch the mission's epic via full-pipeline
+     (dispatch-waves over the child stories) and roll the mission to
+     'in-progress'. Only an approved mission whose epic has been materialized may
+     run. Posts to the loopback-gated /api/mission/run (same posture as the
+     dashboard Execute control), so run it against a LOCAL server.
+
+     `sc` (a local), NOT `scope` (the ivar): a local colliding with an ivar is
+     invisible inside the block below in this VM."
+    | id sc response result |
+    args size < 3 ifTrue: ['Usage: pp mission run <id> [--repo R]' println. ^self].
+    id := args at: 3.
+    self applyScopeFlagFrom: args.
+    sc := self defaultScope.
+    [
+      response := Shell capture: 'curl -s -X POST ''', baseUrl, '/api/mission/run?scope=', sc, '&identity=', id, ''''.
+      (response isNil or: [response isEmpty]) ifTrue: [('No response from ', baseUrl) println. ^self].
+      result := Json decode: response.
+      (result at: 'error' ifAbsent: [nil]) notNil ifTrue: [
+        ('Refused: ', (result at: 'error')) println. ^self
+      ].
+      ((result at: 'status' ifAbsent: [nil]) = 'ok')
+        ifTrue: [(id, ' -> in-progress (dispatched via workflow ', (result at: 'workflow' ifAbsent: ['?']), ')') println]
+        ifFalse: [('Unexpected response: ', response) println]
+    ] on: Exception do: [:e | ('mission run failed: ', e messageText) println]
+  ]
+
   method: cmdNuke: args [
     "pp mission nuke <id> [--repo R] [--confirm]
      Tear down the blast radius a mission spawned: every entity stamped with
@@ -548,9 +577,12 @@ MissionCLI subclass: Object
     '  approve <id> [--repo R]         awaiting-approval -> approved' println.
     '  reject <id> [--reason R] [--repo R]   awaiting-approval -> rejected (+ reason)' println.
     '  archive <id> [--reason R] [--repo R]  approved|rejected|researching -> archived (terminal)' println.
+    '  run <id> [--repo R]                   Execute an approved+decomposed mission (dispatch via full-pipeline)' println.
     '  nuke <id> [--repo R] [--confirm]      Tear down the mission blast radius (dry-run unless --confirm)' println.
     '' println.
     'Lifecycle: researching -> awaiting-approval -> approved | rejected -> archived' println.
-    'On approve, the dispatcher materializes an epic (stamped mission_id); nuke reclaims it.' println.
+    '           approved -> (run) -> in-progress' println.
+    'On approve the dispatcher materializes an epic + story tree (stamped mission_id);' println.
+    '`run` dispatches it; nuke reclaims the whole blast radius.' println.
     ^self
   ]

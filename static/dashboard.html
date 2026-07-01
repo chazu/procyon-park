@@ -356,6 +356,8 @@
     .mission-actions button:disabled{ opacity: .5; cursor: default; }
     .mission-actions .mission-approve{ background: var(--moss-deep); border-color: var(--moss); color: var(--cream-hi); }
     .mission-actions .mission-reject{ background: var(--terra-deep); border-color: var(--terra); color: var(--cream-hi); }
+    .mission-actions .mission-execute{ background: var(--moss-deep); border-color: var(--moss); color: var(--cream-hi); }
+    .mission-card.mission-in-progress .mission-status{ background: var(--moss); color: var(--cream-hi); }
     .mission-id{ margin-top: 6px; color: var(--cream-dim); }
 
     /* ══════════════ PRESENCE ══════════════ */
@@ -1584,7 +1586,8 @@
     document.addEventListener('click', (ev) => {
       const approve = ev.target.closest('.mission-approve');
       const reject  = ev.target.closest('.mission-reject');
-      const btn = approve || reject;
+      const execute = ev.target.closest('.mission-execute');
+      const btn = approve || reject || execute;
       if (!btn || !btn.closest('#dashboard-missions')) return;
       ev.preventDefault();
       const id    = btn.getAttribute('data-mission-id');
@@ -1593,6 +1596,9 @@
       if (approve) {
         if (!confirm('Approve mission "' + id + '"? This unblocks the plan.')) return;
         postMissionDecision('approve', scope, id, null, btn);
+      } else if (execute) {
+        if (!confirm('Execute mission "' + id + '"? This dispatches its work items to agents.')) return;
+        postMissionDecision('run', scope, id, null, btn);
       } else {
         const reason = prompt('Reject mission "' + id + '" — optional reason:', '');
         if (reason === null) return; // cancelled

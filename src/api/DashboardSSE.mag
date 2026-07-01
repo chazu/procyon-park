@@ -655,6 +655,16 @@ DashboardSSE subclass: Object
           '" data-scope="', (self htmlEscape: scope), '">Reject</button>',
         '</div>'
     ].
+    "Execute (D5 second trigger): an approved mission whose epic has been
+     materialized by reconciliation gets a Run control. data-mission-id +
+     data-scope drive the loopback POST to /api/mission/run in dashboard.html."
+    ((status = 'approved')
+      and: [((p at: 'epic_id' ifAbsent: [nil]) isKindOf: String) and: [(p at: 'epic_id') isEmpty not]]) ifTrue: [
+      controls := '<div class="mission-actions">',
+        '<button type="button" class="mission-execute" data-mission-id="', (self htmlEscape: id),
+          '" data-scope="', (self htmlEscape: scope), '">Execute</button>',
+        '</div>'
+    ].
     openAttr := isAwaiting ifTrue: [' open'] ifFalse: [''].
     ^'<div class="mission-card mission-', (self htmlEscape: status),
       '" data-mission-id="', (self htmlEscape: id),

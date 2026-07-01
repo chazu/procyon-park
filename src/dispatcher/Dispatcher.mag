@@ -691,7 +691,11 @@ Dispatcher subclass: Object
     ep at: 'status' put: 'ready'.
     ep at: 'type' put: 'epic'.
     ep at: 'parent' put: nil.
-    ep at: 'template' put: 'story'.
+    "Epic runs via full-pipeline (plan-decoupled: dispatch-waves over the child
+     stories). `pp mission run` / /api/workitem/run honor payload.template, so it
+     MUST be 'full-pipeline' here — a bare 'story' would run the epic itself as a
+     single story instead of dispatching its wave tree."
+    ep at: 'template' put: 'full-pipeline'.
     ep at: 'wave' put: 1.
     ep at: 'depends_on' put: (Array new: 0).
     ep at: 'labels' put: (Array new: 0).
