@@ -38,6 +38,11 @@ Semantic Versioning.
   ~4 MB, and the ganso reader pool/watcher were tightened.
 
 ### Added
+- Mission **rollup to done** — an `in-progress` mission now advances itself to
+  `done` once every work-item it owns has completed (the epic auto-promotes when
+  its stories finish), closing the lifecycle
+  (`approved → in-progress → done → archived`). The mission becomes the outcome
+  anchor. `done` missions are archivable.
 - Mission **Execute** (the D5 second trigger) — after a mission is approved and
   decomposed, a light explicit action starts the work: `pp mission run <id>`
   (CLI) or an **Execute** button on the dashboard mission card. It dispatches the
@@ -71,8 +76,10 @@ Semantic Versioning.
   carries `payload.mission_id`, backed by a new indexed ganso column
   (`ix_mission`), so a mission's whole blast radius is one query.
   `pp mission nuke <id> [--confirm]` tears that blast radius down: **dry-run by
-  default** (prints the work-items it would delete and changes nothing), and
-  with `--confirm` hard-deletes those work-items and archives the mission.
+  default** (prints what it would change and touches nothing), and with
+  `--confirm` **cancels the mission's running workflows** (cancellation cascades
+  to their child workflows/tasks), hard-deletes the work-items, and archives the
+  mission.
   Boundary: it reclaims unmerged planning artifacts only — merged commits are
   never touched. `pp workitem create` gained `--mission <id>` to enlist a
   work-item in a mission's blast radius.

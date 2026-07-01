@@ -361,7 +361,7 @@ MissionCLI subclass: Object
     | reason |
     reason := self flagValue: '--reason' in: args.
     ^self setStatusFor: args to: 'archived' reason: reason action: 'archive'
-      allowedFrom: #('approved' 'rejected' 'researching')
+      allowedFrom: #('approved' 'rejected' 'researching' 'done')
   ]
 
   method: cmdRun: args [
@@ -408,7 +408,7 @@ MissionCLI subclass: Object
      with the `scope` ivar is not visible inside the `items do:` teardown block
      below in this VM — the block would read the nil ivar and delete with a nil
      scope. Same collision that silently broke workitemsForMission."
-    | id confirm m mp msnScope items |
+    | id confirm m mp msnScope items wfs |
     args size < 3 ifTrue: ['Usage: pp mission nuke <id> [--repo R] [--confirm]' println. ^self].
     id := args at: 3.
     self applyScopeFlagFrom: args.
@@ -418,9 +418,14 @@ MissionCLI subclass: Object
     mp := m at: 'payload' ifAbsent: [Dictionary new].
     msnScope := m at: 'scope' ifAbsent: [self defaultScope].
 
+    wfs := self runningWorkflowsForMission: id scope: msnScope.
     items := self workitemsForMission: id scope: msnScope.
 
     ('Mission ', id, ' blast radius (scope ', msnScope, '):') println.
+    wfs do: [:w |
+      ('  workflow  ', (w at: 'identity' ifAbsent: ['?']),
+        '  [', ((w at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: ['?']), '] -> cancel (+ children)') println
+    ].
     items isEmpty
       ifTrue: ['  (no mission-stamped work-items)' println]
       ifFalse: [
@@ -436,12 +441,18 @@ MissionCLI subclass: Object
 
     confirm ifFalse: [
       '' println.
-      ('DRY RUN — nothing deleted. Re-run with --confirm to tear down ',
-        items size printString, ' work-item(s) and archive the mission.') println.
+      ('DRY RUN — nothing changed. Re-run with --confirm to cancel ',
+        wfs size printString, ' workflow(s), tear down ',
+        items size printString, ' work-item(s), and archive the mission.') println.
       ^self
     ].
 
     "--- real teardown (--confirm) ---"
+    "Cancel running workflows FIRST (cancel cascades to their children), so the
+     dispatcher stops advancing them before their work-items vanish."
+    wfs do: [:w |
+      self cancelMissionWorkflow: (w at: 'identity' ifAbsent: [nil]) scope: msnScope
+    ].
     items do: [:t |
       self deleteWorkitem: (t at: 'identity' ifAbsent: [nil]) scope: msnScope
     ].
@@ -454,7 +465,50 @@ MissionCLI subclass: Object
     mp at: 'nuked_at' put: DateTime now epochSeconds.
     mp at: 'updated_at' put: DateTime now epochSeconds.
     self putMission: id payload: mp.
-    ('Nuked mission ', id, ': ', items size printString, ' work-item(s) deleted, mission archived.') println
+    ('Nuked mission ', id, ': ', wfs size printString, ' workflow(s) cancelled, ',
+      items size printString, ' work-item(s) deleted, mission archived.') println
+  ]
+
+  method: runningWorkflowsForMission: missionId scope: sc [
+    "Workflows launched for this mission that are still running. A run-triggered
+     full-pipeline carries payload.params.mission = <mission id>; cancelling the
+     top-level ones cascades to their child workflows/tasks server-side. Only
+     status='running' are returned (terminal ones need no cancel). Best-effort:
+     empty on any network/parse error. Params are `missionId`/`sc`, not `scope`,
+     to dodge the ivar/block-shadow trap."
+    | response result tuples hits |
+    hits := Array new: 0.
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"workflow","scope":"', sc, '"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^hits].
+      result := Json decode: response.
+      tuples := result at: 'tuples' ifAbsent: [Array new: 0].
+      tuples do: [:t |
+        | tp params |
+        tp := t at: 'payload' ifAbsent: [Dictionary new].
+        params := tp at: 'params' ifAbsent: [Dictionary new].
+        (((params at: 'mission' ifAbsent: [nil]) = missionId)
+          and: [(tp at: 'status' ifAbsent: ['?']) = 'running']) ifTrue: [
+          hits := hits copyWith: t
+        ]
+      ]
+    ] on: Exception do: [:e | ^hits].
+    ^hits
+  ]
+
+  method: cancelMissionWorkflow: wfId scope: sc [
+    "Signed cancel of one workflow (the server cancels its children recursively).
+     No-op on a nil id. Best-effort — a failed cancel is reported but does not
+     abort the rest of the teardown. Param is `sc` to avoid the scope-ivar/block
+     collision."
+    | body |
+    wfId isNil ifTrue: [^self].
+    body := Dictionary new.
+    body at: 'workflow_id' put: wfId.
+    body at: 'scope' put: sc.
+    body at: 'reason' put: 'mission nuke'.
+    [CLIBase signedPost: '/api/workflow/cancel' body: body baseUrl: baseUrl]
+      on: Exception do: [:e | ('  (cancel failed for ', wfId, ': ', e messageText, ')') println]
   ]
 
   method: workitemsForMission: missionId scope: sc [
@@ -581,8 +635,9 @@ MissionCLI subclass: Object
     '  nuke <id> [--repo R] [--confirm]      Tear down the mission blast radius (dry-run unless --confirm)' println.
     '' println.
     'Lifecycle: researching -> awaiting-approval -> approved | rejected -> archived' println.
-    '           approved -> (run) -> in-progress' println.
+    '           approved -> (run) -> in-progress -> done -> archived' println.
     'On approve the dispatcher materializes an epic + story tree (stamped mission_id);' println.
-    '`run` dispatches it; nuke reclaims the whole blast radius.' println.
+    '`run` dispatches it; the mission rolls up to done as its work-items complete;' println.
+    'nuke reclaims the whole blast radius (cancels workflows + deletes work-items).' println.
     ^self
   ]

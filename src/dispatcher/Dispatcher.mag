@@ -157,6 +157,12 @@ Dispatcher subclass: Object
        on:Exception wrapper keeps it strictly off-critical-path."
       [self maybeReconcileMissions] on: Exception do: [:e |
         ('Dispatcher tick step error (maybeReconcileMissions): ', e messageText) println
+      ].
+      "Mission rollup (D6): advance an in-progress mission to 'done' once every
+       work-item it owns has completed. The outcome-anchor close of the loop.
+       Its OWN on:Exception wrapper keeps it strictly off-critical-path."
+      [self maybeRollupMissions] on: Exception do: [:e |
+        ('Dispatcher tick step error (maybeRollupMissions): ', e messageText) println
       ]
     ]
   ]
@@ -824,6 +830,56 @@ Dispatcher subclass: Object
     cut > 0 ifTrue: [brief := brief copyFrom: 1 to: cut - 1].
     brief size > 80 ifTrue: [brief := (brief copyFrom: 1 to: 77), '...'].
     ^brief
+  ]
+
+  method: maybeRollupMissions [
+    "Off-critical-path sweep (~every 5min): advance an 'in-progress' mission to
+     'done' once EVERY work-item it owns (by mission_id) has reached 'done'. The
+     epic auto-promotes to done when its stories finish (Server auto-promotion),
+     so this observes the whole tree complete. A mission with no work-items yet
+     is left alone. The mission becomes the outcome anchor (feeds the doctrine
+     outcome-correlation backstop). Each mission is guarded independently so one
+     malformed tuple neither aborts the sweep nor escapes into the tick loop."
+    | missions |
+    missions := bbs scanAll: 'mission'.
+    missions do: [:m |
+      [
+        | p status mid |
+        p := m at: 'payload' ifAbsent: [Dictionary new].
+        status := p at: 'status' ifAbsent: [nil].
+        status = 'in-progress' ifTrue: [
+          mid := m at: 'identity' ifAbsent: [nil].
+          (mid notNil and: [self missionAllItemsDone: mid]) ifTrue: [
+            bbs update: 'mission' scope: (m at: 'scope' ifAbsent: ['default']) identity: mid do: [:mp |
+              mp at: 'status' put: 'done'.
+              mp at: 'done_at' put: DateTime now epochSeconds.
+              mp at: 'updated_at' put: DateTime now epochSeconds
+            ].
+            ('[mission] ', mid, ' -> done (all work-items complete)') println
+          ]
+        ]
+      ] on: Exception do: [:e |
+        bbs logEngine: 'warn' component: 'mission' scope: 'system' message: ('rollup skip: ', e messageText)
+      ]
+    ]
+  ]
+
+  method: missionAllItemsDone: mid [
+    "True iff the mission owns at least one work-item and EVERY one is 'done'.
+     (Zero items -> false: an in-progress mission whose tree has not materialized
+     must not be declared done.)"
+    | any all |
+    any := false.
+    all := true.
+    (bbs scanAll: 'workitem') do: [:t |
+      | tp |
+      tp := t at: 'payload' ifAbsent: [Dictionary new].
+      (tp at: 'mission_id' ifAbsent: [nil]) = mid ifTrue: [
+        any := true.
+        (tp at: 'status' ifAbsent: ['?']) = 'done' ifFalse: [all := false]
+      ]
+    ].
+    ^any and: [all]
   ]
 
   "--- Reaper (D6.2 / D6.3) ---"

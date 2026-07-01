@@ -18,6 +18,10 @@
          sibling story ids.
    MR-f  Idempotent with breakdown: re-sweep never duplicates stories.
    MR-g  Back-compat: an approved mission with NO breakdown -> epic only.
+   MR-h  Rollup: an in-progress mission whose every item is done -> 'done'.
+   MR-i  Rollup holds while any item is unfinished.
+   MR-j  Rollup never declares a no-item in-progress mission done.
+   MR-k  Rollup fires only from in-progress (approved w/ done items untouched).
 
  Real BBS (BBS withDataDir:) is used so the full scan + upsertPinned + update:
  path runs end-to-end against a ganso/SQLite tuplespace, exercising the new
@@ -106,6 +110,34 @@ MRHelper subclass: Object
     bbs out: 'mission' scope: scope identity: id payload: p
   ]
 
+  classMethod: seedInProgressMission: bbs scope: scope identity: id [
+    "An in-progress (dispatched) mission with an epic pointer."
+    | p |
+    p := Dictionary new.
+    p at: 'brief' put: ('brief for ', id).
+    p at: 'status' put: 'in-progress'.
+    p at: 'epic_id' put: ('epic-', id).
+    p at: 'created_at' put: DateTime now epochSeconds.
+    bbs out: 'mission' scope: scope identity: id payload: p
+  ]
+
+  classMethod: seedItem: bbs scope: scope identity: wid mission: mid status: status [
+    "A mission-stamped work-item at a given status."
+    | p |
+    p := Dictionary new.
+    p at: 'title' put: wid.
+    p at: 'type' put: 'story'.
+    p at: 'status' put: status.
+    p at: 'mission_id' put: mid.
+    bbs outPinned: 'workitem' scope: scope identity: wid payload: p
+  ]
+
+  classMethod: missionStatus: bbs scope: scope identity: id [
+    | m |
+    m := bbs rdp: 'mission' scope: scope identity: id.
+    ^m isNil ifTrue: [nil] ifFalse: [(m at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: [nil]]
+  ]
+
   classMethod: itemsForMission: bbs mission: id [
     "All 'workitem' tuples whose payload.mission_id = id (the blast-radius query)."
     ^(bbs scanAll: 'workitem') select: [:t |
@@ -158,7 +190,11 @@ TestMissionReconcile subclass: Object
     self testNonFatalMalformedMission: t.
     self testBreakdownMaterializesStories: t.
     self testBreakdownIdempotent: t.
-    self testNoBreakdownEpicOnly: t
+    self testNoBreakdownEpicOnly: t.
+    self testRollupAllDone: t.
+    self testRollupNotAllDone: t.
+    self testRollupNoItems: t.
+    self testRollupOnlyInProgress: t
   ]
 
   classMethod: testApprovedSpawnsOneEpic: t [
@@ -313,6 +349,65 @@ TestMissionReconcile subclass: Object
       message: 'MR-g: no stories when breakdown is absent'.
     t assertEqual: (MRHelper itemsForMission: bbs mission: 'msn-nb') size to: 1
       message: 'MR-g: just the epic'
+  ]
+
+  classMethod: testRollupAllDone: t [
+    | tempDir bbs disp |
+    '--- MR-h: in-progress mission with all items done -> done ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    MRHelper seedInProgressMission: bbs scope: 'repoA' identity: 'msn-ip'.
+    MRHelper seedItem: bbs scope: 'repoA' identity: 'epic-msn-ip' mission: 'msn-ip' status: 'done'.
+    MRHelper seedItem: bbs scope: 'repoA' identity: 'story-msn-ip-1' mission: 'msn-ip' status: 'done'.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeRollupMissions.
+
+    t assertEqual: (MRHelper missionStatus: bbs scope: 'repoA' identity: 'msn-ip') to: 'done'
+      message: 'MR-h: mission rolled to done when all items done'
+  ]
+
+  classMethod: testRollupNotAllDone: t [
+    | tempDir bbs disp |
+    '--- MR-i: in-progress mission with an unfinished item stays in-progress ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    MRHelper seedInProgressMission: bbs scope: 'repoA' identity: 'msn-ip2'.
+    MRHelper seedItem: bbs scope: 'repoA' identity: 'story-msn-ip2-1' mission: 'msn-ip2' status: 'done'.
+    MRHelper seedItem: bbs scope: 'repoA' identity: 'story-msn-ip2-2' mission: 'msn-ip2' status: 'in-progress'.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeRollupMissions.
+
+    t assertEqual: (MRHelper missionStatus: bbs scope: 'repoA' identity: 'msn-ip2') to: 'in-progress'
+      message: 'MR-i: mission stays in-progress while an item is unfinished'
+  ]
+
+  classMethod: testRollupNoItems: t [
+    | tempDir bbs disp |
+    '--- MR-j: in-progress mission with NO items is not declared done ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    MRHelper seedInProgressMission: bbs scope: 'repoA' identity: 'msn-ip3'.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeRollupMissions.
+
+    t assertEqual: (MRHelper missionStatus: bbs scope: 'repoA' identity: 'msn-ip3') to: 'in-progress'
+      message: 'MR-j: no-item mission is not spuriously rolled to done'
+  ]
+
+  classMethod: testRollupOnlyInProgress: t [
+    | tempDir bbs disp |
+    '--- MR-k: only in-progress missions roll up (approved w/ done items untouched) ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "An approved (not yet run) mission whose items happen to be done must NOT
+     jump to done — rollup fires only from in-progress."
+    MRHelper seedMission: bbs scope: 'repoA' identity: 'msn-ap' status: 'approved'.
+    MRHelper seedItem: bbs scope: 'repoA' identity: 'epic-msn-ap' mission: 'msn-ap' status: 'done'.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeRollupMissions.
+
+    t assertEqual: (MRHelper missionStatus: bbs scope: 'repoA' identity: 'msn-ap') to: 'approved'
+      message: 'MR-k: approved mission not rolled to done'
   ]
 
 "=== Main ==="
