@@ -192,6 +192,18 @@ DispatchWavesAction subclass: WorkflowAction
         (params at: 'mission' ifAbsent: [nil]) notNil ifTrue: [
           childParams at: 'mission' put: (params at: 'mission')
         ].
+        "Link the child workflow back to its story work item so that when the
+         child completes, WorkflowEngine>>completeWorkflow marks the story `done`
+         (and cascades to promote the epic). Without this the story stays `ready`
+         forever and the mission never rolls up (multi-story rollup bug). Only set
+         it for real work-item subtasks — the legacy plan-decision path uses a
+         non-workitem identity, and markWorkitemDone: no-ops on a missing id anyway."
+        (identity notNil and: [
+          identity isString and: [
+            identity isEmpty not and: [
+              (identity = 'subtask') not]]]) ifTrue: [
+          childParams at: 'workitem' put: identity
+        ].
 
         childId := engine instantiate: childTemplate scope: scope params: childParams launchedBy: (engine launchedByForInstance: instanceId).
         waveChildIdsBuf add: childId.
@@ -237,9 +249,12 @@ DispatchWavesAction subclass: WorkflowAction
       (params at: 'mission' ifAbsent: [nil]) notNil ifTrue: [
         childParams at: 'mission' put: (params at: 'mission')
       ].
-
-      childId := engine instantiate: childTemplate scope: scope params: childParams launchedBy: (engine launchedByForInstance: instanceId).
-      waveChildIdsBuf add: childId.
+      "NOTE: batched children bundle N stories into ONE workflow, so the single
+       `workitem` completion hook cannot mark them all done — batched story work
+       items are NOT auto-completed here and a batched mission would not roll up
+       until multi-workitem completion is supported. Default mission breakdowns
+       are unbatched (see the individual-dispatch branch above, which threads
+       workitem per story); revisit if batching is wired into mission decompose."
 
       signalPayload := Dictionary new.
       signalPayload at: 'child_instance' put: childId.

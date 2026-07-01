@@ -1,0 +1,197 @@
+"Regression test for the multi-story rollup bug: DispatchWavesAction must thread
+ workitem=<storyId> into each child workflow's params, so that when the child
+ completes WorkflowEngine>>completeWorkflow marks the story work item `done` (and
+ cascades to promote the epic). Without it, stories stay `ready` forever and a
+ multi-story mission never rolls up (observed live: msn-b5e3103e).
+
+ Invariants under test:
+   DW1  Dispatching a 2-story wave instantiates 2 child workflows.
+   DW2  Each child workflow's params carry workitem = its story work-item id
+        (the fix — the whole point).
+   DW3  Mission provenance still rides along (params.mission preserved).
+
+ Runs DispatchWavesAction directly against an isolated temp git repo (registered
+ as a throwaway repo) so no real repo is touched. Standalone runner at bottom."
+
+DWRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== DispatchWaves workitem-threading Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+DWHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedStoryLiteTemplate: bbs [
+    "Minimal template named 'story-lite' so engine instantiate: can create child
+     workflow tuples. Shape is irrelevant to the test — we never advance it."
+    | transitions tr payload |
+    transitions := Array new: 0.
+    tr := Dictionary new.
+    tr at: 'id' put: 'impl'.
+    tr at: 'in' put: #('request').
+    tr at: 'out' put: #('done').
+    tr at: 'role' put: 'implementer'.
+    transitions := transitions copyWith: tr.
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('request').
+    payload at: 'terminal_places' put: #('done').
+    bbs outPinned: 'template' scope: 'system' identity: 'story-lite' payload: payload
+  ]
+
+  classMethod: seedStory: bbs scope: scope id: id title: title [
+    | p |
+    p := Dictionary new.
+    p at: 'type' put: 'story'.
+    p at: 'status' put: 'ready'.
+    p at: 'title' put: title.
+    p at: 'description' put: ('do ', title).
+    p at: 'wave' put: 1.
+    p at: 'template' put: 'story-lite'.
+    p at: 'parent' put: 'epic-dw'.
+    p at: 'mission_id' put: 'msn-dw'.
+    bbs outPinned: 'workitem' scope: scope identity: id payload: p
+  ]
+
+"=== Tests ==="
+TestDispatchWavesWorkitem subclass: Object
+
+  classMethod: run: t [
+    | tempDir repoPath cfgPath bbs engine parentPayload children got want ep tr params |
+
+    '--- DW: dispatch-waves threads workitem into child workflows ---' println.
+    tempDir := DWHelper makeTempDir.
+    repoPath := tempDir, '/repo'.
+    "Isolated git repo with a main branch."
+    Shell run: 'mkdir -p "', repoPath, '" && cd "', repoPath, '" && git init -q && git commit -q --allow-empty -m init && git checkout -q main 2>/dev/null; true'.
+    "Register a throwaway repo config so params.repo=''dwtest'' resolves here."
+    cfgPath := (System env: 'HOME'), '/.pp/repos/dwtest.json'.
+    Shell run: 'mkdir -p "$(dirname "', cfgPath, '")" && printf ''{"name":"dwtest","path":"%s","registered_at":0}'' "', repoPath, '" > "', cfgPath, '"'.
+
+    bbs := BBS withDataDir: tempDir, '/bbs'.
+    engine := WorkflowEngine on: bbs.
+    DWHelper seedStoryLiteTemplate: bbs.
+
+    "Epic + two wave-1 stories."
+    ep := Dictionary new.
+    ep at: 'type' put: 'epic'.
+    ep at: 'status' put: 'ready'.
+    ep at: 'title' put: 'epic'.
+    ep at: 'mission_id' put: 'msn-dw'.
+    bbs outPinned: 'workitem' scope: 'dwtest' identity: 'epic-dw' payload: ep.
+    DWHelper seedStory: bbs scope: 'dwtest' id: 'story-dw-A' title: 'A'.
+    DWHelper seedStory: bbs scope: 'dwtest' id: 'story-dw-B' title: 'B'.
+
+    "Parent workflow tuple so engine scopeForInstance: resolves scope=dwtest."
+    parentPayload := Dictionary new.
+    parentPayload at: 'status' put: 'running'.
+    parentPayload at: 'template' put: 'full-pipeline'.
+    bbs out: 'workflow' scope: 'dwtest' identity: 'wf-parent' payload: parentPayload.
+
+    "Dispatch wave 1."
+    tr := Dictionary new.
+    tr at: 'id' put: 'dispatch'.
+    params := Dictionary new.
+    params at: 'workitem' put: 'epic-dw'.
+    params at: 'repo' put: 'dwtest'.
+    params at: 'mission' put: 'msn-dw'.
+    (DispatchWavesAction on: engine) execute: tr instance: 'wf-parent' params: params.
+
+    "Collect the child workflows (story-lite instances stamped with mission msn-dw,
+     excluding the parent)."
+    children := (bbs scanAll: 'workflow') select: [:wf |
+      | wp |
+      wp := (wf at: 'payload') at: 'params' ifAbsent: [Dictionary new].
+      ((wp at: 'mission' ifAbsent: ['']) = 'msn-dw')
+        and: [(wf at: 'identity') = 'wf-parent' ifTrue: [false] ifFalse: [true]]
+    ].
+
+    t assertEqual: children size to: 2
+      message: 'DW1: wave 1 dispatched exactly 2 child workflows'.
+
+    "DW2: each child carries workitem = one of the two story ids; both covered."
+    got := Array new: 0.
+    children do: [:wf |
+      | wp wi |
+      wp := (wf at: 'payload') at: 'params' ifAbsent: [Dictionary new].
+      wi := wp at: 'workitem' ifAbsent: [nil].
+      t assert: (wi notNil)
+        message: ('DW2: child ', (wf at: 'identity'), ' carries a workitem param').
+      wi notNil ifTrue: [got := got copyWith: wi].
+      "DW3: mission provenance preserved."
+      t assertEqual: (wp at: 'mission' ifAbsent: [nil]) to: 'msn-dw'
+        message: ('DW3: child ', (wf at: 'identity'), ' preserves mission provenance')
+    ].
+    want := #('story-dw-A' 'story-dw-B').
+    want do: [:sid |
+      t assert: (got includes: sid)
+        message: ('DW2: a child workflow is linked to story ', sid)
+    ].
+
+    "Cleanup the throwaway repo config."
+    Shell run: 'rm -f "', cfgPath, '"'
+  ]
+
+"=== Main ==="
+DispatchWavesWorkitemMain subclass: Object
+  classMethod: run [
+    | t |
+    t := DWRunner new.
+    [TestDispatchWavesWorkitem run: t] on: Exception do: [:e |
+      ('TestDispatchWavesWorkitem CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDispatchWavesWorkitem crashed'
+    ].
+    t report.
+    ^t failed
+  ]
