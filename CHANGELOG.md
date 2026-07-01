@@ -7,7 +7,25 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+- Dashboard **approve/reject/cancel** no longer misfire with a `403 "loopback
+  only"` when you reach the dashboard on the serving machine via a
+  loopback-equivalent authority. The gate (shared by mission approve/reject and
+  work-item cancel) now also treats `0.0.0.0[:PORT]`, `localhost.` (trailing-dot
+  FQDN), and `[::ffff:127.0.0.1][:PORT]` (IPv4-mapped IPv6 loopback) as local,
+  in addition to the existing `localhost` / `127.0.0.1` / `::1` / `[::1]` forms.
+  The `127.` check was also tightened to require a dotted-quad (a spoofed
+  `Host: 127.evil.com` is now rejected).
+
 ### Added
+- Opt-in dashboard host allowlist for the approve/reject/cancel controls. Set
+  `PP_ALLOW_DASHBOARD_HOSTS="host:port,host:port"` (env) or `[security]
+  dashboard_hosts` in `~/.config/pp/server.toml` to let an operator who reaches
+  the dashboard by a fixed hostname/LAN IP use those controls without a 403.
+  Empty (loopback-only) by default; there is no allow-all switch. This remains
+  Host-header-based (a convenience over a network-trusted deployment, **not** an
+  auth boundary — see README); the long-term fix is signing browser
+  approve/reject/cancel through the ed25519 `signedPost:` path.
 - Mission archival — a terminal `archived` mission status (symmetric with
   doctrine `maturity:retired`). New `pp mission archive <id> [--reason R]
   [--repo R]` retires a mission from `approved`, `rejected`, or `researching`

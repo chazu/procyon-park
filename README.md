@@ -73,6 +73,45 @@ rm -rf ~/.config/pp ~/.pp    # CAUTION: deletes all identities + BBS state
 ./pp serve                   # Auto-bootstraps fresh 'local' identity
 ```
 
+### Dashboard approve/reject/cancel host allowlist
+
+The dashboard's plan-gate controls — mission **approve**/**reject** and
+work-item **cancel** — are unsigned but restricted to the local dashboard.
+The server accepts them only when the request's `Host` header is a
+loopback-equivalent authority: `localhost`, `localhost.`, `127.0.0.0/8`
+(dotted-quad), `0.0.0.0`, `::1`, `[::1]`, or `[::ffff:127.0.0.1]` (each with
+an optional `:PORT`). So reaching the dashboard at `http://0.0.0.0:7777/` or
+`http://127.0.0.1:7777/` works out of the box.
+
+If you reach the dashboard by a fixed hostname or LAN IP (e.g.
+`mymac.local:7777`), those controls otherwise return **403**. Opt in by
+enumerating the exact authorities you use — either via an env var:
+
+```bash
+PP_ALLOW_DASHBOARD_HOSTS="mymac.local:7777,192.168.1.50:7777" pp serve
+```
+
+or in `~/.config/pp/server.toml`:
+
+```toml
+[security]
+# Comma-separated string OR a TOML array; entries are matched exactly
+# (case-insensitive) against the request Host header.
+dashboard_hosts = ["mymac.local:7777", "192.168.1.50:7777"]
+```
+
+The allowlist is **empty (loopback-only) by default** and is purely
+additive. There is no allow-all switch.
+
+> **Security note.** This gate is **Host-header-based**, and the `Host`
+> header is client-supplied and therefore spoofable. It is a *convenience*
+> for operators on a network-trusted deployment (bound to loopback, VPN, or
+> a firewalled LAN) — **not** a real authorization boundary. The endpoints
+> mutate the plan gate, so the long-term fix is to authenticate browser
+> approve/reject/cancel by signing them through the existing ed25519
+> `signedPost:` path (as the `pp` CLI already does), rather than
+> host-gating. Until that lands, keep the port off untrusted networks.
+
 ## Workflow Templates
 
 | Template | Use | Flow |

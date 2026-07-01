@@ -291,7 +291,7 @@ TestMissionMissing subclass: Object
     t assertEqual: resp status to: 404 message: 'MP7: missing mission -> 404'
   ]
 
-"=== MP8: loopback gate reused from cancel ==="
+"=== MP8: loopback gate reused from cancel (equivalence + allowlist) ==="
 TestMissionLoopbackGate subclass: Object
   classMethod: run: t [
     | tempDir bbs server |
@@ -299,8 +299,37 @@ TestMissionLoopbackGate subclass: Object
     tempDir := MsnPanelHelper makeTempDir.
     bbs := BBS withDataDir: tempDir.
     server := MsnPanelHelper newServer: bbs.
-    t assert: (server isLoopbackHost: 'localhost:7777') message: 'MP8: localhost accepted'.
-    t assert: (server isLoopbackHost: '192.168.1.5:7777') not message: 'MP8: LAN IP rejected'
+
+    "Existing loopback spellings must stay green."
+    t assert: (server isLoopbackHost: 'localhost') message: 'MP8: localhost accepted'.
+    t assert: (server isLoopbackHost: 'localhost:7777') message: 'MP8: localhost:port accepted'.
+    t assert: (server isLoopbackHost: '127.0.0.1') message: 'MP8: 127.0.0.1 accepted'.
+    t assert: (server isLoopbackHost: '127.0.0.1:7777') message: 'MP8: 127.0.0.1:port accepted'.
+    t assert: (server isLoopbackHost: '::1') message: 'MP8: ::1 accepted'.
+    t assert: (server isLoopbackHost: '[::1]:7777') message: 'MP8: [::1]:port accepted'.
+
+    "New genuine-local authorities now accepted."
+    t assert: (server isLoopbackHost: '0.0.0.0') message: 'MP8: 0.0.0.0 accepted'.
+    t assert: (server isLoopbackHost: '0.0.0.0:7777') message: 'MP8: 0.0.0.0:port accepted'.
+    t assert: (server isLoopbackHost: 'localhost.') message: 'MP8: trailing-dot localhost accepted'.
+    t assert: (server isLoopbackHost: 'localhost.:7777') message: 'MP8: trailing-dot localhost:port accepted'.
+    t assert: (server isLoopbackHost: '[::ffff:127.0.0.1]') message: 'MP8: IPv4-mapped IPv6 loopback accepted'.
+    t assert: (server isLoopbackHost: '[::ffff:127.0.0.1]:7777') message: 'MP8: IPv4-mapped IPv6 loopback:port accepted'.
+
+    "Tightened 127. check: a spoofed hostname under 127. is REJECTED."
+    t assert: (server isLoopbackHost: '127.evil.com') not message: 'MP8: 127.evil.com rejected (tightened)'.
+    t assert: (server isLoopbackHost: '127.evil.com:7777') not message: 'MP8: 127.evil.com:port rejected'.
+
+    "Non-loopback authority rejected while allowlist is unset (default behavior)."
+    t assert: (server isLoopbackHost: '192.168.1.5:7777') not message: 'MP8: LAN IP rejected (allowlist unset)'.
+    t assert: (server isLoopbackHost: 'mymac.local:7777') not message: 'MP8: hostname rejected (allowlist unset)'.
+
+    "Opt-in allowlist: a configured host passes; others still 403."
+    server allowDashboardHosts: 'mymac.local:7777, 192.168.1.50:7777'.
+    t assert: (server isLoopbackHost: 'mymac.local:7777') message: 'MP8: allowlisted host accepted'.
+    t assert: (server isLoopbackHost: 'MyMac.local:7777') message: 'MP8: allowlist match is case-insensitive'.
+    t assert: (server isLoopbackHost: '192.168.1.50:7777') message: 'MP8: second allowlisted host accepted'.
+    t assert: (server isLoopbackHost: '10.0.0.9:7777') not message: 'MP8: non-allowlisted non-loopback still rejected'
   ]
 
 "=== MP9: deterministic identity order so unchanged HTML is byte-stable ==="

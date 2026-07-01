@@ -184,19 +184,36 @@ TestLoopbackGate subclass: Object
     bbs := BBS withDataDir: tempDir.
     server := WDCHelper newServer: bbs.
 
-    "WL1: loopback hosts accepted"
+    "WL1: loopback hosts accepted (existing spellings stay green)"
     t assert: (server isLoopbackHost: 'localhost') message: 'WL1: localhost'.
     t assert: (server isLoopbackHost: 'localhost:7777') message: 'WL1: localhost:port'.
     t assert: (server isLoopbackHost: '127.0.0.1') message: 'WL1: 127.0.0.1'.
     t assert: (server isLoopbackHost: '127.0.0.1:7777') message: 'WL1: 127.0.0.1:port'.
+    t assert: (server isLoopbackHost: '::1') message: 'WL1: ::1'.
     t assert: (server isLoopbackHost: '[::1]:7777') message: 'WL1: [::1]:port'.
+
+    "WL1b: new genuine-local authorities now accepted (shared gate fix)"
+    t assert: (server isLoopbackHost: '0.0.0.0') message: 'WL1b: 0.0.0.0'.
+    t assert: (server isLoopbackHost: '0.0.0.0:7777') message: 'WL1b: 0.0.0.0:port'.
+    t assert: (server isLoopbackHost: 'localhost.') message: 'WL1b: localhost. (trailing dot)'.
+    t assert: (server isLoopbackHost: 'localhost.:7777') message: 'WL1b: localhost.:port'.
+    t assert: (server isLoopbackHost: '[::ffff:127.0.0.1]') message: 'WL1b: IPv4-mapped IPv6 loopback'.
+    t assert: (server isLoopbackHost: '[::ffff:127.0.0.1]:7777') message: 'WL1b: IPv4-mapped IPv6 loopback:port'.
 
     "WL2: non-loopback hosts rejected → route would 403"
     t assert: (server isLoopbackHost: '192.168.1.5:7777') not message: 'WL2: LAN IP rejected'.
     t assert: (server isLoopbackHost: 'pp.internal:7777') not message: 'WL2: hostname rejected'.
     t assert: (server isLoopbackHost: nil) not message: 'WL2: nil rejected'.
     t assert: (server isLoopbackHost: '') not message: 'WL2: empty rejected'.
-    t assert: (server isLoopbackHost: '10.0.0.9') not message: 'WL2: 10.x rejected'
+    t assert: (server isLoopbackHost: '10.0.0.9') not message: 'WL2: 10.x rejected'.
+    "WL2b: tightened 127. check — spoofed hostname under 127. no longer passes"
+    t assert: (server isLoopbackHost: '127.evil.com') not message: 'WL2b: 127.evil.com rejected'.
+
+    "WL3: opt-in allowlist — unset preserves loopback-only; configured host passes"
+    t assert: (server isLoopbackHost: 'mymac.local:7777') not message: 'WL3: hostname rejected while allowlist unset'.
+    server allowDashboardHosts: 'mymac.local:7777'.
+    t assert: (server isLoopbackHost: 'mymac.local:7777') message: 'WL3: allowlisted host accepted'.
+    t assert: (server isLoopbackHost: 'other.host:7777') not message: 'WL3: non-allowlisted non-loopback still rejected'
   ]
 
 "=== Main ==="

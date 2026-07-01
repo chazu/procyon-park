@@ -5,7 +5,7 @@ ApiServer subclass: Object
   instanceVars: httpServer bbs port dispatcher dashboardSSE
                 adminList skewSeconds enforceSignatures signatureVerifier
                 queueMaxPending inviteStore notificationHub
-                watchCache watchCacheExpiry
+                watchCache watchCacheExpiry allowDashboardHosts
 
   classMethod: on: portNumber bbs: aBBS [
     ^super new initPort: portNumber bbs: aBBS dispatcher: nil
@@ -42,6 +42,12 @@ ApiServer subclass: Object
   method: adminList [ ^adminList ]
   method: skewSeconds [ ^skewSeconds ]
   method: enforceSignatures [ ^enforceSignatures ]
+  method: allowDashboardHosts [ ^allowDashboardHosts ]
+  method: allowDashboardHosts: aList [
+    "Set the opt-in dashboard host allowlist (used by isLoopbackHost:).
+     Entries are normalized (lowercased/trimmed) the same way as config input."
+    allowDashboardHosts := self normalizeHostList: aList
+  ]
 
   method: loadSecurityConfig [
     "Read ~/.config/pp/server.toml for [admin].admins, [security].skew_seconds,
@@ -51,11 +57,21 @@ ApiServer subclass: Object
      identity epic — every mutating endpoint now requires a valid ed25519
      signature out of the box. Operators who explicitly want the legacy
      anonymous path back must set [security].enforce_signatures = false."
-    | home path config adminCfg secCfg queueCfg qMax |
+    | home path config adminCfg secCfg queueCfg qMax envHosts hostCfg |
     adminList := Array new: 0.
     skewSeconds := 120.
     enforceSignatures := true.
     queueMaxPending := nil.
+    "Opt-in host allowlist for the browser-initiated dashboard mutations
+     (mission approve/reject + workitem cancel), all gated by isLoopbackHost:.
+     Default empty = loopback-only. Sourced first from the env var
+     PP_ALLOW_DASHBOARD_HOSTS (comma-separated host[:port]) then merged with
+     server.toml [security].dashboard_hosts. This remains HOST-HEADER-BASED
+     and is a convenience over a network-trusted deployment, NOT an auth
+     boundary (see isLoopbackHost:)."
+    allowDashboardHosts := Array new: 0.
+    envHosts := System env: 'PP_ALLOW_DASHBOARD_HOSTS'.
+    allowDashboardHosts := self normalizeHostList: envHosts.
     home := System env: 'HOME'.
     home isNil ifTrue: [home := ''].
     path := home, '/.config/pp/server.toml'.
@@ -69,7 +85,20 @@ ApiServer subclass: Object
         secCfg := config at: 'security' ifAbsent: [nil].
         secCfg notNil ifTrue: [
           skewSeconds := secCfg at: 'skew_seconds' ifAbsent: [120].
-          enforceSignatures := secCfg at: 'enforce_signatures' ifAbsent: [true]
+          enforceSignatures := secCfg at: 'enforce_signatures' ifAbsent: [true].
+          "Opt-in dashboard host allowlist. Accepts a TOML array of strings
+           or a comma-separated string. Merged (union) with any env entries.
+           NOTE: the scout doc (docs/scout/mission-approve-403-loopback-findings.md)
+           named this PP_ALLOW_APPROVE_HOSTS / approve_hosts; because the same
+           gate also guards workitem cancel, the generic dashboard_hosts name
+           is used here."
+          hostCfg := secCfg at: 'dashboard_hosts' ifAbsent: [nil].
+          hostCfg notNil ifTrue: [
+            (self normalizeHostList: hostCfg) do: [:h |
+              (allowDashboardHosts includes: h)
+                ifFalse: [allowDashboardHosts := allowDashboardHosts copyWith: h]
+            ]
+          ]
         ].
         "D6.11 / §4.10: opt-in queue backpressure. [queue].max_pending caps
          the number of pending task tuples; creation endpoints respond 429
@@ -2597,28 +2626,117 @@ ApiServer subclass: Object
   ]
 
   method: isLoopbackHost: hostHeader [
-    "Loopback gate for the browser-initiated cancel mutation. The Maggie
-     HttpRequest primitive does not expose the peer socket address, so the
-     only request-derived signal available is the Host header. A genuine
-     local-dashboard request carries Host: localhost[:port], 127.x[:port],
-     or [::1][:port]. Returns true for those, false otherwise.
+    "Gate for the browser-initiated dashboard mutations (mission
+     approve/reject + workitem cancel). The Maggie HttpRequest primitive does
+     not expose the peer socket address, so the only request-derived signal
+     available is the Host header. A request passes iff its (lowercased,
+     trimmed) Host is a genuine loopback-equivalent authority OR an exact
+     match for an operator-configured allowlist entry.
 
-     NOTE: Host is client-supplied and therefore spoofable; this is a
-     best-effort guard for the single-operator local dashboard, not a
-     hardened security boundary. Follow-up (multiplayer:identity): add a
-     remoteAddr primitive to Maggie for a true peer-address check, and/or
-     browser request signing."
+     Loopback-equivalent authorities accepted (each with optional :PORT):
+       localhost, localhost. (trailing-dot FQDN),
+       0.0.0.0, 127.0.0.0/8 dotted-quad (a DIGIT must follow '127.', so a
+       spoofed Host: 127.evil.com is REJECTED),
+       ::1, [::1], and [::ffff:127.0.0.1] (IPv4-mapped IPv6 loopback).
+
+     The opt-in allowlist (PP_ALLOW_DASHBOARD_HOSTS / server.toml
+     [security].dashboard_hosts) lets an operator who reaches the dashboard by
+     a fixed hostname/LAN IP enumerate it explicitly; empty by default.
+
+     NOTE: Host is client-supplied and therefore spoofable — this whole gate
+     (loopback default AND the allowlist) is a best-effort convenience over a
+     network-trusted deployment for the local dashboard, NOT a hardened
+     authorization boundary. The endpoints mutate the plan gate, so the real
+     long-term fix is to authenticate browser approve/reject/cancel by signing
+     them through the existing ed25519 signedPost: path (SignatureVerifier),
+     rather than host-gating (see docs/scout/mission-approve-403-loopback-findings.md
+     §5c/§6). Do NOT remove this guard until that lands."
     | host |
     hostHeader isNil ifTrue: [^false].
     host := hostHeader asLowercase trimBoth.
     host isEmpty ifTrue: [^false].
+    (self isLoopbackAuthority: host) ifTrue: [^true].
+    (self isAllowlistedDashboardHost: host) ifTrue: [^true].
+    ^false
+  ]
+
+  method: isLoopbackAuthority: host [
+    "host is already asLowercase trimBoth. True iff it is a genuine
+     loopback-equivalent authority (see isLoopbackHost: for the full list)."
     (host = 'localhost') ifTrue: [^true].
     (host startsWith: 'localhost:') ifTrue: [^true].
-    (host startsWith: '127.') ifTrue: [^true].
+    (host = 'localhost.') ifTrue: [^true].
+    (host startsWith: 'localhost.:') ifTrue: [^true].
+    (host = '0.0.0.0') ifTrue: [^true].
+    (host startsWith: '0.0.0.0:') ifTrue: [^true].
+    "Dotted-quad IPv4 loopback (127.0.0.0/8): require a DIGIT immediately
+     after '127.' so 127.evil.com no longer over-matches."
+    (host startsWith: '127.') ifTrue: [
+      (host size >= 5 and: [self isDigitChar: (host at: 5)]) ifTrue: [^true]
+    ].
     (host = '::1') ifTrue: [^true].
     (host startsWith: '::1:') ifTrue: [^true].
     (host startsWith: '[::1]') ifTrue: [^true].
+    "IPv4-mapped IPv6 loopback, with or without :PORT."
+    (host startsWith: '[::ffff:127.0.0.1]') ifTrue: [^true].
     ^false
+  ]
+
+  method: isAllowlistedDashboardHost: host [
+    "Opt-in operator allowlist consulted by isLoopbackHost:. host is already
+     asLowercase trimBoth and allowlist entries are normalized the same way in
+     normalizeHostList:, so the match is exact (case-insensitive, trimmed)."
+    allowDashboardHosts isNil ifTrue: [^false].
+    allowDashboardHosts do: [:h | (host = h) ifTrue: [^true]].
+    ^false
+  ]
+
+  method: isDigitChar: ch [
+    "True iff ch is an ASCII digit 0-9."
+    ^'0123456789' includes: ch
+  ]
+
+  method: normalizeHostList: raw [
+    "Normalize a host-allowlist config value into an Array of lowercased,
+     trimmed authority strings. Accepts a comma-separated String (env-var
+     form) or an Array of Strings (server.toml array form). nil / other
+     types -> empty Array."
+    | out |
+    out := Array new: 0.
+    raw isNil ifTrue: [^out].
+    (raw isKindOf: String) ifTrue: [^self splitHostCsv: raw].
+    (raw isKindOf: Array) ifTrue: [
+      raw do: [:h |
+        (h isKindOf: String) ifTrue: [
+          | s |
+          s := h asLowercase trimBoth.
+          s isEmpty ifFalse: [out := out copyWith: s]
+        ]
+      ].
+      ^out
+    ].
+    ^out
+  ]
+
+  method: splitHostCsv: raw [
+    "Split a comma-separated authority list into an Array of lowercased,
+     trimmed, non-empty entries. (Maggie String has no tokenize:/split:.)"
+    | out rest pos piece |
+    out := Array new: 0.
+    rest := raw.
+    [rest isEmpty] whileFalse: [
+      pos := rest indexOf: ','.
+      pos > 0
+        ifTrue: [
+          piece := rest copyFrom: 1 to: pos - 1.
+          rest := rest copyFrom: pos + 1 to: rest size]
+        ifFalse: [
+          piece := rest.
+          rest := ''].
+      piece := piece asLowercase trimBoth.
+      piece isEmpty ifFalse: [out := out copyWith: piece]
+    ].
+    ^out
   ]
 
   "--- History ---"
