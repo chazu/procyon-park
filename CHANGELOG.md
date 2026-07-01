@@ -38,6 +38,13 @@ Semantic Versioning.
   ~4 MB, and the ganso reader pool/watcher were tightened.
 
 ### Added
+- Mission cards now show an **epic → child-story tree** beneath each
+  non-archived mission on the dashboard. The indented list surfaces each story's
+  title, status, and wave, built entirely from the tick snapshot already cached
+  by the SSE loop — no new BBS scans and no new SSE channels. Stories are ordered
+  by wave (numerically) then id, so an unchanged panel stays byte-stable
+  tick-to-tick (preserving scroll and any expanded plan). Every field is
+  HTML-escaped; archived missions render no tree.
 - Mission **rollup to done + outcome score** — an `in-progress` mission now
   advances itself to `done` once every work-item it owns has completed (the epic
   auto-promotes when its stories finish), closing the lifecycle

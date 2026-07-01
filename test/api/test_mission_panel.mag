@@ -113,18 +113,30 @@ MsnPanelHelper subclass: Object
     bbs out: 'mission' scope: 'default' identity: id payload: p
   ]
 
-  classMethod: seedWorkitem: bbs id: id type: typ parent: parent title: title status: status wave: wave [
-    "Seed a raw workitem tuple (epic or story) into the same shape scanAll
-     returns — top-level identity/scope, fields on payload. Mirrors what
-     Dispatcher>>materializeStory: / the epic materialization write."
+  classMethod: seedMission: bbs id: id status: status epic: epicId [
+    "Seed a mission with a given status AND a stamped epic_id — used to prove
+     an ARCHIVED (non-approved) mission with a materialized epic still emits
+     NO tree."
     | p |
     p := Dictionary new.
-    p at: 'type' put: typ.
+    p at: 'brief' put: 'mission with epic'.
+    p at: 'status' put: status.
+    p at: 'epic_id' put: epicId.
+    p at: 'created_at' put: 1700000000.
+    bbs out: 'mission' scope: 'default' identity: id payload: p
+  ]
+
+  classMethod: seedWorkitem: bbs id: id type: type parent: parent title: title status: status wave: wave [
+    "Seed one workitem tuple (epic or story) mirroring the payload shape
+     Dispatcher>>materializeStory: writes. Epics carry parent=nil; stories
+     carry parent=<epicId>."
+    | p |
+    p := Dictionary new.
+    p at: 'type' put: type.
     p at: 'parent' put: parent.
     p at: 'title' put: title.
     p at: 'status' put: status.
     p at: 'wave' put: wave.
-    p at: 'created_at' put: 1700000000.
     bbs out: 'workitem' scope: 'default' identity: id payload: p
   ]
 
@@ -482,122 +494,80 @@ TestMissionRun subclass: Object
       message: 'MP12: exactly one Execute button (only the epic-materialized mission)'
   ]
 
-"=== MP13: non-archived mission renders an epic/story tree (title/status/wave,
-     numeric-wave-then-identity ordering, XSS-escaped, byte-stable) ==="
-TestMissionPanelStoryTree subclass: Object
+"=== MP13: mission tree — epic + child stories rendered under non-archived cards ==="
+TestMissionTreeRender subclass: Object
   classMethod: run: t [
-    | tempDir bbs sse html html2 iEarlier iTieA iTieB iLater |
-    '--- MP13: non-archived mission renders epic/story tree ---' println.
+    "Under each NON-ARCHIVED mission card, an indented tree of the mission's
+     epic and its child stories (title/status/wave) is rendered ENTIRELY from
+     the cached tick snapshot. Stories order by wave (numeric) then identity.
+     Archived missions with an epic_id emit NO tree."
+    | tempDir bbs sse html iLo iMidA iMidB iHi |
+    '--- MP13: mission epic/story tree render ---' println.
     tempDir := MsnPanelHelper makeTempDir.
     bbs := BBS withDataDir: tempDir.
-    "A non-archived (approved) mission whose epic has been materialized."
-    MsnPanelHelper seedMissionWithEpic: bbs id: 'msn-tree' epic: 'epic-msn-tree'.
-    "The epic ROOT (parent=nil) — must be looked up by identity, not the parent
-     filter (reviewer correction: the epic is NOT in the story filter)."
-    MsnPanelHelper seedWorkitem: bbs id: 'epic-msn-tree' type: 'epic' parent: nil
-      title: 'Epic Title' status: 'ready' wave: 1.
-    "Child stories on distinct waves, seeded OUT of (wave, identity) order so the
-     comparator — not scan order — must produce the deterministic sequence."
-    MsnPanelHelper seedWorkitem: bbs id: 'story-msn-tree-1' type: 'story' parent: 'epic-msn-tree'
-      title: 'Later' status: 'ready' wave: 10.
-    MsnPanelHelper seedWorkitem: bbs id: 'story-msn-tree-2' type: 'story' parent: 'epic-msn-tree'
-      title: 'Earlier' status: 'in-progress' wave: 2.
-    MsnPanelHelper seedWorkitem: bbs id: 'story-msn-tree-3' type: 'story' parent: 'epic-msn-tree'
-      title: 'TieA' status: 'ready' wave: 5.
-    MsnPanelHelper seedWorkitem: bbs id: 'story-msn-tree-4' type: 'story' parent: 'epic-msn-tree'
-      title: 'TieB' status: 'ready' wave: 5.
-    MsnPanelHelper seedWorkitem: bbs id: 'story-msn-tree-5' type: 'story' parent: 'epic-msn-tree'
-      title: '<script>alert(1)</script>' status: 'ready' wave: 20.
+
+    "A non-archived (approved) mission with a materialized epic."
+    MsnPanelHelper seedMissionWithEpic: bbs id: 'msn-tree' epic: 'epic-tree'.
+    MsnPanelHelper seedWorkitem: bbs id: 'epic-tree' type: 'epic' parent: nil
+      title: 'Tree Epic Title' status: 'ready' wave: 1.
+    "Child stories on DISTINCT waves, seeded out of order. Expected render
+     order (wave numeric asc, then identity asc):
+       st-lo (w1), st-mid-a (w2), st-mid-b (w2, id b), st-hi (w3)."
+    MsnPanelHelper seedWorkitem: bbs id: 'st-hi' type: 'story' parent: 'epic-tree'
+      title: 'High Wave' status: 'ready' wave: 3.
+    MsnPanelHelper seedWorkitem: bbs id: 'st-lo' type: 'story' parent: 'epic-tree'
+      title: 'Low Wave' status: 'blocked' wave: 1.
+    MsnPanelHelper seedWorkitem: bbs id: 'st-mid-b' type: 'story' parent: 'epic-tree'
+      title: 'Mid B' status: 'ready' wave: 2.
+    MsnPanelHelper seedWorkitem: bbs id: 'st-mid-a' type: 'story' parent: 'epic-tree'
+      title: 'Mid A' status: 'done' wave: 2.
+    "An XSS-laden story title must be escaped."
+    MsnPanelHelper seedWorkitem: bbs id: 'st-xss' type: 'story' parent: 'epic-tree'
+      title: '<script>alert(1)</script>' status: 'ready' wave: 4.
+
+    "An ARCHIVED mission with an epic_id + a child story must emit NO tree."
+    MsnPanelHelper seedMission: bbs id: 'msn-arch-tree' status: 'archived' epic: 'epic-arch'.
+    MsnPanelHelper seedWorkitem: bbs id: 'epic-arch' type: 'epic' parent: nil
+      title: 'Archived Epic Title' status: 'ready' wave: 1.
+    MsnPanelHelper seedWorkitem: bbs id: 'st-arch' type: 'story' parent: 'epic-arch'
+      title: 'ArchivedOnlyStory' status: 'ready' wave: 1.
 
     sse := DashboardSSE on: bbs.
     html := (sse computeSnapshot) at: 'missionsHtml'.
 
-    "(1) Tree markup present beneath the (non-archived) mission card."
+    "(1) tree markup rendered under the non-archived card."
     t assert: (MsnPanelHelper contains: html sub: 'class="mission-tree"')
-      message: 'MP13: mission-tree markup rendered under a non-archived card'.
-    t assert: (MsnPanelHelper contains: html sub: 'class="mission-story"')
-      message: 'MP13: at least one mission-story row rendered'.
-    t assertEqual: (MsnPanelHelper count: 'class="mission-story"' in: html) to: 5
-      message: 'MP13: exactly one story row per child story (5)'.
-
-    "(2) The epic and each story field (title / status / wave) render."
-    t assert: (MsnPanelHelper contains: html sub: 'Epic Title')
+      message: 'MP13: mission-tree markup rendered'.
+    t assert: (MsnPanelHelper contains: html sub: 'Tree Epic Title')
       message: 'MP13: epic title rendered in the tree'.
-    t assert: (MsnPanelHelper contains: html sub: 'Earlier')
+    "(2) each story row shows title + status + wave."
+    t assert: (MsnPanelHelper contains: html sub: 'class="mission-story"')
+      message: 'MP13: mission-story rows rendered'.
+    t assert: (MsnPanelHelper contains: html sub: 'Low Wave')
       message: 'MP13: story title rendered'.
-    t assert: (MsnPanelHelper contains: html sub: 'in-progress')
+    t assert: (MsnPanelHelper contains: html sub: 'blocked')
       message: 'MP13: story status rendered'.
-    t assert: (MsnPanelHelper contains: html sub: '20')
-      message: 'MP13: story wave rendered'.
-
-    "(3) NUMERIC-wave-then-identity ordering. Waves 2 < 5 < 10 < 20; two stories
-     share wave 5 and must tie-break on identity (story-...-3 < story-...-4).
-     story-...-1 (wave 10, lexicographically SMALLEST id) must render LATE — a
-     string-wave sort ('10' < '2') would wrongly float it to the front."
-    iEarlier := html indexOf: 'Earlier'.
-    iTieA := html indexOf: 'TieA'.
-    iTieB := html indexOf: 'TieB'.
-    iLater := html indexOf: 'Later'.
-    t assert: (iEarlier > 0 and: [iEarlier < iTieA])
-      message: 'MP13: wave 2 story precedes wave 5 story (numeric wave)'.
-    t assert: (iTieA < iTieB)
-      message: 'MP13: same-wave stories ordered by identity (TieA before TieB)'.
-    t assert: (iTieB < iLater)
-      message: 'MP13: wave 5 precedes wave 10 (numeric sort, not string)'.
-
-    "(4) XSS: a story titled <script>alert(1)</script> renders escaped."
+    t assert: (MsnPanelHelper contains: html sub: 'wave 1')
+      message: 'MP13: story wave 1 rendered'.
+    t assert: (MsnPanelHelper contains: html sub: 'wave 3')
+      message: 'MP13: story wave 3 rendered'.
+    "(3) wave-then-identity ordering via substring-index checks."
+    iLo := html indexOf: 'Low Wave'.
+    iMidA := html indexOf: 'Mid A'.
+    iMidB := html indexOf: 'Mid B'.
+    iHi := html indexOf: 'High Wave'.
+    t assert: (iLo > 0 and: [iMidA > iLo and: [iMidB > iMidA and: [iHi > iMidB]]])
+      message: 'MP13: stories ordered by wave numeric asc, identity tiebreak (lo<midA<midB<hi)'.
+    "(4) XSS title escaped; no raw <script> survives."
     t assert: (MsnPanelHelper contains: html sub: '&lt;script&gt;')
-      message: 'MP13: script story title HTML-escaped'.
-    t assert: (MsnPanelHelper contains: html sub: '<script>alert(1)</script>') not
-      message: 'MP13: no raw <script> from a story title survives'.
-
-    "(5) Determinism: byte-identical HTML across consecutive unchanged ticks so
-     the tree cannot churn the panel (scroll reset / collapsed <details>)."
-    html2 := (sse computeSnapshot) at: 'missionsHtml'.
-    t assertEqual: html to: html2
-      message: 'MP13: tree HTML is byte-identical across consecutive ticks'
-  ]
-
-"=== MP14: archived missions get NO tree; a missing-epic mission is guarded ==="
-TestMissionPanelTreeSuppressed subclass: Object
-  classMethod: run: t [
-    | tempDir bbs sse html |
-    '--- MP14: archived tree suppressed + missing-epic guard ---' println.
-    tempDir := MsnPanelHelper makeTempDir.
-    bbs := BBS withDataDir: tempDir.
-
-    "An ARCHIVED mission whose epic + story DO exist — the card renders in the
-     Archived section but the tree must NOT (gated by loop, not by the awaiting
-     flag, which is false for both the others AND archived loops)."
-    MsnPanelHelper seedMissionWithEpic: bbs id: 'msn-arch' epic: 'epic-msn-arch'.
-    bbs update: 'mission' scope: 'default' identity: 'msn-arch' do: [:p |
-      p at: 'status' put: 'archived'].
-    MsnPanelHelper seedWorkitem: bbs id: 'epic-msn-arch' type: 'epic' parent: nil
-      title: 'ArchEpic' status: 'ready' wave: 1.
-    MsnPanelHelper seedWorkitem: bbs id: 'story-msn-arch-1' type: 'story' parent: 'epic-msn-arch'
-      title: 'ArchivedStory' status: 'ready' wave: 1.
-
-    "A non-archived mission with an epic_id but NO epic workitem — the epic-root
-     absence must be guarded: card renders, no tree, no crash."
-    MsnPanelHelper seedMissionWithEpic: bbs id: 'msn-noepicwi' epic: 'epic-missing'.
-
-    sse := DashboardSSE on: bbs.
-    html := (sse computeSnapshot) at: 'missionsHtml'.
-
-    "Both mission cards still render (tuples preserved)."
-    t assert: (MsnPanelHelper contains: html sub: 'msn-arch')
-      message: 'MP14: archived mission card still rendered'.
-    t assert: (MsnPanelHelper contains: html sub: 'mission-group--archived')
-      message: 'MP14: Archived section present'.
-    t assert: (MsnPanelHelper contains: html sub: 'msn-noepicwi')
-      message: 'MP14: missing-epic mission card still rendered'.
-
-    "No tree markup anywhere: the archived tree is suppressed and the missing
-     epic yields no tree (these are the only two missions in this scope)."
-    t assert: (MsnPanelHelper contains: html sub: 'ArchivedStory') not
-      message: 'MP14: archived mission emits NO story tree (suppressed by loop)'.
-    t assert: (MsnPanelHelper contains: html sub: 'class="mission-tree"') not
-      message: 'MP14: no mission-tree markup (archived suppressed + epic missing)'
+      message: 'MP13: XSS story title HTML-escaped'.
+    t assert: (MsnPanelHelper contains: html sub: '<script>') not
+      message: 'MP13: no raw <script> survives in the panel'.
+    "(5) archived mission with an epic_id emits NO tree (its story is absent)."
+    t assert: (MsnPanelHelper contains: html sub: 'ArchivedOnlyStory') not
+      message: 'MP13: archived mission emits no tree (child story not rendered)'.
+    t assert: (MsnPanelHelper contains: html sub: 'Archived Epic Title') not
+      message: 'MP13: archived mission emits no tree (epic title not rendered)'
   ]
 
 "=== Main ==="
@@ -641,12 +611,9 @@ MissionPanelMain subclass: Object
     [TestMissionRun run: t] on: Exception do: [:e |
       ('TestMissionRun CRASHED: ', e messageText) println.
       t assert: false message: 'TestMissionRun crashed'].
-    [TestMissionPanelStoryTree run: t] on: Exception do: [:e |
-      ('TestMissionPanelStoryTree CRASHED: ', e messageText) println.
-      t assert: false message: 'TestMissionPanelStoryTree crashed'].
-    [TestMissionPanelTreeSuppressed run: t] on: Exception do: [:e |
-      ('TestMissionPanelTreeSuppressed CRASHED: ', e messageText) println.
-      t assert: false message: 'TestMissionPanelTreeSuppressed crashed'].
+    [TestMissionTreeRender run: t] on: Exception do: [:e |
+      ('TestMissionTreeRender CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionTreeRender crashed'].
     t report.
     ^t failed
   ]

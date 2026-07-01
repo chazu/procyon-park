@@ -548,8 +548,12 @@ DashboardSSE subclass: Object
      context. Each mission is rendered inside its OWN exception guard so a single
      malformed tuple is SKIPPED — the panel still renders. The panel-level
      safeRender wrap in computeSnapshot is a second backstop."
-    | s missions awaiting others archived |
+    | s missions awaiting others archived workitems |
     missions := snap at: 'missions' ifAbsent: [#()].
+    "Reuse the already-cached workitem scan (computeSnapshot ran it once this
+     tick) to render each non-archived mission's epic/story tree — ZERO new
+     BBS scans, ZERO new SSE channels."
+    workitems := snap at: 'workitems' ifAbsent: [#()].
     s := '<div id="dashboard-missions"><h2>Missions</h2>'.
     awaiting := Array new: 0.
     others := Array new: 0.
@@ -586,7 +590,8 @@ DashboardSSE subclass: Object
     awaiting isEmpty ifFalse: [
       s := s, '<div class="mission-group mission-group--awaiting"><h3>Awaiting approval</h3>'.
       awaiting do: [:m |
-        s := s, ([self renderMissionCard: m awaiting: true]
+        s := s, ([(self renderMissionCard: m awaiting: true),
+            (self renderMissionTree: m workitems: workitems)]
           on: Exception do: [:e |
             ('SSE mission card skipped (malformed tuple): ', e messageText) println. ''])
       ].
@@ -595,7 +600,8 @@ DashboardSSE subclass: Object
     others isEmpty ifFalse: [
       s := s, '<div class="mission-group mission-group--decided"><h3>Other missions</h3>'.
       others do: [:m |
-        s := s, ([self renderMissionCard: m awaiting: false]
+        s := s, ([(self renderMissionCard: m awaiting: false),
+            (self renderMissionTree: m workitems: workitems)]
           on: Exception do: [:e |
             ('SSE mission card skipped (malformed tuple): ', e messageText) println. ''])
       ].
@@ -628,6 +634,84 @@ DashboardSSE subclass: Object
       ia < ib ifTrue: [-1] ifFalse: [ia > ib ifTrue: [1] ifFalse: [0]]
     ].
     ^arr
+  ]
+
+  method: renderMissionTree: m workitems: wis [
+    "Render an indented tree of the mission's epic and its child stories,
+     built ENTIRELY from the already-cached tick snapshot (the `workitems`
+     scan computeSnapshot ran once this tick). ZERO new BBS scans. Only
+     called for NON-ARCHIVED missions.
+
+     The epic itself has parent=nil so it is NOT in the story filter; we
+     resolve it by identity = mission.payload.epic_id. Stories are the
+     workitems whose payload.parent = epic_id. Every user-controlled field
+     (title/status/wave/epic title) is HTML-escaped. Any problem — missing
+     or empty epic_id, missing epic workitem, malformed rows — renders NO
+     tree rather than throwing (the whole body is guarded)."
+    ^[
+      | p epicId epic stories treeHtml |
+      p := m at: 'payload' ifAbsent: [Dictionary new].
+      epicId := p at: 'epic_id' ifAbsent: [nil].
+      ((epicId isKindOf: String) and: [epicId isEmpty not]) ifFalse: [^''].
+      epic := wis detect: [:w | (w at: 'identity' ifAbsent: [nil]) = epicId] ifNone: [nil].
+      epic isNil ifTrue: [^''].
+      stories := wis select: [:w |
+        ((w at: 'payload' ifAbsent: [Dictionary new]) at: 'parent' ifAbsent: [nil]) = epicId].
+      stories := self sortStories: stories.
+      treeHtml := '<ul class="mission-tree"><li class="mission-epic">',
+        (self htmlEscape: ((epic at: 'payload' ifAbsent: [Dictionary new]) at: 'title' ifAbsent: [epicId])),
+        '<ul>'.
+      stories do: [:st |
+        | sp |
+        sp := st at: 'payload' ifAbsent: [Dictionary new].
+        "wave is an Integer (missionWaveOf:); this VM's htmlEscape asString does
+         NOT understand Integer, so render the coerced numeric key's printString
+         (always digits — no injection risk) through htmlEscape for uniformity."
+        treeHtml := treeHtml, '<li class="mission-story">',
+          '<span class="mission-story-title">', (self htmlEscape: (sp at: 'title' ifAbsent: [''])), '</span> ',
+          '<span class="mission-story-status">', (self htmlEscape: (sp at: 'status' ifAbsent: [''])), '</span> ',
+          '<span class="mission-story-wave">wave ', (self htmlEscape: (self storyWaveKey: st) printString), '</span>',
+          '</li>'
+      ].
+      treeHtml := treeHtml, '</ul></li></ul>'.
+      treeHtml
+    ] on: Exception do: [:e |
+      ('SSE mission tree skipped (malformed tuple): ', e messageText) println. ''
+    ]
+  ]
+
+  method: sortStories: arr [
+    "Sort stories by wave NUMERICALLY, tie-breaking on identity lexicographically.
+     wave is an Integer (written via missionWaveOf: in Dispatcher) but a malformed
+     tuple could carry a non-integer; the comparator coerces defensively so it can
+     never throw. A deterministic TOTAL order is required so the rendered
+     missionsHtml is byte-stable tick-to-tick — otherwise sendElements:to:key:
+     change-detection re-patches the panel every tick, resetting scroll and
+     collapsing any expanded mission plan the operator is reading. Mutates and
+     returns the array."
+    arr sort: [:a :b |
+      | wa wb ia ib |
+      wa := self storyWaveKey: a.
+      wb := self storyWaveKey: b.
+      wa < wb ifTrue: [-1] ifFalse: [wa > wb ifTrue: [1] ifFalse: [
+        ia := a at: 'identity' ifAbsent: [''].
+        ib := b at: 'identity' ifAbsent: [''].
+        ia < ib ifTrue: [-1] ifFalse: [ia > ib ifTrue: [1] ifFalse: [0]]
+      ]]
+    ].
+    ^arr
+  ]
+
+  method: storyWaveKey: w [
+    "Extract a story's wave as an Integer for numeric sorting. Guards a
+     non-integer / missing / malformed wave to 0 so the sortStories:
+     comparator can never throw."
+    | v |
+    v := [(w at: 'payload' ifAbsent: [Dictionary new]) at: 'wave' ifAbsent: [0]]
+      on: Exception do: [:e | 0].
+    ^((v isKindOf: SmallInteger) or: [(v isKindOf: Integer) or: [v isKindOf: Float]])
+      ifTrue: [v]
+      ifFalse: [0]
   ]
 
   method: renderMissionCard: m awaiting: isAwaiting [
