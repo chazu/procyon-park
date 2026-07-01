@@ -1267,6 +1267,17 @@ WorkflowEngine subclass: Object
     (workitemId notNil and: [workitemId isString and: [workitemId isEmpty not]]) ifTrue: [
       self markWorkitemDone: workitemId scope: scope
     ].
+    "Batched dispatch bundles N stories into ONE workflow, so the single
+     `workitem` hook above can't mark them all done. A batched child instead
+     carries `workitems` (a list of story ids); mark each done so multi-story
+     batches roll up their epic (and mission) the same as unbatched dispatch."
+    (params at: 'workitems' ifAbsent: [nil]) notNil ifTrue: [
+      (params at: 'workitems') do: [:wid |
+        (wid notNil and: [wid isString and: [wid isEmpty not]]) ifTrue: [
+          self markWorkitemDone: wid scope: scope
+        ]
+      ]
+    ].
 
     "Emit completion event"
     bbs emitEvent: scope identity: (Identity workflowComplete: instanceId) type: 'workflow-complete' summary: 'Workflow completed: ', instanceId.

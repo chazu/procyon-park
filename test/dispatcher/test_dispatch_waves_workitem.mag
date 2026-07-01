@@ -91,6 +91,10 @@ DWHelper subclass: Object
   ]
 
   classMethod: seedStory: bbs scope: scope id: id title: title [
+    ^self seedStory: bbs scope: scope id: id title: title parent: 'epic-dw' mission: 'msn-dw' batch: nil
+  ]
+
+  classMethod: seedStory: bbs scope: scope id: id title: title parent: parentId mission: missionId batch: batchKey [
     | p |
     p := Dictionary new.
     p at: 'type' put: 'story'.
@@ -99,8 +103,9 @@ DWHelper subclass: Object
     p at: 'description' put: ('do ', title).
     p at: 'wave' put: 1.
     p at: 'template' put: 'story-lite'.
-    p at: 'parent' put: 'epic-dw'.
-    p at: 'mission_id' put: 'msn-dw'.
+    p at: 'parent' put: parentId.
+    p at: 'mission_id' put: missionId.
+    batchKey notNil ifTrue: [p at: 'batch' put: batchKey].
     bbs outPinned: 'workitem' scope: scope identity: id payload: p
   ]
 
@@ -183,6 +188,84 @@ TestDispatchWavesWorkitem subclass: Object
     Shell run: 'rm -f "', cfgPath, '"'
   ]
 
+"=== Batched dispatch tests ===
+ A wave whose stories share a `batch` tag must dispatch ONE child workflow that
+ carries `workitems` = every story id in the batch. WorkflowEngine>>completeWorkflow
+ then marks each id done, so batched multi-story missions roll up. Regression for
+ the dead batched branch that never called engine instantiate: (childId was left
+ stale/nil, so batched children were never spawned, tracked, or completed)."
+TestDispatchWavesBatched subclass: Object
+
+  classMethod: run: t [
+    | tempDir repoPath cfgPath bbs engine parentPayload children wp wis ep tr params |
+
+    '--- DW: batched dispatch bundles N stories into 1 child with workitems list ---' println.
+    tempDir := DWHelper makeTempDir.
+    repoPath := tempDir, '/repo'.
+    Shell run: 'mkdir -p "', repoPath, '" && cd "', repoPath, '" && git init -q && git commit -q --allow-empty -m init && git checkout -q main 2>/dev/null; true'.
+    cfgPath := (System env: 'HOME'), '/.pp/repos/dwbatch.json'.
+    Shell run: 'mkdir -p "$(dirname "', cfgPath, '")" && printf ''{"name":"dwbatch","path":"%s","registered_at":0}'' "', repoPath, '" > "', cfgPath, '"'.
+
+    bbs := BBS withDataDir: tempDir, '/bbs'.
+    engine := WorkflowEngine on: bbs.
+    DWHelper seedStoryLiteTemplate: bbs.
+
+    "Epic + two wave-1 stories sharing batch tag 'grp'."
+    ep := Dictionary new.
+    ep at: 'type' put: 'epic'.
+    ep at: 'status' put: 'ready'.
+    ep at: 'title' put: 'epic'.
+    ep at: 'mission_id' put: 'msn-dwb'.
+    bbs outPinned: 'workitem' scope: 'dwbatch' identity: 'epic-dwb' payload: ep.
+    DWHelper seedStory: bbs scope: 'dwbatch' id: 'story-dwb-A' title: 'A' parent: 'epic-dwb' mission: 'msn-dwb' batch: 'grp'.
+    DWHelper seedStory: bbs scope: 'dwbatch' id: 'story-dwb-B' title: 'B' parent: 'epic-dwb' mission: 'msn-dwb' batch: 'grp'.
+
+    parentPayload := Dictionary new.
+    parentPayload at: 'status' put: 'running'.
+    parentPayload at: 'template' put: 'full-pipeline'.
+    bbs out: 'workflow' scope: 'dwbatch' identity: 'wfb-parent' payload: parentPayload.
+
+    tr := Dictionary new.
+    tr at: 'id' put: 'dispatch'.
+    params := Dictionary new.
+    params at: 'workitem' put: 'epic-dwb'.
+    params at: 'repo' put: 'dwbatch'.
+    params at: 'mission' put: 'msn-dwb'.
+    (DispatchWavesAction on: engine) execute: tr instance: 'wfb-parent' params: params.
+
+    children := (bbs scanAll: 'workflow') select: [:wf |
+      | p |
+      p := (wf at: 'payload') at: 'params' ifAbsent: [Dictionary new].
+      ((p at: 'mission' ifAbsent: ['']) = 'msn-dwb')
+        and: [(wf at: 'identity') = 'wfb-parent' ifTrue: [false] ifFalse: [true]]
+    ].
+
+    "DW4: the batch collapses 2 stories into exactly 1 child workflow."
+    t assertEqual: children size to: 1
+      message: 'DW4: batched wave dispatched exactly 1 child workflow'.
+
+    children isEmpty ifFalse: [
+      wp := (children first at: 'payload') at: 'params' ifAbsent: [Dictionary new].
+      "DW5: the batched child carries the full workitems list (both stories)."
+      wis := wp at: 'workitems' ifAbsent: [nil].
+      t assert: (wis notNil)
+        message: 'DW5: batched child carries a workitems list'.
+      wis notNil ifTrue: [
+        t assertEqual: wis size to: 2
+          message: 'DW5: batched child workitems lists both stories'.
+        t assert: (wis includes: 'story-dwb-A')
+          message: 'DW5: batched child workitems includes story-dwb-A'.
+        t assert: (wis includes: 'story-dwb-B')
+          message: 'DW5: batched child workitems includes story-dwb-B'
+      ].
+      "DW6: mission provenance rides along on the batched child too."
+      t assertEqual: (wp at: 'mission' ifAbsent: [nil]) to: 'msn-dwb'
+        message: 'DW6: batched child preserves mission provenance'
+    ].
+
+    Shell run: 'rm -f "', cfgPath, '"'
+  ]
+
 "=== Main ==="
 DispatchWavesWorkitemMain subclass: Object
   classMethod: run [
@@ -191,6 +274,10 @@ DispatchWavesWorkitemMain subclass: Object
     [TestDispatchWavesWorkitem run: t] on: Exception do: [:e |
       ('TestDispatchWavesWorkitem CRASHED: ', e messageText) println.
       t assert: false message: 'TestDispatchWavesWorkitem crashed'
+    ].
+    [TestDispatchWavesBatched run: t] on: Exception do: [:e |
+      ('TestDispatchWavesBatched CRASHED: ', e messageText) println.
+      t assert: false message: 'TestDispatchWavesBatched crashed'
     ].
     t report.
     ^t failed

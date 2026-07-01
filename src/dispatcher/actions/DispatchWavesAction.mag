@@ -165,7 +165,7 @@ DispatchWavesAction subclass: WorkflowAction
      Subtasks with the same batch tag are combined into a single workflow.
      Reads template field to choose story vs story-lite."
 
-    | waveSubtasks childTemplate childParams childId waveChildIdsBuf waveChildIds childScope signalPayload statusPayload desc repo identity batchGroups batchKey batchList batchDesc |
+    | waveSubtasks childTemplate childParams childId waveChildIdsBuf waveChildIds childScope signalPayload statusPayload desc repo identity batchGroups batchKey batchList batchDesc batchWorkitems batchIdentity |
     waveSubtasks := subtasks select: [:st | (st at: 'wave' ifAbsent: [1]) = waveNum].
     waveChildIdsBuf := GrowableArray new.
 
@@ -232,11 +232,22 @@ DispatchWavesAction subclass: WorkflowAction
       batchDesc := 'Batch [', key, ']: '.
       repo := nil.
       childTemplate := 'story-lite'.
+      batchWorkitems := GrowableArray new.
       tasks do: [:st |
-        batchDesc := batchDesc, (st at: 'identity' ifAbsent: ['?']), ': ', (st at: 'description' ifAbsent: ['']), '. '.
+        batchIdentity := st at: 'identity' ifAbsent: ['?'].
+        batchDesc := batchDesc, batchIdentity, ': ', (st at: 'description' ifAbsent: ['']), '. '.
         repo isNil ifTrue: [repo := st at: 'repo' ifAbsent: [params at: 'repo' ifAbsent: [nil]]].
         "Use story (not lite) if any task in batch requests it"
-        (st at: 'template' ifAbsent: ['story-lite']) = 'story' ifTrue: [childTemplate := 'story']
+        (st at: 'template' ifAbsent: ['story-lite']) = 'story' ifTrue: [childTemplate := 'story'].
+        "Collect real work-item ids so the batched child marks each story done
+         on completion (multi-workitem rollup). Skip the placeholder identities
+         used by the legacy plan-decision path."
+        (batchIdentity notNil and: [
+          batchIdentity isString and: [
+            batchIdentity isEmpty not and: [
+              (batchIdentity = 'subtask') not and: [(batchIdentity = '?') not]]]]) ifTrue: [
+          batchWorkitems add: batchIdentity
+        ]
       ].
 
       childParams := Dictionary new.
@@ -249,12 +260,16 @@ DispatchWavesAction subclass: WorkflowAction
       (params at: 'mission' ifAbsent: [nil]) notNil ifTrue: [
         childParams at: 'mission' put: (params at: 'mission')
       ].
-      "NOTE: batched children bundle N stories into ONE workflow, so the single
-       `workitem` completion hook cannot mark them all done — batched story work
-       items are NOT auto-completed here and a batched mission would not roll up
-       until multi-workitem completion is supported. Default mission breakdowns
-       are unbatched (see the individual-dispatch branch above, which threads
-       workitem per story); revisit if batching is wired into mission decompose."
+      "Multi-workitem completion: a batched child bundles N stories into ONE
+       workflow, so it carries the full list of story ids. WorkflowEngine>>
+       completeWorkflow marks every id in `workitems` done (cascading to promote
+       the epic), so a batched mission rolls up just like an unbatched one."
+      batchWorkitems isEmpty ifFalse: [
+        childParams at: 'workitems' put: batchWorkitems asArray
+      ].
+
+      childId := engine instantiate: childTemplate scope: scope params: childParams launchedBy: (engine launchedByForInstance: instanceId).
+      waveChildIdsBuf add: childId.
 
       signalPayload := Dictionary new.
       signalPayload at: 'child_instance' put: childId.

@@ -20,6 +20,15 @@ Semantic Versioning.
   landing on `main` mid-run clashed with the impl branch rewriting the same file.
 
 ### Fixed
+- **Batched wave dispatch now actually runs and rolls up.** A wave whose stories
+  shared a `batch` tag was silently broken: `dispatch-waves` built the child
+  workflow's params but never instantiated it, so no batched workflow was spawned,
+  it was never tracked for wave completion, and its stories were never marked
+  done — a batched multi-story mission would hang forever. The batched branch now
+  spawns the bundled child, tracks it, and threads the full list of story ids
+  (`workitems`), which `completeWorkflow` marks done so the epic and mission roll
+  up just like an unbatched dispatch. (Unbatched breakdowns were already fixed
+  separately; default mission breakdowns remain unbatched.)
 - Dashboard Missions panel: **`done` (completed) missions no longer show in the
   active "Other missions" list.** Like archived missions, they are now filed into
   their own collapsed **Completed** section (with their all-done epic/story tree
