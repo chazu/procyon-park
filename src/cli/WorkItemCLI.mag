@@ -106,7 +106,7 @@ WorkItemCLI subclass: Object
   method: cmdCreate: args [
     "pp workitem create <identity> --title T --type epic|story [--repo R] [--status S] [--parent P]
        [--description D] [--template T] [--batch B] [--wave N] [--depends-on X,Y] [--label L1,L2]"
-    | identity title type repo status parent description template batch wave dependsOn labels body payload estimate |
+    | identity title type repo status parent description template batch wave dependsOn labels body payload estimate mission |
     args size < 3 ifTrue: [
       'Usage: pp workitem create <identity> --title "Title" --type epic|story [--repo R] [--status S] [--parent P]' println.
       ^self
@@ -132,6 +132,7 @@ WorkItemCLI subclass: Object
     dependsOn := self flagValue: '--depends-on' in: args.
     labels := self flagValue: '--label' in: args.
     estimate := self flagValue: '--estimate' in: args.
+    mission := self flagValue: '--mission' in: args.
 
     "Build payload"
     payload := Dictionary new.
@@ -151,6 +152,10 @@ WorkItemCLI subclass: Object
     labels notNil
       ifTrue: [payload at: 'labels' put: (labels split: ',')]
       ifFalse: [payload at: 'labels' put: (Array new: 0)].
+    "mission_id (optional): join this work-item to a mission's blast radius so
+     `pp mission nuke` reclaims it. Stored in the payload — the ganso ix_mission
+     generated column reads $.payload.mission_id."
+    mission notNil ifTrue: [payload at: 'mission_id' put: mission].
     payload at: 'comments' put: (Array new: 0).
     payload at: 'created_by' put: 'human'.
     payload at: 'created_at' put: DateTime now epochSeconds.
@@ -289,7 +294,7 @@ WorkItemCLI subclass: Object
      If parentOverride is non-nil, uses it as the parent (unless dict already has one).
      Missing fields get sensible defaults."
     | identity title type status parent description template batch wave dependsOn labels
-      payload body repoField estimate |
+      payload body repoField estimate mission |
     identity := dict at: 'identity' ifAbsent: [nil].
     identity isNil ifTrue: [
       'Skipping item with no identity.' println.
@@ -311,6 +316,7 @@ WorkItemCLI subclass: Object
     (labels isKindOf: String) ifTrue: [labels := labels split: ','].
     repoField := dict at: 'repo' ifAbsent: [nil].
     estimate := dict at: 'estimate' ifAbsent: [nil].
+    mission := dict at: 'mission_id' ifAbsent: [dict at: 'mission' ifAbsent: [nil]].
 
     "Build payload"
     payload := Dictionary new.
@@ -319,6 +325,7 @@ WorkItemCLI subclass: Object
     payload at: 'status' put: status.
     payload at: 'type' put: type.
     payload at: 'parent' put: parent.
+    mission notNil ifTrue: [payload at: 'mission_id' put: mission].
     repoField notNil ifTrue: [payload at: 'repo' put: repoField].
     payload at: 'template' put: template.
     batch notNil ifTrue: [payload at: 'batch' put: batch].
@@ -1003,7 +1010,7 @@ WorkItemCLI subclass: Object
     'pp workitem — manage work items (epics, stories)' println.
     '' println.
     'Commands:' println.
-    '  create <id> --title T --type epic|story [--repo R] [--status S] [--parent P] [--estimate small|medium|large]' println.
+    '  create <id> --title T --type epic|story [--repo R] [--status S] [--parent P] [--estimate small|medium|large] [--mission M]' println.
     '  create-from <file.yaml|file.json> [--repo R]  Bulk-create epic + stories from a file' println.
     '  show <id> [--repo R]                    Show work item detail' println.
     '  list [--repo R] [--status S] [--type T] [--parent P]  List work items' println.

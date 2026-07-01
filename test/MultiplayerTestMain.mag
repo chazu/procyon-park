@@ -274,6 +274,12 @@ MultiplayerTestMain subclass: Object
         failures := failures copyWith: ('AutoSynthMain CRASHED: ', e messageText).
         ('CRASH: AutoSynthMain: ', e messageText) println].
 
+    [totalFailed := totalFailed + MissionReconcileMain start. ranSuites := ranSuites + 1]
+      on: Exception do: [:e |
+        failedSuites := failedSuites + 1.
+        failures := failures copyWith: ('MissionReconcileMain CRASHED: ', e messageText).
+        ('CRASH: MissionReconcileMain: ', e messageText) println].
+
     [totalFailed := totalFailed + DoctrineFlagMain start. ranSuites := ranSuites + 1]
       on: Exception do: [:e |
         failedSuites := failedSuites + 1.

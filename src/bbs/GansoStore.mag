@@ -49,6 +49,23 @@ GansoStore subclass: Object
     db primExec: 'CREATE INDEX IF NOT EXISTS ix_wf ON tuples(wf_inst)' args: noArgs.
     db primExec: 'CREATE INDEX IF NOT EXISTS ix_parent ON tuples(parent)' args: noArgs.
     db primExec: 'CREATE INDEX IF NOT EXISTS ix_expires ON tuples(expires_at)' args: noArgs.
+    "Mission Decide->Act bridge (Phase B): mission_id provenance column. Every
+     entity spawned BECAUSE OF a mission carries payload.mission_id, so
+     'everything this mission created' is one indexed query (the blast radius a
+     `pp mission nuke` tears down). Mirrors parent/wf_inst — both also extract
+     from $.payload.*.
+
+     Added via ALTER, not by editing the CREATE TABLE above, so it BACK-FILLS
+     onto existing tuples.db files (CREATE TABLE IF NOT EXISTS is a no-op once
+     the table exists). It is VIRTUAL because SQLite forbids ALTER-ADD of a
+     STORED generated column ('cannot add a STORED column'); the index below
+     materializes the value, so `WHERE mission_id=?` is still an O(log N) index
+     search (verified: SEARCH USING INDEX ix_mission). The ALTER is our
+     idempotent migration — a re-run raises 'duplicate column name', which we
+     swallow (best-effort, exactly like the WAL checkpoint below)."
+    [db primExec: 'ALTER TABLE tuples ADD COLUMN mission_id TEXT GENERATED ALWAYS AS (json_extract(data, ''$.payload.mission_id'')) VIRTUAL' args: noArgs]
+      on: Exception do: [:e | ].
+    db primExec: 'CREATE INDEX IF NOT EXISTS ix_mission ON tuples(mission_id)' args: noArgs.
     "WAL hygiene on the writer connection. ganso's defaults leave the WAL to
      grow to ~40MB (wal_autocheckpoint=10000 pages) and never truncate it (no
      journal_size_limit) — observed 41MB WAL against a 2.9MB DB. Checkpoint more

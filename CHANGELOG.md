@@ -38,6 +38,24 @@ Semantic Versioning.
   ~4 MB, and the ganso reader pool/watcher were tightened.
 
 ### Added
+- Mission **Decide→Act bridge (Phase B v1)** — approving a mission now *spawns
+  and owns* work instead of dead-ending. On the next dispatcher housekeeping
+  pass, any `approved` mission with no epic yet has a single epic work-item
+  materialized (status `ready`, not auto-dispatched) and gets its `epic_id`
+  stamped. The reconciliation keys on mission *status*, so it fires identically
+  for the CLI and dashboard approve paths, and is idempotent (the `epic_id`
+  guard plus a deterministic `epic-<mission_id>` id mean re-approve and
+  dispatcher restarts never spawn a second epic). `pp mission show` now displays
+  the `epic:` pointer.
+- Mission provenance + teardown — every entity spawned because of a mission
+  carries `payload.mission_id`, backed by a new indexed ganso column
+  (`ix_mission`), so a mission's whole blast radius is one query.
+  `pp mission nuke <id> [--confirm]` tears that blast radius down: **dry-run by
+  default** (prints the work-items it would delete and changes nothing), and
+  with `--confirm` hard-deletes those work-items and archives the mission.
+  Boundary: it reclaims unmerged planning artifacts only — merged commits are
+  never touched. `pp workitem create` gained `--mission <id>` to enlist a
+  work-item in a mission's blast radius.
 - Opt-in dashboard host allowlist for the approve/reject/cancel controls. Set
   `PP_ALLOW_DASHBOARD_HOSTS="host:port,host:port"` (env) or `[security]
   dashboard_hosts` in `~/.config/pp/server.toml` to let an operator who reaches

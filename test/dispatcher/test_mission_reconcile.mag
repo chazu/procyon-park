@@ -1,0 +1,204 @@
+"Integration tests for Dispatcher>>maybeReconcileMissions — the Decide->Act
+ bridge (Phase B v1 tracer bullet) that materializes an epic when a human
+ approves a mission and stamps the mission's epic_id.
+
+ Invariants under test:
+   MR-a  An approved mission with no epic_id -> EXACTLY ONE epic work-item,
+         typed 'epic', status 'ready', stamped mission_id, and mission.epic_id
+         is set to that epic's id.
+   MR-b  Idempotency: repeated sweeps never spawn a second epic (the epic_id
+         guard + the deterministic epic-<mission_id> id).
+   MR-c  Only approved missions reconcile: researching / awaiting-approval /
+         rejected missions spawn NOTHING.
+   MR-d  Non-fatal: a malformed mission tuple in the scan does not abort the
+         sweep or escape; a valid approved mission alongside it still fires.
+   MR-e  Provenance: the spawned epic is discoverable purely by its mission_id
+         stamp (the blast-radius query `pp mission nuke` relies on).
+
+ Real BBS (BBS withDataDir:) is used so the full scan + upsertPinned + update:
+ path runs end-to-end against a ganso/SQLite tuplespace, exercising the new
+ ix_mission column."
+
+"--- Runner ---"
+MRRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1]
+         ifFalse: [
+           failed := failed + 1.
+           failures := failures copyWith: msg.
+           ('FAIL: ', msg) println
+         ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1]
+                        ifFalse: [
+                          failed := failed + 1.
+                          failures := failures copyWith: msg.
+                          ('FAIL: ', msg, ' (got: ', actual printString,
+                           ' expected: ', expected printString, ')') println
+                        ]
+  ]
+
+  method: report [
+    '=== Dispatcher mission-reconcile Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"--- Helpers ---"
+MRHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: seedMission: bbs scope: scope identity: id status: status [
+    "Write a mission tuple (no epic_id) in `scope`."
+    | p |
+    p := Dictionary new.
+    p at: 'brief' put: ('brief for ', id).
+    p at: 'plan' put: 'the plan'.
+    p at: 'status' put: status.
+    p at: 'created_at' put: DateTime now epochSeconds.
+    bbs out: 'mission' scope: scope identity: id payload: p
+  ]
+
+  classMethod: epicsForMission: bbs mission: id [
+    "All 'workitem' tuples whose payload.mission_id = id (the blast-radius query)."
+    ^(bbs scanAll: 'workitem') select: [:t |
+      ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'mission_id' ifAbsent: [nil]) = id
+    ]
+  ]
+
+  classMethod: missionEpicId: bbs scope: scope identity: id [
+    | m |
+    m := bbs rdp: 'mission' scope: scope identity: id.
+    ^m isNil
+      ifTrue: [nil]
+      ifFalse: [(m at: 'payload' ifAbsent: [Dictionary new]) at: 'epic_id' ifAbsent: [nil]]
+  ]
+
+"=== Tests ==="
+TestMissionReconcile subclass: Object
+
+  classMethod: run: t [
+    self testApprovedSpawnsOneEpic: t.
+    self testIdempotentSweeps: t.
+    self testOnlyApprovedReconciles: t.
+    self testNonFatalMalformedMission: t
+  ]
+
+  classMethod: testApprovedSpawnsOneEpic: t [
+    | tempDir bbs disp epics ep |
+    '--- MR-a: approved mission spawns exactly one stamped epic ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    MRHelper seedMission: bbs scope: 'repoA' identity: 'msn-1' status: 'approved'.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeReconcileMissions.
+
+    epics := MRHelper epicsForMission: bbs mission: 'msn-1'.
+    t assertEqual: epics size to: 1 message: 'MR-a: exactly one epic for the mission'.
+    epics size = 1 ifTrue: [
+      | p |
+      ep := epics at: 1.
+      p := ep at: 'payload'.
+      t assertEqual: (ep at: 'identity') to: 'epic-msn-1' message: 'MR-a: deterministic epic id'.
+      t assertEqual: (p at: 'type' ifAbsent: [nil]) to: 'epic' message: 'MR-a: type=epic'.
+      t assertEqual: (p at: 'status' ifAbsent: [nil]) to: 'ready' message: 'MR-a: status=ready (not dispatched)'.
+      t assertEqual: (p at: 'mission_id' ifAbsent: [nil]) to: 'msn-1' message: 'MR-a: mission_id stamped'
+    ].
+    t assertEqual: (MRHelper missionEpicId: bbs scope: 'repoA' identity: 'msn-1') to: 'epic-msn-1'
+      message: 'MR-a: mission.epic_id stamped'
+  ]
+
+  classMethod: testIdempotentSweeps: t [
+    | tempDir bbs disp |
+    '--- MR-b: repeated sweeps never spawn a second epic ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    MRHelper seedMission: bbs scope: 'repoA' identity: 'msn-2' status: 'approved'.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeReconcileMissions.
+    disp maybeReconcileMissions.
+    disp maybeReconcileMissions.
+
+    t assertEqual: (MRHelper epicsForMission: bbs mission: 'msn-2') size to: 1
+      message: 'MR-b: still exactly one epic after three sweeps'
+  ]
+
+  classMethod: testOnlyApprovedReconciles: t [
+    | tempDir bbs disp |
+    '--- MR-c: non-approved missions spawn nothing ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    MRHelper seedMission: bbs scope: 'repoA' identity: 'msn-r' status: 'researching'.
+    MRHelper seedMission: bbs scope: 'repoA' identity: 'msn-w' status: 'awaiting-approval'.
+    MRHelper seedMission: bbs scope: 'repoA' identity: 'msn-x' status: 'rejected'.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeReconcileMissions.
+
+    t assertEqual: (MRHelper epicsForMission: bbs mission: 'msn-r') size to: 0
+      message: 'MR-c: researching does not reconcile'.
+    t assertEqual: (MRHelper epicsForMission: bbs mission: 'msn-w') size to: 0
+      message: 'MR-c: awaiting-approval does not reconcile'.
+    t assertEqual: (MRHelper epicsForMission: bbs mission: 'msn-x') size to: 0
+      message: 'MR-c: rejected does not reconcile'.
+    t assert: (MRHelper missionEpicId: bbs scope: 'repoA' identity: 'msn-w') isNil
+      message: 'MR-c: awaiting-approval mission keeps epic_id nil'
+  ]
+
+  classMethod: testNonFatalMalformedMission: t [
+    | tempDir bbs disp threw |
+    '--- MR-d: malformed mission does not abort or escape the sweep ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "A mission whose payload is a String, not a Dictionary — the status read
+     throws inside the per-mission guard."
+    bbs out: 'mission' scope: 'repoA' identity: 'msn-bad' payload: 'not-a-dict'.
+    MRHelper seedMission: bbs scope: 'repoA' identity: 'msn-ok' status: 'approved'.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    threw := false.
+    [disp maybeReconcileMissions] on: Exception do: [:e | threw := true].
+
+    t assert: threw not message: 'MR-d: malformed mission did not escape the sweep'.
+    t assertEqual: (MRHelper epicsForMission: bbs mission: 'msn-ok') size to: 1
+      message: 'MR-d: valid approved mission still fired despite malformed neighbour'
+  ]
+
+"=== Main ==="
+MissionReconcileMain subclass: Object
+  classMethod: start [
+    | t |
+    t := MRRunner new.
+    TestMissionReconcile run: t.
+    t report.
+    ^t failed
+  ]

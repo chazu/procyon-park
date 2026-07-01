@@ -71,6 +71,7 @@ MissionCLI subclass: Object
     sub = 'approve'    ifTrue: [^self cmdApprove: args].
     sub = 'reject'     ifTrue: [^self cmdReject: args].
     sub = 'archive'    ifTrue: [^self cmdArchive: args].
+    sub = 'nuke'       ifTrue: [^self cmdNuke: args].
     (sub = 'help' or: [sub = '--help']) ifTrue: [^self printUsage].
     ('Unknown mission command: ', sub) println.
     self printUsage
@@ -244,6 +245,9 @@ MissionCLI subclass: Object
     ('brief:   ', (self orNone: (p at: 'brief' ifAbsent: [nil]))) println.
     ('intent:  ', (self orNone: (p at: 'intent' ifAbsent: [nil]))) println.
     ('plan:    ', (self orNone: (p at: 'plan' ifAbsent: [nil]))) println.
+    (p at: 'epic_id' ifAbsent: [nil]) notNil ifTrue: [
+      ('epic:    ', (p at: 'epic_id')) println
+    ].
     (p at: 'reason' ifAbsent: [nil]) notNil ifTrue: [
       ('reason:  ', (p at: 'reason')) println
     ]
@@ -319,6 +323,111 @@ MissionCLI subclass: Object
     reason := self flagValue: '--reason' in: args.
     ^self setStatusFor: args to: 'archived' reason: reason action: 'archive'
       allowedFrom: #('approved' 'rejected' 'researching')
+  ]
+
+  method: cmdNuke: args [
+    "pp mission nuke <id> [--repo R] [--confirm]
+     Tear down the blast radius a mission spawned: every entity stamped with
+     this mission_id. DRY-RUN BY DEFAULT — it prints the full blast radius and
+     changes nothing; a real teardown requires the explicit --confirm flag.
+
+     BOUNDARY (Phase B v1): reclaims the mission's UNMERGED planning artifacts —
+     the work-items it created (epic + any stories). Merged commits are NEVER
+     touched by nuke (reverting merged code is a deliberate `git revert`, not an
+     auto-cascade). A real run also archives the mission so reconciliation does
+     not re-spawn the epic. Later slices extend the cascade to workflows/tasks/
+     worktrees as those become mission-stamped."
+    "`msnScope` (a local), NOT `scope` (the instance var): a local that collides
+     with the `scope` ivar is not visible inside the `items do:` teardown block
+     below in this VM — the block would read the nil ivar and delete with a nil
+     scope. Same collision that silently broke workitemsForMission."
+    | id confirm m mp msnScope items |
+    args size < 3 ifTrue: ['Usage: pp mission nuke <id> [--repo R] [--confirm]' println. ^self].
+    id := args at: 3.
+    self applyScopeFlagFrom: args.
+    confirm := args includes: '--confirm'.
+    m := self rdpMission: id.
+    m isNil ifTrue: [('Not found: ', id) println. ^self].
+    mp := m at: 'payload' ifAbsent: [Dictionary new].
+    msnScope := m at: 'scope' ifAbsent: [self defaultScope].
+
+    items := self workitemsForMission: id scope: msnScope.
+
+    ('Mission ', id, ' blast radius (scope ', msnScope, '):') println.
+    items isEmpty
+      ifTrue: ['  (no mission-stamped work-items)' println]
+      ifFalse: [
+        items do: [:t |
+          | tp |
+          tp := t at: 'payload' ifAbsent: [Dictionary new].
+          ('  workitem  ', (t at: 'identity' ifAbsent: ['?']),
+            '  [', (tp at: 'type' ifAbsent: ['?']), '] [', (tp at: 'status' ifAbsent: ['?']), ']  ',
+            (self oneLine: (tp at: 'title' ifAbsent: ['']))) println
+        ]
+      ].
+    ('  mission tuple ', id, ' -> archived (status ', (mp at: 'status' ifAbsent: ['?']), ')') println.
+
+    confirm ifFalse: [
+      '' println.
+      ('DRY RUN — nothing deleted. Re-run with --confirm to tear down ',
+        items size printString, ' work-item(s) and archive the mission.') println.
+      ^self
+    ].
+
+    "--- real teardown (--confirm) ---"
+    items do: [:t |
+      self deleteWorkitem: (t at: 'identity' ifAbsent: [nil]) scope: msnScope
+    ].
+    "Archive the mission and drop the epic pointer so the reconciliation guard
+     (status='approved') no longer fires. archived is terminal; the tuple is
+     preserved (missions are never hard-deleted)."
+    mp at: 'status' put: 'archived'.
+    mp at: 'epic_id' put: nil.
+    mp at: 'reason' put: 'nuked'.
+    mp at: 'nuked_at' put: DateTime now epochSeconds.
+    mp at: 'updated_at' put: DateTime now epochSeconds.
+    self putMission: id payload: mp.
+    ('Nuked mission ', id, ': ', items size printString, ' work-item(s) deleted, mission archived.') println
+  ]
+
+  method: workitemsForMission: missionId scope: sc [
+    "All 'workitem' tuples in `sc` whose payload.mission_id = missionId. Filters
+     client-side over a category scan — the ganso ix_mission index backs the
+     equivalent server-side query when a later slice needs it. Best-effort:
+     returns empty on any network/parse error.
+
+     NB: the params are `missionId`/`sc`, NOT `scope` — a method arg that
+     collides with the `scope` INSTANCE VAR is not visible inside a nested block
+     in this VM (the block closes over the nil ivar instead), so building the
+     curl string here with a `scope` arg silently threw primConcat."
+    | response result tuples hits |
+    hits := Array new: 0.
+    [
+      response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/scan -H "Content-Type: application/json" -d ''{"category":"workitem","scope":"', sc, '"}'''.
+      (response isNil or: [response isEmpty]) ifTrue: [^hits].
+      result := Json decode: response.
+      tuples := result at: 'tuples' ifAbsent: [Array new: 0].
+      tuples do: [:t |
+        ((t at: 'payload' ifAbsent: [Dictionary new]) at: 'mission_id' ifAbsent: [nil]) = missionId ifTrue: [
+          hits := hits copyWith: t
+        ]
+      ]
+    ] on: Exception do: [:e | ^hits].
+    ^hits
+  ]
+
+  method: deleteWorkitem: wid scope: sc [
+    "Signed hard-delete of one work-item (cascade: descendants go too). No-op on
+     a nil id. Best-effort — a failed delete is reported but does not abort the
+     rest of the teardown. Param is `sc` to avoid the `scope`-ivar/block collision."
+    | body |
+    wid isNil ifTrue: [^self].
+    body := Dictionary new.
+    body at: 'identity' put: wid.
+    body at: 'scope' put: sc.
+    body at: 'cascade' put: true.
+    [CLIBase signedPost: '/api/workitem/delete' body: body baseUrl: baseUrl]
+      on: Exception do: [:e | ('  (delete failed for ', wid, ': ', e messageText, ')') println]
   ]
 
   method: setStatusFor: args to: newStatus reason: reason action: action allowedFrom: allowedFrom [
@@ -400,7 +509,9 @@ MissionCLI subclass: Object
     '  approve <id> [--repo R]         awaiting-approval -> approved' println.
     '  reject <id> [--reason R] [--repo R]   awaiting-approval -> rejected (+ reason)' println.
     '  archive <id> [--reason R] [--repo R]  approved|rejected|researching -> archived (terminal)' println.
+    '  nuke <id> [--repo R] [--confirm]      Tear down the mission blast radius (dry-run unless --confirm)' println.
     '' println.
     'Lifecycle: researching -> awaiting-approval -> approved | rejected -> archived' println.
+    'On approve, the dispatcher materializes an epic (stamped mission_id); nuke reclaims it.' println.
     ^self
   ]

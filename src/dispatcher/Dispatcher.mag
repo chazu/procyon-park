@@ -147,6 +147,16 @@ Dispatcher subclass: Object
        on:Exception wrapper keeps it strictly off-critical-path."
       [self maybeFlagDoctrineDivergence] on: Exception do: [:e |
         ('Dispatcher tick step error (maybeFlagDoctrineDivergence): ', e messageText) println
+      ].
+      "Mission Decide->Act bridge (Phase B): the reconciliation that closes the
+       Auftragstaktik loop. For any mission that a human has APPROVED but which
+       has not yet spawned its epic, materialize exactly one epic work-item and
+       stamp the mission's epic_id. Reconciles on STATUS (not on the approve
+       call), so it fires identically for the CLI signed-PUT and the dashboard
+       approve endpoint — the two approve paths need no hook. Its OWN
+       on:Exception wrapper keeps it strictly off-critical-path."
+      [self maybeReconcileMissions] on: Exception do: [:e |
+        ('Dispatcher tick step error (maybeReconcileMissions): ', e messageText) println
       ]
     ]
   ]
@@ -622,6 +632,97 @@ Dispatcher subclass: Object
     marker at: 'ewma_score' put: ewma.
     marker at: 'flagged_at' put: DateTime now epochSeconds.
     bbs upsertSignal: dscope identity: ('doctrine-divergence-flagged:', id) payload: marker
+  ]
+
+  "--- Mission Decide->Act reconciliation (Phase B) ---"
+
+  method: maybeReconcileMissions [
+    "Off-critical-path sweep (Dispatcher tick, ~every 5min): for every mission
+     whose status is 'approved' AND which has no epic_id yet, materialize its
+     epic exactly once and stamp mission.epic_id.
+
+     Idempotency (the runaway-spawn risk): the epic_id guard means a re-approve
+     or a dispatcher restart never spawns a second epic. Belt-and-suspenders,
+     the epic's identity is deterministic (epic-<mission_id>) so the underlying
+     upsert is itself idempotent even if the stamp write is lost to a crash.
+
+     Each mission is processed in its OWN on:Exception so one malformed mission
+     tuple can neither abort the sweep nor escape into the tick loop (mirrors
+     maybeAutoSynthesize)."
+    | missions |
+    missions := bbs scanAll: 'mission'.
+    missions do: [:m |
+      [
+        | p status epicId mid scope |
+        p := m at: 'payload' ifAbsent: [Dictionary new].
+        status := p at: 'status' ifAbsent: [nil].
+        epicId := p at: 'epic_id' ifAbsent: [nil].
+        "Fire only for an approved mission that has not yet spawned its epic."
+        ((status = 'approved')
+          and: [epicId isNil or: [(epicId isKindOf: String) and: [epicId isEmpty]]]) ifTrue: [
+          mid := m at: 'identity' ifAbsent: [nil].
+          scope := m at: 'scope' ifAbsent: ['default'].
+          mid notNil ifTrue: [self reconcileMission: mid scope: scope payload: p]
+        ]
+      ] on: Exception do: [:e |
+        bbs logEngine: 'warn' component: 'mission' scope: 'system' message: ('reconcile skip: ', e messageText)
+      ]
+    ]
+  ]
+
+  method: reconcileMission: mid scope: scope payload: mp [
+    "Materialize the single epic for an approved mission, then stamp
+     mission.epic_id. The epic carries mission_id=mid — that is the provenance
+     stamp the whole blast radius (and `pp mission nuke`) keys on. parent is nil
+     (the epic is the root of the mission's tree). Status is 'ready', NOT
+     dispatched: approve spawns the work but a light second trigger
+     (`pp mission run` / dashboard Execute, a later slice) starts execution, so
+     a rubber-stamp approval never kicks off N agents unattended (D5).
+
+     ORDER MATTERS: create the epic BEFORE stamping epic_id. If we crash between
+     the two, the mission is still 'approved' with epic_id=nil, so the next
+     sweep re-runs — and the deterministic epic id makes that re-run a no-op
+     upsert, never a duplicate. Stamping first could orphan the guard."
+    | epicId ep |
+    epicId := 'epic-', mid.
+    ep := Dictionary new.
+    ep at: 'title' put: (self missionEpicTitle: mp).
+    ep at: 'description' put: (mp at: 'plan' ifAbsent: ['']).
+    ep at: 'status' put: 'ready'.
+    ep at: 'type' put: 'epic'.
+    ep at: 'parent' put: nil.
+    ep at: 'template' put: 'story'.
+    ep at: 'wave' put: 1.
+    ep at: 'depends_on' put: (Array new: 0).
+    ep at: 'labels' put: (Array new: 0).
+    ep at: 'comments' put: (Array new: 0).
+    ep at: 'mission_id' put: mid.
+    ep at: 'created_by' put: 'mission-reconcile'.
+    ep at: 'created_at' put: DateTime now epochSeconds.
+    ep at: 'updated_at' put: DateTime now epochSeconds.
+    bbs upsertPinned: 'workitem' scope: scope identity: epicId payload: ep.
+    "Stamp epic_id only. Status stays 'approved' — that closes the reconciliation
+     guard (epic_id is now non-nil) so we never spawn twice, and it keeps the
+     mission archivable/nukeable (both allow 'approved'). The in-progress/done
+     rollup is a deliberately LATER slice (D6), not part of this tracer bullet."
+    bbs update: 'mission' scope: scope identity: mid do: [:p |
+      p at: 'epic_id' put: epicId.
+      p at: 'updated_at' put: DateTime now epochSeconds
+    ].
+    ('[mission] reconciled ', mid, ' -> epic ', epicId, ' (scope ', scope, ')') println
+  ]
+
+  method: missionEpicTitle: mp [
+    "A one-line epic title from the mission's brief (fallback to the id-less
+     generic). Collapses to the first line and caps length so a multi-paragraph
+     brief does not become an unwieldy work-item title."
+    | brief cut |
+    brief := mp at: 'brief' ifAbsent: [nil].
+    (brief isNil or: [(brief isKindOf: String) not or: [brief isEmpty]]) ifTrue: [^'Mission epic'].
+    cut := brief indexOf: String lf.
+    cut > 0 ifTrue: [brief := brief copyFrom: 1 to: cut - 1].
+    brief size > 80 ifTrue: [brief := (brief copyFrom: 1 to: 77), '...'].
+    ^brief
   ]
 
   "--- Reaper (D6.2 / D6.3) ---"
