@@ -188,6 +188,10 @@ DispatchWavesAction subclass: WorkflowAction
         (params at: 'parent_branch' ifAbsent: [nil]) notNil ifTrue: [
           childParams at: 'parent_branch' put: (params at: 'parent_branch')
         ].
+        "Mission provenance: carry mission through so child workflows are stamped."
+        (params at: 'mission' ifAbsent: [nil]) notNil ifTrue: [
+          childParams at: 'mission' put: (params at: 'mission')
+        ].
 
         childId := engine instantiate: childTemplate scope: scope params: childParams launchedBy: (engine launchedByForInstance: instanceId).
         waveChildIdsBuf add: childId.
@@ -228,6 +232,10 @@ DispatchWavesAction subclass: WorkflowAction
       repo notNil ifTrue: [childParams at: 'repo' put: repo].
       (params at: 'parent_branch' ifAbsent: [nil]) notNil ifTrue: [
         childParams at: 'parent_branch' put: (params at: 'parent_branch')
+      ].
+      "Mission provenance: carry mission through so batched child workflows are stamped."
+      (params at: 'mission' ifAbsent: [nil]) notNil ifTrue: [
+        childParams at: 'mission' put: (params at: 'mission')
       ].
 
       childId := engine instantiate: childTemplate scope: scope params: childParams launchedBy: (engine launchedByForInstance: instanceId).

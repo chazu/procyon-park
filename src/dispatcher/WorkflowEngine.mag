@@ -136,6 +136,14 @@ WorkflowEngine subclass: Object
     workflowPayload at: 'params' put: params.
     workflowPayload at: 'scope' put: scope.
     workflowPayload at: 'started_at' put: DateTime now epochSeconds.
+    "Mission provenance (Phase B): a workflow launched for a mission carries a
+     top-level mission_id so it joins the mission's indexed blast radius
+     (ix_mission reads $.payload.mission_id) — nuke lists/cancels it and rollup
+     aggregates its case outcome. Propagated to child workflows via
+     DispatchWavesAction (params.mission)."
+    (params at: 'mission' ifAbsent: [nil]) notNil ifTrue: [
+      workflowPayload at: 'mission_id' put: (params at: 'mission')
+    ].
     "F4.3: stamp CLI-provided affinity override onto the workflow tuple so
      subsequent ticks that fire transitions can layer it over per-transition
      and workflow-root CUE affinity with highest precedence."

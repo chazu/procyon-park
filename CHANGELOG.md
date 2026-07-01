@@ -38,11 +38,19 @@ Semantic Versioning.
   ~4 MB, and the ganso reader pool/watcher were tightened.
 
 ### Added
-- Mission **rollup to done** — an `in-progress` mission now advances itself to
-  `done` once every work-item it owns has completed (the epic auto-promotes when
-  its stories finish), closing the lifecycle
-  (`approved → in-progress → done → archived`). The mission becomes the outcome
-  anchor. `done` missions are archivable.
+- Mission **rollup to done + outcome score** — an `in-progress` mission now
+  advances itself to `done` once every work-item it owns has completed (the epic
+  auto-promotes when its stories finish), closing the lifecycle
+  (`approved → in-progress → done → archived`). On completion it records an
+  `outcome_score` (0–1000) — the mean of its cases' per-workflow outcome scores
+  (or a clean-completion baseline when it produced no cases) — so the mission is
+  a real outcome anchor for the doctrine correlation backstop. `pp mission show`
+  displays it; `done` missions are archivable.
+- Mission **workflow provenance** — workflows launched for a mission (the
+  `full-pipeline` and every child story workflow it dispatch-waves) now carry a
+  `mission_id`, joining the indexed blast radius. `pp mission nuke` finds and
+  cancels the whole live workflow tree, and outcome scoring aggregates their
+  cases.
 - Mission **Execute** (the D5 second trigger) — after a mission is approved and
   decomposed, a light explicit action starts the work: `pp mission run <id>`
   (CLI) or an **Execute** button on the dashboard mission card. It dispatches the

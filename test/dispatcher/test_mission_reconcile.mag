@@ -22,6 +22,9 @@
    MR-i  Rollup holds while any item is unfinished.
    MR-j  Rollup never declares a no-item in-progress mission done.
    MR-k  Rollup fires only from in-progress (approved w/ done items untouched).
+   MR-l  missionOutcomeScore = mean of the mission's case outcomes (two-hop
+         workflow.mission_id -> case.workflow_instance); nil when none.
+   MR-m  Rollup stamps the aggregated outcome_score on done.
 
  Real BBS (BBS withDataDir:) is used so the full scan + upsertPinned + update:
  path runs end-to-end against a ganso/SQLite tuplespace, exercising the new
@@ -138,6 +141,32 @@ MRHelper subclass: Object
     ^m isNil ifTrue: [nil] ifFalse: [(m at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: [nil]]
   ]
 
+  classMethod: missionOutcome: bbs scope: scope identity: id [
+    | m |
+    m := bbs rdp: 'mission' scope: scope identity: id.
+    ^m isNil ifTrue: [nil] ifFalse: [(m at: 'payload' ifAbsent: [Dictionary new]) at: 'outcome_score' ifAbsent: [nil]]
+  ]
+
+  classMethod: seedWorkflow: bbs scope: scope identity: wid mission: mid [
+    "A completed workflow stamped with mission_id (provenance)."
+    | p |
+    p := Dictionary new.
+    p at: 'template' put: 'full-pipeline'.
+    p at: 'status' put: 'completed'.
+    p at: 'mission_id' put: mid.
+    bbs outPinned: 'workflow' scope: scope identity: wid payload: p
+  ]
+
+  classMethod: seedCase: bbs scope: scope identity: cid workflow: wfId outcome: score [
+    "A case linked to a workflow via workflow_instance, carrying an outcome_score."
+    | p |
+    p := Dictionary new.
+    p at: 'workflow_instance' put: wfId.
+    p at: 'terminal_state' put: 'completed'.
+    p at: 'outcome_score' put: score.
+    bbs outPinned: 'case' scope: scope identity: cid payload: p
+  ]
+
   classMethod: itemsForMission: bbs mission: id [
     "All 'workitem' tuples whose payload.mission_id = id (the blast-radius query)."
     ^(bbs scanAll: 'workitem') select: [:t |
@@ -194,7 +223,9 @@ TestMissionReconcile subclass: Object
     self testRollupAllDone: t.
     self testRollupNotAllDone: t.
     self testRollupNoItems: t.
-    self testRollupOnlyInProgress: t
+    self testRollupOnlyInProgress: t.
+    self testOutcomeScoreAggregates: t.
+    self testRollupStampsOutcome: t
   ]
 
   classMethod: testApprovedSpawnsOneEpic: t [
@@ -363,7 +394,9 @@ TestMissionReconcile subclass: Object
     disp maybeRollupMissions.
 
     t assertEqual: (MRHelper missionStatus: bbs scope: 'repoA' identity: 'msn-ip') to: 'done'
-      message: 'MR-h: mission rolled to done when all items done'
+      message: 'MR-h: mission rolled to done when all items done'.
+    t assertEqual: (MRHelper missionOutcome: bbs scope: 'repoA' identity: 'msn-ip') to: 1000
+      message: 'MR-h: no-case mission gets the clean-completion baseline outcome 1000'
   ]
 
   classMethod: testRollupNotAllDone: t [
@@ -408,6 +441,45 @@ TestMissionReconcile subclass: Object
 
     t assertEqual: (MRHelper missionStatus: bbs scope: 'repoA' identity: 'msn-ap') to: 'approved'
       message: 'MR-k: approved mission not rolled to done'
+  ]
+
+  classMethod: testOutcomeScoreAggregates: t [
+    | tempDir bbs disp |
+    '--- MR-l: missionOutcomeScore = mean of the case outcomes (two-hop) ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    "Two mission workflows, each with a case: outcomes 1000 and 500 -> mean 750."
+    MRHelper seedWorkflow: bbs scope: 'repoA' identity: 'wf-o-1' mission: 'msn-o'.
+    MRHelper seedWorkflow: bbs scope: 'repoA' identity: 'wf-o-2' mission: 'msn-o'.
+    MRHelper seedCase: bbs scope: 'repoA' identity: 'case-o-1' workflow: 'wf-o-1' outcome: 1000.
+    MRHelper seedCase: bbs scope: 'repoA' identity: 'case-o-2' workflow: 'wf-o-2' outcome: 500.
+    "A stray case for an unrelated workflow must NOT count."
+    MRHelper seedCase: bbs scope: 'repoA' identity: 'case-x' workflow: 'wf-unrelated' outcome: 0.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+
+    t assertEqual: (disp missionOutcomeScore: 'msn-o') to: 750
+      message: 'MR-l: outcome is the mean (750) of the mission cases only'.
+    t assert: (disp missionOutcomeScore: 'msn-none') isNil
+      message: 'MR-l: a mission with no workflows/cases -> nil (no outcome)'
+  ]
+
+  classMethod: testRollupStampsOutcome: t [
+    | tempDir bbs disp |
+    '--- MR-m: rollup stamps the aggregated outcome_score ---' println.
+    tempDir := MRHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    MRHelper seedInProgressMission: bbs scope: 'repoA' identity: 'msn-o2'.
+    MRHelper seedItem: bbs scope: 'repoA' identity: 'epic-msn-o2' mission: 'msn-o2' status: 'done'.
+    "A completed workflow + case give the mission a real (non-baseline) outcome."
+    MRHelper seedWorkflow: bbs scope: 'repoA' identity: 'wf-o2' mission: 'msn-o2'.
+    MRHelper seedCase: bbs scope: 'repoA' identity: 'case-o2' workflow: 'wf-o2' outcome: 600.
+    disp := Dispatcher on: bbs harnessFactory: nil.
+    disp maybeRollupMissions.
+
+    t assertEqual: (MRHelper missionStatus: bbs scope: 'repoA' identity: 'msn-o2') to: 'done'
+      message: 'MR-m: mission rolled to done'.
+    t assertEqual: (MRHelper missionOutcome: bbs scope: 'repoA' identity: 'msn-o2') to: 600
+      message: 'MR-m: outcome_score stamped from the case (600)'
   ]
 
 "=== Main ==="

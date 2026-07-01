@@ -850,18 +850,56 @@ Dispatcher subclass: Object
         status = 'in-progress' ifTrue: [
           mid := m at: 'identity' ifAbsent: [nil].
           (mid notNil and: [self missionAllItemsDone: mid]) ifTrue: [
+            | score |
+            "Outcome anchor: mean of the mission's case outcomes; a mission with
+             no cases (its items were completed without workflows) gets the
+             clean-completion baseline (1000)."
+            score := self missionOutcomeScore: mid.
+            score isNil ifTrue: [score := 1000].
             bbs update: 'mission' scope: (m at: 'scope' ifAbsent: ['default']) identity: mid do: [:mp |
               mp at: 'status' put: 'done'.
+              mp at: 'outcome_score' put: score.
               mp at: 'done_at' put: DateTime now epochSeconds.
               mp at: 'updated_at' put: DateTime now epochSeconds
             ].
-            ('[mission] ', mid, ' -> done (all work-items complete)') println
+            ('[mission] ', mid, ' -> done (outcome ', score printString, '/1000)') println
           ]
         ]
       ] on: Exception do: [:e |
         bbs logEngine: 'warn' component: 'mission' scope: 'system' message: ('rollup skip: ', e messageText)
       ]
     ]
+  ]
+
+  method: missionOutcomeScore: mid [
+    "Mean outcome_score (integer milli [0,1000]) of the mission's cases, or nil
+     if the mission produced no cases. Two-hop with NO new provenance plumbing:
+     the mission's workflows (payload.mission_id) -> their instance ids -> the
+     cases that reference them (case.payload.workflow_instance). outcome_score is
+     the per-workflow terminal scalar CaseBuilder writes; the mean is a
+     mission-level outcome the doctrine backstop can correlate against."
+    | instanceIds sum count |
+    instanceIds := Set new.
+    (bbs scanAll: 'workflow') do: [:w |
+      ((w at: 'payload' ifAbsent: [Dictionary new]) at: 'mission_id' ifAbsent: [nil]) = mid ifTrue: [
+        instanceIds add: (w at: 'identity' ifAbsent: [nil])
+      ]
+    ].
+    instanceIds isEmpty ifTrue: [^nil].
+    sum := 0.
+    count := 0.
+    (bbs scanAll: 'case') do: [:c |
+      | cp os |
+      cp := c at: 'payload' ifAbsent: [Dictionary new].
+      (instanceIds includes: (cp at: 'workflow_instance' ifAbsent: [nil])) ifTrue: [
+        os := self missionAsIntOrNil: (cp at: 'outcome_score' ifAbsent: [0]).
+        os isNil ifTrue: [os := 0].
+        sum := sum + os.
+        count := count + 1
+      ]
+    ].
+    count = 0 ifTrue: [^nil].
+    ^sum // count
   ]
 
   method: missionAllItemsDone: mid [

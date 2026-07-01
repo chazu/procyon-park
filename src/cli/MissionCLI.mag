@@ -253,6 +253,9 @@ MissionCLI subclass: Object
     (p at: 'epic_id' ifAbsent: [nil]) notNil ifTrue: [
       ('epic:    ', (p at: 'epic_id')) println
     ].
+    (p at: 'outcome_score' ifAbsent: [nil]) notNil ifTrue: [
+      ('outcome: ', (p at: 'outcome_score') printString, '/1000') println
+    ].
     (p at: 'reason' ifAbsent: [nil]) notNil ifTrue: [
       ('reason:  ', (p at: 'reason')) println
     ]
@@ -487,11 +490,15 @@ MissionCLI subclass: Object
       result := Json decode: response.
       tuples := result at: 'tuples' ifAbsent: [Array new: 0].
       tuples do: [:t |
-        | tp params |
+        | tp params owned |
         tp := t at: 'payload' ifAbsent: [Dictionary new].
         params := tp at: 'params' ifAbsent: [Dictionary new].
-        (((params at: 'mission' ifAbsent: [nil]) = missionId)
-          and: [(tp at: 'status' ifAbsent: ['?']) = 'running']) ifTrue: [
+        "Owned by this mission if stamped (payload.mission_id, the indexed
+         provenance) OR linked via params.mission (fallback for the top-level
+         run workflow)."
+        owned := ((tp at: 'mission_id' ifAbsent: [nil]) = missionId)
+          or: [(params at: 'mission' ifAbsent: [nil]) = missionId].
+        (owned and: [(tp at: 'status' ifAbsent: ['?']) = 'running']) ifTrue: [
           hits := hits copyWith: t
         ]
       ]
