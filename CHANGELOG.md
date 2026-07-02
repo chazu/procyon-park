@@ -8,6 +8,7 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- **Merge self-heal validated end-to-end by a live mission run.** (2026-07-01)
 - **Story integrates now self-heal too — parallel wave-mates no longer fail on a
   shared-file clash.** The per-story impl→feature merge previously fail-stopped on
   any conflict ("human intervention required"), which bit parallel wave-mates that
