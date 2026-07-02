@@ -256,38 +256,47 @@ GitOps subclass: Object
   ]
 
   classMethod: syncMainIntoFeature: featureBranch worktree: dir main: mainBranch in: repoPath [
-    "Bring <mainBranch> into <featureBranch> so the eventual feature->main land is
-     a clean fast-forward. Runs in a DEDICATED persistent worktree at <dir> and
-     NEVER switches or dirties the primary working tree.
+    "Back-compat wrapper (full-pipeline feature->main land): bring <mainBranch>
+     into <featureBranch> in a dedicated worktree at <dir>. Delegates to the
+     generalized syncBranch:into:worktree:in:."
+    ^self syncBranch: mainBranch into: featureBranch worktree: dir main: mainBranch in: repoPath
+  ]
+
+  classMethod: syncBranch: sourceBranch into: targetBranch worktree: dir main: mainBranch in: repoPath [
+    "Bring <sourceBranch> into <targetBranch> so the eventual land is a clean
+     fast-forward. Runs in a DEDICATED persistent worktree at <dir> and NEVER
+     switches or dirties the primary working tree. Used when <targetBranch> is a
+     bare ref not checked out anywhere (full-pipeline: target=feature, source=main).
+     For a target already live in a worktree (story: target=impl), use
+     mergeInPlace:worktree:in: instead — git refuses a second checkout of a branch.
 
      Returns:
-       'clean'    — main merged cleanly; featureBranch now contains main and the
-                    worktree has been torn down.
+       'clean'    — sourceBranch merged cleanly; targetBranch now contains it and
+                    the worktree has been torn down.
        'conflict' — the merge conflicted; the worktree at <dir> is LEFT checked
-                    out on featureBranch with the merge IN PROGRESS (conflict
+                    out on targetBranch with the merge IN PROGRESS (conflict
                     markers present), ready for a resolver agent to fix + commit.
 
      Signals Error only on an unexpected git failure (not on a real conflict).
-     featureBranch must not be checked out in another worktree — in the
-     full-pipeline it lives only as a ref while impl work happens elsewhere."
+     <mainBranch> is passed through only for message text parity."
     | conflicted |
     "Clear any stale worktree dir from a prior sync/resolve attempt (idempotent)."
     self pruneEphemeralWorktree: dir in: repoPath.
 
-    "Check out featureBranch in a fresh persistent worktree."
-    Shell runChecked: 'mkdir -p "$(dirname "', dir, '")" && git -C "', repoPath, '" worktree add "', dir, '" "', featureBranch, '"'
+    "Check out targetBranch in a fresh persistent worktree."
+    Shell runChecked: 'mkdir -p "$(dirname "', dir, '")" && git -C "', repoPath, '" worktree add "', dir, '" "', targetBranch, '"'
       timeout: self defaultTimeoutWrite.
 
-    "Merge main inside the worktree. --no-edit auto-commits on success (advancing
-     featureBranch); on conflict git exits nonzero and leaves the merge staged
-     with conflict markers."
+    "Merge sourceBranch inside the worktree. --no-edit auto-commits on success
+     (advancing targetBranch); on conflict git exits nonzero and leaves the merge
+     staged with conflict markers."
     conflicted := false.
-    [Shell runChecked: 'git -C "', dir, '" merge "', mainBranch, '" --no-edit'
+    [Shell runChecked: 'git -C "', dir, '" merge "', sourceBranch, '" --no-edit'
        timeout: self defaultTimeoutWrite]
       on: Exception do: [:e | conflicted := true].
 
     conflicted ifFalse: [
-      "Clean (or already-up-to-date) — feature now contains main. Tear down."
+      "Clean (or already-up-to-date) — target now contains source. Tear down."
       self pruneEphemeralWorktree: dir in: repoPath.
       ^'clean'
     ].
@@ -300,7 +309,39 @@ GitOps subclass: Object
       [Shell runChecked: 'git -C "', dir, '" merge --abort' timeout: self defaultTimeoutFast]
         on: Exception do: [:ignored | nil].
       self pruneEphemeralWorktree: dir in: repoPath.
-      Error signal: 'sync ', mainBranch, ' into ', featureBranch, ' failed (no unmerged paths — not a conflict)'
+      Error signal: 'sync ', sourceBranch, ' into ', targetBranch, ' failed (no unmerged paths — not a conflict)'
+    ].
+    ^'conflict'
+  ]
+
+  classMethod: mergeInPlace: sourceBranch worktree: dir in: repoPath [
+    "Merge <sourceBranch> into whatever branch is ALREADY checked out in the
+     existing worktree at <dir>, in place. Used for the story integrate self-heal:
+     the impl branch is live in its own worktree, so we merge the parent (feature)
+     branch INTO it there rather than adding a second checkout.
+
+     The caller OWNS <dir> (created by create-worktree, torn down later by
+     merge-worktree) — this method never creates or prunes it.
+
+     Returns:
+       'clean'    — merged cleanly (or already up to date); dir advanced in place.
+       'conflict' — conflicted; <dir> is LEFT with the merge IN PROGRESS (conflict
+                    markers present) for a resolver agent to fix + commit.
+
+     Signals Error on an unexpected git failure with no unmerged paths (aborting
+     the half-merge first so <dir> is left clean, not wedged mid-merge)."
+    | conflicted |
+    conflicted := false.
+    [Shell runChecked: 'git -C "', dir, '" merge "', sourceBranch, '" --no-edit'
+       timeout: self defaultTimeoutWrite]
+      on: Exception do: [:e | conflicted := true].
+
+    conflicted ifFalse: [^'clean'].
+
+    (self hasUnmergedPaths: dir) ifFalse: [
+      [Shell runChecked: 'git -C "', dir, '" merge --abort' timeout: self defaultTimeoutFast]
+        on: Exception do: [:ignored | nil].
+      Error signal: 'merge ', sourceBranch, ' into worktree ', dir, ' failed (no unmerged paths — not a conflict)'
     ].
     ^'conflict'
   ]

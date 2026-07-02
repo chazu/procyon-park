@@ -63,10 +63,66 @@ transitions: [
 		]
 	},
 	{
-		id:  "integrate"
-		in:  ["merging"]
-		out: ["merged"]
-		_worktree_bookend.merge
+		// Self-heal integrate: before landing impl -> feature, sync the parent
+		// (feature) branch INTO this story's impl branch in place. A clean sync
+		// makes the impl -> feature land a fast-forward; a conflicting sync routes
+		// to a resolver instead of fail-stopping (the wave-mate CHANGELOG-clash
+		// case). Mirrors full-pipeline's main -> feature self-heal, sync_from=parent.
+		id:        "sync"
+		in:        ["merging"]
+		out:       ["syncing"]
+		action:    "sync-worktree"
+		sync_from: "parent"
+	},
+	{
+		id:     "land"
+		in:     ["syncing"]
+		out:    ["merged"]
+		action: "merge-worktree"
+		preconditions: [
+			{
+				category:   "signal"
+				identity:   "land-sync:{{instance}}"
+				constraint: "{status: \"clean\"}"
+			},
+		]
+	},
+	{
+		id:  "resolve_needed"
+		in:  ["syncing"]
+		out: ["resolving"]
+		preconditions: [
+			{
+				category:   "signal"
+				identity:   "land-sync:{{instance}}"
+				constraint: "{status: \"conflict\"}"
+			},
+		]
+	},
+	{
+		id:   "resolve"
+		in:   ["resolving"]
+		out:  ["resolved"]
+		role: "resolver"
+		// The resolver works the impl worktree, which has `git merge <parent>` in
+		// progress; workdir_signal repoints its workdir to that resolve worktree.
+		workdir_signal: "resolve_worktree"
+		description: """
+			Resolve the merge conflict between the parent branch and this story's branch for: {{description}}
+
+			Your worktree has a `git merge` of the parent (feature) branch into this
+			story's branch IN PROGRESS, with conflict markers (<<<<<<<, =======,
+			>>>>>>>). Resolve every conflicted file so it keeps BOTH this story's work
+			and the changes already on the parent branch, then conclude the merge with
+			`git commit --no-edit`. Do NOT run `git merge --abort`. Do not add features.
+			"""
+	},
+	{
+		id:        "re_sync"
+		in:        ["resolved"]
+		out:       ["syncing"]
+		action:    "sync-worktree"
+		sync_from: "parent"
 	},
 	{
 		id:  "notify"

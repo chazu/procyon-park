@@ -8,6 +8,18 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- **Story integrates now self-heal too — parallel wave-mates no longer fail on a
+  shared-file clash.** The per-story impl→feature merge previously fail-stopped on
+  any conflict ("human intervention required"), which bit parallel wave-mates that
+  each appended to `CHANGELOG.md` even when their code was otherwise orthogonal.
+  The `story` template now runs the same `sync → land / resolve → re_sync`
+  self-heal as the full pipeline: before landing, it syncs the parent (feature)
+  branch into the story's branch in place; a clean sync fast-forwards, a
+  conflicting one dispatches a `resolver` agent to resolve and commit, bounded by
+  the same resolver-pass cap before it fails for a human. The `resolver` role and
+  `sync-worktree` action are now shared across both merge boundaries (the action
+  takes a `sync_from` direction: `main` for the pipeline land, `parent` for the
+  story integrate).
 - **Full-pipeline landings now self-heal when `main` moves underneath a run.**
   Before merging a feature branch to `main`, the pipeline first syncs `main`
   *into* the feature branch in a dedicated, tree-safe worktree. A non-overlapping

@@ -1,9 +1,11 @@
-"Resolver role — resolves a merge conflict between main and the feature branch.
+"Resolver role — resolves an in-progress git merge conflict at a land boundary.
 
- Runs in a dedicated resolve worktree checked out on the feature branch with
- `git merge main` already IN PROGRESS (conflict markers present). The resolver's
- one job is to resolve the conflicts and COMMIT the merge so the feature branch
- contains main; the pipeline then re-syncs (clean) and lands via fast-forward.
+ Runs in a dedicated resolve worktree that already has a `git merge` IN PROGRESS
+ (conflict markers present) — either main into a feature branch (full-pipeline
+ feature->main land) or a parent feature branch into a story's impl branch (story
+ impl->feature integrate). The resolver's one job is to resolve the conflicts and
+ COMMIT the merge so the branch contains both sides; the workflow then re-syncs
+ (clean) and lands via fast-forward.
 
  Scoped deliberately narrow: fix conflict markers only, do not add features."
 
@@ -12,14 +14,15 @@ Resolver subclass: Role
   classMethod: roleName [ ^'resolver' ]
 
   classMethod: roleDescription [
-    ^'You resolve a git merge conflict so the feature branch can land on main.
+    ^'You resolve an in-progress git merge conflict so the branch can land.
 
-Your worktree is checked out on the feature branch with `git merge main` IN
-PROGRESS. Conflict markers (<<<<<<<, =======, >>>>>>>) mark the clashes.
+Your worktree has a `git merge` already IN PROGRESS. Conflict markers (<<<<<<<,
+=======, >>>>>>>) mark the clashes between this branch and the branch being
+merged in.
 
 MUST: Resolve every conflicted file so it is self-consistent and correct, keeping
-      BOTH the work on this branch and the changes that landed on main. Then commit
-      the merge.
+      BOTH this branch''s work and the changes from the branch being merged in.
+      Then commit the merge.
 CAN: Read any file for context. Run the build/tests to confirm your resolution.
 MUST NOT: Add new features. Abort the merge. Leave conflict markers. Skip committing.'
   ]
@@ -39,13 +42,13 @@ MUST NOT: Add new features. Abort the merge. Leave conflict markers. Skip commit
   method: completionInstructions [
     ^'1. Inspect the conflict: git status ; git diff
 2. For each conflicted file, resolve the markers so it keeps this branch''s work
-   AND the changes from main, then: git add <file>
+   AND the changes from the branch being merged in, then: git add <file>
 3. Conclude the merge: git commit --no-edit
    (Do NOT run git merge --abort — that would discard the land.)
 4. Optionally verify: build and run the tests.
 5. pp observe resolve "<what conflicted and how you resolved it>"
 6. Dismiss: pp dismiss
 
-WARNING: If you abort the merge or skip the commit, the feature cannot land and
-the pipeline will retry, then stop for a human.'
+WARNING: If you abort the merge or skip the commit, the branch cannot land and
+the workflow will retry, then stop for a human.'
   ]

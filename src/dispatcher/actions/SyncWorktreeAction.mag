@@ -22,11 +22,11 @@ SyncWorktreeAction subclass: WorkflowAction
   ]
 
   method: execute: transition instance: instanceId params: params [
-    | scope info payload repoPath featureBranch home resolveDir status priorSignal attempts landPayload obsPayload resolvePayload |
+    | scope info payload repoPath featureBranch implBranch workdir home syncFrom inPlace sourceBranch targetBranch resolveDir status priorSignal attempts landPayload obsPayload resolvePayload |
 
     scope := engine scopeForInstance: instanceId.
 
-    "Read the worktree signal for the feature branch + repo path."
+    "Read the worktree signal for the branches + repo path."
     info := bbs rdp: 'signal' scope: instanceId identity: 'worktree'.
     info isNil ifTrue: [
       engine failWorkflow: instanceId scope: scope reason: 'sync-worktree: no worktree signal'.
@@ -35,17 +35,39 @@ SyncWorktreeAction subclass: WorkflowAction
     payload := info at: 'payload'.
     repoPath := payload at: 'repo_path'.
     featureBranch := payload at: 'feature_branch'.
+    implBranch := payload at: 'branch' ifAbsent: [''].
+    workdir := payload at: 'workdir' ifAbsent: [''].
+
+    "Pick the sync direction from the transition. Default 'main' preserves the
+     full-pipeline feature->main land (sync main INTO the feature branch in a
+     dedicated worktree). 'parent' drives the story integrate self-heal: sync the
+     parent (feature) branch INTO the impl branch, IN PLACE in the impl worktree
+     (the impl branch is already checked out there, so a second worktree checkout
+     would be refused by git)."
+    syncFrom := transition at: 'sync_from' ifAbsent: ['main'].
+    inPlace := (syncFrom = 'parent').
 
     home := System env: 'HOME'.
     (home isNil or: [home isEmpty]) ifTrue: [home := '/tmp'].
-    resolveDir := home, '/.pp/worktrees/', instanceId, '/resolve'.
 
-    "Sync main into the feature branch in a dedicated worktree (tree-safe)."
+    inPlace ifTrue: [
+      sourceBranch := featureBranch.
+      targetBranch := implBranch.
+      resolveDir := workdir
+    ] ifFalse: [
+      sourceBranch := 'main'.
+      targetBranch := featureBranch.
+      resolveDir := home, '/.pp/worktrees/', instanceId, '/resolve'
+    ].
+
+    "Sync sourceBranch into targetBranch (tree-safe — never touches the primary tree)."
     status := [
-      GitOps syncMainIntoFeature: featureBranch worktree: resolveDir main: 'main' in: repoPath
+      inPlace
+        ifTrue: [GitOps mergeInPlace: sourceBranch worktree: resolveDir in: repoPath]
+        ifFalse: [GitOps syncBranch: sourceBranch into: targetBranch worktree: resolveDir main: 'main' in: repoPath]
     ] on: Exception do: [:e |
-      bbs logEngine: 'error' component: 'sync-worktree' scope: scope message: ('Sync main into ', featureBranch, ' failed: ', e messageText).
-      engine failWorkflow: instanceId scope: scope reason: ('Sync main into ', featureBranch, ' failed: ', e messageText).
+      bbs logEngine: 'error' component: 'sync-worktree' scope: scope message: ('Sync ', sourceBranch, ' into ', targetBranch, ' failed: ', e messageText).
+      engine failWorkflow: instanceId scope: scope reason: ('Sync ', sourceBranch, ' into ', targetBranch, ' failed: ', e messageText).
       ^self
     ].
 
@@ -53,7 +75,7 @@ SyncWorktreeAction subclass: WorkflowAction
       landPayload := Dictionary new.
       landPayload at: 'status' put: 'clean'.
       bbs upsertSignal: scope identity: (Identity landSync: instanceId) payload: landPayload.
-      bbs logEngine: 'info' component: 'sync-worktree' scope: scope message: ('Synced main into ', featureBranch, ' cleanly — ready to land').
+      bbs logEngine: 'info' component: 'sync-worktree' scope: scope message: ('Synced ', sourceBranch, ' into ', targetBranch, ' cleanly — ready to land').
       ^self
     ].
 
@@ -66,15 +88,17 @@ SyncWorktreeAction subclass: WorkflowAction
 
     attempts > self class resolveAttemptCap ifTrue: [
       obsPayload := Dictionary new.
-      obsPayload at: 'detail' put: ('Feature->main land blocked: main conflicts with ', featureBranch, ' and ', self class resolveAttemptCap printString, ' resolver pass(es) did not clear it — human intervention required').
+      obsPayload at: 'detail' put: ('Land blocked: ', sourceBranch, ' conflicts with ', targetBranch, ' and ', self class resolveAttemptCap printString, ' resolver pass(es) did not clear it — human intervention required').
       bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
-      engine failWorkflow: instanceId scope: scope reason: ('Feature->main land blocked: unresolved conflict with main after ', self class resolveAttemptCap printString, ' resolver pass(es) — human intervention required').
+      engine failWorkflow: instanceId scope: scope reason: ('Land blocked: unresolved conflict between ', sourceBranch, ' and ', targetBranch, ' after ', self class resolveAttemptCap printString, ' resolver pass(es) — human intervention required').
       ^self
     ].
 
     "Publish the resolve worktree so the resolver task lands its workdir there
      (via the transition's workdir_signal), WITHOUT disturbing the primary
-     worktree signal. Scoped to the instance, matching how the engine reads it."
+     worktree signal. Scoped to the instance, matching how the engine reads it.
+     For the in-place case resolveDir IS the impl worktree; for full-pipeline it
+     is the dedicated resolve worktree."
     resolvePayload := Dictionary new.
     resolvePayload at: 'workdir' put: resolveDir.
     resolvePayload at: 'repo_path' put: repoPath.
@@ -87,7 +111,7 @@ SyncWorktreeAction subclass: WorkflowAction
     bbs upsertSignal: scope identity: (Identity landSync: instanceId) payload: landPayload.
 
     obsPayload := Dictionary new.
-    obsPayload at: 'detail' put: ('main conflicts with ', featureBranch, ' — dispatching resolver (pass ', attempts printString, ') to merge main and resolve in ', resolveDir).
+    obsPayload at: 'detail' put: (sourceBranch, ' conflicts with ', targetBranch, ' — dispatching resolver (pass ', attempts printString, ') to merge and resolve in ', resolveDir).
     bbs out: 'observation' scope: scope identity: 'merge-conflict' payload: obsPayload.
-    bbs logEngine: 'info' component: 'sync-worktree' scope: scope message: ('main conflicts with ', featureBranch, ' — resolver pass ', attempts printString, ' in ', resolveDir)
+    bbs logEngine: 'info' component: 'sync-worktree' scope: scope message: (sourceBranch, ' conflicts with ', targetBranch, ' — resolver pass ', attempts printString, ' in ', resolveDir)
   ]

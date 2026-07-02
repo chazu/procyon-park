@@ -106,13 +106,41 @@ SWHelper subclass: Object
     Shell run: 'rm -rf "', r, '"; mkdir -p "', r, '" && cd "', r, '" && git init -q && echo base > c.txt && git add c.txt && git commit -q -m init && git checkout -q -b "', fb, '" && echo featureside > c.txt && git commit -q -am "feature edits c" && git checkout -q main && echo mainside > c.txt && git commit -q -am "main edits c" && git checkout -q main'
   ]
 
+  classMethod: seedStoryWorktreeSignal: bbs instance: instanceId repo: repoPath feature: featureBranch impl: implBranch workdir: workdir [
+    "Worktree signal the story (wave-child) case reads: impl branch live in its own
+     worktree, feature branch is the shared parent. sync_from=parent merges the
+     parent INTO impl IN PLACE in <workdir>."
+    | p |
+    p := Dictionary new.
+    p at: 'repo_path' put: repoPath.
+    p at: 'feature_branch' put: featureBranch.
+    p at: 'branch' put: implBranch.
+    p at: 'workdir' put: workdir.
+    p at: 'standalone' put: 'false'.
+    bbs upsertSignal: instanceId identity: 'worktree' payload: p
+  ]
+
+  classMethod: initRepoStoryClean: r feature: fb impl: ib worktree: wt [
+    "impl forks off feature; feature then advances on a DIFFERENT file -> merging
+     feature into impl is clean. impl is checked out in its own worktree at <wt>."
+    Shell run: 'rm -rf "', r, '"; mkdir -p "', r, '" && cd "', r, '" && git init -q && git commit -q --allow-empty -m init && git checkout -q -b "', fb, '" && git checkout -q -b "', ib, '" && echo implwork > i.txt && git add i.txt && git commit -q -m "impl work" && git checkout -q "', fb, '" && echo featwork > f.txt && git add f.txt && git commit -q -m "feature advances" && git checkout -q main && git worktree add -q "', wt, '" "', ib, '"'
+  ]
+
+  classMethod: initRepoStoryConflict: r feature: fb impl: ib worktree: wt [
+    "impl and feature edit the SAME file divergently -> merging feature into impl
+     conflicts. impl is checked out in its own worktree at <wt>."
+    Shell run: 'rm -rf "', r, '"; mkdir -p "', r, '" && cd "', r, '" && git init -q && echo base > c.txt && git add c.txt && git commit -q -m init && git checkout -q -b "', fb, '" && git checkout -q -b "', ib, '" && echo implside > c.txt && git commit -q -am "impl edits c" && git checkout -q "', fb, '" && echo featside > c.txt && git commit -q -am "feature edits c" && git checkout -q main && git worktree add -q "', wt, '" "', ib, '"'
+  ]
+
 "--- Tests ---"
 TestSyncWorktree subclass: Object
 
   classMethod: run: t [
     self testCleanSync: t.
     self testConflictSync: t.
-    self testCapFailsWorkflow: t
+    self testCapFailsWorkflow: t.
+    self testStoryCleanSync: t.
+    self testStoryConflictSync: t
   ]
 
   classMethod: testCleanSync: t [
@@ -209,6 +237,79 @@ TestSyncWorktree subclass: Object
     (home notNil and: [home isEmpty not]) ifTrue: [
       Shell run: 'rm -rf "', home, '/.pp/worktrees/', inst, '"'
     ]
+  ]
+
+  classMethod: testStoryCleanSync: t [
+    | tempDir bbs engine r fb ib wt inst landSig tr |
+    '--- SW4: in-place (story) clean sync merges parent into impl ---' println.
+    tempDir := SWHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    engine := WorkflowEngine on: bbs.
+    r := tempDir, '/repo-story-clean'.
+    fb := 'feature/sw4'. ib := 'impl/sw4'. wt := tempDir, '/wt-sw4'.
+    inst := 'wf-sw4'.
+    SWHelper initRepoStoryClean: r feature: fb impl: ib worktree: wt.
+    SWHelper seedWorkflow: bbs scope: 'repoS' instance: inst.
+    SWHelper seedStoryWorktreeSignal: bbs instance: inst repo: r feature: fb impl: ib workdir: wt.
+    "Transition selects the story direction: sync the parent (feature) into impl."
+    tr := Dictionary new.
+    tr at: 'sync_from' put: 'parent'.
+
+    (SyncWorktreeAction on: engine) execute: tr instance: inst params: (Dictionary new).
+
+    landSig := bbs rdp: 'signal' scope: 'repoS' identity: (Identity landSync: inst).
+    t assert: landSig notNil message: 'SW4: land-sync signal written'.
+    landSig notNil ifTrue: [
+      t assertEqual: ((landSig at: 'payload') at: 'status' ifAbsent: [nil]) to: 'clean'
+        message: 'SW4: status clean for a non-overlapping parent advance'
+    ].
+    "The impl worktree now contains the parent branch's file (merged in place).
+     Use the `; echo $?` idiom — Shell capture: mangles a `&&`/`||` compound."
+    t assert: ((Shell capture: 'test -f "', wt, '/f.txt"; echo $?') trimSeparators = '0')
+      message: 'SW4: impl worktree contains the parent (feature) file after in-place sync'.
+    t assertEqual: (engine statusOf: (bbs findByCategory: 'workflow' identity: inst)) to: 'running'
+      message: 'SW4: workflow left running (not failed) on a clean in-place sync'.
+    Shell run: 'git -C "', r, '" worktree remove --force "', wt, '" 2>/dev/null; git -C "', r, '" worktree prune 2>/dev/null'
+  ]
+
+  classMethod: testStoryConflictSync: t [
+    | tempDir bbs engine r fb ib wt inst landSig resolveSig tr |
+    '--- SW5: in-place (story) conflict sync routes to a resolver in the impl worktree ---' println.
+    tempDir := SWHelper makeTempDir.
+    bbs := BBS withDataDir: tempDir.
+    engine := WorkflowEngine on: bbs.
+    r := tempDir, '/repo-story-conflict'.
+    fb := 'feature/sw5'. ib := 'impl/sw5'. wt := tempDir, '/wt-sw5'.
+    inst := 'wf-sw5'.
+    SWHelper initRepoStoryConflict: r feature: fb impl: ib worktree: wt.
+    SWHelper seedWorkflow: bbs scope: 'repoS' instance: inst.
+    SWHelper seedStoryWorktreeSignal: bbs instance: inst repo: r feature: fb impl: ib workdir: wt.
+    tr := Dictionary new.
+    tr at: 'sync_from' put: 'parent'.
+
+    (SyncWorktreeAction on: engine) execute: tr instance: inst params: (Dictionary new).
+
+    landSig := bbs rdp: 'signal' scope: 'repoS' identity: (Identity landSync: inst).
+    t assert: landSig notNil message: 'SW5: land-sync signal written'.
+    landSig notNil ifTrue: [
+      t assertEqual: ((landSig at: 'payload') at: 'status' ifAbsent: [nil]) to: 'conflict'
+        message: 'SW5: status conflict for an overlapping parent advance'.
+      t assertEqual: ((landSig at: 'payload') at: 'attempts' ifAbsent: [nil]) to: 1
+        message: 'SW5: first conflict records attempts=1'
+    ].
+    resolveSig := bbs rdp: 'signal' scope: inst identity: 'resolve_worktree'.
+    t assert: resolveSig notNil message: 'SW5: resolve_worktree signal published for the resolver'.
+    resolveSig notNil ifTrue: [
+      "In-place: the resolve worktree IS the impl worktree (no separate checkout)."
+      t assertEqual: ((resolveSig at: 'payload') at: 'workdir' ifAbsent: [nil]) to: wt
+        message: 'SW5: resolve worktree is the impl worktree (in place)'.
+      t assert: (GitOps hasUnmergedPaths: wt)
+        message: 'SW5: impl worktree left mid-merge (unmerged paths) for the resolver'
+    ].
+    t assertEqual: (engine statusOf: (bbs findByCategory: 'workflow' identity: inst)) to: 'running'
+      message: 'SW5: workflow NOT failed on a resolvable in-place conflict'.
+    "Clean up: abort the in-progress merge and remove the worktree."
+    Shell run: 'git -C "', wt, '" merge --abort 2>/dev/null; git -C "', r, '" worktree remove --force "', wt, '" 2>/dev/null; git -C "', r, '" worktree prune 2>/dev/null'
   ]
 
 "--- Main ---"

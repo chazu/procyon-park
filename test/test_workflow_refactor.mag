@@ -406,12 +406,25 @@ TestStoryTemplate subclass: Object
       ]
     ].
 
-    "WR17: T5 (integrate) — action=merge-worktree"
-    tr := self findTransition: 'integrate' in: transitions.
-    t assert: tr notNil message: 'WR17a: T5 integrate must exist'.
+    "WR17: T5 merge tail — the old single `integrate` (merge-worktree) is now a
+     self-heal sub-graph: sync (sync-worktree, sync_from=parent) -> land
+     (merge-worktree), with a resolver dispatched on conflict."
+    tr := self findTransition: 'land' in: transitions.
+    t assert: tr notNil message: 'WR17a: land transition must exist'.
     tr notNil ifTrue: [
-      t assertEqual: (tr at: 'action' ifAbsent: [nil]) to: 'merge-worktree' message: 'WR17b: T5 action must be merge-worktree'.
-      t assert: (tr at: 'role' ifAbsent: [nil]) isNil message: 'WR17c: T5 must not have a role'
+      t assertEqual: (tr at: 'action' ifAbsent: [nil]) to: 'merge-worktree' message: 'WR17b: land action must be merge-worktree'.
+      t assert: (tr at: 'role' ifAbsent: [nil]) isNil message: 'WR17c: land must not have a role'
+    ].
+    tr := self findTransition: 'sync' in: transitions.
+    t assert: tr notNil message: 'WR17d: sync transition must exist'.
+    tr notNil ifTrue: [
+      t assertEqual: (tr at: 'action' ifAbsent: [nil]) to: 'sync-worktree' message: 'WR17e: sync action must be sync-worktree'.
+      t assertEqual: (tr at: 'sync_from' ifAbsent: [nil]) to: 'parent' message: 'WR17f: sync must sync_from parent'
+    ].
+    tr := self findTransition: 'resolve' in: transitions.
+    t assert: tr notNil message: 'WR17g: resolve transition must exist'.
+    tr notNil ifTrue: [
+      t assertEqual: (tr at: 'role' ifAbsent: [nil]) to: 'resolver' message: 'WR17h: resolve role must be resolver'
     ].
 
     "WR18: T6 (notify) — action=notify-head"
@@ -451,9 +464,10 @@ TestStoryTemplate subclass: Object
     "WR21: Spec says description must be 'Single-task: implement in worktree, review, integrate'"
     t assertEqual: (templatePayload at: 'description') to: 'Single-task: implement in worktree, review, integrate' message: 'WR21: template description must match spec'.
 
-    "WR22: Action transitions (T1, T5, T6) must all have no role"
+    "WR22: Action transitions (setup, sync, land, re_sync, notify) must all have no role"
     t assert: ((self findTransition: 'setup' in: transitions) at: 'role' ifAbsent: [nil]) isNil message: 'WR22a: T1 setup must have no role'.
-    t assert: ((self findTransition: 'integrate' in: transitions) at: 'role' ifAbsent: [nil]) isNil message: 'WR22b: T5 integrate must have no role'.
+    t assert: ((self findTransition: 'land' in: transitions) at: 'role' ifAbsent: [nil]) isNil message: 'WR22b: land must have no role'.
+    t assert: ((self findTransition: 'sync' in: transitions) at: 'role' ifAbsent: [nil]) isNil message: 'WR22b2: sync must have no role'.
     t assert: ((self findTransition: 'notify' in: transitions) at: 'role' ifAbsent: [nil]) isNil message: 'WR22c: T6 notify must have no role'.
 
     "WR23: Agentic transitions (T2, T3, T8) must all have no action"
@@ -474,9 +488,12 @@ TestStoryTemplate subclass: Object
     tr := self findTransition: 'pass' in: transitions.
     t assertEqual: ((tr at: 'in') at: 1) to: 'reviewed' message: 'WR24f: pass consumes reviewed'.
     t assertEqual: ((tr at: 'out') at: 1) to: 'merging' message: 'WR24g: pass produces merging'.
-    tr := self findTransition: 'integrate' in: transitions.
-    t assertEqual: ((tr at: 'in') at: 1) to: 'merging' message: 'WR24h: integrate consumes merging'.
-    t assertEqual: ((tr at: 'out') at: 1) to: 'merged' message: 'WR24i: integrate produces merged'.
+    tr := self findTransition: 'sync' in: transitions.
+    t assertEqual: ((tr at: 'in') at: 1) to: 'merging' message: 'WR24h: sync consumes merging'.
+    t assertEqual: ((tr at: 'out') at: 1) to: 'syncing' message: 'WR24i: sync produces syncing'.
+    tr := self findTransition: 'land' in: transitions.
+    t assertEqual: ((tr at: 'in') at: 1) to: 'syncing' message: 'WR24h2: land consumes syncing'.
+    t assertEqual: ((tr at: 'out') at: 1) to: 'merged' message: 'WR24i2: land produces merged'.
     tr := self findTransition: 'notify' in: transitions.
     t assertEqual: ((tr at: 'in') at: 1) to: 'merged' message: 'WR24j: notify consumes merged'.
     t assertEqual: ((tr at: 'out') at: 1) to: 'done' message: 'WR24k: notify produces done'.
