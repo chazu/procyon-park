@@ -1,0 +1,543 @@
+"SPEC tests for mission-nuke blast-radius hardening
+ (mission msn-a5d47af9c5ebe5898d5805f4dfd2e532 — see
+  docs/plans/msn-a5d47af9c5ebe5898d5805f4dfd2e532-plan.md).
+
+ Written from the SPEC, not the implementation. Expected surface:
+   Story 1  WorkflowEngine stamps payload.mission_id onto task tuples
+            (role taskPayload site + dispatchArchivist:; dispatchStrategist:
+            deliberately UNstamped).
+   Story 2  Repo>>cleanWorktreesForInstances:dryRun: — probe-free, positively
+            scoped by instance-id membership; MissionCLI>>allWorkflowsForMission:scope:
+            (all statuses, best-effort empty).
+   Story 3  Repo>>cleanBranchesForInstances:in:dryRun: — force-deletes the
+            mission's UNMERGED impl/<id> + feature/<id> branches, SKIPS branches
+            merged to main, never touches other missions' branches or main.
+   Crit 4   `pp mission nuke <id>` without --confirm stays a dry-run no-op.
+   Crit 5   merged history on main is inviolate.
+
+ Invariants under test:
+   NK1  mission-launched workflow: every spawned task tuple carries
+        payload.mission_id = the mission id (role taskPayload site).
+   NK2  non-mission workflow: task payload has NO mission_id key (back-compat).
+   NK3  dispatchArchivist: task for a mission workflow carries mission_id.
+   NK4  dispatchStrategist: task carries NO mission_id (excluded site).
+   NK5  cleanWorktreesForInstances:dryRun: — dry-run keeps everything;
+        confirm removes ONLY dirs whose name is in the instance-id set;
+        an EMPTY id set removes nothing (fail-safe KEEP).
+   NK6  cleanBranchesForInstances:in:dryRun: — dry-run keeps everything;
+        confirm force-deletes the mission's unmerged impl/feature branches,
+        keeps the merged branch, keeps other missions' branches, and leaves
+        `git rev-parse main` + merged content untouched.
+   NK7  allWorkflowsForMission:scope: exists and answers an empty Array
+        best-effort when the server is unreachable.
+   NK8  cmdNuke: WITHOUT --confirm never writes the mission tuple and the
+        mission status is unchanged (dry-run default preserved).
+
+ Standalone runner: MissionNukeSpecMain run
+   (mag test --entry MissionNukeSpecMain.run)"
+
+NKRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [passed := passed + 1] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Mission Nuke Spec Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+  method: failures [ ^failures ]
+
+"--- Helpers ---"
+NkHelper subclass: Object
+
+  classMethod: makeTempDir [
+    | proc args |
+    proc := ExternalProcess command: '/bin/sh'.
+    args := Array new: 0.
+    args := args copyWith: '-c'.
+    args := args copyWith: 'mktemp -d'.
+    proc args: args.
+    proc run.
+    ^proc stdout trimBoth
+  ]
+
+  classMethod: strip: s [
+    | r |
+    r := s.
+    [r size > 0 and: [(r copyFrom: r size) = ((Character lf) asString)]] whileTrue: [
+      r := r copyFrom: 1 to: r size - 1
+    ].
+    ^r
+  ]
+
+  classMethod: dirExists: path [
+    "if/fi compound so the whole statement's stdout is captured (see
+     test_worktree_clean.mag)."
+    ^(self strip:
+       (Shell capture: 'if test -d "', path, '"; then echo yes; else echo no; fi')) = 'yes'
+  ]
+
+  classMethod: branchExists: b in: repoPath [
+    ^(self strip:
+       (Shell capture: 'if git -C "', repoPath, '" rev-parse --verify --quiet "refs/heads/', b,
+         '" >/dev/null 2>&1; then echo yes; else echo no; fi')) = 'yes'
+  ]
+
+  classMethod: revOfMain: repoPath [
+    ^self strip: (Shell capture: 'git -C "', repoPath, '" rev-parse main 2>/dev/null')
+  ]
+
+  classMethod: fileOnMain: name in: repoPath [
+    "true when <name> exists in the tree of main (merged content intact)."
+    ^(self strip:
+       (Shell capture: 'if git -C "', repoPath, '" cat-file -e "main:', name,
+         '" 2>/dev/null; then echo yes; else echo no; fi')) = 'yes'
+  ]
+
+  classMethod: seedRoleTemplate: bbs [
+    "Minimal role-bearing template: start -> impl (role=implementer) -> end."
+    | transitions tr payload |
+    transitions := Array new: 0.
+    tr := Dictionary new.
+    tr at: 'id' put: 'impl'.
+    tr at: 'in' put: #('start').
+    tr at: 'out' put: #('end').
+    tr at: 'role' put: 'implementer'.
+    tr at: 'description' put: 'do the thing'.
+    transitions := transitions copyWith: tr.
+    payload := Dictionary new.
+    payload at: 'transitions' put: transitions.
+    payload at: 'start_places' put: #('start').
+    payload at: 'terminal_places' put: #('end').
+    bbs outPinned: 'template' scope: 'system' identity: 'nk-test-tmpl' payload: payload
+  ]
+
+  classMethod: tasksOf: bbs instance: instanceId [
+    ^(bbs scanAll: 'task') select: [:tk |
+      ((tk at: 'payload' ifAbsent: [Dictionary new])
+        at: 'workflow_instance' ifAbsent: ['']) = instanceId
+    ]
+  ]
+
+  classMethod: makeFixtureRepo [
+    "Temp git repo:
+       main            — commit base.txt (+ merged feature/inst-m content)
+       feature/inst-a  — UNMERGED (mission instance a)
+       impl/inst-a     — UNMERGED (mission instance a)
+       feature/inst-m  — MERGED into main (mission instance m)
+       feature/other   — UNMERGED (a DIFFERENT mission — must survive)
+     main is left checked out. Answers the repo path."
+    | base |
+    base := self makeTempDir.
+    Shell run: 'git -C "', base, '" init -q -b main'.
+    Shell run: 'git -C "', base, '" config user.email nk@test'.
+    Shell run: 'git -C "', base, '" config user.name nk-test'.
+    Shell run: 'cd "', base, '" && echo base > base.txt && git add . && git commit -qm base'.
+    "mission instance a: unmerged feature + impl"
+    Shell run: 'git -C "', base, '" checkout -qb feature/inst-a'.
+    Shell run: 'cd "', base, '" && echo a > a.txt && git add . && git commit -qm feat-a'.
+    Shell run: 'git -C "', base, '" checkout -qb impl/inst-a'.
+    Shell run: 'cd "', base, '" && echo ai > ai.txt && git add . && git commit -qm impl-a'.
+    "mission instance m: feature merged back to main"
+    Shell run: 'git -C "', base, '" checkout -q main'.
+    Shell run: 'git -C "', base, '" checkout -qb feature/inst-m'.
+    Shell run: 'cd "', base, '" && echo m > merged.txt && git add . && git commit -qm feat-m'.
+    Shell run: 'git -C "', base, '" checkout -q main'.
+    Shell run: 'git -C "', base, '" merge -q --no-ff -m merge-m feature/inst-m'.
+    "another mission's unmerged branch — must never be touched"
+    Shell run: 'git -C "', base, '" checkout -qb feature/other'.
+    Shell run: 'cd "', base, '" && echo o > o.txt && git add . && git commit -qm feat-other'.
+    Shell run: 'git -C "', base, '" checkout -q main'.
+    ^base
+  ]
+
+"--- Repo double: worktreesDir redirected at a temp dir (same seam as
+ RepoWtCleanDouble in test_worktree_clean.mag). No behavior overrides — the
+ methods under test are the real (spec'd) implementations. ---"
+RepoNukeDouble subclass: Repo
+  classVars: nkBase
+
+  classMethod: nkBase: aPath [ nkBase := aPath ]
+
+  method: initialize [
+    super initialize.
+    worktreesDir := nkBase
+  ]
+
+"--- MissionCLI double: baseUrl pointed at a dead port (NEVER the live
+ localhost:7777 server) + in-memory mission seams, so cmdNuke:'s dry-run path
+ runs end-to-end without a server. ---"
+TestNukeCLI subclass: MissionCLI
+  instanceVars: missions putCount
+
+  classMethod: new [
+    | c |
+    c := super new.
+    c bindDead.
+    ^c
+  ]
+
+  method: bindDead [
+    "127.0.0.1:9 (discard) — curl fails fast; every network read collapses to
+     the documented best-effort empty."
+    baseUrl := 'http://127.0.0.1:9'.
+    missions := Dictionary new.
+    putCount := 0
+  ]
+
+  method: putCount [ ^putCount ]
+
+  method: seedMission: id status: status [
+    | p tuple |
+    p := Dictionary new.
+    p at: 'brief' put: 'nuke spec fixture'.
+    p at: 'status' put: status.
+    p at: 'created_at' put: 1700000000.
+    tuple := Dictionary new.
+    tuple at: 'identity' put: id.
+    tuple at: 'scope' put: 'default'.
+    tuple at: 'payload' put: p.
+    missions at: id put: tuple
+  ]
+
+  method: missionStatus: id [
+    | m |
+    m := missions at: id ifAbsent: [nil].
+    m isNil ifTrue: [^nil].
+    ^(m at: 'payload' ifAbsent: [Dictionary new]) at: 'status' ifAbsent: [nil]
+  ]
+
+  "--- seams ---"
+  method: defaultScope [ ^'default' ]
+
+  method: rdpMission: id [
+    ^missions at: id ifAbsent: [nil]
+  ]
+
+  method: putMission: id payload: payload [
+    | tuple |
+    putCount := putCount + 1.
+    tuple := Dictionary new.
+    tuple at: 'identity' put: id.
+    tuple at: 'scope' put: 'default'.
+    tuple at: 'payload' put: payload.
+    missions at: id put: tuple.
+    ^nil
+  ]
+
+"=== TestMissionNukeSpec ==="
+TestMissionNukeSpec subclass: Object
+
+  classMethod: run: t [
+    self testRoleTaskStamped: t.
+    self testNonMissionTaskUnstamped: t.
+    self testArchivistTaskStamped: t.
+    self testStrategistTaskUnstamped: t.
+    self testWorktreeReclamation: t.
+    self testBranchReclamation: t.
+    self testAllWorkflowsForMission: t.
+    self testNukeDryRunIsNoop: t
+  ]
+
+  classMethod: testRoleTaskStamped: t [
+    "NK1: mission-launched workflow -> spawned task carries payload.mission_id."
+    | bbs engine params instanceId wf tasks |
+    '--- NK1: role-site task payload carries mission_id ---' println.
+    bbs := BBS withDataDir: NkHelper makeTempDir.
+    NkHelper seedRoleTemplate: bbs.
+    engine := WorkflowEngine on: bbs.
+    params := Dictionary new.
+    params at: 'mission' put: 'msn-nk-spec-1'.
+    instanceId := engine instantiate: 'nk-test-tmpl' scope: 'default' params: params.
+    engine advance.
+
+    "Sanity: the existing workflow-payload stamp (WorkflowEngine.mag ~146)."
+    wf := bbs rdp: 'workflow' scope: 'default' identity: instanceId.
+    t assert: wf notNil message: 'NK1: workflow tuple exists'.
+    wf notNil ifTrue: [
+      t assertEqual: ((wf at: 'payload') at: 'mission_id' ifAbsent: [nil])
+        to: 'msn-nk-spec-1'
+        message: 'NK1: workflow payload.mission_id stamped (pre-existing behavior)'
+    ].
+
+    tasks := NkHelper tasksOf: bbs instance: instanceId.
+    t assert: tasks size > 0
+      message: 'NK1: workflow spawned at least one task tuple'.
+    tasks do: [:tsk |
+      t assertEqual: ((tsk at: 'payload') at: 'mission_id' ifAbsent: [nil])
+        to: 'msn-nk-spec-1'
+        message: ('NK1: task ', (tsk at: 'identity' ifAbsent: ['?']),
+          ' payload.mission_id = msn-nk-spec-1 (SPEC: task provenance)')
+    ]
+  ]
+
+  classMethod: testNonMissionTaskUnstamped: t [
+    "NK2: workflow WITHOUT params.mission -> tasks carry NO mission_id key."
+    | bbs engine instanceId tasks |
+    '--- NK2: non-mission workflow tasks stay unstamped ---' println.
+    bbs := BBS withDataDir: NkHelper makeTempDir.
+    NkHelper seedRoleTemplate: bbs.
+    engine := WorkflowEngine on: bbs.
+    instanceId := engine instantiate: 'nk-test-tmpl' scope: 'default' params: (Dictionary new).
+    engine advance.
+
+    tasks := NkHelper tasksOf: bbs instance: instanceId.
+    t assert: tasks size > 0
+      message: 'NK2: non-mission workflow spawned at least one task tuple'.
+    tasks do: [:tsk |
+      t assert: (((tsk at: 'payload') includesKey: 'mission_id') not)
+        message: ('NK2: task ', (tsk at: 'identity' ifAbsent: ['?']),
+          ' omits mission_id (back-compat: absence never errors)')
+    ]
+  ]
+
+  classMethod: testArchivistTaskStamped: t [
+    "NK3: dispatchArchivist: for a mission workflow -> archivist task stamped."
+    | bbs engine params instanceId archTasks |
+    '--- NK3: archivist task carries mission_id ---' println.
+    bbs := BBS withDataDir: NkHelper makeTempDir.
+    NkHelper seedRoleTemplate: bbs.
+    engine := WorkflowEngine on: bbs.
+    params := Dictionary new.
+    params at: 'mission' put: 'msn-nk-spec-3'.
+    instanceId := engine instantiate: 'nk-test-tmpl' scope: 'default' params: params.
+    engine advance.
+
+    engine dispatchArchivist: instanceId scope: 'default'.
+    archTasks := (bbs scanAll: 'task') select: [:tk |
+      | p |
+      p := tk at: 'payload' ifAbsent: [Dictionary new].
+      ((p at: 'role' ifAbsent: ['']) = 'archivist')
+        and: [(p at: 'workflow_instance' ifAbsent: ['']) = instanceId]
+    ].
+    t assertEqual: archTasks size to: 1
+      message: 'NK3: dispatchArchivist created exactly one archivist task'.
+    archTasks do: [:tsk |
+      t assertEqual: ((tsk at: 'payload') at: 'mission_id' ifAbsent: [nil])
+        to: 'msn-nk-spec-3'
+        message: 'NK3: archivist task payload.mission_id = msn-nk-spec-3 (SPEC: archivist site stamped)'
+    ]
+  ]
+
+  classMethod: testStrategistTaskUnstamped: t [
+    "NK4: dispatchStrategist: is scope-level — its task must NOT be stamped."
+    | bbs engine stratTasks |
+    '--- NK4: strategist task stays unstamped (excluded site) ---' println.
+    bbs := BBS withDataDir: NkHelper makeTempDir.
+    engine := WorkflowEngine on: bbs.
+    engine dispatchStrategist: 'default'.
+    stratTasks := (bbs scanAll: 'task') select: [:tk |
+      ((tk at: 'payload' ifAbsent: [Dictionary new]) at: 'role' ifAbsent: ['']) = 'strategist'
+    ].
+    t assertEqual: stratTasks size to: 1
+      message: 'NK4: dispatchStrategist created exactly one strategist task'.
+    stratTasks do: [:tsk |
+      t assert: (((tsk at: 'payload') includesKey: 'mission_id') not)
+        message: 'NK4: strategist task omits mission_id (SPEC: excluded site)'
+    ]
+  ]
+
+  classMethod: testWorktreeReclamation: t [
+    "NK5: Repo>>cleanWorktreesForInstances:dryRun: — positive selection by
+     instance-id membership; dry-run and empty-set are no-ops."
+    | base double raised |
+    '--- NK5: mission-scoped worktree reclamation ---' println.
+    base := NkHelper makeTempDir.
+    Shell run: 'mkdir -p "', base, '/inst-a/impl" "', base, '/inst-b/impl" "', base, '/other-1/impl"'.
+    RepoNukeDouble nkBase: base.
+    double := RepoNukeDouble new.
+
+    "Dry-run: enumerates, changes NOTHING."
+    raised := false.
+    [double cleanWorktreesForInstances: #('inst-a' 'inst-b') dryRun: true]
+      on: Exception do: [:e |
+        raised := true.
+        ('  (cleanWorktreesForInstances dryRun raised: ', e messageText, ')') println].
+    t assert: raised not
+      message: 'NK5: Repo>>cleanWorktreesForInstances:dryRun: exists and dry-run does not raise'.
+    t assert: (NkHelper dirExists: base, '/inst-a')
+      message: 'NK5: dry-run keeps inst-a (nothing changed)'.
+    t assert: (NkHelper dirExists: base, '/inst-b')
+      message: 'NK5: dry-run keeps inst-b (nothing changed)'.
+    t assert: (NkHelper dirExists: base, '/other-1')
+      message: 'NK5: dry-run keeps other-1 (nothing changed)'.
+
+    "Empty instance set: fail-safe KEEP — removes nothing."
+    raised := false.
+    [double cleanWorktreesForInstances: (Array new: 0) dryRun: false]
+      on: Exception do: [:e | raised := true].
+    t assert: raised not
+      message: 'NK5: empty instance set does not raise'.
+    t assert: ((NkHelper dirExists: base, '/inst-a')
+        and: [(NkHelper dirExists: base, '/inst-b')
+        and: [NkHelper dirExists: base, '/other-1']])
+      message: 'NK5: empty instance set removes NOTHING (fail-safe KEEP)'.
+
+    "Real run: removes ONLY the mission''s instance dirs."
+    raised := false.
+    [double cleanWorktreesForInstances: #('inst-a' 'inst-b') dryRun: false]
+      on: Exception do: [:e |
+        raised := true.
+        ('  (cleanWorktreesForInstances confirm raised: ', e messageText, ')') println].
+    t assert: raised not
+      message: 'NK5: confirm run does not raise'.
+    t assert: ((NkHelper dirExists: base, '/inst-a') not)
+      message: 'NK5: confirm removed mission worktree inst-a'.
+    t assert: ((NkHelper dirExists: base, '/inst-b') not)
+      message: 'NK5: confirm removed mission worktree inst-b'.
+    t assert: (NkHelper dirExists: base, '/other-1')
+      message: 'NK5: other mission''s worktree other-1 is UNTOUCHED'.
+
+    Shell run: 'rm -rf "', base, '"'
+  ]
+
+  classMethod: testBranchReclamation: t [
+    "NK6: Repo>>cleanBranchesForInstances:in:dryRun: — force-deletes the
+     mission's UNMERGED branches only; merged + other-mission branches and
+     main history are inviolate."
+    | repoPath r mainBefore raised |
+    '--- NK6: mission-scoped branch reclamation ---' println.
+    repoPath := NkHelper makeFixtureRepo.
+    mainBefore := NkHelper revOfMain: repoPath.
+    t assert: mainBefore isEmpty not
+      message: 'NK6: fixture repo has a main rev'.
+    t assert: (NkHelper branchExists: 'feature/inst-a' in: repoPath)
+      message: 'NK6: fixture has unmerged feature/inst-a'.
+    t assert: (NkHelper branchExists: 'impl/inst-a' in: repoPath)
+      message: 'NK6: fixture has unmerged impl/inst-a'.
+    t assert: (NkHelper branchExists: 'feature/inst-m' in: repoPath)
+      message: 'NK6: fixture has merged feature/inst-m'.
+    t assert: (NkHelper branchExists: 'feature/other' in: repoPath)
+      message: 'NK6: fixture has other-mission feature/other'.
+
+    r := Repo new.
+
+    "Dry-run: lists, deletes NOTHING."
+    raised := false.
+    [r cleanBranchesForInstances: #('inst-a' 'inst-m') in: repoPath dryRun: true]
+      on: Exception do: [:e |
+        raised := true.
+        ('  (cleanBranchesForInstances dryRun raised: ', e messageText, ')') println].
+    t assert: raised not
+      message: 'NK6: Repo>>cleanBranchesForInstances:in:dryRun: exists and dry-run does not raise'.
+    t assert: ((NkHelper branchExists: 'feature/inst-a' in: repoPath)
+        and: [(NkHelper branchExists: 'impl/inst-a' in: repoPath)
+        and: [(NkHelper branchExists: 'feature/inst-m' in: repoPath)
+        and: [NkHelper branchExists: 'feature/other' in: repoPath]]])
+      message: 'NK6: dry-run keeps ALL branches'.
+    t assertEqual: (NkHelper revOfMain: repoPath) to: mainBefore
+      message: 'NK6: dry-run leaves main untouched'.
+
+    "Confirm: force-delete the mission's UNMERGED branches only."
+    raised := false.
+    [r cleanBranchesForInstances: #('inst-a' 'inst-m') in: repoPath dryRun: false]
+      on: Exception do: [:e |
+        raised := true.
+        ('  (cleanBranchesForInstances confirm raised: ', e messageText, ')') println].
+    t assert: raised not
+      message: 'NK6: confirm run does not raise'.
+    t assert: ((NkHelper branchExists: 'feature/inst-a' in: repoPath) not)
+      message: 'NK6: unmerged feature/inst-a FORCE-deleted (-D semantics)'.
+    t assert: ((NkHelper branchExists: 'impl/inst-a' in: repoPath) not)
+      message: 'NK6: unmerged impl/inst-a FORCE-deleted (-D semantics)'.
+    t assert: (NkHelper branchExists: 'feature/inst-m' in: repoPath)
+      message: 'NK6: MERGED feature/inst-m is SKIPPED (merged branches untouched)'.
+    t assert: (NkHelper branchExists: 'feature/other' in: repoPath)
+      message: 'NK6: other mission''s feature/other is UNTOUCHED (name guard)'.
+    t assertEqual: (NkHelper revOfMain: repoPath) to: mainBefore
+      message: 'NK6: git rev-parse main unchanged (merged history inviolate)'.
+    t assert: (NkHelper fileOnMain: 'merged.txt' in: repoPath)
+      message: 'NK6: merged content (merged.txt) still reachable on main'.
+
+    Shell run: 'rm -rf "', repoPath, '"'
+  ]
+
+  classMethod: testAllWorkflowsForMission: t [
+    "NK7: allWorkflowsForMission:scope: exists (all statuses — the terminal
+     pipelines are the orphan-leavers) and is best-effort empty when the
+     server is unreachable."
+    | cli result raised |
+    '--- NK7: allWorkflowsForMission:scope: best-effort surface ---' println.
+    cli := TestNukeCLI new.
+    raised := false.
+    result := nil.
+    [result := cli allWorkflowsForMission: 'msn-nk-none' scope: 'default']
+      on: Exception do: [:e |
+        raised := true.
+        ('  (allWorkflowsForMission raised: ', e messageText, ')') println].
+    t assert: raised not
+      message: 'NK7: MissionCLI>>allWorkflowsForMission:scope: exists and does not raise'.
+    raised ifFalse: [
+      t assert: result notNil
+        message: 'NK7: answers a collection (never nil)'.
+      result notNil ifTrue: [
+        t assertEqual: result size to: 0
+          message: 'NK7: unreachable server -> best-effort EMPTY (fail-safe)'
+      ]
+    ]
+  ]
+
+  classMethod: testNukeDryRunIsNoop: t [
+    "NK8: `pp mission nuke <id>` WITHOUT --confirm never writes the mission
+     tuple; status is unchanged (dry-run default preserved, criterion 4)."
+    | cli raised |
+    '--- NK8: nuke without --confirm is a no-op on the mission ---' println.
+    cli := TestNukeCLI new.
+    cli seedMission: 'msn-nk-dry' status: 'approved'.
+    raised := false.
+    [cli cmdNuke: #('mission' 'nuke' 'msn-nk-dry')]
+      on: Exception do: [:e |
+        raised := true.
+        ('  (cmdNuke dry-run raised: ', e messageText, ')') println].
+    t assert: raised not
+      message: 'NK8: dry-run cmdNuke does not raise'.
+    t assertEqual: cli putCount to: 0
+      message: 'NK8: dry-run performed ZERO mission writes'.
+    t assertEqual: (cli missionStatus: 'msn-nk-dry') to: 'approved'
+      message: 'NK8: mission status unchanged after dry-run (still approved)'
+  ]
+
+"=== Main ==="
+MissionNukeSpecMain subclass: Object
+  classMethod: run [
+    | t |
+    t := NKRunner new.
+    [TestMissionNukeSpec run: t] on: Exception do: [:e |
+      ('TestMissionNukeSpec CRASHED: ', e messageText) println.
+      t assert: false message: 'TestMissionNukeSpec crashed'
+    ].
+    t report.
+    ^t failed
+  ]
