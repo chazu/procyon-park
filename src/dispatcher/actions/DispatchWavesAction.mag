@@ -184,6 +184,10 @@ DispatchWavesAction subclass: WorkflowAction
 
         childParams := Dictionary new.
         childParams at: 'description' put: desc.
+        "Thread + increment the spawn-depth counter so the instantiate: recursion
+         guard (max 10) actually trips on epic->waves->epic graphs. Building
+         childParams from scratch without this left every wave child at depth 0."
+        childParams at: '_depth' put: (params at: '_depth' ifAbsent: [0]) + 1.
         repo notNil ifTrue: [childParams at: 'repo' put: repo].
         (params at: 'parent_branch' ifAbsent: [nil]) notNil ifTrue: [
           childParams at: 'parent_branch' put: (params at: 'parent_branch')
@@ -252,6 +256,8 @@ DispatchWavesAction subclass: WorkflowAction
 
       childParams := Dictionary new.
       childParams at: 'description' put: batchDesc.
+      "Thread + increment spawn depth (see unbatched branch above)."
+      childParams at: '_depth' put: (params at: '_depth' ifAbsent: [0]) + 1.
       repo notNil ifTrue: [childParams at: 'repo' put: repo].
       (params at: 'parent_branch' ifAbsent: [nil]) notNil ifTrue: [
         childParams at: 'parent_branch' put: (params at: 'parent_branch')

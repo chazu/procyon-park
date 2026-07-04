@@ -352,10 +352,16 @@ CLIBase subclass: Object
   "--- Argument Parsing ---"
 
   method: flagValue: flag in: args [
-    "Extract the value after a --flag in args. Returns nil if not found."
+    "Extract the value after a --flag in args. Returns nil if the flag is
+     absent. If the flag IS present but is the last token (its value was
+     omitted), warn before returning nil — otherwise the caller reports a
+     misleading 'X is required' even though the user typed X."
     | idx |
     idx := args indexOf: flag.
-    (idx > 0 and: [idx < args size])
-      ifTrue: [^args at: idx + 1]
-      ifFalse: [^nil]
+    idx = 0 ifTrue: [^nil].
+    idx >= args size ifTrue: [
+      ('Warning: ', flag, ' expects a value but none was given') println.
+      ^nil
+    ].
+    ^args at: idx + 1
   ]

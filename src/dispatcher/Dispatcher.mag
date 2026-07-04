@@ -840,8 +840,14 @@ Dispatcher subclass: Object
      is left alone. The mission becomes the outcome anchor (feeds the doctrine
      outcome-correlation backstop). Each mission is guarded independently so one
      malformed tuple neither aborts the sweep nor escapes into the tick loop."
-    | missions |
+    | missions allWorkitems allWorkflows allCases |
     missions := bbs scanAll: 'mission'.
+    "Scan each dependent category ONCE and thread the snapshots into the
+     per-mission predicates, instead of re-scanning workitem/workflow/case for
+     every in-progress mission (was O(M x (workitems+workflows+cases)))."
+    allWorkitems := bbs scanAll: 'workitem'.
+    allWorkflows := bbs scanAll: 'workflow'.
+    allCases := bbs scanAll: 'case'.
     missions do: [:m |
       [
         | p status mid |
@@ -849,12 +855,12 @@ Dispatcher subclass: Object
         status := p at: 'status' ifAbsent: [nil].
         status = 'in-progress' ifTrue: [
           mid := m at: 'identity' ifAbsent: [nil].
-          (mid notNil and: [self missionAllItemsDone: mid]) ifTrue: [
+          (mid notNil and: [self missionAllItemsDone: mid workitems: allWorkitems]) ifTrue: [
             | score |
             "Outcome anchor: mean of the mission's case outcomes; a mission with
              no cases (its items were completed without workflows) gets the
              clean-completion baseline (1000)."
-            score := self missionOutcomeScore: mid.
+            score := self missionOutcomeScore: mid workflows: allWorkflows cases: allCases.
             score isNil ifTrue: [score := 1000].
             bbs update: 'mission' scope: (m at: 'scope' ifAbsent: ['default']) identity: mid do: [:mp |
               mp at: 'status' put: 'done'.
@@ -872,15 +878,22 @@ Dispatcher subclass: Object
   ]
 
   method: missionOutcomeScore: mid [
+    "Back-compat entry point — scans workflow + case internally."
+    ^self missionOutcomeScore: mid workflows: (bbs scanAll: 'workflow') cases: (bbs scanAll: 'case')
+  ]
+
+  method: missionOutcomeScore: mid workflows: workflowSnap cases: caseSnap [
     "Mean outcome_score (integer milli [0,1000]) of the mission's cases, or nil
      if the mission produced no cases. Two-hop with NO new provenance plumbing:
      the mission's workflows (payload.mission_id) -> their instance ids -> the
      cases that reference them (case.payload.workflow_instance). outcome_score is
      the per-workflow terminal scalar CaseBuilder writes; the mean is a
-     mission-level outcome the doctrine backstop can correlate against."
+     mission-level outcome the doctrine backstop can correlate against.
+     workflowSnap/caseSnap are reused snapshots when the rollup sweep already
+     scanned these categories."
     | instanceIds sum count |
     instanceIds := Set new.
-    (bbs scanAll: 'workflow') do: [:w |
+    workflowSnap do: [:w |
       ((w at: 'payload' ifAbsent: [Dictionary new]) at: 'mission_id' ifAbsent: [nil]) = mid ifTrue: [
         instanceIds add: (w at: 'identity' ifAbsent: [nil])
       ]
@@ -888,7 +901,7 @@ Dispatcher subclass: Object
     instanceIds isEmpty ifTrue: [^nil].
     sum := 0.
     count := 0.
-    (bbs scanAll: 'case') do: [:c |
+    caseSnap do: [:c |
       | cp os |
       cp := c at: 'payload' ifAbsent: [Dictionary new].
       (instanceIds includes: (cp at: 'workflow_instance' ifAbsent: [nil])) ifTrue: [
@@ -903,13 +916,19 @@ Dispatcher subclass: Object
   ]
 
   method: missionAllItemsDone: mid [
+    "Back-compat entry point — scans workitem internally."
+    ^self missionAllItemsDone: mid workitems: (bbs scanAll: 'workitem')
+  ]
+
+  method: missionAllItemsDone: mid workitems: workitemSnap [
     "True iff the mission owns at least one work-item and EVERY one is 'done'.
      (Zero items -> false: an in-progress mission whose tree has not materialized
-     must not be declared done.)"
+     must not be declared done.) workitemSnap is a reused snapshot when the
+     rollup sweep already scanned the category."
     | any all |
     any := false.
     all := true.
-    (bbs scanAll: 'workitem') do: [:t |
+    workitemSnap do: [:t |
       | tp |
       tp := t at: 'payload' ifAbsent: [Dictionary new].
       (tp at: 'mission_id' ifAbsent: [nil]) = mid ifTrue: [

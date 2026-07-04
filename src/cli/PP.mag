@@ -416,7 +416,8 @@ PP subclass: CLIBase
     sub = 'register'  ifTrue: [^CliWorkerRegister run: rest].
     sub = 'heartbeat' ifTrue: [^CliWorkerHeartbeat run: rest].
     sub = 'drain'     ifTrue: [^CliWorkerDrain run: rest].
-    ('Unknown worker subcommand: ', sub) println
+    ('Unknown worker subcommand: ', sub) println.
+    'Usage: pp worker <init|register|heartbeat|drain> <name> [flags...]' println
   ]
 
   method: cmdIdentity: args [
@@ -436,47 +437,17 @@ PP subclass: CLIBase
     sub = 'use'    ifTrue: [^CliIdentityUse run: rest].
     sub = 'invite' ifTrue: [^CliIdentityInvite run: rest].
     sub = 'accept' ifTrue: [^CliIdentityAccept run: rest].
-    ('Unknown identity subcommand: ', sub) println
+    ('Unknown identity subcommand: ', sub) println.
+    'Usage: pp identity <init|show|rotate|list|use|invite|accept> [args...]' println
   ]
 
   method: printUsage [
-    'Procyon Park CLI' println.
+    "The canonical command list lives in Main>>printUsage; delegate there so the
+     two help surfaces cannot drift apart (they previously disagreed on which
+     commands even exist). Keep the resolved-context echo, which Main omits."
+    Main printUsage.
     '' println.
-    'Usage: pp <command> [args...]' println.
-    '' println.
-    'Commands:' println.
-    '  observe  <identity> <detail> [--tags t1,t2]     Report an observation' println.
-    '  decide   <identity> <detail> [--rationale ...]   Record a decision' println.
-    '  event    <identity> [--type T] [--summary S]     Emit an event' println.
-    '  plan     <file.json>                             Submit a structured plan' println.
-    '  read     <category> [scope] [identity] [--all]   Read tuples (--all scans every scope)' println.
-    '  notify   <message> [--severity info|warn|urgent] Notify the user' println.
-    '  dismiss                                          Signal task completion' println.
-    '  verdict  <pass|fix|exhausted> [--workflow <id>]   Write review verdict (uses PP_WORKFLOW)' println.
-    '  status                                           Show system status' println.
-    '  workflow <template> [--param key=val ...]        Start a workflow' println.
-    '  workflow status [<id>]                           Show workflow status' println.
-    '  workflow list [--status running|completed|failed] Tabular listing of workflows' println.
-    '  workflow cancel <id> [--scope <scope>]           Cancel a running workflow' println.
-    '  workflow wait <id> [--timeout <secs>]            Block until workflow completes' println.
-    '  watch    <workflow_id>                           Subscribe to workflow lifecycle events' println.
-    '  unwatch  <workflow_id>                           Remove a workflow subscription' println.
-    '  log      [--follow] [--no-follow] [--since <secs>] Stream notifications' println.
-    '  history   [--since S] [--limit N] [--op O] [--category C] [--scope S] [--identity I] Query audit log' println.
-    '  audit    (--actor <n> | --worker <id> | --workflow <id>) Roll up provenance by actor/worker/workflow' println.
-    '  mission  <start|list|show|approve|reject> [args] Manage durable mission artifacts' println.
-    '  dashboard                                        Open web dashboard in browser' println.
-    '  gc       [--dry-run]                             Garbage-collect finished workflows & branches' println.
-    '  session  [<taskId>]                              View Claude Code session logs' println.
-    '  usage    [<taskId>]                              Report current session token consumption' println.
-    '  identity <init|show|rotate|list|use> [args...]   Manage local keypairs' println.
-    '  init     [<name>]                                First-time setup (create identity + config)' println.
-    '  worker   init <name> [--force]                  Create a local worker keypair' println.
-    '  user     <add|revoke> <name> [--pubkey <hex>]    Admin-gated user registry' println.
-    '  whoami                                           Show the active local identity' println.
-    '  help                                             Show this help' println.
-    '' println.
-    'Environment:' println.
+    'Resolved context:' println.
     ('  PP_URL   = ', baseUrl) println.
     ('  PP_SCOPE = ', scope) println.
     ('  PP_TASK  = ', taskId) println

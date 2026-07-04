@@ -7,6 +7,17 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Security
+- **Request-signature verify cache no longer bypasses method/path/body binding.**
+  The ed25519 verify cache was keyed only on `actor|signature`, and a cache hit
+  returned the cached identity *before* the canonical request was reconstructed.
+  An on-path observer who captured one valid signed request could therefore
+  replay that `(actor, signature)` pair against *any other* endpoint (e.g. turn a
+  signed `GET /health` into a signed `POST /workflow/cancel`) for the length of
+  the skew window. The cache key now includes the full canonical
+  (`method‖path‖ts‖sha256(body)`), so a replayed signature against a different
+  request misses the cache and fails re-verification. (adversarial-review C1)
+
 ### Added
 - **Merge self-heal validated end-to-end by a live mission run.** (2026-07-01)
 - **Story integrates now self-heal too — parallel wave-mates no longer fail on a
@@ -33,6 +44,47 @@ Semantic Versioning.
   landing on `main` mid-run clashed with the impl branch rewriting the same file.
 
 ### Fixed
+- **`pp gc` / `pp worktree clean` no longer wipe worktrees when the server is
+  unreachable.** The status probe treated an empty response, a JSON-parse error,
+  *and* a network error all as "workflow gone → remove", so a single server
+  hiccup would `rm -rf` every worktree — including in-flight agent worktrees —
+  and force-delete their branches. It now fails safe: a worktree is removed only
+  on a definitive `completed`/`not_found`, and every ambiguous probe prints a
+  `skip` line and keeps the tree. (adversarial-review U1)
+- **A timed-out or crashed agent no longer reports its task as completed.** The
+  Claude harness swallowed a non-zero/`timeout` (exit 124) process exit — it only
+  printed stderr — so `WorkerAgent` saw no failure and marked the task done,
+  advancing the workflow token over an empty/partial worktree. The harness now
+  records a `harness-timeout` / `harness-exit-N` failure reason. (C2)
+- **A template missing `terminal_places` no longer stalls every workflow.** The
+  engine read `terminal_places` with no default and iterated all instances with
+  no per-instance isolation, so one malformed (e.g. hot-reloaded) template threw
+  on every tick and no workflow advanced. The read now defaults to empty and each
+  instance's advance is exception-isolated. (C3)
+- **Notification long-poll/stream handles an absent `since`/`wait` correctly.**
+  The guards checked `isNil`, but the query-param accessor returns `''` for a
+  missing param, so the defaults were dead and a missing `wait` could crash the
+  handler. (C4)
+- **Pipeline merges record the real `files_changed` (was always `0`).** The
+  pipeline branch counted the diff *after* fast-forwarding `main`, when the
+  three-dot range is empty; case scoring consequently penalised real pipeline
+  work as a no-op. It now counts before the merge. (C5)
+- **The spawn-depth recursion cap now applies to wave-dispatched children.**
+  `dispatch-waves` built child params from scratch without threading `_depth`, so
+  every wave child started at depth 0 and the max-10 guard could never trip on
+  epic→waves→epic graphs. (C7)
+- Dashboard notification timestamps render again (they were always blank because
+  the epoch was checked against `Integer`, which JSON-decoded `SmallInteger`s are
+  not). (C8)
+- `merge-worktree` no longer crashes on a worktree signal missing a field — the
+  `repo_path`/`feature_branch`/`branch`/`workdir` reads are now guarded. (C9)
+- `pp dashboard` works off macOS: it falls back to `xdg-open`, then to printing
+  the URL, instead of silently doing nothing. (U6)
+- `pp log` (follow mode) prints a "Tailing… (Ctrl-C to stop)" banner and
+  coalesces a repeating connection error instead of spamming it every 2 s. (U7)
+- `pp workflow wait` prints a heartbeat when the status changes (instead of
+  hanging silently for up to an hour) and rejects a non-numeric `--timeout`
+  instead of treating it as an instant timeout. (U5)
 - **Batched wave dispatch now actually runs and rolls up.** A wave whose stories
   shared a `batch` tag was silently broken: `dispatch-waves` built the child
   workflow's params but never instantiated it, so no batched workflow was spawned,
@@ -63,6 +115,22 @@ Semantic Versioning.
   `Host: 127.evil.com` is now rejected).
 
 ### Changed
+- **`pp help` now lists every subsystem.** `mission`, `doctrine`, `bbs`,
+  `worker`, `watch`/`unwatch`, and `whoami` were live but undocumented, and
+  `identity` omitted its `use`/`invite`/`accept` subcommands; `workflow cancel`
+  now shows its required `--reason`. The `pp` CLI's own help was collapsed to
+  delegate to the single canonical help so the two can no longer drift.
+  (adversarial-review U2/U3/U12)
+- `pp worker`/`pp identity` now print the subcommand usage after an unknown
+  subcommand (like the other command groups). A flag given without its value now
+  warns explicitly instead of being reported as "required". (U10/U11)
+- **Dispatcher/dashboard scan reductions** (no behaviour change): the workflow
+  engine takes one `task` snapshot per tick instead of re-scanning per running
+  workflow; mission rollup scans workitem/workflow/case once per sweep instead of
+  per mission; the archivist-dispatch idempotency guard is an O(1) id lookup
+  instead of a full task scan; and two O(n²) `copyWith:`-in-loop accumulators in
+  the SSE render path were replaced with amortised-O(1) appends.
+  (P2/P3/P6/P8)
 - **`pp serve` memory footprint cut ~88%** under an open dashboard (RSS ~977 MB
   peak → ~115 MB, flat instead of a sawtooth). The per-tick dashboard work that
   drove the growth is eliminated: the SSE loop now caches its snapshot and skips

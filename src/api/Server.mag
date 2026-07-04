@@ -1822,7 +1822,10 @@ ApiServer subclass: Object
   method: handleNotifications: req [
     | since notifications filtered d identity watchSet |
     since := req queryParam: 'since'.
-    since isNil ifTrue: [since := 0] ifFalse: [since := since asInteger].
+    "queryParam: returns '' (not nil) for an absent param, so an isNil-only
+     guard is dead and '' asInteger flows into the created_at >= since compare
+     below. Guard nil-or-empty."
+    (since isNil or: [since isEmpty]) ifTrue: [since := 0] ifFalse: [since := since asInteger].
 
     identity := self notifyIdentityFor: req.
     watchSet := self watchWorkflowsFor: identity.
@@ -1940,10 +1943,14 @@ ApiServer subclass: Object
      replaces the prior 20× (scanAll:notification + scanAll:watch) loop
      under the BBS mutex; see docs/scout-perf-survey-2026-04-28.md §2."
     | since wait notifications filtered mapped d i obj p identity watchSet sub filterBlock pending |
+    "queryParam: returns '' (not nil) for absent params — guard nil-or-empty,
+     else '' asInteger flows into the created_at compare / `wait > 0` (a nil
+     `wait` would panic the handler on `nil > 0` and long-poll would never
+     engage)."
     since := req queryParam: 'since'.
-    since isNil ifTrue: [since := 0] ifFalse: [since := since asInteger].
+    (since isNil or: [since isEmpty]) ifTrue: [since := 0] ifFalse: [since := since asInteger].
     wait := req queryParam: 'wait'.
-    wait isNil ifTrue: [wait := 1] ifFalse: [wait := wait asInteger].
+    (wait isNil or: [wait isEmpty]) ifTrue: [wait := 1] ifFalse: [wait := wait asInteger].
 
     identity := self notifyIdentityFor: req.
     watchSet := self watchWorkflowsFor: identity.

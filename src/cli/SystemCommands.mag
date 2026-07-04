@@ -221,7 +221,7 @@ Dashboard:     ', baseUrl, '/dashboard/
 
   method: cmdLog: args [
     "pp log [--follow] [--no-follow] [--since <seconds>] — poll notifications stream"
-    | follow sinceOffset since sinceStr url response result notifications payload createdAt severity message ts maxCreatedAt dt waitParam |
+    | follow sinceOffset since sinceStr url response result notifications payload createdAt severity message ts maxCreatedAt dt waitParam lastError errStreak |
     follow := true.
     sinceOffset := 0.
 
@@ -260,11 +260,16 @@ Dashboard:     ', baseUrl, '/dashboard/
     ].
 
     "Following mode: long-poll loop via HttpClient"
+    'Tailing notifications (Ctrl-C to stop)...' println.
+    lastError := nil.
+    errStreak := 0.
     [true] whileTrue: [
       sinceStr := since printString.
       url := baseUrl, '/api/notifications/stream?since=', sinceStr, '&wait=1'.
       [
         response := client get: url.
+        "A successful poll clears any error-suppression state."
+        lastError := nil. errStreak := 0.
         (response notNil and: [(response isKindOf: String) and: [response isEmpty not]]) ifTrue: [
           result := Json decode: response.
           notifications := result at: 'notifications' ifAbsent: [#()].
@@ -282,7 +287,15 @@ Dashboard:     ', baseUrl, '/dashboard/
           notifications size > 0 ifTrue: [since := maxCreatedAt + 1]
         ]
       ] on: Exception do: [:e |
-        ('Error polling notifications: ', e messageText) println
+        "Coalesce a persistent connection error (e.g. server down) instead of
+         spamming an identical line every 2s: print it once, then only every
+         30th repeat, so the tail stays readable while the server is unreachable."
+        errStreak := errStreak + 1.
+        (e messageText = lastError)
+          ifTrue: [(errStreak \\ 30) = 0 ifTrue: [
+                     ('Still failing (x', errStreak printString, '): ', e messageText) println]]
+          ifFalse: [('Error polling notifications: ', e messageText) println.
+                    lastError := e messageText]
       ].
       Process sleep: 2000
     ]
@@ -348,7 +361,11 @@ Dashboard:     ', baseUrl, '/dashboard/
     | url |
     url := baseUrl, '/dashboard/'.
     ('Opening dashboard: ', url) println.
-    Shell run: 'open ', url
+    "Portable open: macOS `open`, then Linux `xdg-open`, else fall back to
+     printing the URL so the command is not a silent no-op off macOS."
+    Shell run: 'command -v open >/dev/null 2>&1 && open "', url,
+      '" || command -v xdg-open >/dev/null 2>&1 && xdg-open "', url,
+      '" || echo "Could not launch a browser automatically — open this URL manually: ', url, '"'
   ]
 
   "--- Garbage Collection ---"

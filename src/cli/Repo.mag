@@ -342,32 +342,38 @@ PPEOF'.
     taskDir := worktreesDir, '/', taskName.
     shouldRemove := false.
 
-    "Check workflow status via HTTP GET"
+    "Check workflow status via HTTP GET.
+
+     FAIL SAFE, NOT FAIL OPEN: a worktree is removed ONLY on a definitive
+     'completed'/'not_found' from the server. Any ambiguity — server
+     unreachable, empty body, or unparseable JSON — means we cannot prove the
+     workflow is dead, so we KEEP the worktree. Removing on error would let a
+     single server hiccup `rm -rf` every in-flight agent worktree at once."
     [
       self shellRun: 'curl -s "', ppUrl, '/api/v1/workflow/status/', taskName, '" > "', tmpFile, '" 2>/dev/null'.
       (File exists: tmpFile) ifTrue: [
         statusResponse := File readFileContents: tmpFile.
         self shellRun: 'rm -f "', tmpFile, '"'.
         statusResponse isEmpty
-          ifTrue: [shouldRemove := true]
+          ifTrue: [('  skip (status unknown — empty response): ', taskName) println]
           ifFalse: [
             [
               statusBody := Json decode: statusResponse.
               wfStatus := statusBody at: 'status' ifAbsent: [''].
-              (wfStatus = 'completed' or: [wfStatus = 'not_found']) ifTrue: [
-                shouldRemove := true
-              ]
+              (wfStatus = 'completed' or: [wfStatus = 'not_found'])
+                ifTrue: [shouldRemove := true]
+                ifFalse: [('  skip (workflow still ', wfStatus, '): ', taskName) println]
             ] on: Exception do: [:e |
-              "JSON parse error — treat as missing"
-              shouldRemove := true
+              "Unparseable status — do NOT assume dead."
+              ('  skip (status unparseable): ', taskName) println
             ]
           ]
       ] ifFalse: [
-        shouldRemove := true
+        ('  skip (status probe produced no output): ', taskName) println
       ]
     ] on: Exception do: [:e |
-      "Network error — treat as missing"
-      shouldRemove := true
+      "Server unreachable — do NOT assume dead."
+      ('  skip (server unreachable): ', taskName) println
     ].
 
     shouldRemove ifFalse: [^false].

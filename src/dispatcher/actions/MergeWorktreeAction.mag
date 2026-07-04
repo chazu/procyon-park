@@ -27,10 +27,14 @@ MergeWorktreeAction subclass: WorkflowAction
     ].
 
     payload := info at: 'payload'.
-    repoPath := payload at: 'repo_path'.
-    featureBranch := payload at: 'feature_branch'.
-    implBranch := payload at: 'branch'.
-    worktreeDir := payload at: 'workdir'.
+    "Guard every worktree-signal read: a signal missing any of these fields
+     would otherwise yield nil and DNU on the first `isEmpty`/git call below
+     (SyncWorktreeAction already reads defensively this way). A missing 'branch'
+     degrades to '' which routes to the pipeline (feature->main) merge path."
+    repoPath := payload at: 'repo_path' ifAbsent: [''].
+    featureBranch := payload at: 'feature_branch' ifAbsent: [''].
+    implBranch := payload at: 'branch' ifAbsent: [''].
+    worktreeDir := payload at: 'workdir' ifAbsent: [''].
     "standalone defaults to 'false' for legacy signals (pipeline-level merges
      and pre-upgrade wave-child signals) — only explicit 'true' triggers the
      feature->main merge below."
@@ -39,6 +43,12 @@ MergeWorktreeAction subclass: WorkflowAction
     "Pipeline-level merge: no impl branch, merge shared feature branch directly to main"
     implBranch isEmpty ifTrue: [
       bbs logEngine: 'info' component: 'merge-worktree' scope: scope message: ('Pipeline merge — merging ', featureBranch, ' into main in ', repoPath).
+      "Count files the feature branch changed since main BEFORE the merge. Once
+       fastForwardOrMerge advances main to the feature tip, the three-dot
+       main...featureBranch diff is empty and this reads 0 — which CaseBuilder
+       scores as a 200-point noop penalty, mis-scoring real pipeline work as a
+       no-op. (The standalone path below already counts before its merge.)"
+      filesChanged := GitOps changedFileCount: featureBranch since: 'main' in: repoPath.
       "Guard: refuse to advance main with a dirty primary tree (would clobber)."
       (GitOps isCleanTree: repoPath) ifFalse: [
         bbs logEngine: 'error' component: 'merge-worktree' scope: scope message: ('Primary tree dirty in ', repoPath, ' — refusing feature->main merge').
@@ -65,10 +75,6 @@ MergeWorktreeAction subclass: WorkflowAction
         engine failWorkflow: instanceId reason: 'Pipeline merge conflict: ', featureBranch, ' into main — human intervention required'.
         ^self
       ].
-      "Count files the feature branch changed since main BEFORE the branch is
-       deleted below — afterwards git has no ref to diff. implBranch is empty in
-       the pipeline case, so the feature branch carries the work."
-      filesChanged := GitOps changedFileCount: featureBranch since: 'main' in: repoPath.
       GitOps deleteBranch: featureBranch in: repoPath.
       "Best-effort push origin/main so the work is actually visible."
       [GitOps pushBranch: 'main' in: repoPath]

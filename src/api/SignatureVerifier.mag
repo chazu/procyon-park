@@ -35,8 +35,14 @@ SignatureVerifier subclass: Object
     verifyCache := Dictionary new
   ]
 
-  method: cacheKeyFor: actorHeader sig: sigHeader [
-    ^actorHeader, '|', sigHeader
+  method: cacheKeyFor: actorHeader sig: sigHeader canonical: canonical [
+    "Key on actor + signature + the full canonical (method||path||ts||sha256(body)).
+     Binding the canonical is what prevents a captured (actor,sig) pair from being
+     replayed against a DIFFERENT request within the skew window: the ed25519
+     signature only covers the canonical, so without it in the key a hit would
+     hand back an ActorContext for a request whose method/path/body were never
+     verified against the signature."
+    ^actorHeader, '|', sigHeader, '|', canonical
   ]
 
   method: verify: req adminList: admins skewSeconds: skew [
@@ -71,18 +77,9 @@ SignatureVerifier subclass: Object
     delta < 0 ifTrue: [delta := delta negated].
     delta > skew ifTrue: [^nil].
 
-    "§6 keyed cache fast-path: same actor+sig already verified within
-     this server's lifetime. Skew has been re-checked above, so a cached
-     ActorContext can short-circuit BBS lookup + ed25519 verify. Bypass
-     when a rotation-mode oldPub is supplied — the rotation gate must
-     re-confirm the registry value."
-    oldPub isNil ifTrue: [
-      cacheKey := self cacheKeyFor: actorHeader sig: sigHeader.
-      cached := verifyCache at: cacheKey ifAbsent: [nil].
-      cached notNil ifTrue: [^cached]
-    ].
-
-    "Resolve pubkey + actor"
+    "Compute the canonical signed message up front so the verify cache can be
+     keyed on it (see cacheKeyFor:sig:canonical:). sha256(body) is far cheaper
+     than the ed25519 verify + BBS identity lookup a cache hit still skips."
     body := req body.
     body isNil ifTrue: [body := ''].
     method := req method.
@@ -91,6 +88,19 @@ SignatureVerifier subclass: Object
                  path, (String lf),
                  tsHeader, (String lf),
                  (Sha256 hash: body).
+
+    "§6 keyed cache fast-path: same actor+sig+canonical already verified within
+     this server's lifetime. Skew has been re-checked above, so a cached
+     ActorContext can short-circuit BBS lookup + ed25519 verify. Bypass
+     when a rotation-mode oldPub is supplied — the rotation gate must
+     re-confirm the registry value."
+    oldPub isNil ifTrue: [
+      cacheKey := self cacheKeyFor: actorHeader sig: sigHeader canonical: canonical.
+      cached := verifyCache at: cacheKey ifAbsent: [nil].
+      cached notNil ifTrue: [^cached]
+    ].
+
+    "Resolve pubkey + actor"
 
     isAdmin := false.
     resolvedActor := nil.
@@ -145,7 +155,7 @@ SignatureVerifier subclass: Object
     actorContext := ActorContext actor: resolvedActor timestamp: ts verified: true isAdmin: isAdmin.
     "Populate cache (oldPub-rotation requests intentionally skip cache)."
     oldPub isNil ifTrue: [
-      verifyCache at: (self cacheKeyFor: actorHeader sig: sigHeader) put: actorContext.
+      verifyCache at: (self cacheKeyFor: actorHeader sig: sigHeader canonical: canonical) put: actorContext.
       "Bound cache size — drop entries wholesale if grown unbounded. Each
        entry lives at most skew seconds; a busy server with many distinct
        (actor, sig) pairs is the only way to exceed this."

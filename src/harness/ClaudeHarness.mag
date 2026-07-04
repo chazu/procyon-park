@@ -200,12 +200,19 @@ ClaudeHarness subclass: Object
     "Report output file path"
     ('Session output: ', outputFile) println.
 
-    "Check result"
+    "Check result. A non-zero exit MUST surface via failureReason — otherwise
+     WorkerAgent>>run sees failureReason=nil and marks the task 'completed',
+     advancing the workflow token over an empty/partial worktree. `timeout`
+     exits 124 when it kills the child at the wall-clock cap; call that out
+     distinctly so the failure reads as a timeout, not a crash."
     process isSuccess ifTrue: [
       ('Harness completed: ', taskId) println
     ] ifFalse: [
       ('Harness failed: ', taskId, ' (exit ', process exitCode printString, ')') println.
-      ('stderr: ', process stderr) println
+      ('stderr: ', process stderr) println.
+      failureReason := (process exitCode = 124)
+        ifTrue: ['harness-timeout']
+        ifFalse: ['harness-exit-', process exitCode printString]
     ].
 
     "D6.8 stub: report usage back to any in-process WorkerAgent.

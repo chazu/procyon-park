@@ -280,7 +280,7 @@ WorkflowCommands subclass: CLIBase
     "pp workflow wait <workflow-id> [--scope <scope>] [--timeout <seconds>]
      Block until the workflow reaches a terminal state (completed, failed, cancelled).
      Default timeout: 3600 seconds (1 hour). Returns the final status."
-    | wfId theScope timeoutStr maxWait body response result status elapsed |
+    | wfId theScope timeoutStr maxWait body response result status elapsed lastStatus |
     args size < 3 ifTrue: [
       'Usage: pp workflow wait <workflow-id> [--scope <scope>] [--timeout <seconds>]' println.
       ^self
@@ -290,19 +290,36 @@ WorkflowCommands subclass: CLIBase
     theScope := self flagValue: '--scope' in: args.
     theScope isNil ifTrue: [theScope := scope].
     timeoutStr := self flagValue: '--timeout' in: args.
-    maxWait := timeoutStr notNil ifTrue: [timeoutStr asInteger] ifFalse: [3600].
+    "Validate --timeout: a non-numeric value used to fall through to 0 and print
+     'did not complete within 0 seconds' immediately. Reject it explicitly."
+    maxWait := 3600.
+    timeoutStr notNil ifTrue: [
+      maxWait := timeoutStr asInteger.
+      (maxWait isNil or: [maxWait <= 0]) ifTrue: [
+        ('Error: --timeout must be a positive integer of seconds (got: ', timeoutStr, ')') println.
+        ^self
+      ]
+    ].
 
     body := Dictionary new.
     body at: 'workflow_id' put: wfId.
     body at: 'scope' put: theScope.
 
+    "Heartbeat so the terminal is not silent for up to an hour: announce the
+     wait, then echo the status whenever it changes."
+    ('Waiting for ', wfId, ' (timeout ', maxWait printString, 's; Ctrl-C to stop)...') println.
     elapsed := 0.
+    lastStatus := nil.
     [elapsed < maxWait] whileTrue: [
       [
         response := Shell capture: 'curl -s -X POST ', baseUrl, '/api/workflow/status -H "Content-Type: application/json" -d ''', (Json encode: body), ''''.
         (response notNil and: [response isEmpty not]) ifTrue: [
           result := Json decode: response.
           status := result at: 'status' ifAbsent: ['unknown'].
+          status = lastStatus ifFalse: [
+            ('  [', elapsed printString, 's] status: ', status) println.
+            lastStatus := status
+          ].
           (status = 'completed' or: [status = 'failed' or: [status = 'cancelled']]) ifTrue: [
             (Json encodePretty: result) println.
             ^self

@@ -489,16 +489,17 @@ DashboardSSE subclass: Object
     workitems := snap at: 'workitems'.
     statuses := #('backlog' 'ready' 'in-progress' 'done' 'blocked').
     buckets := Dictionary new.
-    statuses do: [:st | buckets at: st put: Array new].
+    statuses do: [:st | buckets at: st put: ArrayList new].
     workitems do: [:w |
       | p status bucket |
       p := w at: 'payload' ifAbsent: [Dictionary new].
       status := p at: 'status' ifAbsent: ['backlog'].
       (buckets includesKey: status) ifFalse: [
-        buckets at: status put: Array new.
+        buckets at: status put: ArrayList new.
       ].
-      bucket := buckets at: status.
-      buckets at: status put: (bucket copyWith: w)
+      "ArrayList add: is O(1) amortized; the prior `copyWith:` reallocated the
+       whole bucket every work item, making this loop O(n^2) per snapshot."
+      (buckets at: status) add: w
     ].
     s := '<div id="dashboard-workitems"><h2>Work Items</h2><div class="kanban">'.
     statuses do: [:st |
@@ -1364,7 +1365,11 @@ DashboardSSE subclass: Object
             ifTrue: [scope]
             ifFalse: [p at: 'workflow_instance' ifAbsent: ['']].
           workflow isNil ifTrue: [workflow := ''].
-          ts := ((createdAt isKindOf: Integer) and: [createdAt > 0])
+          "JSON-decoded epochs are SmallInteger, which is NOT a subclass of
+           Integer — an Integer-only check is always false, so every
+           notification rendered a blank time. Match SmallInteger/BigInteger
+           explicitly, as storyWaveKey: already does."
+          ts := (((createdAt isKindOf: SmallInteger) or: [createdAt isKindOf: BigInteger]) and: [createdAt > 0])
             ifTrue: [(DateTime fromEpoch: createdAt) format: '15:04:05']
             ifFalse: [''].
           '<li class="notif-item sev-', (self htmlEscape: severity),
@@ -1404,7 +1409,7 @@ DashboardSSE subclass: Object
       cached := watchSetCache at: identity ifAbsent: [nil].
       cached notNil ifTrue: [^cached]
     ].
-    result := Array new: 0.
+    result := ArrayList new.
     prefix := identity, ':'.
     watches do: [:w |
       | p wid wfId owner matches |
@@ -1417,9 +1422,10 @@ DashboardSSE subclass: Object
       owner := p at: 'user' ifAbsent: [nil].
       matches := (owner = identity) or: [wid startsWith: prefix].
       (matches and: [wfId notNil and: [wfId isEmpty not]]) ifTrue: [
-        result := result copyWith: wfId
+        result add: wfId
       ]
     ].
+    result := result asArray.
     watchSetCache at: identity put: result.
     watchSetCacheExpiry at: identity put: now + 2.
     watchSetCache size > 1024 ifTrue: [

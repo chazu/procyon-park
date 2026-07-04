@@ -177,28 +177,45 @@ WorkflowEngine subclass: Object
      promoteWaitingTokens: and advanceInstance: so we do O(1) BBS token
      scans per tick instead of O(2W) for W running workflows."
 
-    | workflows allTokens |
+    | workflows allTokens allTasks |
     workflows := bbs scanAll: 'workflow'.
     allTokens := bbs scanAll: 'token'.
+    "One task snapshot per tick, threaded into advanceInstance: — the review-
+     cycle cap counts review tasks per instance, and re-scanning inside the
+     per-workflow loop reintroduced the O(W x tasks) blowup this method's
+     token snapshot was written to avoid."
+    allTasks := bbs scanAll: 'task'.
 
     workflows do: [:wf |
       | wfPayload status |
       wfPayload := wf at: 'payload' ifAbsent: [Dictionary new].
       status := wfPayload at: 'status' ifAbsent: [''].
       status = 'running' ifTrue: [
-        self advanceInstance: wf tokens: allTokens
+        "Isolate each instance: a throw advancing one workflow (e.g. a
+         malformed hot-reloaded template) must not abort the whole sweep and
+         starve every other running workflow of its tick."
+        [self advanceInstance: wf tokens: allTokens tasks: allTasks]
+          on: Exception do: [:e |
+            ('WorkflowEngine advance: instance ',
+              (wf at: 'identity' ifAbsent: ['?']), ' threw: ', e messageText) println
+          ]
       ]
     ]
   ]
 
   method: advanceInstance: wf [
-    "Back-compat entry point — scans tokens internally."
-    ^self advanceInstance: wf tokens: nil
+    "Back-compat entry point — scans tokens + tasks internally."
+    ^self advanceInstance: wf tokens: nil tasks: nil
   ]
 
   method: advanceInstance: wf tokens: maybeTokens [
-    "Advance a single workflow instance. If maybeTokens is non-nil it
-     is reused as the token snapshot (avoiding a redundant scanAll:)."
+    "Back-compat entry point — scans tasks internally."
+    ^self advanceInstance: wf tokens: maybeTokens tasks: nil
+  ]
+
+  method: advanceInstance: wf tokens: maybeTokens tasks: maybeTasks [
+    "Advance a single workflow instance. If maybeTokens/maybeTasks are
+     non-nil they are reused as snapshots (avoiding a redundant scanAll:)."
     | instanceId scope wfPayload templateId template transitions templatePayload allTokens instanceTokens tokenPlaces terminalPlaces allTerminal consumedTokens params maxCycles cycleSignal cycleCount verdictPayload launchedBy wfAffinity overrideAffinity |
 
     instanceId := wf at: 'identity'.
@@ -238,8 +255,11 @@ WorkflowEngine subclass: Object
     "Collect current token places"
     tokenPlaces := instanceTokens collect: [:t | (t at: 'payload') at: 'place' ifAbsent: ['']].
 
-    "Check for completion: all tokens in terminal places"
-    terminalPlaces := templatePayload at: 'terminal_places'.
+    "Check for completion: all tokens in terminal places. Default to an empty
+     set when a template omits terminal_places — otherwise the includes:/reject:
+     below do `nil includes:` (DNU), which the per-instance guard in advance
+     would catch but only after starving this instance every tick."
+    terminalPlaces := templatePayload at: 'terminal_places' ifAbsent: [#()].
     allTerminal := tokenPlaces size > 0 and: [
       tokenPlaces detect: [:p | (terminalPlaces includes: p) not] ifNone: [nil].
       (tokenPlaces reject: [:p | terminalPlaces includes: p]) isEmpty
@@ -259,8 +279,9 @@ WorkflowEngine subclass: Object
      tuples is authoritative — it does not rely on reviewers writing cycle signals."
     maxCycles := templatePayload at: 'max_review_cycles' ifAbsent: [nil].
     maxCycles notNil ifTrue: [
-      | reviewTasks |
-      reviewTasks := (bbs scanAll: 'task') select: [:t |
+      | reviewTasks taskSnapshot |
+      taskSnapshot := maybeTasks isNil ifTrue: [bbs scanAll: 'task'] ifFalse: [maybeTasks].
+      reviewTasks := taskSnapshot select: [:t |
         ((t at: 'identity') startsWith: instanceId, ':task:review')
           and: [((t at: 'payload') at: 'role' ifAbsent: ['']) = 'reviewer']
       ].
@@ -770,13 +791,11 @@ WorkflowEngine subclass: Object
     [
       | existing wf wfPayload params repo launchedBy taskPayload |
       "Idempotency guard: skip if an archivist task already exists for this
-       instance (role='archivist' AND payload workflow_instance=instanceId)."
-      existing := (bbs scanAll: 'task') detect: [:t |
-        | p |
-        p := t at: 'payload' ifAbsent: [Dictionary new].
-        ((p at: 'role' ifAbsent: ['']) = 'archivist')
-          and: [(p at: 'workflow_instance' ifAbsent: ['']) = instanceId]
-      ] ifNone: [nil].
+       instance. The task is written below at the deterministic id
+       '<instanceId>:task:archivist', so an O(1) rdp: on that id replaces a full
+       scanAll:'task' detect: over every task ever created (this fires on every
+       terminal workflow)."
+      existing := bbs rdp: 'task' scope: scope identity: instanceId, ':task:archivist'.
       existing notNil ifTrue: [^self].
 
       "Recover repo from the workflow params + launched_by for attribution."
