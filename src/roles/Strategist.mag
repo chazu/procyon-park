@@ -80,6 +80,10 @@ doctrine, and dismiss. You never change the repository or git history.'
   classMethod: hardCategories [ ^#('case') ]
   classMethod: softCategories [ ^#('doctrine') ]
   classMethod: contextBudget [ ^40 ]
+  classMethod: allowedTools [
+    "Least privilege: this role must not edit files, so no Write/Edit."
+    ^self readOnlyTools
+  ]
   classMethod: defaultTimeout [
     "Reading many cases and synthesizing across them — allow the full 30 min."
     ^1800

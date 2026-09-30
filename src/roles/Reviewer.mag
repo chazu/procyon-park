@@ -46,6 +46,10 @@ MUST NOT: Edit source code. Make commits. Skip writing the verdict signal.'
   classMethod: hardCategories [ ^#('decision') ]
   classMethod: softCategories [ ^#('convention' 'fact') ]
   classMethod: contextBudget [ ^40 ]
+  classMethod: allowedTools [
+    "Least privilege: this role must not edit files, so no Write/Edit."
+    ^self readOnlyTools
+  ]
   classMethod: defaultTimeout [
     "Reviewers just read a diff and write a verdict — 15 minutes is plenty.
      Overridable per-transition via CUE `timeout` field."

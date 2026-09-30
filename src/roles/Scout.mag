@@ -26,6 +26,10 @@ You write ONE markdown document with your findings, commit it, then dismiss.'
   classMethod: hardCategories [ ^#('fact') ]
   classMethod: softCategories [ ^#('convention' 'signal') ]
   classMethod: contextBudget [ ^30 ]
+  classMethod: allowedTools [
+    "Least privilege: this role must not edit files, so no Write/Edit."
+    ^self readOnlyTools
+  ]
   classMethod: defaultTimeout [
     "Scouts read broadly and write prose — allow the full 30 minutes.
      Overridable per-transition via CUE `timeout` field."
@@ -33,7 +37,9 @@ You write ONE markdown document with your findings, commit it, then dismiss.'
   ]
 
   method: completionInstructions [
-    ^'1. Write findings to a markdown file in your working directory.
+    ^'1. Write findings to a markdown file in your working directory. The
+   Write/Edit tools are not available to scouts — create the file from
+   Bash with a heredoc: cat > findings.md <<''EOF'' ... EOF
 2. Stage and commit: git add -A && git commit -m "Scout: <topic summary>"
 3. Report: pp observe research-complete "Wrote findings to <filename>"
 4. Notify: pp notify "Scout complete: <brief summary>"

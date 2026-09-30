@@ -8,6 +8,14 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Security
+- **Agent tool access is now least-privilege per role.** Every harnessed
+  Claude agent used to get `--allowedTools Bash,Read,Write,Edit,Glob,Grep`
+  whatever its role. Roles now declare `allowedTools`: implementer, fixer,
+  resolver and tester keep the full set, while reviewer, doc-reviewer, scout,
+  foreman, planner, strategist and archivist get `Bash,Read,Glob,Grep` only.
+  Any file-mutating tool a role isn't granted (`Write`, `Edit`, `NotebookEdit`)
+  is passed explicitly via `--disallowedTools`. Scouts and planners write
+  their findings/plan file with a Bash heredoc instead.
 - **Request-signature verify cache no longer bypasses method/path/body binding.**
   The ed25519 verify cache was keyed only on `actor|signature`, and a cache hit
   returned the cached identity *before* the canonical request was reconstructed.

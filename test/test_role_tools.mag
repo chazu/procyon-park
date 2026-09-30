@@ -1,0 +1,152 @@
+"Tests for per-role tool access (least privilege).
+
+ Invariants under test:
+   RT1  Code-writing roles (implementer, fixer, resolver, tester) get the full
+        set Bash,Read,Write,Edit,Glob,Grep and disallow only NotebookEdit.
+   RT2  Read-only roles (reviewer, doc-reviewer, scout, foreman, planner,
+        strategist, archivist) get neither Write nor Edit, keep Bash/Read/
+        Glob/Grep, and explicitly disallow Write and Edit.
+   RT3  Role>>toolFlags renders --allowedTools / --disallowedTools.
+   RT4  ClaudeHarness>>claudeCommand embeds the role's tool flags instead of
+        a hardcoded list.
+
+ Standalone runner at bottom (RoleToolsMain run)."
+
+RoleToolsRunner subclass: Object
+  instanceVars: passed failed failures
+
+  classMethod: new [ ^super new init ]
+
+  method: init [
+    passed := 0.
+    failed := 0.
+    failures := Array new: 0
+  ]
+
+  method: assert: cond message: msg [
+    cond ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg) println
+    ]
+  ]
+
+  method: assertEqual: actual to: expected message: msg [
+    (actual = expected) ifTrue: [
+      passed := passed + 1
+    ] ifFalse: [
+      failed := failed + 1.
+      failures := failures copyWith: msg.
+      ('FAIL: ', msg, ' (got: ', actual printString, ' expected: ', expected printString, ')') println
+    ]
+  ]
+
+  method: report [
+    '=== Role Tools Test Results ===' println.
+    ('Passed: ', passed printString) println.
+    ('Failed: ', failed printString) println.
+    failed > 0 ifTrue: [
+      'Failures:' println.
+      failures do: [:f | ('  - ', f) println]
+    ].
+    failed = 0
+      ifTrue: ['ALL TESTS PASSED' println]
+      ifFalse: ['SOME TESTS FAILED' println]
+  ]
+
+  method: failed [ ^failed ]
+
+"=== TestRoleTools ==="
+TestRoleTools subclass: Object
+
+  classMethod: contains: haystack sub: needle [
+    | hlen nlen i last |
+    nlen := needle size.
+    nlen = 0 ifTrue: [^true].
+    hlen := haystack size.
+    nlen > hlen ifTrue: [^false].
+    last := hlen - nlen + 1.
+    i := 1.
+    [i <= last] whileTrue: [
+      (haystack copyFrom: i to: i + nlen - 1) = needle ifTrue: [^true].
+      i := i + 1
+    ].
+    ^false
+  ]
+
+  classMethod: run: t [
+    | factory writers readers role harness cmd |
+    '--- TestRoleTools ---' println.
+    factory := HarnessFactory new.
+
+    "RT1: code-writing roles keep the full working set."
+    writers := #('implementer' 'fixer' 'resolver' 'tester').
+    writers do: [:rn |
+      role := factory roleFor: rn.
+      #('Bash' 'Read' 'Write' 'Edit' 'Glob' 'Grep') do: [:tool |
+        t assert: (role allowedTools includes: tool)
+          message: 'RT1: ', rn, ' allows ', tool
+      ].
+      t assert: ((role disallowedTools includes: 'Write') not)
+        message: 'RT1: ', rn, ' does not disallow Write'.
+      t assert: ((role disallowedTools includes: 'Edit') not)
+        message: 'RT1: ', rn, ' does not disallow Edit'
+    ].
+
+    "RT2: read-only roles have no Write/Edit and explicitly deny them."
+    readers := #('reviewer' 'doc-reviewer' 'scout' 'foreman' 'planner' 'strategist' 'archivist').
+    readers do: [:rn |
+      role := factory roleFor: rn.
+      t assert: ((role allowedTools includes: 'Write') not)
+        message: 'RT2: ', rn, ' does not allow Write'.
+      t assert: ((role allowedTools includes: 'Edit') not)
+        message: 'RT2: ', rn, ' does not allow Edit'.
+      #('Bash' 'Read' 'Glob' 'Grep') do: [:tool |
+        t assert: (role allowedTools includes: tool)
+          message: 'RT2: ', rn, ' allows ', tool
+      ].
+      t assert: (role disallowedTools includes: 'Write')
+        message: 'RT2: ', rn, ' disallows Write'.
+      t assert: (role disallowedTools includes: 'Edit')
+        message: 'RT2: ', rn, ' disallows Edit'
+    ].
+
+    "RT3: toolFlags rendering."
+    t assertEqual: Implementer new toolFlags
+      to: ' --allowedTools Bash,Read,Write,Edit,Glob,Grep --disallowedTools NotebookEdit'
+      message: 'RT3: implementer toolFlags'.
+    t assertEqual: Reviewer new toolFlags
+      to: ' --allowedTools Bash,Read,Glob,Grep --disallowedTools Write,Edit,NotebookEdit'
+      message: 'RT3: reviewer toolFlags'.
+
+    "RT4: harness command uses the role's flags."
+    harness := factory createFor: 'scout' task: 'task-rt4' scope: 'procyon-park' bbs: nil.
+    cmd := harness claudeCommand.
+    t assert: (self contains: cmd sub: '--allowedTools Bash,Read,Glob,Grep ')
+      message: 'RT4: scout command carries read-only --allowedTools'.
+    t assert: (self contains: cmd sub: '--disallowedTools Write,Edit,NotebookEdit')
+      message: 'RT4: scout command disallows Write/Edit'.
+    t assert: ((self contains: cmd sub: 'Write,Edit,Glob') not)
+      message: 'RT4: scout command has no hardcoded full tool list'.
+    harness := factory createFor: 'implementer' task: 'task-rt4b' scope: 'procyon-park' bbs: nil.
+    cmd := harness claudeCommand.
+    t assert: (self contains: cmd sub: '--allowedTools Bash,Read,Write,Edit,Glob,Grep ')
+      message: 'RT4: implementer command carries full --allowedTools'.
+    t assert: (self contains: cmd sub: '-p "$PP_TASK_DESC" > "$PP_OUTPUT_FILE" 2>&1')
+      message: 'RT4: command keeps task/output redirection'
+  ]
+
+"=== Main ==="
+RoleToolsMain subclass: Object
+  classMethod: run [
+    | t |
+    t := RoleToolsRunner new.
+    [TestRoleTools run: t] on: Exception do: [:e |
+      ('TestRoleTools CRASHED: ', e messageText) println.
+      t assert: false message: 'TestRoleTools crashed'
+    ].
+    t report.
+    ^t failed
+  ]

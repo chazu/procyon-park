@@ -47,6 +47,10 @@ enrichment, then dismiss. You never change the repository or git history.'
   classMethod: hardCategories [ ^#('case' 'observation' 'decision') ]
   classMethod: softCategories [ ^#('event' 'fact') ]
   classMethod: contextBudget [ ^30 ]
+  classMethod: allowedTools [
+    "Least privilege: this role must not edit files, so no Write/Edit."
+    ^self readOnlyTools
+  ]
   classMethod: defaultTimeout [
     "Archivists read a workflow''s full history and synthesize prose —
      allow the full 30 minutes. Overridable per-transition via CUE `timeout`."

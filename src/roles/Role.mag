@@ -20,6 +20,52 @@ Role subclass: Object
     ^1800
   ]
 
+  "--- Tool access (least privilege per role) ---
+   The Claude CLI harness passes allowedTools as --allowedTools and every
+   harness-managed MUTATING tool the role is NOT granted as --disallowedTools,
+   so a read-only role (reviewer, scout, foreman, ...) cannot use the file
+   editing tools even if it tries. The base default is the full working
+   set; roles that must not edit files override allowedTools with
+   readOnlyTools."
+
+  classMethod: fullTools [
+    "Working set for roles that write code/files: implementer, fixer,
+     resolver, tester."
+    ^#('Bash' 'Read' 'Write' 'Edit' 'Glob' 'Grep')
+  ]
+
+  classMethod: readOnlyTools [
+    "Working set for roles that must not edit files directly. Bash is kept
+     because these roles still drive the pp CLI (observe/signal/dismiss)
+     and git."
+    ^#('Bash' 'Read' 'Glob' 'Grep')
+  ]
+
+  classMethod: mutatingTools [
+    "Harness-managed file-mutating tools. Any of these a role is not granted
+     is explicitly disallowed on the CLI (not merely left un-approved)."
+    ^#('Write' 'Edit' 'NotebookEdit')
+  ]
+
+  classMethod: allowedTools [ ^self fullTools ]
+
+  classMethod: disallowedTools [
+    | allowed |
+    allowed := self allowedTools.
+    ^self mutatingTools select: [:t | (allowed includes: t) not]
+  ]
+
+  classMethod: joinTools: tools [
+    "Comma-join tool names for the claude CLI (--allowedTools A,B,C)."
+    | out |
+    out := ''.
+    tools do: [:t |
+      out isEmpty ifFalse: [out := out, ','].
+      out := out, t
+    ].
+    ^out
+  ]
+
   classMethod: new [
     "Template method: builds a Role from class-side protocol overrides."
     | r hard soft constraints |
@@ -72,6 +118,22 @@ Role subclass: Object
      call this to pick a fallback timeout when the transition does not
      specify one."
     ^self class defaultTimeout
+  ]
+
+  method: allowedTools [ ^self class allowedTools ]
+  method: disallowedTools [ ^self class disallowedTools ]
+
+  method: toolFlags [
+    "CLI flags restricting the Claude harness to this role's tool set:
+     ' --allowedTools A,B[ --disallowedTools X,Y]' (leading space included).
+     Tool names contain no shell metacharacters, so no quoting is needed."
+    | flags denied |
+    flags := ' --allowedTools ', (self class joinTools: self allowedTools).
+    denied := self disallowedTools.
+    denied isEmpty ifFalse: [
+      flags := flags, ' --disallowedTools ', (self class joinTools: denied)
+    ].
+    ^flags
   ]
 
   method: primeFor: taskDescription context: contextTuples [

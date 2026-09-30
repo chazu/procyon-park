@@ -36,6 +36,10 @@ type story, wave number, template (story or story-lite), and repo.'
   classMethod: hardCategories [ ^#('fact' 'signal') ]
   classMethod: softCategories [ ^#('convention' 'decision' 'observation') ]
   classMethod: contextBudget [ ^60 ]
+  classMethod: allowedTools [
+    "Least privilege: this role must not edit files, so no Write/Edit."
+    ^self readOnlyTools
+  ]
 
   method: completionInstructions [
     ^'If creating work items (preferred):
@@ -48,7 +52,8 @@ type story, wave number, template (story or story-lite), and repo.'
 3. pp dismiss
 
 If using legacy plan JSON:
-1. Write plan JSON with subtasks array
+1. Write plan JSON with subtasks array (Write/Edit tools are not available
+   to planners — use a Bash heredoc: cat > plan.json <<''EOF'' ... EOF)
 2. pp plan plan.json
 3. pp dismiss
 

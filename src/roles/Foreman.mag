@@ -45,6 +45,10 @@ CAN: Read any tuples for context. Write observations about findings.'
   classMethod: hardCategories [ ^#('observation' 'decision' 'event') ]
   classMethod: softCategories [ ^#('convention' 'fact' 'signal') ]
   classMethod: contextBudget [ ^60 ]
+  classMethod: allowedTools [
+    "Least privilege: this role must not edit files, so no Write/Edit."
+    ^self readOnlyTools
+  ]
 
   method: completionInstructions [
     ^'1. Read observations: pp read observation <scope>

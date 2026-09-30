@@ -170,8 +170,10 @@ ClaudeHarness subclass: Object
     ].
 
     "Build sh -c command that runs claude with stream-json output redirected to file.
-     We reference env vars instead of inlining the system prompt to avoid quoting hell."
-    shellCmd := 'claude --output-format stream-json --verbose --system-prompt "$PP_SYSTEM_PROMPT" --allowedTools Bash,Read,Write,Edit,Glob,Grep --max-turns 200 -p "$PP_TASK_DESC" > "$PP_OUTPUT_FILE" 2>&1'.
+     We reference env vars instead of inlining the system prompt to avoid quoting hell.
+     Tool access is per role (Role>>toolFlags): read-only roles get no
+     Write/Edit, and those tools are explicitly disallowed."
+    shellCmd := self claudeCommand.
 
     "Resolve timeout (seconds) with three-tier precedence:
        1. transition-level `timeout` field in CUE (threaded via task payload)
@@ -223,6 +225,14 @@ ClaudeHarness subclass: Object
      harness-usage story lands. See obstacle observation:
      multiplayer:harness-usage-parsing."
     ('Harness usage (stub): task ', taskId, ' — usage parsing not yet implemented; see obstacle:multiplayer:harness-usage-parsing') println
+  ]
+
+  method: claudeCommand [
+    "The sh -c command line that runs the Claude CLI for this role. Pure
+     (no side effects) so tests can assert the per-role tool flags."
+    ^'claude --output-format stream-json --verbose --system-prompt "$PP_SYSTEM_PROMPT"',
+      role toolFlags,
+      ' --max-turns 200 -p "$PP_TASK_DESC" > "$PP_OUTPUT_FILE" 2>&1'
   ]
 
   method: gitDiffSummaryFor: aWorkDir [
