@@ -58,7 +58,7 @@ CliWorkerRegister subclass: Object
    without re-reading the string list inline."
 
   classMethod: defaultRoles [
-    ^#('implementer' 'planner' 'reviewer' 'tester' 'fixer' 'scout' 'doc-reviewer' 'foreman')
+    ^#('implementer' 'planner' 'reviewer' 'tester' 'fixer' 'scout' 'prototyper' 'doc-reviewer' 'foreman')
   ]
 
   classMethod: defaultAcceptFrom [

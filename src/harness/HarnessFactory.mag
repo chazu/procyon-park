@@ -10,6 +10,7 @@ HarnessFactory subclass: Object
   method: initialize [
     roles := Dictionary new.
     roles at: 'scout' put: Scout new.
+    roles at: 'prototyper' put: Prototyper new.
     roles at: 'planner' put: Planner new.
     roles at: 'implementer' put: Implementer new.
     roles at: 'reviewer' put: Reviewer new.

@@ -431,7 +431,7 @@ The doctrine above was selected to guide THIS task. If — and only if — you f
     "Roles whose context is biased by doctrine: the planner consumes it at
      plan-time (Orient -> Decide); the execution roles consume it at act-time
      (Orient -> Act). Other roles (e.g. strategist, archivist, foreman) do not."
-    ^#('planner' 'implementer' 'reviewer' 'scout' 'fixer') includes: roleName
+    ^#('planner' 'implementer' 'reviewer' 'scout' 'prototyper' 'fixer') includes: roleName
   ]
 
   classMethod: maxDoctrineEntries [

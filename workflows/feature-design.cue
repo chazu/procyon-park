@@ -24,7 +24,13 @@ transitions: [
 			   conventions, and related existing functionality.
 			2. Design the feature from a USER-CENTRIC perspective — what does the
 			   user experience? What are the entry points? What changes are visible?
-			3. Write an epic document (as a markdown file in docs/plans/) containing:
+			3. Write an epic document (as a markdown file in docs/plans/). The
+			   Write/Edit tools are NOT available to scouts — create the file from
+			   Bash with a heredoc, e.g.:
+			     mkdir -p docs/plans && cat > docs/plans/<name>-epic.md <<'EOF'
+			     ...
+			     EOF
+			   then git add + git commit it. The epic must contain:
 			   - Summary: what the feature does and why
 			   - User stories: "As a <role>, I want <goal>, so that <benefit>"
 			   - Acceptance criteria: concrete, testable conditions for done
@@ -71,7 +77,9 @@ transitions: [
 			- Test requirements are achievable
 
 			Fix any minor issues (wrong file paths, missing edge cases, scope
-			adjustments) directly as you go — do not bounce back for small fixes.
+			adjustments) directly in the stories you record — do not bounce back
+			for small fixes. (Write/Edit are not available to reviewers; do not
+			try to edit the epic file — capture corrections in the plan decision.)
 
 			Write the final stories as a plan decision via pp decide.
 			Write verdict signal with decision "pass" when done, or "redesign" if

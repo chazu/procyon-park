@@ -9,6 +9,10 @@
    RT3  Role>>toolFlags renders --allowedTools / --disallowedTools.
    RT4  ClaudeHarness>>claudeCommand embeds the role's tool flags instead of
         a hardcoded list.
+   RT5  The prototyper role (spike workflow) resolves via HarnessFactory, is
+        a Prototyper, gets the full tool set with nothing disallowed except
+        NotebookEdit — no Write/Edit in --disallowedTools — while scout stays
+        read-only.
 
  Standalone runner at bottom (RoleToolsMain run)."
 
@@ -135,7 +139,33 @@ TestRoleTools subclass: Object
     t assert: (self contains: cmd sub: '--allowedTools Bash,Read,Write,Edit,Glob,Grep ')
       message: 'RT4: implementer command carries full --allowedTools'.
     t assert: (self contains: cmd sub: '-p "$PP_TASK_DESC" > "$PP_OUTPUT_FILE" 2>&1')
-      message: 'RT4: command keeps task/output redirection'
+      message: 'RT4: command keeps task/output redirection'.
+
+    "RT5: prototyper — full tools, no Write/Edit denial; scout unaffected."
+    role := factory roleFor: 'prototyper'.
+    t assert: (role isKindOf: Prototyper)
+      message: 'RT5: HarnessFactory resolves prototyper to a Prototyper'.
+    t assertEqual: role name to: 'prototyper'
+      message: 'RT5: prototyper role name'.
+    t assertEqual: (Role joinTools: role allowedTools) to: (Role joinTools: Role fullTools)
+      message: 'RT5: prototyper allowedTools is fullTools'.
+    t assertEqual: (Role joinTools: role disallowedTools) to: 'NotebookEdit'
+      message: 'RT5: prototyper disallows only NotebookEdit'.
+    t assert: ((role disallowedTools includes: 'Write') not)
+      message: 'RT5: prototyper does not disallow Write'.
+    t assert: ((role disallowedTools includes: 'Edit') not)
+      message: 'RT5: prototyper does not disallow Edit'.
+    t assertEqual: Prototyper new toolFlags
+      to: ' --allowedTools Bash,Read,Write,Edit,Glob,Grep --disallowedTools NotebookEdit'
+      message: 'RT5: prototyper toolFlags'.
+    harness := factory createFor: 'prototyper' task: 'task-rt5' scope: 'procyon-park' bbs: nil.
+    cmd := harness claudeCommand.
+    t assert: (self contains: cmd sub: '--allowedTools Bash,Read,Write,Edit,Glob,Grep ')
+      message: 'RT5: prototyper command carries full --allowedTools'.
+    t assert: ((self contains: cmd sub: '--disallowedTools Write') not)
+      message: 'RT5: prototyper command does not disallow Write'.
+    t assert: (((factory roleFor: 'scout') allowedTools includes: 'Write') not)
+      message: 'RT5: scout remains read-only'
   ]
 
 "=== Main ==="

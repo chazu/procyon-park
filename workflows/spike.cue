@@ -26,12 +26,15 @@ transitions: [
 		id:   "spike"
 		in:   ["ready"]
 		out:  ["spiking"]
-		role: "scout"
+		// prototyper (not scout): scouts are read-only (no Write/Edit), but a
+		// spike must write and run prototype code. The worktree is discarded.
+		role: "prototyper"
 		description: """
 			You are running a time-boxed SPIKE. Your input: {{description}}
 
 			GROUND RULES:
-			- You have a real worktree and can write prototype code freely.
+			- You have a real worktree and can write prototype code freely
+			  (Write/Edit/Bash are all available to the prototyper role).
 			- The code you write will be DISCARDED at the end of this spike —
 			  do not polish it, do not worry about style, do not write tests
 			  unless a test is the fastest way to learn what you need to learn.

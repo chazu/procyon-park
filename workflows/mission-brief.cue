@@ -187,6 +187,9 @@ transitions: [
 
 			OPTIONALLY also write the same plan to docs/plans/<mission>-plan.md and
 			commit it, so the plan lands in git history when the worktree is merged.
+			The Write/Edit tools are NOT available to planners — create the file
+			from Bash with a heredoc (mkdir -p docs/plans && cat >
+			docs/plans/<mission>-plan.md <<'EOF' ... EOF).
 
 			Do NOT wait for approval — approval is a separate human action. Once the
 			plan AND breakdown are stored and the status is awaiting-approval, your task

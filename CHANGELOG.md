@@ -52,6 +52,18 @@ Semantic Versioning.
   landing on `main` mid-run clashed with the impl branch rewriting the same file.
 
 ### Fixed
+- **Spikes can write prototype code again.** Since per-role tool scoping,
+  the `spike` workflow ran as a read-only `scout` and could no longer write
+  the prototype it exists to build. It now runs under a new **`prototyper`**
+  role that keeps the full tool set (Write/Edit included) and is prompted for
+  throwaway, discard-on-completion prototyping ending in a `pp decide`.
+  Scouts stay read-only. Workers advertise `prototyper` by default.
+- **Read-only roles are no longer told to write files with tools they lack.**
+  The `feature-design` and `workitem-plan` scout steps and the optional plan
+  doc in `mission-brief` now tell the agent to create the file with a Bash
+  heredoc, and the `feature-design` reviewer is told to put corrections in
+  the plan decision rather than editing the epic, so agents don't stall on
+  denied Write/Edit calls.
 - **`pp gc` / `pp worktree clean` no longer wipe worktrees when the server is
   unreachable.** The status probe treated an empty response, a JSON-parse error,
   *and* a network error all as "workflow gone → remove", so a single server

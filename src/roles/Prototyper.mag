@@ -1,0 +1,59 @@
+"Prototyper role — throwaway prototyping in a worktree that will be discarded.
+
+ Used by the spike workflow. Unlike Scout (read-only research), a spike has
+ to write and run code to learn, so this role keeps the full tool set
+ (Write/Edit included). The worktree and impl branch are discarded when the
+ spike ends; the deliverable is a design decision recorded via pp decide."
+
+Prototyper subclass: Role
+
+  classMethod: roleName [ ^'prototyper' ]
+
+  classMethod: roleDescription [
+    ^'You are a prototyper running a time-boxed spike. You write throwaway
+code to answer a design question, then record the answer as a decision.
+
+MUST: State the question the spike answers. Record the conclusion via
+      pp decide before dismissing — the decision is your deliverable.
+CAN: Write, edit, build and run prototype code freely in your worktree.
+     Read any file. Search the web. Fetch documentation.
+MUST NOT: Polish the prototype, write it for production, or touch files
+          outside your worktree. The worktree and branch are DISCARDED when
+          the spike ends — nothing you write is merged.'
+  ]
+
+  classMethod: rolePpCommands [
+    ^#(
+      'pp observe <identity> <detail>  — record a finding / dead end as you go'
+      'pp decide <identity> <detail>   — record the spike conclusion (REQUIRED)'
+      'pp read <category> [scope] [id] — read from the knowledge base'
+      'pp notify <message>             — flag something for the user'
+      'pp dismiss                      — signal completion (AFTER pp decide)'
+    )
+  ]
+
+  classMethod: hardCategories [ ^#('fact') ]
+  classMethod: softCategories [ ^#('convention' 'decision' 'signal') ]
+  classMethod: contextBudget [ ^30 ]
+  classMethod: allowedTools [
+    "Spikes must write and run prototype code, so this role keeps the full
+     working set (Write/Edit included). Safe because the worktree is
+     discarded, never merged."
+    ^self fullTools
+  ]
+  classMethod: defaultTimeout [
+    "Spikes are time-boxed but hands-on — allow the full 30 minutes.
+     Overridable per-transition via CUE `timeout` field."
+    ^1800
+  ]
+
+  method: completionInstructions [
+    ^'1. Record the spike conclusion (REQUIRED — this is the deliverable):
+   pp decide <identity> "<one-line decision>" --rationale "<what you tried,
+   what worked, what did not, recommended direction>"
+2. Commit the prototype if you like (git add -A && git commit -m "spike:
+   <topic>") — it is harmless, but the branch is DISCARDED, so anything
+   worth keeping must already be in the decision or pp observations.
+3. Report: pp observe spike-complete "<brief summary of the verdict>"
+4. Dismiss: pp dismiss'
+  ]

@@ -21,6 +21,9 @@ transitions: [
 			Read the work item: pp workitem show {{workitem}}
 			Explore the codebase to understand current state, relevant files,
 			and technical constraints. Write findings to a markdown document.
+			The Write/Edit tools are NOT available to scouts — create the file
+			from Bash with a heredoc (cat > findings.md <<'EOF' ... EOF), then
+			git add + git commit it.
 			"""
 	},
 	{
