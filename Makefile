@@ -1,14 +1,18 @@
 BIN = pp
 GOBIN = $(shell go env GOPATH)/bin
+# pp does not yet run on current maggie HEAD (GansoDatabase primOpen: and
+# trimBoth were renamed upstream). Build with a mag pinned to maggie 46de074
+# when one is installed as mag-pp; override with `make MAG=mag` once ported.
+MAG ?= $(or $(shell command -v mag-pp 2>/dev/null),mag)
 
 build:
 	rm -f $(BIN)
-	mag build -o $(BIN)
+	$(MAG) build -o $(BIN)
 	codesign -s - $(BIN)
 
 full:
 	rm -f $(BIN)
-	mag build --full -o $(BIN)
+	$(MAG) build --full -o $(BIN)
 	codesign -s - $(BIN)
 
 install: build
@@ -18,7 +22,7 @@ install: build
 	cp -r static/. $(HOME)/.pp/static/
 
 run:
-	mag -m Main.start
+	$(MAG) -m Main.start
 
 serve:
 	./$(BIN) serve
